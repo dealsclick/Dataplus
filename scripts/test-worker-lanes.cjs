@@ -21,6 +21,7 @@ assert.ok(HEAVY_RESOURCE_TASKS.includes('product-dump-import'));
 assert.ok(HEAVY_RESOURCE_TASKS.includes('walmart-bulk-launch'));
 assert.ok(HEAVY_RESOURCE_TASKS.includes('shipping-report-export'));
 assert.ok(HEAVY_RESOURCE_TASKS.includes('shopify-order-import'));
+assert.ok(HEAVY_RESOURCE_TASKS.includes('shopify-return-import'));
 assert.deepEqual(WORKLOAD_LIMITS['fulfillment-rate-refresh'], {lane:'carrier-rates',limit:1});
 assert.deepEqual(WORKLOAD_LIMITS['fulfillment-label-purchase'], {lane:'label-purchase',limit:1});
 assert.deepEqual(WORKLOAD_LIMITS['shipping-report-export'], {lane:'report-export',limit:1});

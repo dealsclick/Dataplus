@@ -24628,6 +24628,17 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
   }
 }
 
+async function readChannelJobQueueState() {
+  return readDbFast({
+    skipInventory: true,
+    skipOperationJobs: true,
+    skipOrders: true,
+    skipPurchaseOrders: true,
+    stateFieldsOnly: true,
+    stateFields: ["sequence", "systemSettings", "connections", "connectorState"]
+  });
+}
+
 async function queueTemuReturnImportJob(db, body = {}) {
   const channel = requireEnabledChannel(db, "Temu");
   if (!channel.settings?.temuReturnSyncEnabled) throw new Error("Enable Temu return sync in Channel Settings before importing returns.");
@@ -24652,7 +24663,7 @@ async function runTemuReturnImportWorkerJob(job) {
     const result = await importTemuReturns({
       since: job.workerPayload.since, until: job.workerPayload.until,
       request: async (type, payload) => {
-        const db = await readDbFast({ skipInventory: true });
+        const db = await readChannelJobQueueState();
         try {
           const channel = requireEnabledChannel(db, "Temu");
           if (!channel.settings?.temuReturnSyncEnabled) throw new Error("Temu return sync is disabled.");
@@ -24711,14 +24722,14 @@ async function queueShopifyReturnImportJob(db, body = {}) {
 
 async function runShopifyReturnImportWorkerJob(job) {
   try {
-    const db = normalizeDb(await readDbFast({ skipInventory: true }));
+    const db = normalizeDb(await readChannelJobQueueState());
     const channel = requireEnabledChannel(db, "Shopify");
     if (!channel.settings?.shopifyReturnSyncEnabled) throw new Error("Shopify return sync is disabled.");
     await persistWorkerImportJob(job, { status: "running", phase: "importing_returns", startedAt: new Date().toISOString(), message: "Reading Shopify returns and reverse deliveries." });
     const result = await importShopifyReturns({
       since: job.workerPayload.since,
       request: async (query, variables) => {
-        const current = await readDbFast({ skipInventory: true });
+        const current = await readChannelJobQueueState();
         const enabled = requireEnabledChannel(current, "Shopify");
         if (!enabled.settings?.shopifyReturnSyncEnabled) throw new Error("Shopify return sync was disabled.");
         return shopifyGraphqlRequestAuto(query, variables, { jobId: job.id, operation: "Import Shopify returns" });
@@ -24789,7 +24800,7 @@ async function runEbayReturnImportWorkerJob(job = {}, attrs = {}) {
   });
   appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-returns", operation: "eBay return import started", statusCode: 102, ok: true, jobId: job.id, message: job.message });
   try {
-    const workDb = normalizeDb(await readDbFast({ skipInventory: true }));
+    const workDb = normalizeDb(await readChannelJobQueueState());
     const result = await importEbayReturns(workDb, {
       ...payload,
       jobId: job.id,
@@ -66498,7 +66509,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && url.pathname === "/api/temu/returns/import" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     try {
-      const result = await queueTemuReturnImportJob(await readDbFast({ skipInventory: true }), body);
+      const result = await queueTemuReturnImportJob(await readChannelJobQueueState(), body);
       return sendJson(res, 202, { ...result, message: result.job.message });
     } catch (error) { return sendJson(res, 400, { error: error.message }); }
   }
@@ -66506,15 +66517,15 @@ async function handleApi(req, res) {
   if (req.method === "POST" && url.pathname === "/api/shopify/returns/import" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     try {
-      const result = await queueShopifyReturnImportJob(await readDbFast({ skipInventory: true }), body);
+      const result = await queueShopifyReturnImportJob(await readChannelJobQueueState(), body);
       return sendJson(res, 202, { ...result, message: result.job.message });
     } catch (error) { return sendJson(res, 400, { error: error.message }); }
   }
 
   if (req.method === "POST" && url.pathname === "/api/ebay/returns/import" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const db = await readDbFast({ skipInventory: true });
     try {
+      const db = await readChannelJobQueueState();
       const result = await queueEbayReturnImportJob(db, body);
       return sendJson(res, result.duplicate ? 200 : 202, {
         queued: true,

@@ -15,7 +15,7 @@ const HEAVY_TASKS = new Set([
   "product-dump-import", "vendor-feed-import", "source-catalog-import", "mapped-product-import",
   "source-facets-refresh", "data-quality-scan", "source-search-index", "source-performance-indexes",
   "postgres-backup", "walmart-bulk-launch", "walmart-existing-launch", "walmart-feed",
-  "ebay-catalog-sync", "ebay-taxonomy-sync", "ebay-order-import", "shopify-order-import", "shopify-status-import", "category-mapping-bulk-refresh"
+  "ebay-catalog-sync", "ebay-taxonomy-sync", "ebay-order-import", "shopify-order-import", "shopify-return-import", "shopify-status-import", "category-mapping-bulk-refresh"
 ]);
 
 function positiveNumber(value, fallback) {
