@@ -49624,8 +49624,48 @@ async function handleApi(req, res) {
       return sendJson(res, 202, { queued: true, job: normalizeImportJob(queued.job), jobIds: queued.jobs.map((job) => job.id), totalRows: queued.totalRows, totalChunks: queued.totalChunks, message: queued.message });
     }
     if (req.method === "GET" && routeParts[4] === "items" && routeParts[5] && routeParts[6] === "postal-suggestion" && routeParts.length === 7) {
-      const suggestion = await shippingDisputeStore.suggestItemPostalCode(scope, batchId, decodeURIComponent(routeParts[5]));
+      const itemId = decodeURIComponent(routeParts[5]);
+      let suggestion = await shippingDisputeStore.suggestItemPostalCode(scope, batchId, itemId);
       if (!suggestion) return sendJson(res, 404, { error: "Shipping dispute shipment not found." });
+      if (!suggestion.postalCode && suggestion.city && suggestion.state) {
+        try {
+          const result = await upsRating.suggestPostalCodes({
+            city: suggestion.city,
+            state: suggestion.state,
+            country: suggestion.country || "US",
+          }, process.env, carrierCredentials.getUps(), { selectionKey: `${batchId}:${itemId}` });
+          if (result.selected?.postalCode) {
+            suggestion = {
+              ...suggestion,
+              postalCode: result.selected.postalCode,
+              country: result.selected.country || suggestion.country,
+              source: "ups_regional_address_validation",
+              status: "found",
+              candidateCount: result.candidateCount,
+              evidenceCount: result.candidateCount,
+              message: result.candidateCount > 1
+                ? `UPS returned ${result.candidateCount} ZIP candidates for ${suggestion.city}, ${suggestion.state}. DataPlus selected ${result.selected.postalCode} consistently for this dispute row.`
+                : `UPS found ZIP ${result.selected.postalCode} for ${suggestion.city}, ${suggestion.state}.`,
+            };
+          } else {
+            suggestion = {
+              ...suggestion,
+              source: "ups_regional_address_validation",
+              status: "failed",
+              candidateCount: 0,
+              message: `Failed - UPS returned no ZIP candidates for ${suggestion.city}, ${suggestion.state}.`,
+            };
+          }
+        } catch (error) {
+          suggestion = {
+            ...suggestion,
+            source: "ups_regional_address_validation",
+            status: "failed",
+            candidateCount: 0,
+            message: `Failed - ${error.message || "UPS ZIP lookup could not be completed."}`,
+          };
+        }
+      }
       return sendJson(res, 200, { suggestion });
     }
     if (req.method === "PATCH" && routeParts[4] === "items" && routeParts[5] && routeParts[6] === "order-destination" && routeParts.length === 7) {
@@ -49637,7 +49677,7 @@ async function handleApi(req, res) {
         action: "Corrected shipping dispute order and destination",
         entityType: "shipping_dispute_item",
         entityId: item.id,
-        metadata: { batchId, orderReference: body.orderReference || "", postalCode: body.postalCode || "", country: body.country || "" },
+        metadata: { batchId, orderReference: body.orderReference || "", postalCode: body.postalCode || "", country: body.country || "", postalSource: body.postalSource || "manual", postalCandidateCount: Number(body.postalCandidateCount || 0) || 0 },
       });
       return sendJson(res, 200, { item, batch: await shippingDisputeStore.getBatch(scope, batchId) });
     }

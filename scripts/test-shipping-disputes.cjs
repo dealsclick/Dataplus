@@ -20,6 +20,8 @@ assert.match(server, /comparisonOnly: true/, "dispute jobs must use quote-only r
 assert.match(server, /shippingDisputeStore\.finishRun/, "quote results must be persisted through the dispute store");
 assert.match(server, /shippingDisputeStore\.updateItemOrderDestination/, "operators must be able to correct a dispute order match and destination ZIP");
 assert.match(server, /shippingDisputeStore\.suggestItemPostalCode/, "the dispute editor must expose a scoped ZIP suggestion lookup");
+assert.match(server, /upsRating\.suggestPostalCodes/, "missing dispute ZIPs must fall back to UPS regional address validation");
+assert.match(server, /selectionKey: `\$\{batchId\}:\$\{itemId\}`/, "UPS ZIP selection must remain stable for the same dispute row");
 assert.match(server, /shippingDisputeExportCsv/, "shipment-level dispute evidence must be exportable");
 assert.match(server, /Shipping disputes are available only for LINQ/, "operational shipment evidence must stay inside the current LINQ boundary");
 assert.match(disputeStore, /update shipping_dispute_items item set status='quoting'/, "a rerun must keep every eligible item visibly in progress");
@@ -30,6 +32,7 @@ assert.match(disputeStore, /productMetadataForOrderLines\(client/, "dispute line
 assert.match(disputeStore, /catalogQuotePackage\(enrichedLines, productMetadata\)/, "existing disputes must hydrate quote packages from current catalog measurements");
 assert.match(disputeStore, /tenant_id=\$2 and company_id=\$3/, "manual dispute rematching must stay inside the active tenant and company");
 assert.match(disputeStore, /orderDestinationOverride/, "manual order and ZIP corrections must be retained as audited dispute evidence");
+assert.match(disputeStore, /postalSource/, "auto-filled ZIP provenance must be retained with the dispute-only destination override");
 assert.match(disputeStore, /same_dispute_city_state_consensus/, "ZIP suggestions must come from matching dispute shipment evidence");
 assert.match(disputeStore, /candidates\.size !== 1/, "ZIP suggestions must reject ambiguous city and state evidence");
 assert.doesNotMatch(disputeStore, /!currentSource\.startsWith\("current_catalog_"\)/, "catalog-backed dispute packages must refresh after SKU measurements change");
@@ -112,6 +115,8 @@ assert.match(page, /disabled=\{!itemReady \|\| quoting \|\| item\.status === "qu
 assert.match(page, /Edit order and ZIP/, "every dispute row must expose order and ZIP correction");
 assert.match(page, /Auto-fill/, "missing dispute ZIPs must offer an evidence-based auto-fill action");
 assert.match(page, /postal-suggestion/, "the dispute editor must request ZIP suggestions only on demand");
+assert.match(page, /postalSuggestion\.status === "failed"/, "failed UPS ZIP lookups must show an explicit failure state");
+assert.match(page, /Failed - \$\{reason\}/, "failed quote rows must display the failure reason with the status");
 assert.match(page, /does not update the source order, fulfillment address, label, settlement, or accounting history/, "the correction dialog must disclose its dispute-only scope");
 assert.match(page, /Saved rates will be cleared/, "the correction dialog must warn that old comparisons become stale");
 assert.match(page, /Filter order, channel order, tracking, or SKU/, "the review workspace must search normalized SKUs");
@@ -180,6 +185,19 @@ assert.equal(quoteEvidenceIsCurrent({
 }), false, "changing the matched order or destination ZIP must invalidate old comparison rates");
 
 assert.deepEqual(ups.upsAddress({ postalCode: "10001", country: "US" }), { PostalCode: "10001", CountryCode: "US" }, "UPS ZIP-only rating must omit empty street, city, and state fields");
+const upsPostalCandidates = ups.addressValidationCandidates({ XAVResponse: { Candidate: [
+  { AddressKeyFormat: { PoliticalDivision2: "Seattle", PoliticalDivision1: "WA", PostcodePrimaryLow: "98101-1234", CountryCode: "US" } },
+  { AddressKeyFormat: { PoliticalDivision2: "Seattle", PoliticalDivision1: "WA", PostcodePrimaryLow: "98109", CountryCode: "US" } },
+  { AddressKeyFormat: { PoliticalDivision2: "Seattle", PoliticalDivision1: "WA", PostcodePrimaryLow: "98109", CountryCode: "US" } },
+] } });
+assert.deepEqual(upsPostalCandidates.map((candidate) => candidate.postalCode), ["98101", "98109"], "UPS regional candidates must normalize ZIP+4 and remove duplicates");
+assert.deepEqual(
+  ups.selectPostalCandidate(upsPostalCandidates, "batch:item"),
+  ups.selectPostalCandidate([...upsPostalCandidates].reverse(), "batch:item"),
+  "multiple UPS ZIP candidates must resolve consistently for the same dispute row"
+);
+assert.match(ups.suggestPostalCodes.toString(), /regionalrequestindicator=True/, "UPS ZIP recovery must use regional address validation when no postal code is available");
+assert.match(ups.suggestPostalCodes.toString(), /maximumcandidatelistsize=/, "UPS ZIP recovery must request a bounded candidate list");
 
 const selectedRates = selectLowestRates([
   { provider: "veeqo", carrier: "UPS", service: "Ground", amount: 14 },
