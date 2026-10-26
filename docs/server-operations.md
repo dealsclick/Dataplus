@@ -53,6 +53,7 @@ docker compose logs --tail=100 worker-background
 docker compose logs --tail=100 worker-orders-shopify
 docker compose logs --tail=100 worker-orders-ebay
 docker compose logs --tail=100 worker-orders-temu
+docker compose logs --tail=100 worker-orders-tiktok
 docker compose logs --tail=100 worker-walmart
 ```
 
@@ -71,6 +72,7 @@ Press `Ctrl+C` to stop following the log. This does not stop the service.
 - `worker-orders-shopify`: Shopify order and return imports.
 - `worker-orders-ebay`: eBay order and return imports.
 - `worker-orders-temu`: Temu order, status, enrichment, and return imports.
+- `worker-orders-tiktok`: TikTok Shop order and return imports.
 - `worker-walmart`: Walmart orders, feeds, launches, pricing, inventory, and
   reconciliation.
 - `dataplus`: the website and API.
@@ -112,6 +114,7 @@ docker compose restart worker-background
 docker compose restart worker-orders-shopify
 docker compose restart worker-orders-ebay
 docker compose restart worker-orders-temu
+docker compose restart worker-orders-tiktok
 docker compose restart worker-walmart
 ```
 
@@ -131,6 +134,7 @@ docker compose up -d --no-deps --force-recreate worker-background
 docker compose up -d --no-deps --force-recreate worker-orders-shopify
 docker compose up -d --no-deps --force-recreate worker-orders-ebay
 docker compose up -d --no-deps --force-recreate worker-orders-temu
+docker compose up -d --no-deps --force-recreate worker-orders-tiktok
 docker compose up -d --no-deps --force-recreate worker-walmart
 ```
 
@@ -173,7 +177,7 @@ After confirming that no important jobs are active, recreate the workers:
 ```bash
 docker compose up -d --no-deps --force-recreate \
   worker worker-background worker-orders-shopify worker-orders-ebay \
-  worker-orders-temu worker-walmart
+  worker-orders-temu worker-orders-tiktok worker-walmart
 ```
 
 Verify the deployment:
@@ -184,6 +188,7 @@ docker compose logs --tail=50 dataplus
 docker compose logs --tail=50 worker-orders-shopify
 docker compose logs --tail=50 worker-orders-ebay
 docker compose logs --tail=50 worker-orders-temu
+docker compose logs --tail=50 worker-orders-tiktok
 ```
 
 ## Inspect jobs

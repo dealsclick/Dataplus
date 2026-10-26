@@ -117,7 +117,8 @@ const accountingHandler = createAccountingHandler({
     if (normalized === 'walmart') return queueWalmartSettlementSyncJob({ scheduled: false, actor });
     if (normalized === 'ebay') return queueEbaySettlementSyncJob(normalizeDb(await readDbFast({ skipInventory: true })), { scheduled: false, actor });
     if (normalized === 'shopify') return queueShopifySettlementSyncJob(normalizeDb(await readDbFast({ skipInventory: true })), { scheduled: false, actor });
-    throw Object.assign(new Error('Automatic settlement sync is available for Walmart, eBay, and Shopify Payments.'), { status: 400 });
+    if (normalized === 'tiktok' || normalized === 'tiktok shop') return queueTikTokSettlementSyncJob({ scheduled: false, actor });
+    throw Object.assign(new Error('Automatic settlement sync is available for Walmart, eBay, TikTok Shop, and Shopify Payments.'), { status: 400 });
   },
   queueTemuReportImport: (req, scope, actor, metadata) => queueTemuSettlementReportImport(req, scope, actor, metadata),
   enrichOrder: order => enrichOrderDetail(order), parseBody, sendJson, sendCsv, can: userCan
@@ -1094,6 +1095,27 @@ const DEFAULT_CHANNEL_SETTINGS = {
   temuOrderEnrichmentScheduleEveryHours: 12,
   temuOrderEnrichmentLookbackDays: 7,
   temuOrderEnrichmentLimit: 250,
+  tiktokEnvironment: "production",
+  tiktokOrdersEnabled: false,
+  tiktokOrderScheduleEnabled: false,
+  tiktokOrderScheduleHours: 1,
+  tiktokOrderLookbackDays: 30,
+  tiktokReturnsEnabled: false,
+  tiktokReturnScheduleEnabled: false,
+  tiktokReturnScheduleHours: 2,
+  tiktokReturnLookbackDays: 30,
+  tiktokSettlementImportEnabled: false,
+  tiktokSettlementScheduleEnabled: false,
+  tiktokSettlementScheduleHours: 24,
+  tiktokSettlementLookbackDays: 45,
+  tiktokCatalogEnabled: false,
+  tiktokLaunchEnabled: false,
+  tiktokInventoryEnabled: false,
+  tiktokPriceEnabled: false,
+  tiktokFulfillmentEnabled: false,
+  tiktokLabelPurchaseEnabled: false,
+  tiktokMessagesEnabled: false,
+  tiktokWebhooksEnabled: false,
   ebayPriceInventorySyncScheduleEnabled: false,
   ebayPriceInventorySyncScheduleType: "times",
   ebayPriceInventorySyncScheduleTimes: "04:00,16:00",
@@ -5026,10 +5048,10 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultReplenishableQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "minimumPrice", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayCatalogSyncScheduleEveryHours", "ebayLaunchStatusMaxAgeHours", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuMinimumPrice", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate", "walmartInventoryScheduleHours"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultReplenishableQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "minimumPrice", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayCatalogSyncScheduleEveryHours", "ebayLaunchStatusMaxAgeHours", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuMinimumPrice", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "tiktokOrderScheduleHours", "tiktokOrderLookbackDays", "tiktokReturnScheduleHours", "tiktokReturnLookbackDays", "tiktokSettlementScheduleHours", "tiktokSettlementLookbackDays", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate", "walmartInventoryScheduleHours"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "createMissingOrderSkusFromSource", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayRequireFreshStatusBeforeLaunch", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifySettlementImportEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled", "walmartInventoryScheduleEnabled", "walmartSettlementImportEnabled"]) {
+  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "createMissingOrderSkusFromSource", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayRequireFreshStatusBeforeLaunch", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "tiktokOrdersEnabled", "tiktokOrderScheduleEnabled", "tiktokReturnsEnabled", "tiktokReturnScheduleEnabled", "tiktokSettlementImportEnabled", "tiktokSettlementScheduleEnabled", "tiktokCatalogEnabled", "tiktokLaunchEnabled", "tiktokInventoryEnabled", "tiktokPriceEnabled", "tiktokFulfillmentEnabled", "tiktokLabelPurchaseEnabled", "tiktokMessagesEnabled", "tiktokWebhooksEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifySettlementImportEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled", "walmartInventoryScheduleEnabled", "walmartSettlementImportEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   settings.replenishableFeedMaxAgeHours = Math.max(0, Number(settings.replenishableFeedMaxAgeHours || 0));
@@ -6544,7 +6566,7 @@ function authAreaForPath(pathname = "") {
   if (/^\/api\/(purchase-orders|purchasing|vendors\/[^/]+\/purchase)/.test(pathname)) return "purchasing";
   if (/^\/api\/(warehouse|warehouse-audits|inventory|warehouses|barcodes)/.test(pathname)) return "warehouse";
   if (/^\/api\/(catalog|products|categories|source-catalog|attribute|brands|vendors)/.test(pathname)) return pathname.includes("/vendors") ? "vendors" : pathname.includes("/brands") ? "brands" : "catalog";
-  if (/^\/api\/(channels|shopify|ebay|temu|walmart|webhooks)/.test(pathname)) return "channels";
+  if (/^\/api\/(channels|shopify|ebay|temu|tiktok|walmart|webhooks)/.test(pathname)) return "channels";
   if (/^\/api\/(import-jobs|jobs)/.test(pathname)) return "jobs";
   if (/^\/api\/ai/.test(pathname)) return "ai";
   return "overview";
@@ -6647,6 +6669,12 @@ function authRequirementForRequest(req, url, parts = []) {
       if (/\/webhooks(?:\/|$)/.test(pathname)) return { area: 'channels.walmart', action: 'webhooks' };
       if (/\/(?:orders|returns|settlements)\/import$/.test(pathname)) return { area: 'channels.walmart', action: 'import' };
       return { area: 'channels.walmart', action: 'sync' };
+    }
+    if (pathname.startsWith('/api/tiktok/')) {
+      if (pathname.endsWith('/credentials')) return { area: 'channels.settings', action: 'credentials' };
+      if (/\/fulfillment\//.test(pathname)) return { area: 'channels.settings', action: 'sync' };
+      if (/\/jobs\//.test(pathname)) return { area: 'channels.settings', action: 'import' };
+      return { area: 'channels.settings', action: 'sync' };
     }
     const channelArea = /ebay/i.test(pathname) ? "channels.ebay" : /shopify/i.test(pathname) ? "channels.shopify" : /log|activity|ledger/i.test(pathname) ? "channels.logs" : "channels.settings";
     if (/credentials/.test(pathname)) return { area: "channels.settings", action: "credentials" };
@@ -21935,6 +21963,92 @@ async function checkWalmartOrderSchedule() { return getWalmartMarketplace().sche
 async function queueWalmartSettlementSyncJob(options = {}) { return getWalmartMarketplace().queue('settlements', { scheduled: options.scheduled === true, scheduleKey: options.scheduleKey || '', lookbackDays: options.lookbackDays || 45 }); }
 async function queueWalmartReadinessJob(actor, payload = {}) {
   return getWalmartMarketplace().queue("match", { ...payload, actor, readiness: true });
+}
+
+let tiktokMarketplace;
+function getTikTokMarketplace() {
+  if (!tiktokMarketplace) tiktokMarketplace = require('./lib/tiktok-marketplace').createTikTokMarketplace({
+    postgres,
+    artifactsDir: IMPORT_JOB_FILE_DIR,
+    log: appendChannelApiLog,
+    feeStore: channelFeeStore,
+    settlementScope: { tenantId: LEGACY_TENANT, companyId: LEGACY_COMPANY },
+    credentials: require('./lib/tiktok-credentials').createTikTokCredentials({ directory: DATA_DIR }),
+    readConnections: () => postgres.readEntityDocumentCollectionFast('connections'),
+    canManageCredentials: user => userCan(user, 'channels.settings', 'credentials'),
+    findActive: task => findActiveImportJobByWorkerTask({}, task),
+    createJob: async attrs => {
+      const db = await readDbFast({ skipInventory: true });
+      const job = createImportJob(db, attrs);
+      await postgres.upsertOperationJob(job);
+      upsertImportJobStore(job);
+      return job;
+    },
+    persistJob: persistWorkerImportJob,
+    saveProductSnapshot: async raw => {
+      const sellerSkus = [...new Set((Array.isArray(raw?.skus) ? raw.skus : [])
+        .map(row => sourceTextValue(row?.seller_sku))
+        .filter(Boolean))];
+      if (!sellerSkus.length) return { matched: 0 };
+      const listing = {
+        productId: sourceTextValue(raw.id),
+        status: sourceTextValue(raw.status),
+        title: sourceTextValue(raw.title),
+        sellerSkus,
+        syncedAt: new Date().toISOString()
+      };
+      const result = await postgres.getPool().query(`
+        update products
+        set raw=jsonb_set(coalesce(raw,'{}'::jsonb),'{tiktokListing}',coalesce(raw->'tiktokListing','{}'::jsonb)||$2::jsonb),updated_at=now()
+        where upper(btrim(sku))=any($1::text[])
+        returning product_id
+      `, [sellerSkus.map(sku => sku.toUpperCase()), JSON.stringify(listing)]);
+      if (result.rowCount) await Promise.all([
+        redisCache.deleteByPrefix('dataplus:products:'),
+        redisCache.deleteByPrefix('dataplus:product-detail:')
+      ]);
+      return { matched: result.rowCount };
+    },
+    saveOrder: async (incoming, options = {}) => {
+      const existing = await postgres.readChannelOrderForReturn('TikTok Shop', { orderId: incoming.marketplaceOrderId });
+      if (existing && ['void', 'deleted', 'archived'].includes(String(existing.status || '').toLowerCase())) return { action: 'skipped', order: existing };
+      const historicalBackfill = options.historicalBackfill === true || incoming.historicalBackfill === true;
+      if (historicalBackfill && existing) return { action: 'skipped', order: existing };
+      const db = historicalBackfill ? null : await readDbFast({ skipInventory: true });
+      if (db && isDeletedMarketplaceOrder(db, incoming)) return;
+      if (db) applyOrderSkuAliases(db, incoming);
+      const merged = { ...existing, ...preserveMarketplaceOrderOperations(incoming, existing) };
+      merged.items = require('./lib/walmart-client').mergeOrderLines(incoming.items, existing?.items);
+      merged.sku = merged.items[0]?.sku || incoming.sku;
+      if (!existing && postgres.isPostgresEnabled()) {
+        const internalOrderNumber = await postgres.nextOrderNumberAtomic();
+        merged.internalOrderNumber = internalOrderNumber;
+        merged.orderNumber = internalOrderNumber;
+        merged.displayOrderNumber = internalOrderNumber;
+      }
+      const order = historicalBackfill
+        ? prepareHistoricalBackfillOrder(merged, { channel: 'TikTok Shop', jobId: options.jobId })
+        : assignImportedOrderInternalNumber(db, merged, existing);
+      if (!historicalBackfill) await ensureProductsForImportedOrders(db, [order], { channel: 'TikTok Shop' });
+      // New TikTok orders reserve their number through nextOrderNumberAtomic().
+      // Do not overwrite that committed sequence with this older state snapshot.
+      await postgres.upsertOrdersFromState([order], { replace: false });
+      if (!historicalBackfill) await reconcilePersistedTerminalOrders([order], { user: 'TikTok Shop order import' });
+      clearOrderApiCache();
+      return { action: existing ? 'updated' : 'imported', order };
+    }
+  });
+  return tiktokMarketplace;
+}
+
+async function runTikTokWorkerJob(job) { return getTikTokMarketplace().run(job); }
+async function checkTikTokSchedule() { return getTikTokMarketplace().schedule(); }
+async function queueTikTokSettlementSyncJob(options = {}) {
+  return getTikTokMarketplace().queue('settlements', {
+    scheduled: options.scheduled === true,
+    lookbackDays: options.lookbackDays || 45,
+    actor: options.actor || ''
+  });
 }
 
 async function runStatusInventoryJob(job) {
@@ -49704,6 +49818,16 @@ async function handleApi(req, res) {
     return accountingHandler(req, res, url, authUser);
   }
 
+  if (url.pathname.startsWith('/api/tiktok/')) {
+    if (!authUser) return sendJson(res, 401, { error: 'Sign in to use TikTok Shop.' });
+    const scope = notificationScope(req);
+    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
+      return sendJson(res, 409, { error: 'TikTok Shop operations are available only for LINQ while company isolation is completed.' });
+    }
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 503, { error: 'TikTok Shop operations require PostgreSQL.' });
+    if (await getTikTokMarketplace().handle(req, res, url, authUser, sendJson, parseBody)) return;
+  }
+
   if (url.pathname.startsWith('/api/walmart/')) {
     if (!authUser) return sendJson(res, 401, { error: 'Sign in to use Walmart Marketplace.' });
     if (await getWalmartMarketplace().handle(req, res, url, authUser.id, sendJson, parseBody)) return;
@@ -72148,6 +72272,9 @@ module.exports = {
   checkWalmartOrderSchedule,
   runWalmartWorkerJob,
   queueWalmartSettlementSyncJob,
+  checkTikTokSchedule,
+  runTikTokWorkerJob,
+  queueTikTokSettlementSyncJob,
   queueWalmartReconciliationJob: actor => getWalmartMarketplace().queue('reconcile', { actor }),
   runChannelCategoryMappingJob,
   runBulkCategoryMappingRefreshJob,

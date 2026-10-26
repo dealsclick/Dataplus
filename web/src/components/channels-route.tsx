@@ -28,6 +28,7 @@ import type {
 } from "../App"
 
 const WalmartChannel = lazy(() => import("./walmart-channel").then((module) => ({ default: module.WalmartChannel })))
+const TikTokChannel = lazy(() => import("./tiktok-channel").then((module) => ({ default: module.TikTokChannel })))
 function ChannelsPage({
   channels,
   warehouses,
@@ -85,7 +86,7 @@ function ChannelsPage({
             ))}
           </CardContent>
         </Card>
-        {selectedChannel?.name === 'Walmart' ? <WalmartChannel key={selectedChannel.id} channel={selectedChannel} warehouses={warehouses} onSave={onSaveChannel} onRefresh={onRefreshData} /> : selectedChannel ? (
+        {selectedChannel?.name === 'Walmart' ? <WalmartChannel key={selectedChannel.id} channel={selectedChannel} warehouses={warehouses} onSave={onSaveChannel} onRefresh={onRefreshData} /> : selectedChannel?.name === 'TikTok Shop' ? <TikTokChannel key={selectedChannel.id} channel={selectedChannel} onSave={onSaveChannel} onRefresh={onRefreshData} /> : selectedChannel ? (
           <ChannelDetail
             channel={selectedChannel}
             warehouses={warehouses}

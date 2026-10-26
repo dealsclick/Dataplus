@@ -167,6 +167,19 @@ services:
     mem_limit: 1536m
     cpus: 1.5
 
+  worker-orders-tiktok:
+    extends:
+      service: worker
+    image: dataplus-worker
+    container_name: dataplus-worker-orders-tiktok
+    environment:
+      DATAPLUS_WORKER_LANE: orders-tiktok
+      NODE_OPTIONS: --max-old-space-size=512
+      DATAPLUS_WORKER_JOB_RSS_MB: 480
+      DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: 600
+    mem_limit: 768m
+    cpus: 1.0
+
   worker-walmart:
     extends:
       service: worker

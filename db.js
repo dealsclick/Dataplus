@@ -1,4 +1,4 @@
-const { SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, WALMART_TASKS, HEAVY_RESOURCE_TASKS, WORKLOAD_LIMITS, validateLane, laneSql } = require('./lib/worker-lanes');
+const { SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, TIKTOK_ORDER_TASKS, WALMART_TASKS, HEAVY_RESOURCE_TASKS, WORKLOAD_LIMITS, validateLane, laneSql } = require('./lib/worker-lanes');
 const { shippingClassSql, shippingFunctionSql } = require("./lib/shipping-filter-sql");
 const { Pool } = require("pg");
 const { sourcePriceFloors } = require("./lib/product-price-floors");
@@ -24,7 +24,7 @@ const {
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-26-shipping-dispute-history-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-26-tiktok-shop-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -181,6 +181,12 @@ async function initRelationalSchema() {
       data jsonb not null,
       updated_at timestamptz not null default now()
     );
+    create table if not exists tiktok_documents (
+      doc_key text primary key,
+      data jsonb not null,
+      updated_at timestamptz not null default now()
+    );
+    create index if not exists tiktok_documents_updated_idx on tiktok_documents (updated_at desc);
     create table if not exists accounting_documents (
       doc_key text primary key,
       data jsonb not null default '{}'::jsonb,
@@ -290,6 +296,17 @@ async function initRelationalSchema() {
       where collection = 'categorySettings';
     create index if not exists entity_documents_collection_position_idx on entity_documents (collection, position);
     create index if not exists entity_documents_collection_updated_idx on entity_documents (collection, updated_at desc);
+    insert into entity_documents(collection, entity_id, position, data)
+    select
+      'connections',
+      'tiktok-shop',
+      coalesce((select max(position) + 1 from entity_documents where collection = 'connections'), 0),
+      '{"id":"tiktok-shop","name":"TikTok Shop","connected":false,"status":"inactive","settings":{"channelEnabled":false,"tiktokEnvironment":"production","tiktokOrdersEnabled":false,"tiktokOrderScheduleEnabled":false,"tiktokReturnsEnabled":false,"tiktokReturnScheduleEnabled":false,"tiktokSettlementImportEnabled":false,"tiktokSettlementScheduleEnabled":false,"tiktokCatalogEnabled":false,"tiktokLaunchEnabled":false,"tiktokInventoryEnabled":false,"tiktokPriceEnabled":false,"tiktokFulfillmentEnabled":false,"tiktokLabelPurchaseEnabled":false,"tiktokMessagesEnabled":false,"tiktokWebhooksEnabled":false}}'::jsonb
+    where not exists (
+      select 1 from entity_documents
+      where collection = 'connections' and lower(data->>'name') = 'tiktok shop'
+    )
+    on conflict(collection, entity_id) do nothing;
 
     create table if not exists fulfillment_label_batches (
       batch_id text primary key,
@@ -12903,22 +12920,22 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all"
         and coalesce(raw ->> 'workerTask', '') = any($1::text[])
         and ($3::text = 'all' or (${laneSql}) = $3::text)
         and (
-          coalesce($9::jsonb -> coalesce(raw ->> 'workerTask', '') ->> 'lane', '') = ''
+          coalesce($10::jsonb -> coalesce(raw ->> 'workerTask', '') ->> 'lane', '') = ''
           or (
             select count(*)
             from operations_jobs running_job
             where lower(running_job.status) = 'running'
-              and coalesce($9::jsonb -> coalesce(running_job.raw ->> 'workerTask', '') ->> 'lane', '')
-                = coalesce($9::jsonb -> coalesce(operations_jobs.raw ->> 'workerTask', '') ->> 'lane', '')
-          ) < coalesce(nullif($9::jsonb -> coalesce(raw ->> 'workerTask', '') ->> 'limit', '')::int, 1)
+              and coalesce($10::jsonb -> coalesce(running_job.raw ->> 'workerTask', '') ->> 'lane', '')
+                = coalesce($10::jsonb -> coalesce(operations_jobs.raw ->> 'workerTask', '') ->> 'lane', '')
+          ) < coalesce(nullif($10::jsonb -> coalesce(raw ->> 'workerTask', '') ->> 'limit', '')::int, 1)
         )
         and (
-          coalesce(raw ->> 'workerTask', '') <> all($8::text[])
+          coalesce(raw ->> 'workerTask', '') <> all($9::text[])
           or not exists (
             select 1
             from operations_jobs running_job
             where lower(running_job.status) = 'running'
-              and coalesce(running_job.raw ->> 'workerTask', '') = any($8::text[])
+              and coalesce(running_job.raw ->> 'workerTask', '') = any($9::text[])
           )
         )
         and (
@@ -12970,9 +12987,9 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all"
         'phase', 'claimed',
         'workerId', $2::text,
         'workerLane', $3::text,
-        'workerWorkloadLane', coalesce($9::jsonb -> coalesce(job.raw ->> 'workerTask', '') ->> 'lane', 'standard'),
-        'workerWorkloadLimit', coalesce(nullif($9::jsonb -> coalesce(job.raw ->> 'workerTask', '') ->> 'limit', '')::int, 0),
-        'workerResourceClass', case when coalesce(job.raw ->> 'workerTask', '') = any($8::text[]) then 'heavy' else 'standard' end,
+        'workerWorkloadLane', coalesce($10::jsonb -> coalesce(job.raw ->> 'workerTask', '') ->> 'lane', 'standard'),
+        'workerWorkloadLimit', coalesce(nullif($10::jsonb -> coalesce(job.raw ->> 'workerTask', '') ->> 'limit', '')::int, 0),
+        'workerResourceClass', case when coalesce(job.raw ->> 'workerTask', '') = any($9::text[]) then 'heavy' else 'standard' end,
         'workerClaimedAt', now(),
         'workerLastSeenAt', now()
       )
@@ -12983,7 +13000,7 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all"
       job.total_rows, job.processed_rows, job.changed_rows, job.missing_rows,
       job.progress, job.eta_seconds, job.source, job.output_path, job.error_path,
       job.created_at, job.started_at, job.ended_at, job.updated_at, job.raw
-  `, [taskList, worker, lane, SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, WALMART_TASKS, HEAVY_RESOURCE_TASKS, JSON.stringify(WORKLOAD_LIMITS)]);
+  `, [taskList, worker, lane, SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, TIKTOK_ORDER_TASKS, WALMART_TASKS, HEAVY_RESOURCE_TASKS, JSON.stringify(WORKLOAD_LIMITS)]);
   if (!result.rows.length) return null;
   const claimed = result.rows[0];
   return {
@@ -13034,6 +13051,7 @@ const BACKUP_CORE_TABLES = [
   "product_source_enrichments",
   "shopify_product_statuses",
   "product_quality_rows",
+  "tiktok_documents",
   "state_documents",
   "entity_documents"
 ];

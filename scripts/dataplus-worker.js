@@ -41,6 +41,7 @@ const WORKER_POST_JOB_DRAIN_TIMEOUT_MS = Math.max(1_000, Number(
   process.env.DATAPLUS_WORKER_POST_JOB_DRAIN_TIMEOUT_MS || 15_000
 ) || 15_000);
 const SUPPORTED_TASKS = [
+  "tiktok-orders", "tiktok-returns", "tiktok-settlements", "tiktok-products", "tiktok-messages",
   "walmart-pricing", "walmart-bulk-launch", "walmart-launch-reconcile", "walmart-existing-launch", "walmart-reconcile", "walmart-match", "walmart-orders", "walmart-returns", "walmart-webhook", "walmart-taxonomy", "walmart-launch", "walmart-feed", "walmart-preview", "walmart-update", "walmart-retire", "walmart-inventory-sync", "walmart-settlements",
   "status-inventory",
   "inactive-inventory-temu",
@@ -2411,6 +2412,7 @@ async function runJob(job) {
   if (task === "shopify-status-sync") return runShopifyStatusSyncJob(job);
   if (task === "shopify-inventory-update") return runShopifyInventoryUpdateJob(job);
   if (task.startsWith("walmart-")) return dataplus.runWalmartWorkerJob(job);
+  if (task.startsWith("tiktok-")) return dataplus.runTikTokWorkerJob(job);
   if (["inactive-inventory-temu", "inactive-inventory-whatnot", "inactive-inventory-tiktok"].includes(task)) return dataplus.runInactiveChannelInventoryJob(job);
   if (task === "ai-category-review") return runAiCategoryReviewJob(job);
   if (task === "ebay-category-auto-map") return runEbayCategoryAutoMapJob(job);
@@ -2448,6 +2450,7 @@ async function tick() {
     if (['all', 'background'].includes(WORKER_LANE)) {
       await checkScheduledVendorFeedImports();
       await dataplus.checkWalmartOrderSchedule().catch(error => console.error(error.message));
+      await dataplus.checkTikTokSchedule().catch(error => console.error(error.message));
       await checkScheduledShopifyInventoryUpdate();
       await checkScheduledShopifySkuPairAudit();
       await checkScheduledEbayCatalogSync();
@@ -2458,6 +2461,7 @@ async function tick() {
     if (['all', 'orders-shopify'].includes(WORKER_LANE)) await checkScheduledShopifyOrderImport();
     if (['all', 'orders-ebay'].includes(WORKER_LANE)) await checkScheduledEbayOrderImport();
     if (['all', 'orders-temu'].includes(WORKER_LANE)) await checkScheduledTemuOrderImport();
+    if (['all', 'orders-tiktok'].includes(WORKER_LANE)) await dataplus.checkTikTokSchedule().catch(error => console.error(error.message));
     job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS, lane: WORKER_LANE });
   }
   if (!job) return false;
