@@ -51,6 +51,7 @@ assert.match(disputeStore, /async function quoteItemIds/, "large quote requests 
 assert.match(disputeStore, /async function quoteProgress/, "large quote requests must expose lightweight progress without hydrating dispute rows");
 assert.match(disputeStore, /requestGroupId/, "quote progress must aggregate the chained jobs from one request");
 assert.match(disputeStore, /job\.category='Accounting'/, "quote progress must use the normalized operation-job category stored by createImportJob");
+assert.match(disputeStore, /hasBulkHistory/, "completed single-row retries must not hide the latest bulk quote progress");
 assert.match(disputeStore, /select item\.\*\s+from shipping_dispute_items item/, "each quote worker must load only its bounded shipment rows");
 assert.match(disputeStore, /input\.refreshBatch !== false/, "per-row quote persistence must be able to defer full dispute recounts");
 assert.doesNotMatch(disputeStore, /from unnest\([^)]*\)[\s\S]{0,160}left join lateral/, "bulk dispute matching must not rescan orders once per reference");
