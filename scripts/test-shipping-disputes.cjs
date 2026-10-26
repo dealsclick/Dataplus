@@ -56,6 +56,9 @@ assert.match(page, /Matched: No/, "operators must be able to isolate unmatched o
 assert.match(page, /Based on full address/, "operators must be able to isolate full-address comparisons");
 assert.match(page, /Based on ZIP/, "operators must be able to isolate ZIP-based comparisons");
 assert.match(page, /Address: Needs ZIP/, "operators must be able to isolate destinations without postal evidence");
+for (const label of ["Channel order number", "Order date", "Ship date", "Tracking number"]) {
+  assert.match(page, new RegExp(label), `comparison rates must display ${label.toLowerCase()}`);
+}
 assert.match(page, /Dimensions: Complete/, "operators must be able to isolate complete quote dimensions");
 assert.match(page, /Dimensions: Missing/, "operators must be able to isolate incomplete quote dimensions");
 assert.match(page, /addressFilter, detail\?\.items, dimensionsFilter/, "address and dimension filters must participate in the visible shipment set");
@@ -85,6 +88,10 @@ assert.match(server, /Quote address basis/, "the dispute export must identify fu
 assert.match(server, /allowPostalOnlyDestination: addressQuoteBasis === "postal_code"/, "ZIP-only disputes must explicitly opt into direct UPS postal rating");
 assert.match(server, /postalOnlyComparison/, "ZIP-only disputes must avoid unsupported full-address provider work");
 assert.match(disputeStore, /nullif\(item\.destination_postal_code,''\) is not null/, "a destination postal code must be sufficient for dispute quote selection");
+assert.match(disputeStore, /select order_id,order_date,created_at/, "existing disputes must hydrate order dates from order records");
+assert.match(disputeStore, /select order_id,shipment_id,tracking_number,shipped_at/, "existing disputes must hydrate ship dates from shipment financials");
+assert.match(disputeStore, /orderDate: timestamp\(order\.order_date/, "new disputes must snapshot the source order date");
+assert.match(disputeStore, /shipDate: timestamp\(shipment\.shipped_at/, "new disputes must snapshot the source ship date");
 assert.match(disputeStore, /Only negative Shipping label purchase adjustment rows are eligible/, "the server must enforce charge-only Temu imports");
 assert.match(disputeStore, /references = \[\.\.\.referenceEvidence\.values\(\)\]/, "Temu order matching must be limited to accepted charge evidence");
 assert.match(disputeStore, /importEvidence/, "Temu adjustment evidence must be retained on dispute items");
