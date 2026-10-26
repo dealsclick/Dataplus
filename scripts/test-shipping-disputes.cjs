@@ -8,7 +8,7 @@ const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const worker = fs.readFileSync(path.join(root, "scripts", "dataplus-worker.js"), "utf8");
 const app = fs.readFileSync(path.join(root, "web", "src", "App.tsx"), "utf8");
 const page = fs.readFileSync(path.join(root, "web", "src", "components", "shipping-disputes.tsx"), "utf8");
-const { completePackage, completeDestination, postalDestination, destinationQuoteBasis, selectLowestRates, normalizeReferenceEvidence, orderLinesForDispute, enrichOrderLinesWithProducts, catalogQuotePackage, disputeSkus } = require("../lib/shipping-disputes");
+const { completePackage, completeDestination, postalDestination, destinationQuoteBasis, selectLowestRates, normalizeReferenceEvidence, orderLinesForDispute, enrichOrderLinesWithProducts, catalogQuotePackage, disputeSkus, sameQuotePackage } = require("../lib/shipping-disputes");
 const ups = require("../lib/ups-rating");
 const disputeStore = fs.readFileSync(path.join(root, "lib", "shipping-disputes.js"), "utf8");
 
@@ -26,6 +26,7 @@ assert.match(disputeStore, /from order_line_items where order_id=any\(\$1::text\
 assert.match(disputeStore, /join product_aliases alias on lower\(alias\.alias_sku\)=requested\.key/, "SKU aliases must resolve to catalog display metadata");
 assert.match(disputeStore, /productMetadataForOrderLines\(client/, "dispute line images must use one bounded catalog enrichment query");
 assert.match(disputeStore, /catalogQuotePackage\(enrichedLines, productMetadata\)/, "existing disputes must hydrate quote packages from current catalog measurements");
+assert.doesNotMatch(disputeStore, /!currentSource\.startsWith\("current_catalog_"\)/, "catalog-backed dispute packages must refresh after SKU measurements change");
 assert.match(disputeStore, /historicalPackage/, "historical label package evidence must remain retained separately");
 assert.match(disputeStore, /!\["quoted", "quoting"\]\.includes\(row\.status\)/, "saved quote runs must keep the package snapshot they were rated with");
 assert.match(disputeStore, /DISPUTE_REFERENCE_LIMIT = 50_000/, "one user-visible dispute must support a large uploaded statement");
@@ -158,27 +159,59 @@ const catalogPackage = catalogQuotePackage([{
   sku: "CHANNEL-1", catalogSku: "CATALOG-1", quantity: 1,
 }], new Map([["catalog-1", {
   product_id: "product-1", sku: "CATALOG-1", raw: {
-    packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 2, uomQty: 12,
+    itemLength: 6, itemWidth: 4, itemHeight: 2, itemWeight: 1,
+    packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 12, uomQty: 12,
   },
 }]]));
 assert.equal(catalogPackage.parcel.source, "current_catalog_sku", "single-SKU quote packages must identify the catalog as their source");
 assert.deepEqual(
   [catalogPackage.parcel.weight, catalogPackage.parcel.length, catalogPackage.parcel.width, catalogPackage.parcel.height],
-  [2, 12, 8, 4],
-  "current catalog package fields must remain the exact single-SKU quote package"
+  [1, 6, 4, 2],
+  "shipping disputes must prefer individual sell-unit measurements over supplier case measurements"
 );
 const catalogMultiUnitPackage = catalogQuotePackage([{
   sku: "CHANNEL-1", catalogSku: "CATALOG-1", quantity: 2,
 }], new Map([["catalog-1", {
   product_id: "product-1", sku: "CATALOG-1", raw: {
-    packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 2, uomQty: 12,
+    itemLength: 6, itemWidth: 4, itemHeight: 2, itemWeight: 1,
+    packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 12, uomQty: 12,
   },
 }]]));
 assert.equal(catalogMultiUnitPackage.parcel.source, "current_catalog_order_estimate", "multi-unit quote packages must be labeled as estimates");
 assert.deepEqual(
   [catalogMultiUnitPackage.parcel.weight, catalogMultiUnitPackage.parcel.length, catalogMultiUnitPackage.parcel.width, catalogMultiUnitPackage.parcel.height],
-  [4, 12, 8, 8],
-  "multi-unit quote packages must combine stored SKU weight and dimensions without changing the source UOM"
+  [2, 6, 4, 4],
+  "multi-unit quote packages must combine individual sell-unit measurements"
+);
+const overriddenCatalogPackage = catalogQuotePackage([{
+  sku: "CHANNEL-1", catalogSku: "CATALOG-1", quantity: 1,
+}], new Map([["catalog-1", {
+  product_id: "product-1", sku: "CATALOG-1", raw: {
+    itemLength: 6, itemWidth: 4, itemHeight: 2, itemWeight: 1,
+    packageLength: 12, packageWidth: 8, packageHeight: 4, packageWeight: 12,
+    shippingPackageOverride: true,
+  },
+}]]));
+assert.deepEqual(
+  [overriddenCatalogPackage.parcel.weight, overriddenCatalogPackage.parcel.length, overriddenCatalogPackage.parcel.width, overriddenCatalogPackage.parcel.height],
+  [12, 12, 8, 4],
+  "an explicit catalog package override must remain authoritative"
+);
+assert.equal(sameQuotePackage(catalogPackage.parcel, { ...catalogPackage.parcel }), true, "unchanged catalog measurements must not rewrite dispute rows");
+assert.equal(sameQuotePackage(catalogPackage.parcel, { ...catalogPackage.parcel, weight: 99 }), false, "changed catalog measurements must refresh dispute rows");
+const trueValuePottingMixPackage = catalogQuotePackage([{
+  sku: "BUS172083TRV", catalogSku: "BUS172083TRV", quantity: 3,
+}], new Map([["bus172083trv", {
+  product_id: "BUS172083TRV", sku: "BUS172083TRV", raw: {
+    itemLength: 24, itemWidth: 11, itemHeight: 2, itemWeight: 15,
+    packageLength: 48, packageWidth: 40, packageHeight: 57, packageWeight: 1980, uomQty: 120,
+    shippingPackageOverride: false,
+  },
+}]]));
+assert.deepEqual(
+  [trueValuePottingMixPackage.parcel.weight, trueValuePottingMixPackage.parcel.length, trueValuePottingMixPackage.parcel.width, trueValuePottingMixPackage.parcel.height],
+  [45, 24, 11, 6],
+  "BUS172083TRV disputes must rate three individual units instead of three supplier cases"
 );
 
 const status = ups.publicStatus({ UPS_RATING_ENABLED: "true", UPS_CLIENT_ID: "id", UPS_CLIENT_SECRET: "secret", UPS_ACCOUNT_NUMBER: "ABC123" });
