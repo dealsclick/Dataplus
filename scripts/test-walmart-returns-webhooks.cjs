@@ -95,7 +95,11 @@ function run() {
   }
 
   const server = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const marketplace = fs.readFileSync(path.join(__dirname, '..', 'lib', 'walmart-marketplace.js'), 'utf8');
   assert.match(server, /POST['"]\s*&&\s*url\.pathname\s*===\s*['"]\/api\/webhooks\/walmart['"]/);
+  assert.match(server, /return sendJson\(res, 200, result\)/);
+  assert.doesNotMatch(marketplace, /if \(event\.supported\) await queue\('webhook'/);
+  assert.match(marketplace, /if \(event\.supported\)[\s\S]{0,120}queue\('webhook',[\s\S]{0,120}\.catch\(/);
   assert.equal(supportsTask('walmart', 'walmart-returns'), true);
   assert.equal(supportsTask('walmart', 'walmart-webhook'), true);
   console.log('Walmart returns, cancellation, webhook, and credential tests passed.');

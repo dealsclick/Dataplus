@@ -49114,8 +49114,8 @@ async function handleApi(req, res) {
     try {
       const signature = String(req.headers["x-dataplus-walmart-signature"] || "");
       const result = await getWalmartMarketplace().receiveWebhook(rawBody, payload, signature);
-      appendChannelApiLog({ channel: "Walmart", transport: "webhook", method: "POST", path: url.pathname, operation: result.eventType || "Walmart webhook delivery", statusCode: 202, ok: true, durationMs: Date.now() - startedAt, message: result.duplicate ? "Duplicate Walmart webhook ignored." : result.message || "Walmart webhook accepted for background processing." });
-      return sendJson(res, 202, result);
+      appendChannelApiLog({ channel: "Walmart", transport: "webhook", method: "POST", path: url.pathname, operation: result.eventType || "Walmart webhook delivery", statusCode: 200, ok: true, durationMs: Date.now() - startedAt, message: result.duplicate ? "Duplicate Walmart webhook ignored." : result.message || "Walmart webhook accepted for background processing." });
+      return sendJson(res, 200, result);
     } catch (error) {
       const code = error.statusCode || 500;
       appendChannelApiLog({ channel: "Walmart", transport: "webhook", method: "POST", path: url.pathname, operation: "Walmart webhook delivery", statusCode: code, ok: false, durationMs: Date.now() - startedAt, message: error.message || "Walmart webhook failed." });
