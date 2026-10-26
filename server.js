@@ -1476,7 +1476,7 @@ const AUTH_PERMISSION_AREAS = [
     { id: "channels.settings", label: "Channel settings", path: "/channels", actions: ["view", "edit", "credentials"] },
     { id: "channels.shopify", label: "Shopify", path: "/channels/shopify", actions: ["view", "sync", "launch", "import", "export", "webhooks"] },
     { id: "channels.ebay", label: "eBay", path: "/channels/ebay", actions: ["view", "sync", "launch", "import", "export", "webhooks"] },
-    { id: "channels.walmart", label: "Walmart", path: "/channels", actions: ["view", "sync", "launch", "import"] },
+    { id: "channels.walmart", label: "Walmart", path: "/channels", actions: ["view", "sync", "launch", "import", "webhooks"] },
     { id: "channels.logs", label: "Channel logs", path: "/channels/activity", actions: ["view", "export"] }
   ] },
   { id: "jobs", label: "Jobs", path: "/jobs", actions: ["view", "run", "retry", "stop", "cleanup", "notes", "export"], sections: [
@@ -6644,7 +6644,8 @@ function authRequirementForRequest(req, url, parts = []) {
     if (pathname.startsWith('/api/walmart/')) {
       if (pathname.endsWith('/credentials')) return { area: 'channels.settings', action: 'credentials' };
       if (/\/launch\//.test(pathname)) return { area: 'channels.walmart', action: 'launch' };
-      if (/\/orders\/import$/.test(pathname)) return { area: 'channels.walmart', action: 'import' };
+      if (/\/webhooks(?:\/|$)/.test(pathname)) return { area: 'channels.walmart', action: 'webhooks' };
+      if (/\/(?:orders|returns|settlements)\/import$/.test(pathname)) return { area: 'channels.walmart', action: 'import' };
       return { area: 'channels.walmart', action: 'sync' };
     }
     const channelArea = /ebay/i.test(pathname) ? "channels.ebay" : /shopify/i.test(pathname) ? "channels.shopify" : /log|activity|ledger/i.test(pathname) ? "channels.logs" : "channels.settings";
@@ -21855,6 +21856,7 @@ function getWalmartMarketplace() {
       };
     },
     shippingRestriction: channelShippingRestriction, packSize: () => 1,
+    invalidateOrders: clearOrderApiCache,
     sourcePackSize: productUomQty, sellingUnits: productSellingUnits,
     priceFor: (product, db, settings, sellingUnitQty = 1) => {
       const cost = productEachUnitCost(product, db);
@@ -49098,6 +49100,28 @@ async function handleApi(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const parts = url.pathname.split("/").filter(Boolean);
   await hydrateAuthSessionsStore();
+
+  if (req.method === "POST" && url.pathname === "/api/webhooks/walmart") {
+    const startedAt = Date.now();
+    const rawBody = await readRawBody(req);
+    if (rawBody.length > 2 * 1024 * 1024) return sendJson(res, 413, { error: "Walmart webhook payload is too large." });
+    let payload;
+    try { payload = rawBody.length ? JSON.parse(rawBody.toString("utf8")) : {}; }
+    catch {
+      appendChannelApiLog({ channel: "Walmart", transport: "webhook", method: "POST", path: url.pathname, operation: "Walmart webhook delivery", statusCode: 400, ok: false, durationMs: Date.now() - startedAt, message: "Walmart sent invalid JSON." });
+      return sendJson(res, 400, { error: "Invalid Walmart webhook payload." });
+    }
+    try {
+      const signature = String(req.headers["x-dataplus-walmart-signature"] || "");
+      const result = await getWalmartMarketplace().receiveWebhook(rawBody, payload, signature);
+      appendChannelApiLog({ channel: "Walmart", transport: "webhook", method: "POST", path: url.pathname, operation: result.eventType || "Walmart webhook delivery", statusCode: 202, ok: true, durationMs: Date.now() - startedAt, message: result.duplicate ? "Duplicate Walmart webhook ignored." : result.message || "Walmart webhook accepted for background processing." });
+      return sendJson(res, 202, result);
+    } catch (error) {
+      const code = error.statusCode || 500;
+      appendChannelApiLog({ channel: "Walmart", transport: "webhook", method: "POST", path: url.pathname, operation: "Walmart webhook delivery", statusCode: code, ok: false, durationMs: Date.now() - startedAt, message: error.message || "Walmart webhook failed." });
+      return sendJson(res, code, { error: error.message || "Walmart webhook failed." });
+    }
+  }
 
   if (req.method === "GET" && url.pathname === "/api/webhooks/ebay") {
     const challengeCode = String(url.searchParams.get("challenge_code") || "").trim();

@@ -11051,7 +11051,7 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
   async function importChannelReturns() {
     setBusy(true)
     const lookbackDays = Math.ceil((Date.now() - new Date(new Date().getFullYear(), 0, 1).getTime()) / 86400000) + 1
-    const channels = ["temu", "shopify", "ebay"]
+    const channels = ["temu", "shopify", "ebay", "walmart"]
     const results = await Promise.all(channels.map(async (channel) => {
       try {
         const result = await api<{ job?: { id?: string }; duplicate?: boolean; message?: string }>(`/api/${channel}/returns/import`, { method: "POST", body: JSON.stringify({ lookbackDays, fetchAll: true }) })

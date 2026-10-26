@@ -8,6 +8,10 @@ Implemented features:
 
 - Runtime client-credentials authentication, expiring token cache, request timeouts, read retries, and API activity logging.
 - Manual and scheduled paginated order imports with stable purchase-order/source-line identity, internal numbering, cancellation/shipment quantities, and preservation of local operational work.
+- Manual and scheduled paginated return imports with source-order and source-line reconciliation, reverse tracking, refund state, unmatched review records, and complete raw Walmart evidence retained on each return.
+- Daily reconciliation-report discovery and import. Every available report is retained and posted through the shared channel settlement ledger so Accounting can trace fees, payments, report dates, and Walmart settlement identifiers.
+- Signed order and return webhooks with a server-only HMAC secret, durable inbox, idempotent event keys, fast acknowledgement, and worker-based targeted reconciliation. Webhooks accelerate updates; scheduled imports remain the recovery path.
+- Reviewed cancellation of unshipped seller-fulfilled line quantities. DataPlus refreshes Walmart before preview and again immediately before submission, stores a user-bound expiring review, and never blindly retries an uncertain cancellation.
 - Walmart source line identifiers are namespaced by the DataPlus order before they are written to the relational order-line projection. Repeated marketplace values such as `1` are never treated as globally unique. Use `node scripts/repair-order-line-items.cjs` to preview historical projection mismatches and add `--apply` only after reviewing the count and sample.
 - Versioned taxonomy refresh and deliberate master-category to Walmart product-type mappings with offer/content defaults.
 - UPC, EAN and GTIN checksum validation and Walmart SPEC search. Existing catalog items use `MP_ITEM_MATCH`; full-item setup uses `MP_ITEM` and the mapped product type. Leading zeros are preserved. Multipack identity must be explicitly confirmed.
@@ -27,9 +31,10 @@ Run `scripts/register-walmart-channel.sql` against the existing operational Post
 3. Verification stays on Connection. Continue through **Features → Shipping → Categories → Review** to choose capabilities. Unsaved field edits survive background refreshes; Save applies only changed fields. Order import does not require catalog launch. Connection verification checks authentication and order-read access; item-write permissions are checked when used.
 4. Shipping has **Download Walmart shipping nodes**, which reads the US fulfillment-center API and caches nodes per credentials/environment. Map an active node to an active physical warehouse for inventory updates. Categories has **Download and cache Walmart categories**, a worker job with visible status/count/version/time and a preserved last-good cache. It requests Product Type taxonomy version 5.0 unless an explicit version override is saved. Manage mappings in **Catalog → Categories**, choose **Walmart**, and open a category's Walmart tab. Search the cached product types, load required attributes, then save verified defaults. The main list displays the saved mapping and supports mapped/missing filters. Channel setup shows these same records as a read-only summary. Both screens and launch preparation read the dedicated `walmart_documents` records; no mapping is copied into shared category documents. No speculative compliance values are generated.
 5. Import an order date range. Dates are UTC and the UI's end date is inclusive. Scheduled imports recheck the selected creation-date window; they are not an updated-at cursor and do not refresh orders older than that window. Use a wider manual range for those orders.
-6. Select products in **Catalog → Products**, then choose **Actions → Launch on Walmart by UPC**. Preview one SKU, fix validation issues and verify the selling pack. Then submit the reviewed item. Batch launch prepares up to 100 SKUs through a job; load the review using its job ID and deliberately submit ready rows. Multipacks needing confirmation use single-item review.
-7. Load the submission by SKU and check its feed. A successful submission job only means a feed ID was obtained. Bulk launches automatically queue a launch reconciliation after submission. It waits for every related feed, categorizes failures, retries only allowlisted transient Walmart system errors once, verifies accepted SKUs against the seller Item Report, and queues inventory only for verified-live listings. Processing/compliance review remains pending until Walmart finishes; item ingestion success still does not certify publication.
-8. Set a physical warehouse and Walmart ship node before reviewing inventory. Price and inventory updates are separate from launch. Order acknowledgment and tracking also require separate operation previews and confirmation.
+6. In **Features**, explicitly enable returns, cancellations, settlements, and webhooks as needed. Save, then choose **Test and configure subscriptions**. Walmart must grant the app's webhook permissions before setup succeeds. Return and order webhooks accelerate targeted refreshes; scheduled order and return imports remain enabled as recovery paths. Use the Returns and Settlements tabs for manual date-range imports and job history.
+7. Select products in **Catalog → Products**, then choose **Actions → Launch on Walmart by UPC**. Preview one SKU, fix validation issues and verify the selling pack. Then submit the reviewed item. Batch launch prepares up to 100 SKUs through a job; load the review using its job ID and deliberately submit ready rows. Multipacks needing confirmation use single-item review.
+8. Load the submission by SKU and check its feed. A successful submission job only means a feed ID was obtained. Bulk launches automatically queue a launch reconciliation after submission. It waits for every related feed, categorizes failures, retries only allowlisted transient Walmart system errors once, verifies accepted SKUs against the seller Item Report, and queues inventory only for verified-live listings. Processing/compliance review remains pending until Walmart finishes; item ingestion success still does not certify publication.
+9. Set a physical warehouse and Walmart ship node before reviewing inventory. Price and inventory updates are separate from launch. Order acknowledgment and tracking also require separate operation previews and confirmation.
 
 ## Sandbox and isolation
 
@@ -41,7 +46,7 @@ This integration uses the existing legacy operational authorization boundary: on
 
 This is not a claim of support for every Walmart API. The following remain outside this implementation:
 
-- WFS, international markets, returns/refunds, cancellation uploads, promotions/repricers, settlement reconciliation, shipping-label purchase and webhooks.
+- WFS, international markets, promotions/repricers, Walmart shipping-label purchase, and general buyer/seller messaging. Walmart does not expose a general marketplace inbox API for this integration; DataPlus handles documented order intent-to-cancel events instead of presenting a fake message sync.
 - Multi-ship-node allocation and automatic category approval remain unsupported. Bulk launch reconciliation may queue a targeted positive-inventory sync only for listings verified live in the seller Item Report; ordinary scheduled inventory behavior remains controlled separately. The status-inventory coordinator supports Walmart zero-only protection for exactly linked seller SKUs, rechecking every reported ship node and surfacing incomplete zeroing as needs-attention.
 - Ambiguous mutations and data/compliance rejections are never retried automatically. Bulk launch reconciliation retries only the explicit transient-code allowlist once. Feed ingestion polling is automatic (15 minutes, with backoff up to four hours) unless disabled in Rules.
 - A visual editor for every possible Walmart schema construct. Category controls support required fields, enums, numbers, booleans and nested objects; arrays and complex conditional structures use the advanced JSON editor. Every launch still receives full server-side schema validation.
@@ -56,6 +61,7 @@ If a preview shows `submitting` after a timeout/restart, inspect Walmart Seller 
 
 ```powershell
 node scripts/test-walmart-marketplace.cjs
+node scripts/test-walmart-returns-webhooks.cjs
 node scripts/test-status-inventory.cjs --sql
 node scripts/test-product-selling-status.cjs
 npm run web:build
@@ -77,6 +83,10 @@ The automated suite uses mocked HTTP and persistence, never live seller credenti
 - [Price update](https://developer.walmart.com/us-marketplace/reference/updateprice)
 - [Order acknowledgment](https://developer.walmart.com/us-marketplace/reference/acknowledgeorders)
 - [Shipment upload](https://developer.walmart.com/us-marketplace/reference/shippingupdates)
+- [Returns](https://developer.walmart.com/us-marketplace/reference/getreturns)
+- [Cancel order lines](https://developer.walmart.com/global-marketplace/docs/cancel-order-lines)
+- [Webhook subscriptions](https://developer.walmart.com/global-marketplace/docs/subscribe-to-an-event-notification)
+- [Return notifications](https://developer.walmart.com/global-marketplace/docs/return-notifications)
 
 Setup API references: [US fulfillment centers](https://developer.walmart.com/us-marketplace/docs/get-all-fulfillment-centers), [US product-type taxonomy](https://developer.walmart.com/us-marketplace/reference/gettaxonomyresponse).
 

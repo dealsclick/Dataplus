@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { AlertCircle, AlertTriangle, Boxes, CheckCircle2, ExternalLink, FileText, Loader2, Pencil, RefreshCw, RotateCcw, Search, Truck } from "lucide-react"
+import { AlertCircle, AlertTriangle, Ban, Boxes, CheckCircle2, ExternalLink, FileText, Loader2, Pencil, RefreshCw, RotateCcw, Search, Truck } from "lucide-react"
 import { toast } from "sonner"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -211,6 +211,12 @@ function OrderDetailWorkspace() {
   const [restoreDismissal, setRestoreDismissal] = useState<Record<string, unknown> | null>(null)
   const [restoreMode, setRestoreMode] = useState("new_po")
   const [restorePoReference, setRestorePoReference] = useState("")
+  const [walmartCancelOpen, setWalmartCancelOpen] = useState(false)
+  const [walmartCancelLoading, setWalmartCancelLoading] = useState(false)
+  const [walmartCancelPlan, setWalmartCancelPlan] = useState<Record<string, unknown> | null>(null)
+  const [walmartCancelReview, setWalmartCancelReview] = useState<Record<string, unknown> | null>(null)
+  const [walmartCancelReason, setWalmartCancelReason] = useState("CUSTOMER_REQUESTED_SELLER_TO_CANCEL")
+  const [walmartCancelQuantities, setWalmartCancelQuantities] = useState<Record<string, number>>({})
   const createPurchaseOrdersRequestIdRef = useRef("")
   const restorePurchaseDemandRequestIdRef = useRef("")
   const openSkuEditor = (line: Record<string, unknown>, index: number) => {
@@ -286,6 +292,44 @@ function OrderDetailWorkspace() {
     } finally {
       setLoading(false)
     }
+  }
+  async function openWalmartCancellation() {
+    setWalmartCancelOpen(true)
+    setWalmartCancelLoading(true)
+    setWalmartCancelPlan(null)
+    setWalmartCancelReview(null)
+    try {
+      const result = await api<Record<string, unknown>>("/api/walmart/orders/cancel/preview", { method: "POST", body: JSON.stringify({ orderId: String(order?.id || orderId) }) })
+      setWalmartCancelPlan(result)
+      setWalmartCancelQuantities({})
+    } catch (error) {
+      setWalmartCancelOpen(false)
+      toast.error(error instanceof Error ? error.message : "Unable to load cancellable Walmart lines.")
+    } finally { setWalmartCancelLoading(false) }
+  }
+  async function reviewWalmartCancellation() {
+    const selected = ((walmartCancelPlan?.availableLines || []) as Array<Record<string, unknown>>).map(line => ({ lineNumber: String(line.lineNumber || ""), quantity: Number(walmartCancelQuantities[String(line.lineNumber || "")] || 0) })).filter(line => line.quantity > 0)
+    if (!selected.length) return toast.error("Choose at least one Walmart line quantity to cancel.")
+    setWalmartCancelLoading(true)
+    try {
+      const result = await api<Record<string, unknown>>("/api/walmart/orders/cancel/preview", { method: "POST", body: JSON.stringify({ orderId: String(order?.id || orderId), reason: walmartCancelReason, lines: selected }) })
+      setWalmartCancelReview(result)
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to review the Walmart cancellation.") }
+    finally { setWalmartCancelLoading(false) }
+  }
+  async function applyWalmartCancellation() {
+    if (!walmartCancelReview?.token) return
+    setWalmartCancelLoading(true)
+    try {
+      const result = await api<{ order?: Record<string, unknown>; message?: string }>("/api/walmart/orders/cancel/apply", { method: "POST", body: JSON.stringify({ token: walmartCancelReview.token }) })
+      if (result.order) setOrder(result.order)
+      setWalmartCancelOpen(false)
+      setWalmartCancelReview(null)
+      await load()
+      toast.success(result.message || "Walmart cancellation submitted.")
+      window.dispatchEvent(new CustomEvent("dataplus:order-updated"))
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Walmart cancellation could not be confirmed. Refresh the order before retrying.") }
+    finally { setWalmartCancelLoading(false) }
   }
   useEffect(() => { void load() }, [orderId])
   useEffect(() => { const refresh = () => void load(); window.addEventListener("dataplus:order-updated", refresh); return () => window.removeEventListener("dataplus:order-updated", refresh) }, [orderId])
@@ -616,6 +660,10 @@ function OrderDetailWorkspace() {
   const operationalStateLower = operationalState.toLowerCase()
   const operationalStateVariant = operationalStateLower === "completed" ? "success" : ["on_hold", "pending_payment"].includes(operationalStateLower) ? "warning" : operationalStateLower === "canceled" ? "destructive" : "outline"
   const hasRemainingFulfillment = lines.some((line, index) => remaining(line, index) > 0)
+  const walmartExternal = (order.external || {}) as Record<string, unknown>
+  const walmartCancellationRequest = (walmartExternal.walmartCancellationRequest || {}) as Record<string, unknown>
+  const walmartCancellationStatus = String(walmartCancellationRequest.status || "").toLowerCase()
+  const walmartCancellationEvent = String(walmartCancellationRequest.subEventType || walmartCancellationRequest.eventType || "").toUpperCase()
   const unshippableShipments = shipments.filter((shipment) => ["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase()))
   const activeTrackedShipments = shipments.filter((shipment) => {
     const status = String(shipment.status || "").toLowerCase()
@@ -646,9 +694,11 @@ function OrderDetailWorkspace() {
     </Card>
   </div>
   return <div className="grid gap-5">
-    <PageHeader eyebrow="Operations / Order" title={String(order.orderNumber || orderId)} description={`${String(order.source || "Order")}${isEbayLive ? " / eBay Live sale" : ` / ${String(order.channelSource || "Unclassified sales channel")}`}${!isWalmartOrder && channelOrderNumber ? ` / Channel order ${channelOrderNumber}` : ""}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/orders">Back to orders</a></Button><OrderActionsMenu order={order} busy={saving || loading} onAction={runOrderAction} onRefresh={() => void refreshOrder()} onRefreshRouting={() => void refreshRouting()} onCreatePurchaseOrders={() => void createPurchaseOrders()} onPrintTemuLabel={() => setShippingLabelOpen(true)} unshippableShipments={unshippableShipments} onUnshipShipment={(shipment) => void unshipShipment(shipment)} /></div>} />
+    <PageHeader eyebrow="Operations / Order" title={String(order.orderNumber || orderId)} description={`${String(order.source || "Order")}${isEbayLive ? " / eBay Live sale" : ` / ${String(order.channelSource || "Unclassified sales channel")}`}${!isWalmartOrder && channelOrderNumber ? ` / Channel order ${channelOrderNumber}` : ""}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/orders">Back to orders</a></Button>{isWalmartOrder && hasRemainingFulfillment && <Button size="sm" variant="outline" disabled={saving || loading} onClick={() => void openWalmartCancellation()}><Ban className="size-4" /> Cancel Walmart lines</Button>}<OrderActionsMenu order={order} busy={saving || loading} onAction={runOrderAction} onRefresh={() => void refreshOrder()} onRefreshRouting={() => void refreshRouting()} onCreatePurchaseOrders={() => void createPurchaseOrders()} onPrintTemuLabel={() => setShippingLabelOpen(true)} unshippableShipments={unshippableShipments} onUnshipShipment={(shipment) => void unshipShipment(shipment)} /></div>} />
     {isEbayLive && <div className="flex flex-col gap-2 rounded-md border border-pink-500/40 bg-pink-500/5 px-3 py-2 sm:flex-row sm:items-center sm:justify-between"><div className="flex min-w-0 items-center gap-2"><EbayLiveMark className="h-4 w-[46px]" /><div className="min-w-0"><p className="text-sm font-medium">eBay Live order</p><p className="text-xs text-muted-foreground">Sales channel: eBay</p></div></div><div className="flex min-w-0 flex-wrap items-center gap-1 text-xs"><span className="text-muted-foreground">{liveEventIds.length === 1 ? "Live event ID" : "Live event IDs"}</span>{liveEventIds.length ? liveEventIds.map((eventId) => <code key={eventId} className="max-w-full select-all break-all rounded bg-background px-1.5 py-0.5 font-mono text-foreground">{eventId}</code>) : <span className="text-amber-700 dark:text-amber-300">Not provided by eBay</span>}</div></div>}
     {isWalmartOrder && <TooltipProvider><div className="flex flex-wrap items-center gap-2 text-sm"><OrderChannelHeaderReferences order={order} references={orderReferences} href={channelOrderUrl} /></div></TooltipProvider>}
+    {isWalmartOrder && walmartCancellationStatus === "pending" && <Alert className="border-amber-500/50 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Walmart cancellation requested</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>Walmart sent an intent-to-cancel event. Pause fulfillment, review the live line quantities, and confirm only the lines that should be canceled.</span><Button size="sm" variant="outline" disabled={saving || loading || !hasRemainingFulfillment} onClick={() => void openWalmartCancellation()}>Review cancellation</Button></AlertDescription></Alert>}
+    {isWalmartOrder && walmartCancellationStatus === "canceled" && <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>{walmartCancellationEvent === "FRAUD_CANCEL" ? "Walmart fraud cancellation" : "Walmart line auto-canceled"}</AlertTitle><AlertDescription>Walmart reported this cancellation event and DataPlus refreshed the order and fulfillment quantities. Do not ship canceled units.</AlertDescription></Alert>}
     <TooltipProvider><div className="flex flex-wrap items-center gap-2 text-sm">{isEbayLive ? <Tooltip><TooltipTrigger asChild><span className="inline-flex"><EbayLiveMark /></span></TooltipTrigger><TooltipContent>This order was identified by eBay as an eBay Live sale.</TooltipContent></Tooltip> : null}{channelOrderNumber && <Tooltip><TooltipTrigger asChild>{channelOrderUrl ? <a href={channelOrderUrl} target="_blank" rel="noreferrer"><Badge variant="outline" className="max-w-full cursor-pointer gap-1 font-mono text-xs hover:bg-muted"><span className="font-sans">Channel order</span> <span className="break-all">{channelOrderNumber}</span><ExternalLink className="size-3 shrink-0" /></Badge></a> : <Badge variant="outline" className="max-w-full gap-1 font-mono text-xs"><span className="font-sans">Channel order</span> <span className="break-all">{channelOrderNumber}</span></Badge>}</TooltipTrigger><TooltipContent>{channelOrderUrl ? `Open this order in ${String(order.source || "the sales channel")}.` : `Marketplace order number from ${String(order.source || "the sales channel")}.`}</TooltipContent></Tooltip>}<Tooltip><TooltipTrigger asChild><Badge variant="outline">{String(order.financialStatus || "Unpaid")}</Badge></TooltipTrigger><TooltipContent>Payment state reported by the sales channel.</TooltipContent></Tooltip>{operationalState && <Tooltip><TooltipTrigger asChild><Badge variant={operationalStateVariant}>{orderStateLabel(operationalState)}</Badge></TooltipTrigger><TooltipContent>DataPlus operational state for routing, fulfillment, and open work queues.</TooltipContent></Tooltip>}<Tooltip><TooltipTrigger asChild><Badge variant={String(order.fulfillmentStatus || order.status || "").toLowerCase().includes("fulfill") ? "default" : "secondary"}>{String(order.fulfillmentStatus || order.status || "Unfulfilled")}</Badge></TooltipTrigger><TooltipContent>Channel fulfillment status. Line-level status appears in the fulfillment workspace.</TooltipContent></Tooltip><Tooltip><TooltipTrigger asChild><Badge variant={routingState.needsRouting || routingState.needsReview ? "destructive" : routingState.hasActiveRoutes ? "secondary" : "outline"} className={routingState.hasActiveRoutes ? "gap-1 text-emerald-700 dark:text-emerald-400" : "gap-1"}>{routingState.needsRouting || routingState.needsReview ? <AlertCircle className="size-3.5" /> : routingState.hasActiveRoutes ? <CheckCircle2 className="size-3.5" /> : null}{routingState.label}</Badge></TooltipTrigger><TooltipContent>{routingState.detail}</TooltipContent></Tooltip><Tooltip><TooltipTrigger asChild><Badge variant={hasPurchaseOrders ? "secondary" : "outline"} className={hasPurchaseOrders ? "gap-1 text-emerald-700 dark:text-emerald-400" : "gap-1 text-muted-foreground"}>{hasPurchaseOrders ? <CheckCircle2 className="size-3.5" /> : <AlertCircle className="size-3.5" />}{hasPurchaseOrders ? "Has PO" : "No PO"}</Badge></TooltipTrigger><TooltipContent>{hasPurchaseOrders ? "At least one supplier purchase order is linked to this order." : "No supplier purchase order is linked yet."}</TooltipContent></Tooltip><span className="text-muted-foreground">{dateLabel(String(order.createdAt || order.importedAt || ""))} from {String(order.channelSource || order.source || "channel")}</span></div></TooltipProvider>
     {attentionItems.length ? <Alert variant={orderHasBlockingException(order) ? "destructive" : "default"}><AlertTriangle className="size-4" /><AlertTitle>Needs attention</AlertTitle><AlertDescription><div className="mt-2 grid gap-2">{attentionItems.slice(0, 5).map((item) => <div key={item.id} className="rounded-md border bg-background/70 p-2"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-medium">{item.title}</span><Badge variant={["blocking", "error", "critical", "destructive", "exception", "buyer_review", "blocked"].includes(item.severity.toLowerCase()) ? "destructive" : "outline"}>{item.severity.replace(/_/g, " ")}</Badge></div><p className="mt-1 break-words text-sm text-muted-foreground">{item.detail}</p>{item.source ? <p className="mt-1 text-xs text-muted-foreground">Source: {item.source}</p> : null}</div>)}{attentionItems.length > 5 ? <p className="text-xs text-muted-foreground">Open the Operations tab to review all {numberLabel(attentionItems.length)} attention items.</p> : null}</div></AlertDescription></Alert> : null}
     <div className="grid gap-4 lg:hidden">{fulfillmentWorkspace}{orderContext}</div>
@@ -702,6 +752,18 @@ function OrderDetailWorkspace() {
       <OrderChannelPanel order={order} lines={lines} shipments={shipments} shopifyAdminUrl={shopifyAdminUrl} />
       <TabsContent value="activity" className="pt-4"><OrderActivityTimeline order={order} /></TabsContent>
     </Tabs></div>
+    <Dialog open={walmartCancelOpen} onOpenChange={(open) => { if (!walmartCancelLoading) { setWalmartCancelOpen(open); if (!open) { setWalmartCancelPlan(null); setWalmartCancelReview(null) } } }}>
+      <DialogContent className="max-h-[92dvh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader><DialogTitle>Cancel Walmart order lines</DialogTitle><DialogDescription>DataPlus checks the live Walmart order before review and again before submission. Shipped quantities and Walmart Fulfillment Services lines cannot be canceled here.</DialogDescription></DialogHeader>
+        {walmartCancelLoading && !walmartCancelPlan ? <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading the latest Walmart quantities...</div> : walmartCancelPlan ? <div className="grid gap-4">
+          <div className="rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">Walmart purchase order {String(walmartCancelPlan.purchaseOrderId || "")}</p><p className="text-xs text-muted-foreground">Only Created or Acknowledged units are available below.</p></div>
+          <Label className="grid gap-2">Cancellation reason<Select value={walmartCancelReason} onValueChange={(value) => { setWalmartCancelReason(value); setWalmartCancelReview(null) }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="CUSTOMER_REQUESTED_SELLER_TO_CANCEL">Customer requested cancellation</SelectItem><SelectItem value="SELLER_CANCEL_OUT_OF_STOCK">Out of stock</SelectItem><SelectItem value="SELLER_CANCEL_PRICING_ERROR">Pricing error</SelectItem><SelectItem value="SELLER_CANCEL_ADDRESS_NOT_SERVICEABLE">Address not serviceable</SelectItem><SelectItem value="SELLER_CANCEL_FRAUD_STOP_SHIPMENT">Fraud stop shipment</SelectItem></SelectContent></Select></Label>
+          <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Line</TableHead><TableHead>SKU / item</TableHead><TableHead className="w-36">Available</TableHead><TableHead className="w-36">Cancel qty</TableHead></TableRow></TableHeader><TableBody>{((walmartCancelPlan.availableLines || []) as Array<Record<string, unknown>>).map(line => <TableRow key={String(line.lineNumber)}><TableCell className="font-mono text-xs">{String(line.lineNumber)}</TableCell><TableCell><p className="font-medium">{String(line.sku || "No SKU")}</p><p className="text-xs text-muted-foreground">{String(line.title || "Walmart order line")}</p></TableCell><TableCell>{numberLabel(Number(line.cancellableQuantity || 0))}</TableCell><TableCell><Input type="number" min="0" max={Number(line.cancellableQuantity || 0)} step="1" disabled={Number(line.cancellableQuantity || 0) < 1 || Boolean(walmartCancelReview)} value={walmartCancelQuantities[String(line.lineNumber)] || 0} onChange={(event) => { const value = Math.max(0, Math.min(Number(line.cancellableQuantity || 0), Math.floor(Number(event.target.value || 0)))); setWalmartCancelQuantities(current => ({ ...current, [String(line.lineNumber)]: value })); setWalmartCancelReview(null) }} /></TableCell></TableRow>)}</TableBody></Table></div>
+          {walmartCancelReview && <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Ready for final submission</AlertTitle><AlertDescription>{((walmartCancelReview.lines || []) as Array<Record<string, unknown>>).map(line => `Line ${line.lineNumber}: ${line.quantity}`).join("; ")}. Walmart will be updated immediately after confirmation.</AlertDescription></Alert>}
+        </div> : null}
+        <DialogFooter><Button variant="outline" disabled={walmartCancelLoading} onClick={() => setWalmartCancelOpen(false)}>Close</Button>{walmartCancelReview ? <Button variant="destructive" disabled={walmartCancelLoading} onClick={() => void applyWalmartCancellation()}>{walmartCancelLoading && <Loader2 className="size-4 animate-spin" />} Confirm cancellation</Button> : <Button disabled={walmartCancelLoading || !walmartCancelPlan} onClick={() => void reviewWalmartCancellation()}>{walmartCancelLoading && <Loader2 className="size-4 animate-spin" />} Review cancellation</Button>}</DialogFooter>
+      </DialogContent>
+    </Dialog>
     <Dialog open={Boolean(skuEditLine)} onOpenChange={(open) => { if (!open) setSkuEditLine(null) }}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader><DialogTitle>Edit imported order SKU</DialogTitle><DialogDescription>The channel SKU remains in the audit history. DataPlus will use the corrected SKU for catalog matching, fulfillment, and reporting.</DialogDescription></DialogHeader>
