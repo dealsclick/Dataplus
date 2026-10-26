@@ -13,6 +13,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { Progress } from "@/components/ui/progress"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -106,6 +107,22 @@ type DisputeItem = {
 type DisputeDetail = DisputeBatch & { items: DisputeItem[] }
 type ListResponse = { batches: DisputeBatch[]; providers: { ups: ProviderStatus; veeqo: ProviderStatus } }
 type PostalSuggestion = { itemId: string; postalCode: string; country: string; city: string; state: string; source: string; evidenceCount: number; message: string }
+type QuoteProgress = {
+  active: boolean
+  status: string
+  requestGroupId: string
+  totalChunks: number
+  totalRequested: number
+  completedChunks: number
+  failedChunks: number
+  processedRows: number
+  quotedRows: number
+  failedRows: number
+  progressPercent: number
+  updatedAt: string
+  stalled: boolean
+  currentChunk: { index: number; status: string; totalRows: number; processedRows: number; quotedRows: number; failedRows: number; progressPercent: number; jobNumber?: number | null; message?: string } | null
+}
 
 function statusLabel(value: string) {
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
@@ -121,6 +138,15 @@ function auditDateLabel(value?: string) {
   const date = new Date(/^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T12:00:00` : value)
   if (Number.isNaN(date.getTime())) return "Not available"
   return new Intl.DateTimeFormat("en-US", { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(date)
+}
+
+function progressActivityLabel(value?: string) {
+  if (!value) return "No activity recorded"
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000))
+  if (elapsedSeconds < 10) return "Updated just now"
+  if (elapsedSeconds < 60) return `Updated ${elapsedSeconds} seconds ago`
+  const minutes = Math.floor(elapsedSeconds / 60)
+  return `Updated ${minutes} minute${minutes === 1 ? "" : "s"} ago`
 }
 
 function ComparisonOrderSummary({ item }: { item: DisputeItem }) {
@@ -206,7 +232,7 @@ function QuoteProviderResult({ item, providerKey, name }: { item: DisputeItem; p
 function statusVariant(value: string): "default" | "secondary" | "destructive" | "outline" {
   if (["ready", "quoted"].includes(value)) return "default"
   if (["failed", "quote_failed", "unmatched", "ambiguous"].includes(value)) return "destructive"
-  if (["quoting", "ready_to_quote"].includes(value)) return "secondary"
+  if (["quoting", "ready_to_quote", "queued", "running"].includes(value)) return "secondary"
   return "outline"
 }
 
@@ -493,6 +519,7 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
   const [providers, setProviders] = useState<ListResponse["providers"]>({ ups: {}, veeqo: {} })
   const [selectedId, setSelectedId] = useState("")
   const [detail, setDetail] = useState<DisputeDetail | null>(null)
+  const [quoteProgress, setQuoteProgress] = useState<QuoteProgress | null>(null)
   const [loading, setLoading] = useState(true)
   const [detailLoading, setDetailLoading] = useState(false)
   const [creating, setCreating] = useState(false)
@@ -525,6 +552,7 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
   })
   const [resetting, setResetting] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
+  const quoteProgressRefreshRef = useRef("")
 
   const loadList = async (quiet = false) => {
     if (!quiet) setLoading(true)
@@ -548,18 +576,39 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
     finally { if (!quiet) setDetailLoading(false) }
   }
 
+  const loadQuoteProgress = async (id: string) => {
+    if (!id) { setQuoteProgress(null); return null }
+    try {
+      const result = await api<{ progress: QuoteProgress }>(`/api/accounting/shipping-disputes/${encodeURIComponent(id)}/quote-progress`)
+      setQuoteProgress(result.progress)
+      return result.progress
+    } catch {
+      return null
+    }
+  }
+
   useEffect(() => { void loadList() }, [])
-  useEffect(() => { void loadDetail(selectedId) }, [selectedId])
+  useEffect(() => { setQuoteProgress(null); quoteProgressRefreshRef.current = "__pending__"; void loadDetail(selectedId); void loadQuoteProgress(selectedId) }, [selectedId])
   useEffect(() => {
     try { window.localStorage.setItem("dataplus.shipping-disputes.recent-open", String(recentDisputesOpen)) }
     catch { /* Browser storage can be unavailable in restricted sessions. */ }
   }, [recentDisputesOpen])
   useEffect(() => { setQuery(""); setSelectedSkuFilters(new Set()); setMatchFilter("all"); setAddressFilter("all"); setDimensionsFilter("all"); setPageIndex(0); setSelectedItemIds([]) }, [selectedId])
   useEffect(() => {
-    if (!detail || detail.status !== "quoting") return
-    const timer = window.setInterval(() => { void loadDetail(detail.id, true); void loadList(true) }, 2500)
-    return () => window.clearInterval(timer)
-  }, [detail?.id, detail?.status])
+    if (!selectedId || (!quoteProgress?.active && detail?.status !== "quoting")) return
+    let cancelled = false
+    const poll = async () => {
+      const next = await loadQuoteProgress(selectedId)
+      if (cancelled || !next) return
+      const refreshKey = next.requestGroupId || `idle:${selectedId}`
+      if (!next.active && detail?.status === "quoting" && quoteProgressRefreshRef.current !== refreshKey) {
+        quoteProgressRefreshRef.current = refreshKey
+        await Promise.all([loadDetail(selectedId, true), loadList(true)])
+      }
+    }
+    const timer = window.setInterval(() => { void poll() }, 2500)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [detail?.status, quoteProgress?.active, selectedId])
 
   const skuOptions = useMemo(() => {
     const groups = new Map<string, DisputeSkuOption & { orderIds: Set<string> }>()
@@ -656,7 +705,7 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
       const result = await api<{ message?: string }>(`/api/accounting/shipping-disputes/${encodeURIComponent(detail.id)}/quote`, { method: "POST", body: JSON.stringify({ itemIds, selectionMode }) })
       toast.success(result.message || "Comparison quotes queued.")
       setSelectedItemIds([])
-      await loadDetail(detail.id, true)
+      await Promise.all([loadDetail(detail.id, true), loadQuoteProgress(detail.id)])
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to queue comparison quotes.") }
     finally { setQuoting(false) }
   }
@@ -791,6 +840,12 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
 
       <Card className="min-w-0"><CardHeader className="border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div className="flex min-w-0 items-start gap-2">{!recentDisputesOpen ? <Button size="sm" variant="outline" className="shrink-0" onClick={() => setRecentDisputesOpen(true)} aria-label={`Show ${batches.length} recent disputes`}><PanelLeftOpen className="size-4" /> Recent disputes{batches.length ? ` (${batches.length})` : ""}</Button> : null}<div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><CardTitle className="text-lg">{detail?.displayId || "Select a dispute"}</CardTitle>{detail ? <Badge variant={statusVariant(detail.status)}>{statusLabel(detail.status)}</Badge> : null}</div><CardDescription>{detail ? `${detail.name} · ${detail.matchedItems} matched · ${detail.quotedItems} quoted${detail.sourceFileName ? ` · ${detail.sourceFileName}` : ""}` : "Choose a dispute or create a new one."}</CardDescription></div></div>{detail ? <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => window.location.assign(`/api/accounting/shipping-disputes/${encodeURIComponent(detail.id)}/export.csv`)}><Download className="size-4" /> Export CSV</Button><Button size="sm" disabled={quoting || detail.status === "quoting" || !readyItems.length} onClick={() => void quoteItems(undefined, "all")}>{quoting || detail.status === "quoting" ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} Quote entire dispute ({readyItems.length})</Button></div> : null}</div></CardHeader><CardContent className="p-0">
         {detailLoading ? <div className="flex h-64 items-center justify-center text-sm text-muted-foreground"><Loader2 className="mr-2 size-4 animate-spin" /> Loading shipment evidence</div> : detail ? <>
+          {quoteProgress?.requestGroupId ? <div className={`grid gap-2 border-b px-4 py-3 ${quoteProgress.stalled ? "bg-destructive/5" : "bg-primary/5"}`}>
+            <div className="flex flex-wrap items-center justify-between gap-2"><div className="flex min-w-0 items-center gap-2">{quoteProgress.active ? <Loader2 className="size-4 shrink-0 animate-spin text-primary" /> : quoteProgress.status === "success" ? <CheckCircle2 className="size-4 shrink-0 text-emerald-600" /> : <AlertTriangle className="size-4 shrink-0 text-destructive" />}<p className="text-sm font-medium">{quoteProgress.quotedRows.toLocaleString()}/{quoteProgress.totalRequested.toLocaleString()} quoted overall</p><Badge variant={statusVariant(quoteProgress.status)}>{statusLabel(quoteProgress.status)}</Badge></div><p className="text-xs text-muted-foreground">{progressActivityLabel(quoteProgress.updatedAt)}</p></div>
+            <Progress value={quoteProgress.progressPercent} className="h-2" />
+            <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs text-muted-foreground"><p>{quoteProgress.processedRows.toLocaleString()}/{quoteProgress.totalRequested.toLocaleString()} checked · {quoteProgress.failedRows.toLocaleString()} failed · {quoteProgress.completedChunks.toLocaleString()}/{quoteProgress.totalChunks.toLocaleString()} batches finished</p>{quoteProgress.currentChunk ? <p className="font-medium text-foreground">Batch {quoteProgress.currentChunk.index}/{quoteProgress.totalChunks}: {quoteProgress.currentChunk.quotedRows.toLocaleString()}/{quoteProgress.currentChunk.totalRows.toLocaleString()} quoted · {quoteProgress.currentChunk.processedRows.toLocaleString()}/{quoteProgress.currentChunk.totalRows.toLocaleString()} checked{quoteProgress.currentChunk.jobNumber ? ` · JOB-${quoteProgress.currentChunk.jobNumber}` : ""}</p> : null}</div>
+            {quoteProgress.stalled ? <p className="text-xs font-medium text-destructive">No progress has been recorded for more than 5 minutes. The batch may need worker attention.</p> : null}
+          </div> : null}
           {detail.raw?.importType === "temu_shipping_label_purchase_adjustment" ? <Alert className="m-4 w-auto"><CheckCircle2 className="size-4" /><AlertTitle>Temu additional shipping charges</AlertTitle><AlertDescription>{Number(detail.raw.summary?.transactionCount || 0).toLocaleString()} charge{Number(detail.raw.summary?.transactionCount || 0) === 1 ? "" : "s"} across {Number(detail.raw.summary?.orderCount || 0).toLocaleString()} orders in this dispute · additional shipping expense {moneyLabel(Number(detail.raw.summary?.expenseAmount || 0))}. Credits, zero-value adjustments, and all other transaction types are excluded. These rows support the dispute and do not post a second charge to accounting.</AlertDescription></Alert> : null}
           {(detail.items.some((item) => !["matched"].includes(item.matchStatus) || ["needs_package_data", "needs_address_review"].includes(item.status))) ? <Alert className="m-4 w-auto"><AlertTriangle className="size-4" /><AlertTitle>Review required before quoting</AlertTitle><AlertDescription>DataPlus automatically builds the quote package from each matched order's current catalog SKU measurements; Temu reports are not expected to include dimensions. Only unmatched orders, incomplete catalog measurements, or destinations without a ZIP or postal code require review.</AlertDescription></Alert> : null}
           <div className="flex flex-wrap items-center gap-2 border-b px-4 py-3">

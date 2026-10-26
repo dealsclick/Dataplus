@@ -49603,6 +49603,10 @@ async function handleApi(req, res) {
       return sendJson(res, 201, { batch: await shippingDisputeStore.getBatch(scope, batch.id) });
     }
     if (!batchId) return sendJson(res, 404, { error: "Shipping dispute route not found." });
+    if (req.method === "GET" && routeParts[4] === "quote-progress" && routeParts.length === 5) {
+      const progress = await shippingDisputeStore.quoteProgress(scope, batchId);
+      return sendJson(res, 200, { progress });
+    }
     if (req.method === "GET" && routeParts.length === 4) {
       const batch = await shippingDisputeStore.getBatch(scope, batchId);
       return batch ? sendJson(res, 200, { batch }) : sendJson(res, 404, { error: "Shipping dispute batch not found." });
