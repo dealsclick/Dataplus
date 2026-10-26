@@ -98,6 +98,8 @@ function run() {
   const marketplace = fs.readFileSync(path.join(__dirname, '..', 'lib', 'walmart-marketplace.js'), 'utf8');
   assert.match(server, /POST['"]\s*&&\s*url\.pathname\s*===\s*['"]\/api\/webhooks\/walmart['"]/);
   assert.match(server, /return sendJson\(res, 200, result\)/);
+  assert.match(marketplace, /process\.env\.WALMART_WEBHOOK_URL/);
+  assert.match(marketplace, /event type is not configured/i);
   assert.doesNotMatch(marketplace, /if \(event\.supported\) await queue\('webhook'/);
   assert.match(marketplace, /if \(event\.supported\)[\s\S]{0,120}queue\('webhook',[\s\S]{0,120}\.catch\(/);
   assert.equal(supportsTask('walmart', 'walmart-returns'), true);
