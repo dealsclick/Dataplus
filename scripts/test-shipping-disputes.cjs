@@ -65,6 +65,10 @@ for (const label of ["Channel order number", "Order date", "Ship date", "Trackin
 for (const label of ["Quoted weight", "Quoted dimensions", "Package source"]) {
   assert.match(page, new RegExp(label), `comparison rates must display ${label.toLowerCase()}`);
 }
+for (const label of ["Temu cost comparison", "Original charge", "Temu adjustment", "Rate received", "Charge difference"]) {
+  assert.match(page, new RegExp(label), `comparison rates must display ${label.toLowerCase()}`);
+}
+assert.match(page, /temuTotal - Number\(quote\.amount\)/, "the Temu charge difference must compare the original charge plus imported adjustment with each current quote");
 assert.match(page, /Dimensions: Complete/, "operators must be able to isolate complete quote dimensions");
 assert.match(page, /Dimensions: Missing/, "operators must be able to isolate incomplete quote dimensions");
 assert.match(page, /addressFilter, detail\?\.items, dimensionsFilter/, "address and dimension filters must participate in the visible shipment set");
