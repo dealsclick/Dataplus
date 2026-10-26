@@ -283,6 +283,17 @@ function readyToQuote(item: DisputeItem) {
     && addressQuoteBasis(item) !== "missing"
 }
 
+function matchesQuoteStatus(item: DisputeItem, filter: string) {
+  const status = String(item.status || "").toLowerCase()
+  if (filter === "quoted") return status === "quoted"
+  if (filter === "not_quoted") return status !== "quoted"
+  if (filter === "ready") return status === "ready_to_quote"
+  if (filter === "quoting") return status === "quoting"
+  if (filter === "failed") return status === "quote_failed"
+  if (filter === "review") return ["needs_package_data", "needs_address_review", "unmatched", "ambiguous"].includes(status)
+  return true
+}
+
 function parseCsvLine(line: string) {
   const cells: string[] = []
   let value = "", quoted = false
@@ -534,6 +545,7 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
   const [matchFilter, setMatchFilter] = useState("all")
   const [addressFilter, setAddressFilter] = useState("all")
   const [dimensionsFilter, setDimensionsFilter] = useState("all")
+  const [quoteStatusFilter, setQuoteStatusFilter] = useState("all")
   const [pageIndex, setPageIndex] = useState(0)
   const [selectedItemIds, setSelectedItemIds] = useState<string[]>([])
   const [editItem, setEditItem] = useState<DisputeItem | null>(null)
@@ -593,7 +605,7 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
     try { window.localStorage.setItem("dataplus.shipping-disputes.recent-open", String(recentDisputesOpen)) }
     catch { /* Browser storage can be unavailable in restricted sessions. */ }
   }, [recentDisputesOpen])
-  useEffect(() => { setQuery(""); setSelectedSkuFilters(new Set()); setMatchFilter("all"); setAddressFilter("all"); setDimensionsFilter("all"); setPageIndex(0); setSelectedItemIds([]) }, [selectedId])
+  useEffect(() => { setQuery(""); setSelectedSkuFilters(new Set()); setMatchFilter("all"); setAddressFilter("all"); setDimensionsFilter("all"); setQuoteStatusFilter("all"); setPageIndex(0); setSelectedItemIds([]) }, [selectedId])
   useEffect(() => {
     if (!selectedId || (!quoteProgress?.active && detail?.status !== "quoting")) return
     let cancelled = false
@@ -650,11 +662,12 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
       const dimensionsComplete = hasCompleteDimensions(item.package)
       if (dimensionsFilter === "complete" && !dimensionsComplete) return false
       if (dimensionsFilter === "missing" && dimensionsComplete) return false
+      if (!matchesQuoteStatus(item, quoteStatusFilter)) return false
       if (!value) return true
       return [item.inputReference, item.orderNumber, item.channelOrderNumber, item.trackingNumber, item.channel, ...(item.skus || []), ...(item.orderLines || []).map((line) => line.title)]
         .some((candidate) => String(candidate || "").toLowerCase().includes(value))
     })
-  }, [addressFilter, detail?.items, dimensionsFilter, matchFilter, query, selectedSkuFilters])
+  }, [addressFilter, detail?.items, dimensionsFilter, matchFilter, query, quoteStatusFilter, selectedSkuFilters])
   const readyItems = (detail?.items || []).filter(readyToQuote)
   const visibleReadyItems = visibleItems.filter(readyToQuote)
   const visibleReadyIds = new Set(visibleReadyItems.map((item) => item.id))
@@ -663,7 +676,7 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
   const pageCount = Math.max(1, Math.ceil(visibleItems.length / DISPUTE_PAGE_SIZE))
   const pagedItems = visibleItems.slice(pageIndex * DISPUTE_PAGE_SIZE, (pageIndex + 1) * DISPUTE_PAGE_SIZE)
 
-  useEffect(() => { setPageIndex(0) }, [addressFilter, dimensionsFilter, matchFilter, query, selectedSkuFilters])
+  useEffect(() => { setPageIndex(0) }, [addressFilter, dimensionsFilter, matchFilter, query, quoteStatusFilter, selectedSkuFilters])
   useEffect(() => { if (pageIndex >= pageCount) setPageIndex(pageCount - 1) }, [pageCount, pageIndex])
 
   const createBatch = async () => {
@@ -854,6 +867,7 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
             <Select value={matchFilter} onValueChange={setMatchFilter}><SelectTrigger className="h-9 w-40" aria-label="Matched order filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All match states</SelectItem><SelectItem value="matched">Matched: Yes</SelectItem><SelectItem value="unmatched">Matched: No</SelectItem></SelectContent></Select>
             <Select value={addressFilter} onValueChange={setAddressFilter}><SelectTrigger className="h-9 w-48" aria-label="Address status filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Address basis: All</SelectItem><SelectItem value="full">Based on full address</SelectItem><SelectItem value="postal">Based on ZIP</SelectItem><SelectItem value="review">Address: Needs ZIP</SelectItem></SelectContent></Select>
             <Select value={dimensionsFilter} onValueChange={setDimensionsFilter}><SelectTrigger className="h-9 w-48" aria-label="Dimensions status filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Dimensions: All</SelectItem><SelectItem value="complete">Dimensions: Complete</SelectItem><SelectItem value="missing">Dimensions: Missing</SelectItem></SelectContent></Select>
+            <Select value={quoteStatusFilter} onValueChange={setQuoteStatusFilter}><SelectTrigger className="h-9 w-44" aria-label="Quote status filter"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Quote status: All</SelectItem><SelectItem value="quoted">Quoted</SelectItem><SelectItem value="not_quoted">Not quoted</SelectItem><SelectItem value="ready">Ready to quote</SelectItem><SelectItem value="quoting">In progress</SelectItem><SelectItem value="failed">Failed</SelectItem><SelectItem value="review">Needs review</SelectItem></SelectContent></Select>
             <Button size="sm" variant="outline" disabled={quoting || detail.status === "quoting" || !visibleReadyItems.length} onClick={() => void quoteItems(visibleReadyItems.map((item) => item.id), "filtered")}><Play className="size-4" /> Quote filtered ({visibleReadyItems.length})</Button>
             <span className="text-xs text-muted-foreground">{visibleItems.length} of {detail.items.length} shipment rows</span>
           </div>

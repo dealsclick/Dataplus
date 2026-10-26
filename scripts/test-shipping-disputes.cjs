@@ -73,6 +73,10 @@ assert.match(page, /Matched: No/, "operators must be able to isolate unmatched o
 assert.match(page, /Based on full address/, "operators must be able to isolate full-address comparisons");
 assert.match(page, /Based on ZIP/, "operators must be able to isolate ZIP-based comparisons");
 assert.match(page, /Address: Needs ZIP/, "operators must be able to isolate destinations without postal evidence");
+for (const label of ["Quote status: All", "Quoted", "Not quoted", "Ready to quote", "In progress", "Failed", "Needs review"]) {
+  assert.match(page, new RegExp(label), `operators must be able to filter the quote status by ${label.toLowerCase()}`);
+}
+assert.match(page, /matchesQuoteStatus\(item, quoteStatusFilter\)/, "quote-status filtering must use the displayed shipment status");
 for (const label of ["Channel order number", "Order date", "Ship date", "Tracking number"]) {
   assert.match(page, new RegExp(label), `comparison rates must display ${label.toLowerCase()}`);
 }
