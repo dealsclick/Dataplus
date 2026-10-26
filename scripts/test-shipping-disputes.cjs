@@ -62,9 +62,11 @@ assert.match(page, /Address: Needs ZIP/, "operators must be able to isolate dest
 for (const label of ["Channel order number", "Order date", "Ship date", "Tracking number"]) {
   assert.match(page, new RegExp(label), `comparison rates must display ${label.toLowerCase()}`);
 }
-for (const label of ["Quoted weight", "Quoted dimensions", "Package source"]) {
+for (const label of ["Quoted weight", "Quoted dimensions"]) {
   assert.match(page, new RegExp(label), `comparison rates must display ${label.toLowerCase()}`);
 }
+assert.match(page, /sm:grid-cols-5/, "comparison order details should stay compact on desktop");
+assert.match(page, /overflow-x-auto whitespace-nowrap/, "comparison SKUs should stay on one horizontally scrollable line");
 for (const label of ["Temu cost comparison", "Original charge", "Temu adjustment", "Rate received", "Charge difference"]) {
   assert.match(page, new RegExp(label), `comparison rates must display ${label.toLowerCase()}`);
 }

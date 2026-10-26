@@ -130,10 +130,10 @@ function ComparisonOrderSummary({ item }: { item: DisputeItem }) {
     ["Ship date", auditDateLabel(item.shipDate)],
     ["Tracking number", item.trackingNumber || "Not available"],
   ]
-  return <dl className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-md border bg-muted/20 p-3 sm:grid-cols-3">
+  return <dl className="grid grid-cols-2 gap-x-3 gap-y-2 rounded-md border bg-muted/20 px-3 py-2 sm:grid-cols-5">
     {details.map(([label, value]) => <div key={label} className={`min-w-0 ${label === "Tracking number" ? "col-span-2 sm:col-span-1" : ""}`}>
-      <dt className="text-xs font-medium text-muted-foreground">{label}</dt>
-      <dd className={`mt-0.5 break-words text-sm font-medium ${label === "Tracking number" ? "font-mono text-xs" : ""}`}>{value}</dd>
+      <dt className="text-[11px] font-medium leading-4 text-muted-foreground">{label}</dt>
+      <dd title={value} className={`truncate text-xs font-medium leading-4 ${label === "Channel order number" || label === "Tracking number" ? "font-mono" : ""}`}>{value}</dd>
     </div>)}
   </dl>
 }
@@ -145,16 +145,13 @@ function ComparisonPackageSummary({ item }: { item: DisputeItem }) {
   const skus = lines.length
     ? lines.map((line) => ({ sku: line.mappedSku || line.catalogSku || line.sku || line.originalSku, quantity: line.quantity }))
     : (snapshot?.skus?.length ? snapshot.skus : item.skus).map((sku) => ({ sku, quantity: null }))
-  return <div className="grid gap-3 rounded-md border bg-muted/20 p-3">
-    <div>
-      <p className="text-xs font-medium text-muted-foreground">SKU{skus.length === 1 ? "" : "s"}</p>
-      <div className="mt-1 flex flex-wrap gap-1.5">{skus.length ? skus.map((entry, index) => <Badge key={`${entry.sku}-${index}`} variant="outline" className="font-mono">{entry.sku || "SKU missing"}{entry.quantity != null ? ` × ${entry.quantity}` : ""}</Badge>) : <span className="text-sm font-medium">Not available</span>}</div>
+  return <div className="grid gap-2 rounded-md border bg-muted/20 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center sm:gap-4">
+    <div className="flex min-w-0 items-center gap-2">
+      <span className="shrink-0 text-[11px] font-medium text-muted-foreground">SKU{skus.length === 1 ? "" : "s"}</span>
+      <div className="flex min-w-0 gap-1.5 overflow-x-auto whitespace-nowrap">{skus.length ? skus.map((entry, index) => <Badge key={`${entry.sku}-${index}`} variant="outline" className="shrink-0 font-mono text-xs">{entry.sku || "SKU missing"}{entry.quantity != null ? ` × ${entry.quantity}` : ""}</Badge>) : <span className="text-xs font-medium">Not available</span>}</div>
     </div>
-    <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
-      <div><dt className="text-xs font-medium text-muted-foreground">Quoted weight</dt><dd className="mt-0.5 text-sm font-medium">{Number(parcel.weight) > 0 ? `${parcel.weight} ${parcel.weightUnit || "lb"}` : "Not available"}</dd></div>
-      <div><dt className="text-xs font-medium text-muted-foreground">Quoted dimensions</dt><dd className="mt-0.5 text-sm font-medium">{[parcel.length, parcel.width, parcel.height].every((value) => Number(value) > 0) ? `${parcel.length} × ${parcel.width} × ${parcel.height} ${parcel.dimensionUnit || "in"}` : "Not available"}</dd></div>
-      <div className="col-span-2 sm:col-span-1"><dt className="text-xs font-medium text-muted-foreground">Package source</dt><dd className="mt-0.5 text-sm font-medium">{packageSourceLabel(parcel.source)}</dd></div>
-    </dl>
+    <div className="flex items-baseline justify-between gap-2 whitespace-nowrap sm:block"><span className="text-[11px] font-medium text-muted-foreground">Quoted weight</span><span className="text-xs font-medium sm:block">{Number(parcel.weight) > 0 ? `${parcel.weight} ${parcel.weightUnit || "lb"}` : "Not available"}</span></div>
+    <div className="flex items-baseline justify-between gap-2 whitespace-nowrap sm:block"><span className="text-[11px] font-medium text-muted-foreground">Quoted dimensions</span><span className="text-xs font-medium sm:block">{[parcel.length, parcel.width, parcel.height].every((value) => Number(value) > 0) ? `${parcel.length} × ${parcel.width} × ${parcel.height} ${parcel.dimensionUnit || "in"}` : "Not available"}</span></div>
   </div>
 }
 
