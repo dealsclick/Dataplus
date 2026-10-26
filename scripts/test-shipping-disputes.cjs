@@ -8,7 +8,7 @@ const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const worker = fs.readFileSync(path.join(root, "scripts", "dataplus-worker.js"), "utf8");
 const app = fs.readFileSync(path.join(root, "web", "src", "App.tsx"), "utf8");
 const page = fs.readFileSync(path.join(root, "web", "src", "components", "shipping-disputes.tsx"), "utf8");
-const { completePackage, completeDestination, postalDestination, destinationQuoteBasis, selectLowestRates, normalizeReferenceEvidence, orderLinesForDispute, enrichOrderLinesWithProducts, catalogQuotePackage, disputeSkus, sameQuotePackage } = require("../lib/shipping-disputes");
+const { completePackage, completeDestination, postalDestination, destinationQuoteBasis, selectLowestRates, normalizeReferenceEvidence, orderLinesForDispute, enrichOrderLinesWithProducts, catalogQuotePackage, disputeSkus, sameQuotePackage, quoteEvidenceIsCurrent } = require("../lib/shipping-disputes");
 const ups = require("../lib/ups-rating");
 const disputeStore = fs.readFileSync(path.join(root, "lib", "shipping-disputes.js"), "utf8");
 
@@ -29,6 +29,8 @@ assert.match(disputeStore, /catalogQuotePackage\(enrichedLines, productMetadata\
 assert.doesNotMatch(disputeStore, /!currentSource\.startsWith\("current_catalog_"\)/, "catalog-backed dispute packages must refresh after SKU measurements change");
 assert.match(disputeStore, /historicalPackage/, "historical label package evidence must remain retained separately");
 assert.match(disputeStore, /!\["quoted", "quoting"\]\.includes\(row\.status\)/, "saved quote runs must keep the package snapshot they were rated with");
+assert.match(disputeStore, /quoted_at=incoming\.quoted_at/, "catalog measurement changes must clear the prior quote timestamp");
+assert.match(disputeStore, /staleQuoteEvidence/, "a quote made before the current package must return to the quote-ready workflow");
 assert.match(disputeStore, /DISPUTE_REFERENCE_LIMIT = 50_000/, "one user-visible dispute must support a large uploaded statement");
 assert.match(disputeStore, /for \(const referenceChunk of chunks\(normalizedReferences\)\)/, "large disputes must keep order matching internally bounded");
 assert.match(disputeStore, /jsonb_to_recordset\(\$1::jsonb\)/, "large disputes must bulk-insert shipment evidence instead of issuing one query per row");
@@ -113,6 +115,16 @@ assert.equal(postalDestination({ country: "US" }), false);
 assert.equal(destinationQuoteBasis({ line1: "1 Main St", city: "New York", state: "NY", postalCode: "10001", country: "US" }), "full_address");
 assert.equal(destinationQuoteBasis({ postalCode: "10001", country: "US" }), "postal_code");
 assert.equal(destinationQuoteBasis({ country: "US" }), "missing");
+assert.equal(quoteEvidenceIsCurrent({
+  latest_run_id: "run-old",
+  latest_run_requested_at: "2026-10-26T12:00:00.000Z",
+  raw: { catalogQuotePackage: { capturedAt: "2026-10-26T13:00:00.000Z" } },
+}), false, "a quote made before catalog measurements changed must be treated as stale");
+assert.equal(quoteEvidenceIsCurrent({
+  latest_run_id: "run-current",
+  latest_run_requested_at: "2026-10-26T14:00:00.000Z",
+  raw: { catalogQuotePackage: { capturedAt: "2026-10-26T13:00:00.000Z" } },
+}), true, "a quote made after catalog measurements changed must remain current");
 
 assert.deepEqual(ups.upsAddress({ postalCode: "10001", country: "US" }), { PostalCode: "10001", CountryCode: "US" }, "UPS ZIP-only rating must omit empty street, city, and state fields");
 
