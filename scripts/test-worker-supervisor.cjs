@@ -50,6 +50,7 @@ try {
   assert.strictEqual(jobMemoryBudgetMb("background", "product-dump-import", {}), 900);
   assert.strictEqual(jobMemoryBudgetMb("background", "product-dump-import", { DATAPLUS_PRODUCT_DUMP_JOB_RSS_MB: "880" }), 880);
   assert.strictEqual(jobMemoryBudgetMb("orders-ebay", "ebay-order-import", {}), 600);
+  assert.strictEqual(jobMemoryBudgetMb("orders-shopify", "shopify-order-import", {}), 560);
   assert.strictEqual(jobMemoryBudgetMb("walmart", "walmart-orders", { DATAPLUS_WORKER_JOB_RSS_MB: "600" }), 600);
   assert.strictEqual(jobMemoryBudgetMb("manual", "postgres-backup", { DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: "900" }), 900);
   console.log("Worker supervisor memory tests passed.");
