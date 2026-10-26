@@ -49617,6 +49617,11 @@ async function handleApi(req, res) {
       void recordUserActivity(req, authUser, { eventType: "accounting", action: "Requested shipping dispute quotes", entityType: "shipping_dispute", entityId: batchId, metadata: { jobId: queued.job.id, jobIds: queued.jobs.map((job) => job.id), itemCount: queued.totalRows, batchCount: queued.totalChunks, selectionMode: String(body.selectionMode || (Array.isArray(body.itemIds) && body.itemIds.length ? "selected" : "all")) } });
       return sendJson(res, 202, { queued: true, job: normalizeImportJob(queued.job), jobIds: queued.jobs.map((job) => job.id), totalRows: queued.totalRows, totalChunks: queued.totalChunks, message: queued.message });
     }
+    if (req.method === "GET" && routeParts[4] === "items" && routeParts[5] && routeParts[6] === "postal-suggestion" && routeParts.length === 7) {
+      const suggestion = await shippingDisputeStore.suggestItemPostalCode(scope, batchId, decodeURIComponent(routeParts[5]));
+      if (!suggestion) return sendJson(res, 404, { error: "Shipping dispute shipment not found." });
+      return sendJson(res, 200, { suggestion });
+    }
     if (req.method === "PATCH" && routeParts[4] === "items" && routeParts[5] && routeParts[6] === "order-destination" && routeParts.length === 7) {
       const body = await parseBody(req);
       const item = await shippingDisputeStore.updateItemOrderDestination(scope, batchId, decodeURIComponent(routeParts[5]), body, { id: authUser.id, name: authUser.name || authUser.username });

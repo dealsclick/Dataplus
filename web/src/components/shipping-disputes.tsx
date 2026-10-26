@@ -105,6 +105,7 @@ type DisputeItem = {
 }
 type DisputeDetail = DisputeBatch & { items: DisputeItem[] }
 type ListResponse = { batches: DisputeBatch[]; providers: { ups: ProviderStatus; veeqo: ProviderStatus } }
+type PostalSuggestion = { itemId: string; postalCode: string; country: string; city: string; state: string; source: string; evidenceCount: number; message: string }
 
 function statusLabel(value: string) {
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
@@ -513,6 +514,9 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
   const [orderDestinationItem, setOrderDestinationItem] = useState<DisputeItem | null>(null)
   const [orderDestinationDraft, setOrderDestinationDraft] = useState({ orderReference: "", postalCode: "", country: "" })
   const [savingOrderDestination, setSavingOrderDestination] = useState(false)
+  const [postalSuggestion, setPostalSuggestion] = useState<PostalSuggestion | null>(null)
+  const [postalSuggestionLoading, setPostalSuggestionLoading] = useState(false)
+  const orderDestinationItemRef = useRef("")
   const [ratesItem, setRatesItem] = useState<DisputeItem | null>(null)
   const [resetOpen, setResetOpen] = useState(false)
   const [recentDisputesOpen, setRecentDisputesOpen] = useState(() => {
@@ -676,13 +680,36 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update package evidence.") }
   }
 
+  const loadPostalSuggestion = async (item: DisputeItem) => {
+    if (!detail) return
+    setPostalSuggestionLoading(true)
+    try {
+      const result = await api<{ suggestion: PostalSuggestion }>(`/api/accounting/shipping-disputes/${encodeURIComponent(detail.id)}/items/${encodeURIComponent(item.id)}/postal-suggestion`)
+      if (orderDestinationItemRef.current !== item.id) return
+      setPostalSuggestion(result.suggestion)
+      if (result.suggestion.postalCode) {
+        setOrderDestinationDraft((current) => current.postalCode ? current : {
+          ...current,
+          postalCode: result.suggestion.postalCode,
+          country: current.country || result.suggestion.country,
+        })
+      }
+    } catch (error) {
+      if (orderDestinationItemRef.current === item.id) toast.error(error instanceof Error ? error.message : "Unable to look up a ZIP suggestion.")
+    } finally {
+      if (orderDestinationItemRef.current === item.id) setPostalSuggestionLoading(false)
+    }
+  }
   const openOrderDestinationEdit = (item: DisputeItem) => {
+    orderDestinationItemRef.current = item.id
     setOrderDestinationItem(item)
+    setPostalSuggestion(null)
     setOrderDestinationDraft({
       orderReference: item.orderNumber || item.channelOrderNumber || item.inputReference,
       postalCode: item.destination.postalCode || "",
       country: item.destination.country || "",
     })
+    if (!item.destination.postalCode && item.destination.city && item.destination.state) void loadPostalSuggestion(item)
   }
   const saveOrderDestination = async () => {
     if (!detail || !orderDestinationItem) return
@@ -700,7 +727,9 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
       setDetail(result.batch)
       setBatches((current) => current.map((batch) => batch.id === result.batch.id ? result.batch : batch))
       setSelectedItemIds((current) => current.filter((itemId) => itemId !== orderDestinationItem.id))
+      orderDestinationItemRef.current = ""
       setOrderDestinationItem(null)
+      setPostalSuggestion(null)
       toast.success("Dispute order match and destination ZIP updated.")
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update the dispute order and ZIP.") }
     finally { setSavingOrderDestination(false) }
@@ -799,7 +828,13 @@ export function ShippingDisputes({ isSuperuser = false }: { isSuperuser?: boolea
 
     <Dialog open={Boolean(editItem)} onOpenChange={(open) => !open && setEditItem(null)}><DialogContent className="sm:max-w-lg"><DialogHeader><DialogTitle>Override quote package</DialogTitle><DialogDescription>DataPlus normally uses the current catalog SKU measurements. This override affects only this dispute quote; the catalog, order, label, and shipping report history remain unchanged.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><div className="grid gap-1.5"><Label>Weight (lb)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.weight} onChange={(event) => setEditDraft({ ...editDraft, weight: event.target.value })} /></div><div className="grid gap-1.5"><Label>Length (in)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.length} onChange={(event) => setEditDraft({ ...editDraft, length: event.target.value })} /></div><div className="grid gap-1.5"><Label>Width (in)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.width} onChange={(event) => setEditDraft({ ...editDraft, width: event.target.value })} /></div><div className="grid gap-1.5"><Label>Height (in)</Label><Input type="number" min="0.01" step="0.01" value={editDraft.height} onChange={(event) => setEditDraft({ ...editDraft, height: event.target.value })} /></div></div><div className="grid gap-1.5"><Label>Reason for override</Label><Textarea value={editDraft.reason} onChange={(event) => setEditDraft({ ...editDraft, reason: event.target.value })} placeholder="Verified against the physical sell unit or corrected catalog package." /></div></div><DialogFooter><Button variant="outline" onClick={() => setEditItem(null)}>Cancel</Button><Button onClick={() => void savePackage()}>Save override</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={Boolean(orderDestinationItem)} onOpenChange={(open) => { if (!open && !savingOrderDestination) setOrderDestinationItem(null) }}><DialogContent className="max-h-[100dvh] overflow-y-auto sm:max-w-lg"><DialogHeader><DialogTitle>Edit dispute order and ZIP</DialogTitle><DialogDescription>Correct the order match or destination used for current rate comparisons. This changes only this dispute and does not update the source order, fulfillment address, label, settlement, or accounting history.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="grid gap-1.5"><Label htmlFor="dispute-order-reference">Order reference</Label><Input id="dispute-order-reference" value={orderDestinationDraft.orderReference} onChange={(event) => setOrderDestinationDraft({ ...orderDestinationDraft, orderReference: event.target.value })} placeholder="DataPlus order or exact channel order number" autoComplete="off" /><p className="text-xs text-muted-foreground">DataPlus will rematch this shipment and reload its SKU, package, and shipping evidence.</p></div><div className="grid grid-cols-[minmax(0,1fr)_7rem] gap-3"><div className="grid gap-1.5"><Label htmlFor="dispute-postal-code">Destination ZIP</Label><Input id="dispute-postal-code" value={orderDestinationDraft.postalCode} onChange={(event) => setOrderDestinationDraft({ ...orderDestinationDraft, postalCode: event.target.value })} placeholder="10001" autoComplete="postal-code" /></div><div className="grid gap-1.5"><Label htmlFor="dispute-country">Country</Label><Input id="dispute-country" value={orderDestinationDraft.country} onChange={(event) => setOrderDestinationDraft({ ...orderDestinationDraft, country: event.target.value.toUpperCase().slice(0, 2) })} placeholder="US" maxLength={2} autoComplete="country" /></div></div><Alert><AlertTriangle className="size-4" /><AlertTitle>Saved rates will be cleared</AlertTitle><AlertDescription>Any comparison rates based on the previous order or ZIP will be removed from this row until you request current rates again.</AlertDescription></Alert></div><DialogFooter className="pb-[max(0.75rem,env(safe-area-inset-bottom))]"><Button variant="outline" disabled={savingOrderDestination} onClick={() => setOrderDestinationItem(null)}>Cancel</Button><Button disabled={savingOrderDestination} onClick={() => void saveOrderDestination()}>{savingOrderDestination ? <Loader2 className="size-4 animate-spin" /> : <MapPin className="size-4" />} Save order and ZIP</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={Boolean(orderDestinationItem)} onOpenChange={(open) => {
+      if (!open && !savingOrderDestination) {
+        orderDestinationItemRef.current = ""
+        setOrderDestinationItem(null)
+        setPostalSuggestion(null)
+      }
+    }}><DialogContent className="max-h-[100dvh] overflow-y-auto sm:max-w-lg"><DialogHeader><DialogTitle>Edit dispute order and ZIP</DialogTitle><DialogDescription>Correct the order match or destination used for current rate comparisons. This changes only this dispute and does not update the source order, fulfillment address, label, settlement, or accounting history.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="grid gap-1.5"><Label htmlFor="dispute-order-reference">Order reference</Label><Input id="dispute-order-reference" value={orderDestinationDraft.orderReference} onChange={(event) => setOrderDestinationDraft({ ...orderDestinationDraft, orderReference: event.target.value })} placeholder="DataPlus order or exact channel order number" autoComplete="off" /><p className="text-xs text-muted-foreground">DataPlus will rematch this shipment and reload its SKU, package, and shipping evidence.</p></div><div className="grid grid-cols-[minmax(0,1fr)_7rem] gap-3"><div className="grid gap-1.5"><div className="flex items-center justify-between gap-2"><Label htmlFor="dispute-postal-code">Destination ZIP</Label><Button type="button" size="sm" variant="ghost" className="h-6 px-2 text-xs" disabled={postalSuggestionLoading || !orderDestinationItem} onClick={() => orderDestinationItem && void loadPostalSuggestion(orderDestinationItem)}>{postalSuggestionLoading ? <Loader2 className="size-3.5 animate-spin" /> : <MapPin className="size-3.5" />} Auto-fill</Button></div><Input id="dispute-postal-code" value={orderDestinationDraft.postalCode} onChange={(event) => setOrderDestinationDraft({ ...orderDestinationDraft, postalCode: event.target.value })} placeholder="10001" autoComplete="postal-code" />{postalSuggestion ? <p className={`text-xs ${postalSuggestion.postalCode ? "text-emerald-600" : "text-muted-foreground"}`}>{postalSuggestion.message}</p> : null}</div><div className="grid content-start gap-1.5"><Label htmlFor="dispute-country" className="h-6 content-center">Country</Label><Input id="dispute-country" value={orderDestinationDraft.country} onChange={(event) => setOrderDestinationDraft({ ...orderDestinationDraft, country: event.target.value.toUpperCase().slice(0, 2) })} placeholder="US" maxLength={2} autoComplete="country" /></div></div><Alert><AlertTriangle className="size-4" /><AlertTitle>Saved rates will be cleared</AlertTitle><AlertDescription>Any comparison rates based on the previous order or ZIP will be removed from this row until you request current rates again.</AlertDescription></Alert></div><DialogFooter className="pb-[max(0.75rem,env(safe-area-inset-bottom))]"><Button variant="outline" disabled={savingOrderDestination} onClick={() => { orderDestinationItemRef.current = ""; setOrderDestinationItem(null); setPostalSuggestion(null) }}>Cancel</Button><Button disabled={savingOrderDestination} onClick={() => void saveOrderDestination()}>{savingOrderDestination ? <Loader2 className="size-4 animate-spin" /> : <MapPin className="size-4" />} Save order and ZIP</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={Boolean(ratesItem)} onOpenChange={(open) => !open && setRatesItem(null)}><DialogContent className="max-h-[100dvh] overflow-y-auto sm:max-w-4xl"><DialogHeader><DialogTitle>Current comparison rates</DialogTitle><DialogDescription>{ratesItem?.orderNumber} · requested {dateLabel(ratesItem?.latestRun?.requestedAt)}</DialogDescription></DialogHeader>{ratesItem ? <><ComparisonOrderSummary item={ratesItem} /><ComparisonPackageSummary item={ratesItem} /></> : null}{ratesItem ? <div className="grid gap-2 sm:grid-cols-2"><QuoteProviderResult item={ratesItem} providerKey="ups" name="Direct UPS" /><QuoteProviderResult item={ratesItem} providerKey="veeqo" name="Veeqo" /></div> : null}<div className="overflow-x-auto"><Table className="min-w-[860px]"><TableHeader><TableRow><TableHead>Rank</TableHead><TableHead>Provider</TableHead><TableHead>Carrier / service</TableHead><TableHead className="text-right">Rate</TableHead><TableHead>Temu cost comparison</TableHead><TableHead>Delivery</TableHead></TableRow></TableHeader><TableBody>{(ratesItem?.quotes || []).map((quote) => <TableRow key={`${quote.rank}-${quote.provider}-${quote.service}`}><TableCell>{quote.rank}</TableCell><TableCell>{providerLabel(quote.provider)}</TableCell><TableCell><p className="font-medium">{quote.carrier}</p><p className="text-xs text-muted-foreground">{quote.service}</p></TableCell><TableCell className="text-right font-semibold">{moneyLabel(quote.amount)}</TableCell><TableCell>{ratesItem ? <TemuRateComparison item={ratesItem} quote={quote} /> : null}</TableCell><TableCell>{quote.deliveryEstimate || (quote.deliveryDays ? `${quote.deliveryDays} days` : "Not provided")}</TableCell></TableRow>)}</TableBody></Table></div><DialogFooter className="pb-[max(0.75rem,env(safe-area-inset-bottom))]"><Button onClick={() => setRatesItem(null)}>Close</Button></DialogFooter></DialogContent></Dialog>
 

@@ -8,7 +8,7 @@ const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const worker = fs.readFileSync(path.join(root, "scripts", "dataplus-worker.js"), "utf8");
 const app = fs.readFileSync(path.join(root, "web", "src", "App.tsx"), "utf8");
 const page = fs.readFileSync(path.join(root, "web", "src", "components", "shipping-disputes.tsx"), "utf8");
-const { completePackage, completeDestination, postalDestination, destinationQuoteBasis, selectLowestRates, normalizeReferenceEvidence, orderLinesForDispute, enrichOrderLinesWithProducts, catalogQuotePackage, disputeSkus, sameQuotePackage, quoteEvidenceIsCurrent } = require("../lib/shipping-disputes");
+const { completePackage, completeDestination, postalDestination, destinationQuoteBasis, selectLowestRates, normalizeReferenceEvidence, normalizedPostalSuggestion, orderLinesForDispute, enrichOrderLinesWithProducts, catalogQuotePackage, disputeSkus, sameQuotePackage, quoteEvidenceIsCurrent } = require("../lib/shipping-disputes");
 const ups = require("../lib/ups-rating");
 const disputeStore = fs.readFileSync(path.join(root, "lib", "shipping-disputes.js"), "utf8");
 
@@ -19,6 +19,7 @@ assert.match(database, /check \(rank between 1 and 5\)/, "stored comparison rate
 assert.match(server, /comparisonOnly: true/, "dispute jobs must use quote-only rate shopping");
 assert.match(server, /shippingDisputeStore\.finishRun/, "quote results must be persisted through the dispute store");
 assert.match(server, /shippingDisputeStore\.updateItemOrderDestination/, "operators must be able to correct a dispute order match and destination ZIP");
+assert.match(server, /shippingDisputeStore\.suggestItemPostalCode/, "the dispute editor must expose a scoped ZIP suggestion lookup");
 assert.match(server, /shippingDisputeExportCsv/, "shipment-level dispute evidence must be exportable");
 assert.match(server, /Shipping disputes are available only for LINQ/, "operational shipment evidence must stay inside the current LINQ boundary");
 assert.match(disputeStore, /update shipping_dispute_items item set status='quoting'/, "a rerun must keep every eligible item visibly in progress");
@@ -29,6 +30,8 @@ assert.match(disputeStore, /productMetadataForOrderLines\(client/, "dispute line
 assert.match(disputeStore, /catalogQuotePackage\(enrichedLines, productMetadata\)/, "existing disputes must hydrate quote packages from current catalog measurements");
 assert.match(disputeStore, /tenant_id=\$2 and company_id=\$3/, "manual dispute rematching must stay inside the active tenant and company");
 assert.match(disputeStore, /orderDestinationOverride/, "manual order and ZIP corrections must be retained as audited dispute evidence");
+assert.match(disputeStore, /same_dispute_city_state_consensus/, "ZIP suggestions must come from matching dispute shipment evidence");
+assert.match(disputeStore, /candidates\.size !== 1/, "ZIP suggestions must reject ambiguous city and state evidence");
 assert.doesNotMatch(disputeStore, /!currentSource\.startsWith\("current_catalog_"\)/, "catalog-backed dispute packages must refresh after SKU measurements change");
 assert.match(disputeStore, /historicalPackage/, "historical label package evidence must remain retained separately");
 assert.match(disputeStore, /!\["quoted", "quoting"\]\.includes\(row\.status\)/, "saved quote runs must keep the package snapshot they were rated with");
@@ -89,6 +92,8 @@ assert.match(page, /DISPUTE_PAGE_SIZE = 100/, "large single disputes must pagina
 assert.match(page, /Quote selected/, "operators must be able to quote a selected subset");
 assert.match(page, /Request current rates/, "operators must be able to quote an individual shipment");
 assert.match(page, /Edit order and ZIP/, "every dispute row must expose order and ZIP correction");
+assert.match(page, /Auto-fill/, "missing dispute ZIPs must offer an evidence-based auto-fill action");
+assert.match(page, /postal-suggestion/, "the dispute editor must request ZIP suggestions only on demand");
 assert.match(page, /does not update the source order, fulfillment address, label, settlement, or accounting history/, "the correction dialog must disclose its dispute-only scope");
 assert.match(page, /Saved rates will be cleared/, "the correction dialog must warn that old comparisons become stale");
 assert.match(page, /Filter order, channel order, tracking, or SKU/, "the review workspace must search normalized SKUs");
@@ -136,6 +141,8 @@ assert.equal(postalDestination({ country: "US" }), false);
 assert.equal(destinationQuoteBasis({ line1: "1 Main St", city: "New York", state: "NY", postalCode: "10001", country: "US" }), "full_address");
 assert.equal(destinationQuoteBasis({ postalCode: "10001", country: "US" }), "postal_code");
 assert.equal(destinationQuoteBasis({ country: "US" }), "missing");
+assert.equal(normalizedPostalSuggestion("98019-1234", "US"), "98019", "US ZIP suggestions should normalize ZIP+4 evidence to the five-digit rating ZIP");
+assert.equal(normalizedPostalSuggestion("SW1A 1AA", "GB"), "SW1A 1AA", "non-US postal suggestions must retain their complete postal code");
 assert.equal(quoteEvidenceIsCurrent({
   latest_run_id: "run-old",
   latest_run_requested_at: "2026-10-26T12:00:00.000Z",
