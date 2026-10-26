@@ -20241,7 +20241,7 @@ async function runShippingDisputeQuoteWorkerJob(job = {}) {
   const chunkLabel = totalChunks > 1 ? ` batch ${chunkIndex} of ${totalChunks}` : "";
   const itemIds = [...new Set((Array.isArray(payload.itemIds) ? payload.itemIds : []).map((value) => String(value || "").trim()).filter(Boolean))].sort();
   const items = await shippingDisputeStore.quoteItems(scope, batchId, { itemIds });
-  if (!items.length) throw new Error("No matched shipments have complete package and address data to quote.");
+  if (!items.length) throw new Error("No matched shipments have complete package data and a destination ZIP or postal code to quote.");
   await shippingDisputeStore.markBatchQuoting(scope, batchId, itemIds);
   let current = await persistWorkerImportJob(job, {
     status: "running",
@@ -20269,6 +20269,7 @@ async function runShippingDisputeQuoteWorkerJob(job = {}) {
       shipmentId: item.shipmentId,
       warehouseId: item.warehouseId,
       destination: item.destination,
+      addressQuoteBasis: item.addressQuoteBasis,
       package: item.package,
       originalLabelCost: item.originalLabelCost,
       finalBilledCost: item.finalBilledCost,
@@ -20355,7 +20356,7 @@ async function queueShippingDisputeQuoteJob(scope, batchId, actor = {}, input = 
   if (!detail) throw Object.assign(new Error("Shipping dispute batch not found."), { status: 404 });
   if (detail.status === "quoting") throw Object.assign(new Error("A comparison-rate job is already running for this dispute batch."), { status: 409 });
   const readyItemIds = await shippingDisputeStore.quoteItemIds(scope, batchId, { itemIds: requestedItemIds });
-  if (!readyItemIds.length) throw Object.assign(new Error("Resolve missing package data before requesting comparison rates."), { status: 409 });
+  if (!readyItemIds.length) throw Object.assign(new Error("Resolve missing package data and destination ZIP codes before requesting comparison rates."), { status: 409 });
   const itemChunks = shippingDisputeQuoteChunks(readyItemIds);
   const inline = shouldRunJobsInline();
   const requestGroupId = crypto.randomUUID();
@@ -20412,7 +20413,7 @@ async function queueShippingDisputeQuoteJob(scope, batchId, actor = {}, input = 
 function shippingDisputeExportCsv(detail = {}) {
   const headers = [
     "Dispute batch", "Input reference", "DataPlus order", "Channel", "Channel order", "SKUs", "Order line detail", "Shipment ID", "Tracking number",
-    "Destination city", "Destination state", "Destination ZIP", "Package source", "Package weight", "Weight unit",
+    "Destination city", "Destination state", "Destination ZIP", "Quote address basis", "Package source", "Package weight", "Weight unit",
     "Package length", "Package width", "Package height", "Dimension unit", "Carrier billed weight", "Carrier billed length",
     "Carrier billed width", "Carrier billed height", "Original label cost", "Final billed cost", "Billing difference",
     "Temu adjustment transaction type", "Temu statement signed charge", "Temu additional shipping charge", "Temu adjustment currency",
@@ -20431,7 +20432,7 @@ function shippingDisputeExportCsv(detail = {}) {
     return [
       detail.displayId, item.inputReference, item.orderNumber, item.channel, item.channelOrderNumber, (item.skus || []).join(" | "),
       item.orderLines?.length ? JSON.stringify(item.orderLines) : "", item.shipmentId, item.trackingNumber,
-      item.destination.city, item.destination.state, item.destination.postalCode, item.package.source, item.package.weight ?? "", item.package.weightUnit,
+      item.destination.city, item.destination.state, item.destination.postalCode, item.addressQuoteBasis === "postal_code" ? "Based on ZIP" : item.addressQuoteBasis === "full_address" ? "Based on full address" : "Missing ZIP", item.package.source, item.package.weight ?? "", item.package.weightUnit,
       item.package.length ?? "", item.package.width ?? "", item.package.height ?? "", item.package.dimensionUnit,
       item.carrierBilledPackage.weight ?? "", item.carrierBilledPackage.length ?? "", item.carrierBilledPackage.width ?? "", item.carrierBilledPackage.height ?? "",
       item.originalLabelCost ?? "", item.finalBilledCost ?? "", item.billingDifference ?? "",
@@ -29657,7 +29658,10 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   const blockers = [];
   const toAddress = shippingAddressForRates(order, settings);
   const fromAddress = shipFromAddressForRates(settings, warehouse);
-  if (![toAddress.line1, toAddress.town, toAddress.postcode, toAddress.country_code].every(Boolean)) blockers.push("Shipping address is incomplete.");
+  const fullDestinationAddress = [toAddress.line1, toAddress.town, toAddress.county, toAddress.postcode, toAddress.country_code].every(Boolean);
+  const postalDestinationAddress = [toAddress.postcode, toAddress.country_code].every(Boolean);
+  const addressQuoteBasis = fullDestinationAddress ? "full_address" : comparisonOnly && postalDestinationAddress ? "postal_code" : "missing";
+  if (addressQuoteBasis === "missing") blockers.push(comparisonOnly ? "A destination ZIP or postal code is required." : "Shipping address is incomplete.");
   if (![fromAddress.line1, fromAddress.town, fromAddress.postcode, fromAddress.country_code].every(Boolean)) blockers.push("Ship-from address is incomplete in System Settings or warehouse settings.");
   if (settings.fulfillmentRequirePackageDataBeforeLabel && (!parcel.weight || !parcel.length || !parcel.width || !parcel.height)) blockers.push("Package weight, length, width, and height are required.");
   const rates = [];
@@ -29705,7 +29709,11 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
       message: `${veeqoDuplicateGuard.reason} Veeqo rates were skipped to prevent purchasing a duplicate label.`
     });
   }
-  if (!blockers.length && !veeqoDuplicateGuard.blocked && veeqoConfig(settings).enabled) {
+  const postalOnlyComparison = comparisonOnly && addressQuoteBasis === "postal_code";
+  if (!blockers.length && postalOnlyComparison && !veeqoDuplicateGuard.blocked && veeqoConfig(settings).enabled) {
+    providerErrors.push({ provider: "Veeqo", code: "postal_only_comparison", message: "Veeqo was skipped because this comparison has only a destination ZIP; Direct UPS was used for ZIP-based evidence." });
+  }
+  if (!blockers.length && !postalOnlyComparison && !veeqoDuplicateGuard.blocked && veeqoConfig(settings).enabled) {
     fulfillmentRateMemoryStage(order, "veeqo-start");
     const shippingConfigurationIds = await veeqoShippingConfigurationIds(settings);
     fulfillmentRateMemoryStage(order, "veeqo-configurations");
@@ -29775,6 +29783,7 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     try {
       const upsResult = await upsRating.shopRates({
         reference: String(order.marketplaceOrderNumber || order.orderNumber || order.id || ""),
+        allowPostalOnlyDestination: addressQuoteBasis === "postal_code",
         from: {
           name: fromAddress.name,
           company: fromAddress.company,
@@ -29852,6 +29861,7 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     requestedWarehouseId,
     warehouseFallbackApplied: shipFrom.fallbackApplied,
     warehouseFallbackReason: shipFrom.fallbackReason,
+    addressQuoteBasis,
     providers: { shopify: !comparisonOnly && sourceKey === "shopify", temu: !comparisonOnly && sourceKey === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey), ups: upsProviderStatus.configured === true },
     providerDetails: { ups: upsProviderStatus, veeqo: veeqoProviderStatus }
   };

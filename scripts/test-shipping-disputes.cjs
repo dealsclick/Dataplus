@@ -8,7 +8,7 @@ const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const worker = fs.readFileSync(path.join(root, "scripts", "dataplus-worker.js"), "utf8");
 const app = fs.readFileSync(path.join(root, "web", "src", "App.tsx"), "utf8");
 const page = fs.readFileSync(path.join(root, "web", "src", "components", "shipping-disputes.tsx"), "utf8");
-const { completePackage, completeDestination, selectLowestRates, normalizeReferenceEvidence, orderLinesForDispute, enrichOrderLinesWithProducts, catalogQuotePackage, disputeSkus } = require("../lib/shipping-disputes");
+const { completePackage, completeDestination, postalDestination, destinationQuoteBasis, selectLowestRates, normalizeReferenceEvidence, orderLinesForDispute, enrichOrderLinesWithProducts, catalogQuotePackage, disputeSkus } = require("../lib/shipping-disputes");
 const ups = require("../lib/ups-rating");
 const disputeStore = fs.readFileSync(path.join(root, "lib", "shipping-disputes.js"), "utf8");
 
@@ -53,8 +53,9 @@ assert.match(page, /Load matching orders/, "the first workflow transition must l
 assert.match(page, /Quote filtered/, "operators must be able to quote SKU-filtered shipment rows");
 assert.match(page, /Matched: Yes/, "operators must be able to isolate matched order rows");
 assert.match(page, /Matched: No/, "operators must be able to isolate unmatched order rows");
-assert.match(page, /Address: Complete/, "operators must be able to isolate complete shipping addresses");
-assert.match(page, /Address: Needs review/, "operators must be able to isolate incomplete shipping addresses");
+assert.match(page, /Based on full address/, "operators must be able to isolate full-address comparisons");
+assert.match(page, /Based on ZIP/, "operators must be able to isolate ZIP-based comparisons");
+assert.match(page, /Address: Needs ZIP/, "operators must be able to isolate destinations without postal evidence");
 assert.match(page, /Dimensions: Complete/, "operators must be able to isolate complete quote dimensions");
 assert.match(page, /Dimensions: Missing/, "operators must be able to isolate incomplete quote dimensions");
 assert.match(page, /addressFilter, detail\?\.items, dimensionsFilter/, "address and dimension filters must participate in the visible shipment set");
@@ -80,6 +81,10 @@ assert.match(server, /prerequisiteJobId: prerequisiteJob\?\.id \|\| ""/, "quote 
 assert.match(server, /chunkIndex === totalChunks[\s\S]{0,120}completeBatch/, "only the final quote chunk may complete the dispute batch");
 assert.doesNotMatch(server, /Request rates for at most 1,000 shipment rows at a time/, "quote requests must not expose a fixed row ceiling");
 assert.match(server, /Temu statement signed charge/, "Temu charge evidence must be included in the dispute export");
+assert.match(server, /Quote address basis/, "the dispute export must identify full-address and ZIP-based quotes");
+assert.match(server, /allowPostalOnlyDestination: addressQuoteBasis === "postal_code"/, "ZIP-only disputes must explicitly opt into direct UPS postal rating");
+assert.match(server, /postalOnlyComparison/, "ZIP-only disputes must avoid unsupported full-address provider work");
+assert.match(disputeStore, /nullif\(item\.destination_postal_code,''\) is not null/, "a destination postal code must be sufficient for dispute quote selection");
 assert.match(disputeStore, /Only negative Shipping label purchase adjustment rows are eligible/, "the server must enforce charge-only Temu imports");
 assert.match(disputeStore, /references = \[\.\.\.referenceEvidence\.values\(\)\]/, "Temu order matching must be limited to accepted charge evidence");
 assert.match(disputeStore, /importEvidence/, "Temu adjustment evidence must be retained on dispute items");
@@ -95,6 +100,13 @@ assert.equal(completePackage({ weight: 1, length: 2, width: 3, height: 4 }), tru
 assert.equal(completePackage({ weight: 1, length: 2, width: 3, height: 0 }), false);
 assert.equal(completeDestination({ line1: "1 Main St", city: "New York", state: "NY", postalCode: "10001", country: "US" }), true);
 assert.equal(completeDestination({ city: "New York", state: "NY", postalCode: "10001", country: "US" }), false);
+assert.equal(postalDestination({ postalCode: "10001", country: "US" }), true);
+assert.equal(postalDestination({ country: "US" }), false);
+assert.equal(destinationQuoteBasis({ line1: "1 Main St", city: "New York", state: "NY", postalCode: "10001", country: "US" }), "full_address");
+assert.equal(destinationQuoteBasis({ postalCode: "10001", country: "US" }), "postal_code");
+assert.equal(destinationQuoteBasis({ country: "US" }), "missing");
+
+assert.deepEqual(ups.upsAddress({ postalCode: "10001", country: "US" }), { PostalCode: "10001", CountryCode: "US" }, "UPS ZIP-only rating must omit empty street, city, and state fields");
 
 const selectedRates = selectLowestRates([
   { provider: "veeqo", carrier: "UPS", service: "Ground", amount: 14 },
