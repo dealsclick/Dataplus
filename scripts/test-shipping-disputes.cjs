@@ -66,7 +66,9 @@ for (const label of ["Quoted weight", "Quoted dimensions"]) {
   assert.match(page, new RegExp(label), `comparison rates must display ${label.toLowerCase()}`);
 }
 assert.match(page, /sm:grid-cols-5/, "comparison order details should stay compact on desktop");
-assert.match(page, /overflow-x-auto whitespace-nowrap/, "comparison SKUs should stay on one horizontally scrollable line");
+assert.match(page, /max-w-\[45%\].*overflow-x-auto/, "comparison SKUs should stay on one bounded horizontally scrollable line");
+assert.match(page, /title=\{productTitle\}/, "comparison rates should show the product title with the full value available on hover");
+assert.match(page, /flex-1 truncate text-xs text-muted-foreground/, "comparison product titles should remain on one truncated line");
 assert.doesNotMatch(page, /Rated from the stored destination address/, "comparison rates should not repeat the address basis");
 assert.doesNotMatch(page, /Supporting evidence, not a historical re-rate/, "comparison rates should not show the historical-rate notice");
 for (const label of ["Temu cost comparison", "Original charge", "Temu adjustment", "Rate received", "Charge difference"]) {

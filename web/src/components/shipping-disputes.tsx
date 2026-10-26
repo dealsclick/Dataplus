@@ -145,10 +145,14 @@ function ComparisonPackageSummary({ item }: { item: DisputeItem }) {
   const skus = lines.length
     ? lines.map((line) => ({ sku: line.mappedSku || line.catalogSku || line.sku || line.originalSku, quantity: line.quantity }))
     : (snapshot?.skus?.length ? snapshot.skus : item.skus).map((sku) => ({ sku, quantity: null }))
+  const productTitle = [...new Set(lines.map((line) => line.title).filter(Boolean))].join(" · ")
   return <div className="grid gap-2 rounded-md border bg-muted/20 px-3 py-2 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-center sm:gap-4">
     <div className="flex min-w-0 items-center gap-2">
       <span className="shrink-0 text-[11px] font-medium text-muted-foreground">SKU{skus.length === 1 ? "" : "s"}</span>
-      <div className="flex min-w-0 gap-1.5 overflow-x-auto whitespace-nowrap">{skus.length ? skus.map((entry, index) => <Badge key={`${entry.sku}-${index}`} variant="outline" className="shrink-0 font-mono text-xs">{entry.sku || "SKU missing"}{entry.quantity != null ? ` × ${entry.quantity}` : ""}</Badge>) : <span className="text-xs font-medium">Not available</span>}</div>
+      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden whitespace-nowrap">
+        <div className="flex max-w-[45%] shrink-0 gap-1.5 overflow-x-auto">{skus.length ? skus.map((entry, index) => <Badge key={`${entry.sku}-${index}`} variant="outline" className="shrink-0 font-mono text-xs">{entry.sku || "SKU missing"}{entry.quantity != null ? ` × ${entry.quantity}` : ""}</Badge>) : <span className="text-xs font-medium">Not available</span>}</div>
+        {productTitle ? <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={productTitle}>{productTitle}</span> : null}
+      </div>
     </div>
     <div className="flex items-baseline justify-between gap-2 whitespace-nowrap sm:block"><span className="text-[11px] font-medium text-muted-foreground">Quoted weight</span><span className="text-xs font-medium sm:block">{Number(parcel.weight) > 0 ? `${parcel.weight} ${parcel.weightUnit || "lb"}` : "Not available"}</span></div>
     <div className="flex items-baseline justify-between gap-2 whitespace-nowrap sm:block"><span className="text-[11px] font-medium text-muted-foreground">Quoted dimensions</span><span className="text-xs font-medium sm:block">{[parcel.length, parcel.width, parcel.height].every((value) => Number(value) > 0) ? `${parcel.length} × ${parcel.width} × ${parcel.height} ${parcel.dimensionUnit || "in"}` : "Not available"}</span></div>
