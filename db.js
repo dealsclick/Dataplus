@@ -10409,7 +10409,7 @@ async function readOrdersByTrackingCandidates(values = [], options = {}) {
   const client = getPool();
   const candidates = [...new Set((Array.isArray(values) ? values : [])
     .map((value) => String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, ''))
-    .filter((value) => value.length >= 6 && value.length <= 80))].slice(0, 40);
+    .filter((value) => value.length >= 4 && value.length <= 120))].slice(0, 40);
   if (!client || !candidates.length) return [];
   await initRelationalSchema();
   const limit = Math.max(1, Math.min(50, Number(options.limit || 20)));

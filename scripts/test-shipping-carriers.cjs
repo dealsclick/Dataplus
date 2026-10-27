@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const {
   canonicalCarrierName,
+  carrierTrackingUrl,
   inferCarrierFromTracking,
   isCarrierProviderPlaceholder,
   normalizeShipmentCarrier,
@@ -11,11 +12,20 @@ const {
 } = require("../lib/shipping-carriers");
 
 assert.equal(inferCarrierFromTracking("1Z999AA10123456784"), "UPS");
+assert.equal(inferCarrierFromTracking("T1234567890"), "UPS");
 assert.equal(inferCarrierFromTracking("9400111899223856928499"), "USPS");
+assert.equal(inferCarrierFromTracking("EC123456789US"), "USPS");
 assert.equal(inferCarrierFromTracking("123456789012"), "FedEx");
+assert.equal(inferCarrierFromTracking("12345678901234"), "FedEx");
+assert.equal(inferCarrierFromTracking("JD014600006281234567"), "DHL");
 assert.equal(inferCarrierFromTracking("TBA123456789012"), "Amazon Shipping");
 assert.equal(inferCarrierFromTracking("GF6383377250020"), "GOFO");
 assert.equal(inferCarrierFromTracking("1234567890"), "", "ambiguous numeric tracking is not guessed");
+assert.equal(inferCarrierFromTracking("1234567890", "DHL eCommerce"), "DHL", "saved carrier resolves an ambiguous number");
+assert.equal(inferCarrierFromTracking("LOCAL123", "Veeqo"), "", "a label provider is not treated as a carrier");
+assert.match(carrierTrackingUrl("UPS", "1Z999AA10123456784"), /^https:\/\/www\.ups\.com\/track/);
+assert.match(carrierTrackingUrl("", "9400111899223856928499"), /^https:\/\/tools\.usps\.com/);
+assert.equal(carrierTrackingUrl("", "LOCAL123"), "");
 assert.equal(canonicalCarrierName("fed ex"), "FedEx");
 assert.equal(isCarrierProviderPlaceholder("Buy Shipping"), true);
 assert.equal(isCarrierProviderPlaceholder("Marketplace shipping label"), true);

@@ -145,7 +145,7 @@ const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfi
 const shipmentConsolidation = require("./lib/shipment-consolidation");
 const { ebayLiveLineContext } = require("./lib/ebay-live-order");
 const { packageDimensionsChanged, applyManualPackageDimensions, applyShippingPreferences } = require("./lib/product-dimensions");
-const { canonicalCarrierName, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
+const { canonicalCarrierName, carrierTrackingUrl, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
 const { buildPrintPreview, attachmentFilePath, restorePurchasedLabelReferences, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { buildLabelPacketIsolated } = require("./lib/isolated-fulfillment-print");
 const { createRequestPerformanceContext, enterRequestPerformanceContext } = require("./lib/performance-context");
@@ -39376,8 +39376,10 @@ function inferCarrierFromTracking(trackingNumber = "", fallback = "") {
 
 async function resolveOutboundAuditTracking(scannedValue = "") {
   const raw = String(scannedValue || "").trim();
+  const normalized = canonicalTrackingValue(raw);
+  if (!normalized || normalized.length > 120) throw Object.assign(new Error("The scanned barcode does not contain a usable tracking reference."), { statusCode: 400 });
   const candidates = trackingLookupCandidates(raw);
-  if (!candidates.length) throw Object.assign(new Error("The scanned barcode does not contain a usable tracking reference."), { statusCode: 400 });
+  if (!candidates.length) candidates.push(normalized);
   const orderMatches = await postgres.readOrdersByTrackingCandidates(candidates, { limit: 20 });
   const matches = orderMatches.map(({ order, shipmentId, trackingNumber, provider }) => {
     const savedTracking = String(trackingNumber || order.trackingNumber || raw).trim();
@@ -39394,12 +39396,14 @@ async function resolveOutboundAuditTracking(scannedValue = "") {
     };
   });
   const trackingNumber = String(matches[0]?.trackingNumber || raw).trim();
+  const carrier = inferCarrierFromTracking(trackingNumber || raw, matches[0]?.carrier || "");
   return {
     scannedValue: raw,
     normalizedCandidates: candidates,
     trackingNumber,
     trackingNormalized: canonicalTrackingValue(trackingNumber || raw),
-    carrier: inferCarrierFromTracking(trackingNumber || raw, matches[0]?.carrier || ""),
+    carrier,
+    trackingUrl: carrierTrackingUrl(carrier, trackingNumber || raw),
     matches
   };
 }
@@ -39451,19 +39455,7 @@ async function writeOutboundEvidenceFile(req, filePath) {
 }
 
 function trackingUrlForCarrier(carrier = "", trackingNumber = "") {
-  const tracking = String(trackingNumber || "").trim();
-  if (!tracking) return "";
-  const upper = String(inferCarrierFromTracking(tracking, carrier) || "").toUpperCase();
-  if (upper === "USPS") return `https://tools.usps.com/go/TrackConfirmAction?tLabels=${encodeURIComponent(tracking)}`;
-  if (upper === "UPS") return `https://www.ups.com/track?tracknum=${encodeURIComponent(tracking)}`;
-  if (upper === "FEDEX" || upper === "FED_EX") return `https://www.fedex.com/fedextrack/?trknbr=${encodeURIComponent(tracking)}`;
-  if (upper === "DHL") return `https://www.dhl.com/us-en/home/tracking.html?tracking-id=${encodeURIComponent(tracking)}`;
-  if (upper === "ONTRAC") return `https://www.ontrac.com/tracking/?number=${encodeURIComponent(tracking)}`;
-  if (upper.includes("AMAZON")) return `https://track.amazon.com/tracking/${encodeURIComponent(tracking)}`;
-  if (upper.includes("SWIFTX")) return `https://swiftx-express.com/track?trackingNumber=${encodeURIComponent(tracking)}`;
-  if (upper.includes("SPEEDX")) return `https://tracking.speedx.io/?trackingNumber=${encodeURIComponent(tracking)}`;
-  if (upper.includes("GOFO")) return `https://www.gofoexpress.com/tracking.html?searchID=${encodeURIComponent(tracking)}`;
-  return "";
+  return carrierTrackingUrl(carrier, trackingNumber);
 }
 
 function mapEbayStatus(order) {
@@ -60959,6 +60951,7 @@ async function handleApi(req, res) {
           warehouse: audit.session.warehouseName,
           handoff_carrier: audit.session.carrier || "Any carrier",
           tracking_number: scan.trackingNumber,
+          tracking_url: scan.trackingUrl,
           detected_carrier: scan.carrier,
           match_status: scan.matchStatus,
           photo_status: scan.evidenceStatus,

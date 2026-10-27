@@ -20,6 +20,14 @@ const unmatched = publicScan({
 assert.equal(unmatched.matchStatus, 'unmatched');
 assert.equal(unmatched.matches.length, 0);
 assert.equal(unmatched.trackingNumber, 'EXTERNAL-TRACKING-123');
+assert.equal(unmatched.trackingUrl, '');
+
+const upsScan = publicScan({
+  scan_id: 'scan-2', tracking_raw: '1Z999AA10123456784', tracking_number: '1Z999AA10123456784',
+  tracking_normalized: '1Z999AA10123456784', carrier: 'UPS', match_status: 'matched', order_matches: []
+});
+assert.match(upsScan.trackingUrl, /^https:\/\/www\.ups\.com\/track/);
+assert.equal(upsScan.carrier, 'UPS');
 
 const dbSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
 assert.match(dbSource, /RELATIONAL_SCHEMA_VERSION = "2026-10-27-outbound-evidence-v1"/);
@@ -52,6 +60,8 @@ assert.match(workspaceSource, /captureCompressedEvidence/);
 assert.match(workspaceSource, /savePendingOutboundEvidence/);
 assert.match(workspaceSource, /DataPlus order/);
 assert.match(workspaceSource, /channelOrderNumber/);
+assert.match(workspaceSource, /TrackingReference/);
+assert.match(workspaceSource, /trackingUrl/);
 
 const warehouseMobileSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'warehouse-mobile.tsx'), 'utf8');
 assert.match(warehouseMobileSource, /id: "outbound"/);
