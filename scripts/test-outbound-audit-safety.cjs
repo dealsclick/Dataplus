@@ -73,6 +73,9 @@ assert.match(warehouseRouteSource, /startFastBarcodeScanner/);
 assert.match(warehouseRouteSource, /captureCompressedEvidence/);
 assert.match(warehouseRouteSource, /Quick create/);
 assert.match(warehouseRouteSource, /Full create/);
+assert.match(warehouseRouteSource, /scannerEngine/);
+assert.match(warehouseRouteSource, /h-28 rounded-md border-2/);
+assert.match(warehouseRouteSource, /Align one barcode inside the frame/);
 
 const trackingLookupSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'tracking-camera-lookup.tsx'), 'utf8');
 assert.match(trackingLookupSource, /startFastBarcodeScanner/);
