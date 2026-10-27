@@ -22,6 +22,7 @@ assert.equal(unmatched.matches.length, 0);
 assert.equal(unmatched.trackingNumber, 'EXTERNAL-TRACKING-123');
 
 const dbSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
+assert.match(dbSource, /RELATIONAL_SCHEMA_VERSION = "2026-10-27-outbound-audit-v1"/);
 assert.match(dbSource, /create table if not exists outbound_audit_sessions/);
 assert.match(dbSource, /create table if not exists outbound_audit_scans/);
 assert.match(dbSource, /unique \(audit_id, tracking_normalized\)/);
