@@ -50,5 +50,14 @@ assert.doesNotMatch(scannerSource, /ideal: 1920, max: 1920/);
 const workspaceSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'outbound-audit-workspace.tsx'), 'utf8');
 assert.match(workspaceSource, /captureCompressedEvidence/);
 assert.match(workspaceSource, /savePendingOutboundEvidence/);
+assert.match(workspaceSource, /DataPlus order/);
+assert.match(workspaceSource, /channelOrderNumber/);
+
+const warehouseMobileSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'warehouse-mobile.tsx'), 'utf8');
+assert.match(warehouseMobileSource, /id: "outbound"/);
+assert.match(warehouseMobileSource, /section === "outbound"/);
+
+const warehouseRouteSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'warehouse-route.tsx'), 'utf8');
+assert.match(warehouseRouteSource, /OutboundAuditWorkspace/);
 
 console.log('outbound audit safety tests passed');

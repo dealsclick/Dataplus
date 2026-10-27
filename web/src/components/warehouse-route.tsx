@@ -25,6 +25,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 import { BinLabelDialog } from "./bin-label-dialog"
 import { WarehouseMobile } from "./warehouse-mobile"
+import { OutboundAuditWorkspace } from "./outbound-audit-workspace"
 import { VendorCreateDialog } from "./vendor-create-dialog"
 import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
 import { Detail, Field, PageHeader, ProductDetailSheet } from "../App"
@@ -2802,7 +2803,7 @@ function WarehouseAuditPanel({
 
 export { WarehouseWorkspace }
 
-function WarehouseMobileRoute({ canPurchase, returns, fulfillment, inventory, account, canReceive, canManageBins, canAudit, operatorName, purchaseOrder }: {
+function WarehouseMobileRoute({ canPurchase, returns, fulfillment, inventory, account, canReceive, canManageBins, canAudit, operatorName, purchaseOrder, warehouses }: {
   canPurchase: boolean
   returns: ReactNode
   fulfillment: ReactNode
@@ -2813,6 +2814,7 @@ function WarehouseMobileRoute({ canPurchase, returns, fulfillment, inventory, ac
   canAudit: boolean
   operatorName: string
   purchaseOrder: (id: string) => ReactNode
+  warehouses: Array<Record<string, unknown>>
 }) {
   return <WarehouseMobile
     api={api}
@@ -2822,6 +2824,7 @@ function WarehouseMobileRoute({ canPurchase, returns, fulfillment, inventory, ac
     inventory={inventory}
     account={account}
     manual={canReceive ? <ManualReceivingPanel mobile /> : <p>Receiving access is required.</p>}
+    outbound={<OutboundAuditWorkspace warehouses={warehouses} />}
     bins={canManageBins ? <WarehouseBinManager mobile /> : <p>Bin access is required.</p>}
     audits={canAudit ? <><WarehouseAuditPanel createOnly mobile operatorName={operatorName} /><WarehouseAuditHistory mobile /></> : <p>Audit access is required.</p>}
     audit={(id) => canAudit ? <WarehouseAuditPanel key={id} auditId={id} mobile /> : <p>Audit access is required.</p>}

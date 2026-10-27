@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react"
-import { Archive, Boxes, CheckCircle2, Package, Search, Loader2, Menu } from "lucide-react"
+import { Archive, Boxes, CheckCircle2, Package, Search, Loader2, Menu, ScanBarcode } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent } from "@/components/ui/card"
@@ -10,16 +10,17 @@ const base = "/warehouse/mobile"
 const sections = [
   { id: "receiving", label: "Receive POs", icon: Package },
   { id: "manual", label: "Other stock", icon: Archive },
+  { id: "outbound", label: "Outbound", icon: ScanBarcode },
   { id: "audits", label: "Audits", icon: CheckCircle2 },
-  { id: "bins", label: "Bins", icon: Boxes },
   { id: "more", label: "More", icon: Menu },
 ]
 
-export function WarehouseMobile({ api, canPurchase, account, manual, audits, bins, purchaseOrder, audit, returns, fulfillment, inventory }: {
+export function WarehouseMobile({ api, canPurchase, account, manual, outbound, audits, bins, purchaseOrder, audit, returns, fulfillment, inventory }: {
   api: <T>(url: string, options?: RequestInit) => Promise<T>
   canPurchase: boolean
   account: ReactNode
   manual: ReactNode
+  outbound: ReactNode
   audits: ReactNode
   bins: ReactNode
   returns: ReactNode
@@ -30,7 +31,7 @@ export function WarehouseMobile({ api, canPurchase, account, manual, audits, bin
 }) {
   const parts = window.location.pathname.slice(base.length).split("/").filter(Boolean)
   const section = parts[0] || "receiving"
-  const activeSection = ["returns", "fulfillment", "inventory"].includes(section) ? "more" : section
+  const activeSection = ["bins", "returns", "fulfillment", "inventory"].includes(section) ? "more" : section
   const id = parts[1] ? decodeURIComponent(parts[1]) : ""
   useEffect(() => {
     document.body.classList.add("warehouse-mobile-mode")
@@ -42,13 +43,14 @@ export function WarehouseMobile({ api, canPurchase, account, manual, audits, bin
       {id && <Button variant="outline" className="justify-self-start" asChild><a href={`${base}/${section}`}>← Back to {section === "receiving" ? "POs" : "audits"}</a></Button>}
       {section === "receiving" && (canPurchase ? id ? purchaseOrder(id) : <PurchaseQueue api={api} /> : <p>Your account does not have purchasing access. Choose Other stock, Audits, or Bins below.</p>)}
       {section === "manual" && manual}
+      {section === "outbound" && outbound}
       {section === "audits" && (id ? audit(id) : audits)}
       {section === "bins" && bins}
-      {section === "more" && <><h1 className="text-xl font-semibold">More warehouse tasks</h1><Button asChild variant="outline"><a href={`${base}/returns`}>Customer returns / inspections</a></Button><Button asChild variant="outline"><a href={`${base}/fulfillment`}>Picking and fulfillment</a></Button><Button asChild variant="outline"><a href={`${base}/inventory`}>Inventory and transfers</a></Button></>}
+      {section === "more" && <><h1 className="text-xl font-semibold">More warehouse tasks</h1><Button asChild variant="outline"><a href={`${base}/bins`}><Boxes className="size-4" /> Bins and locations</a></Button><Button asChild variant="outline"><a href={`${base}/returns`}>Customer returns / inspections</a></Button><Button asChild variant="outline"><a href={`${base}/fulfillment`}>Picking and fulfillment</a></Button><Button asChild variant="outline"><a href={`${base}/inventory`}>Inventory and transfers</a></Button></>}
       {section === "returns" && returns}
       {section === "fulfillment" && fulfillment}
       {section === "inventory" && inventory}
-      {!["returns", "fulfillment", "inventory"].includes(section) && !sections.some(item => item.id === section) && <p>Page not found. Choose a warehouse task below.</p>}
+      {!["bins", "returns", "fulfillment", "inventory"].includes(section) && !sections.some(item => item.id === section) && <p>Page not found. Choose a warehouse task below.</p>}
     </main>
     <nav aria-label="Warehouse tasks" className="fixed inset-x-0 bottom-0 z-40 border-t bg-background pb-[env(safe-area-inset-bottom)]"><div className="mx-auto grid max-w-3xl grid-cols-5 gap-1 p-2">{sections.map(({ id: key, label, icon: Icon }) => <a key={key} href={`${base}/${key}`} aria-current={activeSection === key ? "page" : undefined} className={`flex min-h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-md px-1 text-center text-xs font-medium ${activeSection === key ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}><Icon className="size-5" />{label}</a>)}</div></nav>
   </div></MobileTables>

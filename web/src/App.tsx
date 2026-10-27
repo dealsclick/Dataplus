@@ -2623,6 +2623,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
       canReceive={userCan(authUser, "warehouse.receiving", "view")}
       canManageBins={userCan(authUser, "warehouse.locations", "view")}
       canAudit={userCan(authUser, "warehouse.audits", "view")}
+      warehouses={state.warehouses || []}
       operatorName={authUser.name || authUser.username || "Warehouse"}
       purchaseOrder={(id) => <PurchaseOrderDetailPage key={id} mobileId={id} operatorName={authUser.name || authUser.username || "Warehouse"} />} /> : <div className="p-6">Warehouse access is required. <a href="/" className="underline">Back to app</a></div>}
     </Suspense>
