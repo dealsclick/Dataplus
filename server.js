@@ -147,7 +147,6 @@ const { buildPrintPreview, attachmentFilePath, restorePurchasedLabelReferences, 
 const { buildLabelPacketIsolated } = require("./lib/isolated-fulfillment-print");
 const { createRequestPerformanceContext, enterRequestPerformanceContext } = require("./lib/performance-context");
 const { recordBatchLabelPdfSave, recordBatchLabelPrint, recordPrintJobCompletion, recordPrintJobPdfSave, recordShipmentLabelPrint } = require("./lib/fulfillment-print-audit");
-const { findShippingLabelMatches, packageShipmentStatus, recordShipmentLabelScan } = require("./lib/fulfillment-label-scan");
 const { normalizeBatchHandlingStatus, setBatchHandlingStatus } = require("./lib/fulfillment-batch-handling");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
 const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, shouldSyncRecoveredTracking, walmartShipmentNeedsTrackingSync, walmartShipmentReadyForTrackingSync, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
@@ -29102,16 +29101,46 @@ function fulfillmentRateMemoryStage(order = {}, stage = "unknown") {
   return memory;
 }
 
-async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, actor = "Scheduled carrier refresh", allowLabelFallback = true, includeLegacyRecovery = true } = {}) {
+function applyCarrierShipmentConfirmation({ order, shipment, trackingStatus, carrierStatus, carrier, trackingNumber, confirmed, occurredAt, actor }) {
+  const normalizedStatus = normalizeCarrierTrackingStatus(trackingStatus);
+  const previousStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
+  const previouslyConfirmed = carrierStatusConfirmsShipment(previousStatus) || ["shipped", "delivered"].includes(String(shipment.status || "").toLowerCase());
+  if (!confirmed) return { newlyConfirmed: false, previousStatus };
+  const now = new Date().toISOString();
+  const delivered = normalizedStatus === "delivered";
+  shipment.status = delivered ? "delivered" : "shipped";
+  shipment.shippedAt = shipment.shippedAt || occurredAt || now;
+  shipment.carrierConfirmedAt = shipment.carrierConfirmedAt || occurredAt || now;
+  if (delivered) shipment.deliveredAt = shipment.deliveredAt || occurredAt || now;
+  for (const route of Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : []) {
+    if (!shipment.fulfillmentBatchId || String(route.labelBatchId || "") !== String(shipment.fulfillmentBatchId)) continue;
+    route.status = delivered ? "delivered" : "shipped";
+    route.qtyShipped = Number(route.qty || 0);
+    route.shippedAt = route.shippedAt || occurredAt || now;
+    route.updatedAt = now;
+  }
+  recalculateOrderOperationalStatus(order);
+  if (!previouslyConfirmed) {
+    addOrderTimeline(order, {
+      type: "shipment_tracking",
+      title: delivered ? "Carrier confirmed delivery" : "Carrier confirmed shipment",
+      message: `${carrier || "Carrier"}${trackingNumber ? ` tracking ${trackingNumber}` : ""} is ${carrierStatus || normalizedStatus}.`,
+      user: actor
+    });
+  }
+  return { newlyConfirmed: !previouslyConfirmed, previousStatus };
+}
+
+async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, actor = "Scheduled carrier refresh", allowLabelFallback = true, includeLegacyRecovery = true, checkedBefore = "", trackingOnly = false } = {}) {
   if (!postgres.isPostgresEnabled()) return { checked: 0, updated: 0, confirmed: 0, failed: 0 };
   if (fulfillmentTrackingRefreshPromise) return fulfillmentTrackingRefreshPromise;
   fulfillmentTrackingRefreshPromise = (async () => {
     const startedAt = new Date().toISOString();
     const maximumCandidates = Math.max(1, Math.min(Number(limit) || 50, 50));
     const [indexedCandidates, db, legacyRecoveryBatches] = await Promise.all([
-      postgres.listShipmentTrackingCandidates({ force, limit: maximumCandidates }),
+      postgres.listShipmentTrackingCandidates({ force, limit: maximumCandidates, checkedBefore, trackingOnly }),
       readFulfillmentShippingContext(),
-      includeLegacyRecovery
+      includeLegacyRecovery && !trackingOnly
         ? postgres.listFulfillmentLabelTrackingRecoveryBatches({ limit: Math.min(maximumCandidates, 5) }).catch(() => [])
         : Promise.resolve([])
     ]);
@@ -29124,6 +29153,8 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
     const veeqoMissingTrackingMinimumCheckedAt = Date.now() - (force ? 0 : 5 * 60_000);
     const temuMinimumCheckedAt = Date.now() - (force ? 0 : 5 * 60_000);
     const candidates = [];
+    const indexedShipmentKeys = new Set((indexedCandidates || []).map((candidate) => `${String(candidate.orderId || "")}::${String(candidate.shipmentId || "")}`));
+    const restrictToIndexedShipments = Boolean(checkedBefore || trackingOnly);
     const batchRowsByOrder = new Map();
     const candidateOrders = new Map();
     const rememberCandidateOrder = (orderId, checkedAt = 0, hasTracking = false) => {
@@ -29252,10 +29283,20 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
     for (const order of orders) for (const shipment of Array.isArray(order.shipments) ? order.shipments : []) {
       const provider = String(shipment.provider || "").toLowerCase();
       const checkedAt = new Date(shipment.trackingCheckedAt || 0).getTime();
+      const shipmentKey = `${String(order.id || "")}::${String(shipment.id || "")}`;
+      if (restrictToIndexedShipments && !indexedShipmentKeys.has(shipmentKey)) continue;
       if (provider === "temu" && !String(shipment.trackingNumber || "").trim()) {
         const packageSnList = extractTemuPackageSns(shipment, order.temuShippingLabels, order.external);
         if (!packageSnList.length || (!force && Number.isFinite(checkedAt) && checkedAt >= temuMinimumCheckedAt)) continue;
         candidates.push({ order, shipment, provider, packageSnList, checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0 });
+        continue;
+      }
+      const trackingNumber = String(shipment.trackingNumber || "").trim();
+      const carrier = String(shipment.carrierName || shipment.carrier || "").trim();
+      const upsTracking = Boolean(trackingNumber && (/^1z/i.test(trackingNumber) || /\bups\b/i.test(carrier) || provider === "ups" || provider === "ups_direct"));
+      if (upsTracking && shipment.voidStatus !== "voided") {
+        const normalizedStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
+        if (normalizedStatus !== "delivered") candidates.push({ order, shipment, provider: "ups", sourceProvider: provider, packageSnList: [], checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0 });
         continue;
       }
       if (provider !== "veeqo" || shipment.voidStatus === "voided") continue;
@@ -29294,10 +29335,11 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
     });
     const summary = { checked: 0, updated: 0, confirmed: 0, failed: 0, startedAt, completedAt: "", errors: [] };
     let fulfillmentState = initialFulfillmentState;
-    for (const { order, shipment, provider, remoteShipmentId, rateSource, veeqoOrderId, allocationId, veeqoShipmentId, packageSnList } of candidates.slice(0, maximumCandidates)) {
+    for (const { order, shipment, provider, sourceProvider, remoteShipmentId, rateSource, veeqoOrderId, allocationId, veeqoShipmentId, packageSnList } of candidates.slice(0, maximumCandidates)) {
       const memoryPressure = fulfillmentWorkerMemoryPressure();
       if (memoryPressure) {
         summary.failed += 1;
+        summary.paused = true;
         summary.errors.push({
           orderId: order.id,
           shipmentId: shipment.id,
@@ -29326,6 +29368,62 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         order.updatedAt = now;
         await postgres.saveOrder(order);
         clearOrderApiCache(order.id);
+        invalidateFulfillmentConsoleSnapshot([order.id]);
+        continue;
+      }
+      if (provider === "ups") {
+        const trackingNumber = String(shipment.trackingNumber || "").trim();
+        const apiPath = `/api/track/v1/details/${encodeURIComponent(trackingNumber)}`;
+        try {
+          const previousTrackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
+          const previousPhysicalScanAt = String(shipment.carrierPhysicalScanAt || "");
+          const tracking = await upsRating.trackShipment(trackingNumber, process.env, carrierCredentials.getUps());
+          const now = new Date().toISOString();
+          const effectiveTrackingStatus = tracking.physicalScan && tracking.status === "delayed" ? "in_transit" : tracking.status;
+          const confirmed = tracking.physicalScan || carrierStatusConfirmsShipment(tracking.status);
+          const confirmation = applyCarrierShipmentConfirmation({
+            order,
+            shipment,
+            trackingStatus: effectiveTrackingStatus,
+            carrierStatus: tracking.statusDescription,
+            carrier: shipment.carrierName || shipment.carrier || "UPS",
+            trackingNumber,
+            confirmed,
+            occurredAt: tracking.physicalScanAt || tracking.latestActivityAt,
+            actor
+          });
+          shipment.carrierName = shipment.carrierName || shipment.carrier || "UPS";
+          shipment.carrier = shipment.carrier || "UPS";
+          shipment.carrierStatus = tracking.statusDescription;
+          shipment.trackingStatus = effectiveTrackingStatus;
+          shipment.carrierTrackingSource = tracking.source;
+          shipment.carrierLatestActivity = tracking.latestActivity;
+          shipment.carrierLatestActivityAt = tracking.latestActivityAt;
+          shipment.carrierActivityCount = Number(tracking.activityCount || 0);
+          if (tracking.physicalScanAt) shipment.carrierPhysicalScanAt = tracking.physicalScanAt;
+          shipment.trackingCheckedAt = now;
+          shipment.trackingRefreshError = "";
+          shipment.updatedAt = now;
+          summary.checked += 1;
+          if (effectiveTrackingStatus !== previousTrackingStatus || (!previousPhysicalScanAt && tracking.physicalScanAt)) summary.updated += 1;
+          if (confirmation.newlyConfirmed) summary.confirmed += 1;
+          const needsWalmartTrackingSync = String(order.source || "").trim().toLowerCase() === "walmart" && walmartShipmentNeedsTrackingSync(shipment);
+          if (shouldSyncRecoveredTracking(shipment) || needsWalmartTrackingSync) await syncDropshipShipmentToChannel(db, order, shipment, actor);
+          order.updatedAt = now;
+          await postgres.saveOrder(order);
+          clearOrderApiCache(order.id);
+          invalidateFulfillmentConsoleSnapshot([order.id]);
+          appendChannelApiLog({ channel: "UPS", transport: "HTTP", method: "GET", path: apiPath, operation: "Check carrier scan", statusCode: 200, ok: true, entityType: "order", entityId: order.id, message: `${trackingNumber}: ${tracking.statusDescription}${tracking.physicalScan ? " (physical scan)" : ""}.`, details: { sourceProvider: sourceProvider || "", transactionId: tracking.transactionId } });
+        } catch (error) {
+          summary.failed += 1;
+          summary.errors.push({ orderId: order.id, shipmentId: shipment.id, message: error.message || "UPS carrier scan check failed." });
+          shipment.trackingCheckedAt = new Date().toISOString();
+          shipment.trackingRefreshError = error.message || "UPS carrier scan check failed.";
+          await postgres.saveOrder(order);
+          clearOrderApiCache(order.id);
+          invalidateFulfillmentConsoleSnapshot([order.id]);
+          appendChannelApiLog({ channel: "UPS", transport: "HTTP", method: "GET", path: apiPath, operation: "Check carrier scan failed", statusCode: 502, ok: false, entityType: "order", entityId: order.id, message: shipment.trackingRefreshError });
+        }
         continue;
       }
       const allocationShipment = rateSource === "veeqo_allocation" || Boolean(allocationId && veeqoOrderId);
@@ -29408,6 +29506,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         order.updatedAt = now;
         await postgres.saveOrder(order);
         clearOrderApiCache(order.id);
+        invalidateFulfillmentConsoleSnapshot([order.id]);
         if (remoteShipmentId || veeqoOrderId) appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "GET", path: apiPath, operation: "Refresh outbound tracking", statusCode: 200, ok: true, entityType: "order", entityId: order.id, message: `${trackingNumber || shipment.reference || "Shipment"}: ${remoteStatus || trackingStatus}.` });
       } catch (error) {
         summary.failed += 1;
@@ -29416,6 +29515,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         shipment.trackingRefreshError = error.message || "Tracking refresh failed.";
         await postgres.saveOrder(order);
         clearOrderApiCache(order.id);
+        invalidateFulfillmentConsoleSnapshot([order.id]);
         appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "GET", path: apiPath, operation: "Refresh outbound tracking failed", statusCode: 502, ok: false, entityType: "order", entityId: order.id, message: shipment.trackingRefreshError });
       }
     }
@@ -29427,27 +29527,45 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
   return fulfillmentTrackingRefreshPromise;
 }
 
-async function queueScheduledFulfillmentTrackingRefreshJob(options = {}) {
-  if (!postgres.isPostgresEnabled() || await activeWorkerTask("fulfillment-tracking-refresh")) return null;
-  const limit = Math.max(1, Math.min(Number(options.limit || 10), 10));
+async function queueFulfillmentTrackingRefreshJob(options = {}) {
+  if (!postgres.isPostgresEnabled()) return null;
+  const existingJobs = await postgres.readOperationJobs(100).catch(() => []);
+  const active = existingJobs.find((entry) => ["queued", "running"].includes(String(entry.status || "").toLowerCase())
+    && String(entry.workerTask || entry.raw?.workerTask || "") === "fulfillment-tracking-refresh");
+  if (active) return active;
+  const scheduled = options.scheduled === true;
+  const force = options.force === true;
+  const trackingOnly = options.trackingOnly === true;
+  const scanStartedAt = new Date().toISOString();
+  const requestedLimit = Math.max(1, Number(options.limit || (scheduled ? 50 : Number.MAX_SAFE_INTEGER)));
+  const candidateCount = await postgres.countShipmentTrackingCandidates({ force, trackingOnly, checkedBefore: scanStartedAt });
+  const totalRows = Math.min(candidateCount, requestedLimit);
   const queueDb = { importJobs: [] };
   const job = createImportJob(queueDb, {
     section: "Fulfillment",
     category: "Shipping",
-    operation: "Refresh shipment tracking",
+    operation: scheduled ? "Scheduled carrier scan check" : "Check carrier scans",
     direction: "sync",
     status: "queued",
     startedAt: "",
-    totalRows: limit,
+    totalRows,
     processedRows: 0,
     progressPercent: 0,
     phase: "queued",
     workerTask: "fulfillment-tracking-refresh",
-    workerPayload: { scheduled: true, background: true, limit },
-    message: "Shipment tracking refresh is queued in the background worker."
+    workerPayload: { scheduled, background: true, force, trackingOnly, scanStartedAt, limit: totalRows, batchSize: Math.min(50, Number(options.batchSize || 50)), requestedBy: options.requestedBy || "" },
+    rowLabel: "shipping labels",
+    progressLabel: scheduled ? "Carrier scan check queued" : "Checking carrier scans",
+    message: totalRows
+      ? `${totalRows.toLocaleString()} shipping label${totalRows === 1 ? "" : "s"} queued for carrier scan checks.`
+      : "No eligible shipping labels need a carrier scan check."
   });
   await postgres.upsertOperationJob(job);
   return job;
+}
+
+async function queueScheduledFulfillmentTrackingRefreshJob(options = {}) {
+  return queueFulfillmentTrackingRefreshJob({ ...options, scheduled: true, force: false, trackingOnly: false, limit: Math.max(1, Math.min(Number(options.limit || 50), 50)) });
 }
 
 async function runFulfillmentTrackingRefreshWorkerJob(job = {}) {
@@ -29458,25 +29576,66 @@ async function runFulfillmentTrackingRefreshWorkerJob(job = {}) {
     message: "Refreshing carrier tracking for indexed shipment candidates."
   });
   try {
-    const result = await refreshFulfillmentShipmentTracking({
-      force: job.workerPayload?.force === true,
-      limit: job.workerPayload?.scheduled === true
-        ? Math.min(10, Number(job.workerPayload?.limit || 10))
-        : Number(job.workerPayload?.limit || 100),
-      actor: String(job.workerPayload?.requestedBy || "Scheduled carrier refresh"),
-      allowLabelFallback: job.workerPayload?.scheduled !== true,
-      includeLegacyRecovery: job.workerPayload?.scheduled !== true
+    const scheduled = job.workerPayload?.scheduled === true;
+    const totalRows = Math.max(0, Number(job.totalRows || job.workerPayload?.limit || 0));
+    const batchSize = Math.max(1, Math.min(50, Number(job.workerPayload?.batchSize || 50)));
+    const aggregate = { checked: 0, updated: 0, confirmed: 0, failed: 0, errors: [], incomplete: false };
+    let processedRows = 0;
+    while (processedRows < totalRows) {
+      const result = await refreshFulfillmentShipmentTracking({
+        force: job.workerPayload?.force === true,
+        limit: Math.min(batchSize, totalRows - processedRows),
+        actor: String(job.workerPayload?.requestedBy || "Scheduled carrier refresh"),
+        allowLabelFallback: !scheduled,
+        includeLegacyRecovery: !scheduled && job.workerPayload?.trackingOnly !== true,
+        checkedBefore: String(job.workerPayload?.scanStartedAt || job.createdAt || ""),
+        trackingOnly: job.workerPayload?.trackingOnly === true
+      });
+      const batchProcessed = Number(result.checked || 0) + Number(result.failed || 0);
+      aggregate.checked += Number(result.checked || 0);
+      aggregate.updated += Number(result.updated || 0);
+      aggregate.confirmed += Number(result.confirmed || 0);
+      aggregate.failed += Number(result.failed || 0);
+      aggregate.errors.push(...(Array.isArray(result.errors) ? result.errors : []));
+      processedRows += batchProcessed;
+      current = await persistWorkerImportJob(current, {
+        totalRows,
+        processedRows: Math.min(totalRows, processedRows),
+        progressPercent: totalRows ? Math.min(99, Math.round((processedRows / totalRows) * 100)) : 100,
+        changed: aggregate.confirmed,
+        missingCount: aggregate.failed,
+        errors: aggregate.errors.slice(-50),
+        message: `${Math.min(totalRows, processedRows).toLocaleString()}/${totalRows.toLocaleString()} labels checked; ${aggregate.confirmed.toLocaleString()} newly shipped; ${aggregate.failed.toLocaleString()} failed.`
+      });
+      if (!batchProcessed || result.paused) {
+        aggregate.incomplete = processedRows < totalRows;
+        break;
+      }
+    }
+    if (processedRows < totalRows) {
+      aggregate.incomplete = true;
+      aggregate.errors.push({ message: `${(totalRows - processedRows).toLocaleString()} labels were not checked because no further eligible carrier records were available.` });
+    }
+    const completedAt = new Date().toISOString();
+    await postgres.writeStateField("fulfillmentTrackingRefresh", {
+      checked: aggregate.checked,
+      updated: aggregate.updated,
+      confirmed: aggregate.confirmed,
+      failed: aggregate.failed,
+      startedAt: current.startedAt || job.createdAt || completedAt,
+      completedAt,
+      errors: aggregate.errors.slice(-50)
     });
     return persistWorkerImportJob(current, {
-      status: result.failed ? "warning" : "success",
+      status: aggregate.failed || aggregate.incomplete ? "warning" : "success",
       phase: "complete",
       progressPercent: 100,
-      processedRows: Number(result.checked || 0),
-      changedCount: Number(result.updated || 0),
-      errorCount: Number(result.failed || 0),
-      errors: result.errors || [],
-      message: `${Number(result.checked || 0)} shipments checked; ${Number(result.updated || 0)} updated; ${Number(result.failed || 0)} need attention.`,
-      finishedAt: new Date().toISOString()
+      processedRows: Math.min(totalRows, processedRows),
+      changed: aggregate.confirmed,
+      missingCount: aggregate.failed,
+      errors: aggregate.errors.slice(-50),
+      message: `${Math.min(totalRows, processedRows).toLocaleString()}/${totalRows.toLocaleString()} labels checked; ${aggregate.confirmed.toLocaleString()} newly shipped; ${aggregate.failed.toLocaleString()} failed.`,
+      finishedAt: completedAt
     });
   } catch (error) {
     return persistWorkerImportJob(current, {
@@ -31965,13 +32124,6 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
       labelLastPrintStation: shipment.labelLastPrintStation || printJob?.lastPrintStation || printJob?.stationName || "",
       labelLastPrinterName: shipment.labelLastPrinterName || printJob?.lastPrinterName || printJob?.printerName || "",
       labelPrintHistory: Array.isArray(shipment.labelPrintHistory) ? shipment.labelPrintHistory : [],
-      labelPrintEvidenceSource: shipment.labelPrintEvidenceSource || "",
-      labelScanVerifiedAt: shipment.labelScanVerifiedAt || "",
-      labelScanVerifiedBy: shipment.labelScanVerifiedBy || "",
-      labelLastScannedAt: shipment.labelLastScannedAt || "",
-      labelLastScannedBy: shipment.labelLastScannedBy || "",
-      labelScanCount: Number(shipment.labelScanCount || 0),
-      labelScanEvidenceSource: shipment.labelScanEvidenceSource || "",
       fulfillmentBatchNumber: printJob?.batchNumber || "",
       pickedAt: batchRow?.pickedAt || "",
       pickedBy: batchRow?.pickedBy || "",
@@ -32249,7 +32401,7 @@ function projectFulfillmentConsoleSnapshot(snapshot = {}, view = "") {
     late: work.filter((row) => fulfillmentConsoleDeadlineState(row) === "late").length,
     readyForLabel: work.filter((row) => String(row.allocationStatus || "").toLowerCase() === "allocated" || String(row.status || "").toLowerCase() === "ready_to_ship").length,
     purchasedLabels: shipmentSets.purchased.length,
-    unprintedPurchasedLabels: shipmentSets.purchased.filter((row) => !row.labelScanVerifiedAt && !row.labelPrintedAt && Number(row.labelPrintCount || 0) <= 0).length,
+    unprintedPurchasedLabels: shipmentSets.purchased.filter((row) => !row.labelPrintedAt && Number(row.labelPrintCount || 0) <= 0).length,
     shipped: shipmentSets.shipped.length,
     exceptions: Array.isArray(snapshot.exceptions) ? snapshot.exceptions.length : 0,
     trackingFailures: Array.isArray(snapshot.exceptions) ? snapshot.exceptions.filter((row) => row.type === "tracking").length : 0,
@@ -51644,91 +51796,6 @@ async function handleApi(req, res) {
     return sendJson(res, 202, { recorded: true });
   }
 
-  if (req.method === "POST" && url.pathname === "/api/fulfillment/label-scan" && postgres.isPostgresEnabled()) {
-    const body = await parseBody(req);
-    const code = String(body.code || "").trim();
-    if (code.length < 3 || code.length > 160) return sendJson(res, 400, { error: "Scan a tracking barcode, package ID, or order number." });
-    const orders = await postgres.readOrdersByShippingLabelCode(code, { limit: 6 });
-    const matches = findShippingLabelMatches(orders, code);
-    if (!matches.length) return sendJson(res, 404, { error: `No shipping label was found for ${code}. Check the barcode or open the order to confirm tracking was saved.` });
-    if (matches.length > 1) {
-      return sendJson(res, 409, {
-        error: `This scan matches ${matches.length} packages. Scan the tracking barcode instead of the order number.`,
-        matches: matches.slice(0, 6).map(({ order, shipment }) => ({
-          orderId: order.id,
-          orderNumber: order.orderNumber || order.id,
-          shipmentId: shipment.id || "",
-          trackingNumber: shipment.trackingNumber || ""
-        }))
-      });
-    }
-    const { order, shipment, matchedBy } = matches[0];
-    const actor = authUser?.name || authUser?.username || "Warehouse";
-    const firstPhysicalVerification = !shipment.labelScanVerifiedAt;
-    const scan = recordShipmentLabelScan(shipment, {
-      scanId: String(body.scanId || crypto.randomUUID()),
-      scannedBy: actor,
-      code,
-      matchedBy
-    });
-    const packageStatus = packageShipmentStatus(order, shipment);
-    if (scan.recorded) {
-      if (firstPhysicalVerification) {
-        addOrderTimeline(order, {
-          type: "shipping_label_scan",
-          title: "Shipping label physically verified",
-          message: `${shipment.trackingNumber || shipment.id || "Package label"} scanned in Fulfillment. ${scan.addedPrintEvidence ? "The scan supplied the first physical print evidence." : "Existing print evidence was preserved."} Shipment status was not changed.`,
-          user: actor
-        });
-      }
-      order.updatedAt = scan.event.scannedAt;
-      await postgres.saveOrder(order);
-      clearOrderApiCache(order.id);
-      invalidateFulfillmentConsoleSnapshot([order.id]);
-      void recordUserActivity(req, authUser, {
-        eventType: "fulfillment",
-        action: "shipping_label_scanned",
-        path: url.pathname,
-        entityType: "shipment",
-        entityId: String(shipment.id || shipment.trackingNumber || order.id),
-        metadata: { orderId: order.id, trackingNumber: shipment.trackingNumber || "", matchedBy, addedPrintEvidence: scan.addedPrintEvidence, packageStatus: packageStatus.code }
-      });
-    }
-    const shipmentLines = Array.isArray(shipment.lines) && shipment.lines.length ? shipment.lines : (Array.isArray(order.items) ? order.items : []);
-    const printed = Boolean(shipment.labelScanVerifiedAt || shipment.labelPrintedAt || shipment.labelLastPrintedAt || Number(shipment.labelPrintCount || 0) > 0);
-    return sendJson(res, 200, {
-      match: {
-        orderId: order.id,
-        orderNumber: order.orderNumber || order.id,
-        channel: order.channelSource || order.source || "",
-        channelOrderNumber: order.channelOrderNumber || order.marketplaceOrderNumber || order.marketplaceOrderId || "",
-        shipmentId: shipment.id || "",
-        trackingNumber: shipment.trackingNumber || "",
-        carrier: shipment.carrierName || shipment.carrier || shipment.provider || "",
-        service: shipment.serviceName || shipment.service || "",
-        batchId: shipment.fulfillmentBatchId || "",
-        skus: [...new Set(shipmentLines.map((line) => String(line.sku || line.mappedSku || line.originalSku || "").trim()).filter(Boolean))],
-        print: {
-          printed,
-          status: shipment.labelScanVerifiedAt ? "scan_verified" : printed ? "printed" : "not_printed",
-          firstPrintedAt: shipment.labelPrintedAt || shipment.labelScanVerifiedAt || "",
-          lastPrintedAt: shipment.labelLastPrintedAt || shipment.labelPrintedAt || shipment.labelLastScannedAt || shipment.labelScanVerifiedAt || "",
-          printedBy: shipment.labelLastPrintedBy || shipment.labelPrintedBy || shipment.labelLastScannedBy || shipment.labelScanVerifiedBy || "",
-          printCount: Number(shipment.labelPrintCount || 0),
-          evidenceSource: shipment.labelScanVerifiedAt ? "physical_scan" : "print_action",
-          scanVerifiedAt: shipment.labelScanVerifiedAt || "",
-          lastScannedAt: shipment.labelLastScannedAt || "",
-          scanCount: Number(shipment.labelScanCount || 0),
-          addedPrintEvidence: scan.addedPrintEvidence
-        },
-        packageStatus
-      },
-      message: scan.addedPrintEvidence
-        ? "Label verified. The physical scan supplied the first print evidence; shipment status was not changed."
-        : "Label verified. Existing print evidence and shipment status were preserved."
-    });
-  }
-
   if (req.method === "GET" && url.pathname === "/api/fulfillment/console" && postgres.isPostgresEnabled()) {
     const requestStarted = fulfillmentPerformanceClock();
     const view = String(url.searchParams.get("view") || "ready").trim().toLowerCase();
@@ -51780,8 +51847,12 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && url.pathname === "/api/fulfillment/tracking/refresh" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const result = await refreshFulfillmentShipmentTracking({ force: body.force === true, limit: Number(body.limit || 100), actor: authUser?.name || authUser?.username || "Manual carrier refresh" });
-    return sendJson(res, 200, { result, message: `Carrier tracking checked for ${result.checked} shipment${result.checked === 1 ? "" : "s"}; ${result.confirmed} newly confirmed shipped.` });
+    const job = await queueFulfillmentTrackingRefreshJob({
+      force: body.force !== false,
+      trackingOnly: body.trackingOnly !== false,
+      requestedBy: authUser?.name || authUser?.username || "Manual carrier scan check"
+    });
+    return sendJson(res, 202, { job, message: job?.message || "Carrier scan check queued." });
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/carriers" && postgres.isPostgresEnabled()) {

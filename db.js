@@ -3528,7 +3528,7 @@ async function patchFulfillmentConsoleProjection(projection = {}) {
         count(*) filter (where view_key = 'ready' and data->>'projectionDeadlineState' = 'late')::int as late,
         count(*) filter (where view_key = 'ready' and (lower(coalesce(data->>'allocationStatus', '')) = 'allocated' or lower(coalesce(data->>'status', '')) = 'ready_to_ship'))::int as ready_for_label,
         count(*) filter (where view_key = 'purchased-labels')::int as purchased_labels,
-        count(*) filter (where view_key = 'purchased-labels' and coalesce(data->>'labelScanVerifiedAt', '') = '' and coalesce(data->>'labelPrintedAt', '') = '' and coalesce(nullif(data->>'labelPrintCount', '')::numeric, 0) <= 0)::int as unprinted_purchased_labels,
+        count(*) filter (where view_key = 'purchased-labels' and coalesce(data->>'labelPrintedAt', '') = '' and coalesce(nullif(data->>'labelPrintCount', '')::numeric, 0) <= 0)::int as unprinted_purchased_labels,
         count(*) filter (where view_key = 'shipments')::int as shipped,
         count(*) filter (where view_key = 'exceptions')::int as exceptions,
         count(*) filter (where view_key = 'exceptions' and data->>'type' = 'tracking')::int as tracking_failures,
@@ -3862,7 +3862,7 @@ async function readFulfillmentConsoleProjectionPage(viewKey, options = {}) {
   if (skus.length) filters.push(`lower(coalesce(data->>'sku', data->>'catalogSku', 'missing sku')) = any(${bind(skus)}::text[])`);
   if (options.kind && options.kind !== "all") filters.push(`lower(coalesce(data->>'kind', '')) = ${bind(String(options.kind).toLowerCase())}`);
   if (options.printStatus && options.printStatus !== "all") {
-    const printedExpression = `(coalesce(nullif(data->>'labelPrintCount', '')::numeric, 0) > 0 or coalesce(data->>'labelPrintedAt', '') <> '' or coalesce(data->>'labelScanVerifiedAt', '') <> '')`;
+    const printedExpression = `(coalesce(nullif(data->>'labelPrintCount', '')::numeric, 0) > 0 or coalesce(data->>'labelPrintedAt', '') <> '')`;
     filters.push(options.printStatus === "printed" ? printedExpression : `not ${printedExpression}`);
   }
   if (options.carrier && options.carrier !== "all") filters.push(`lower(coalesce(data->>'carrierName', data->>'carrier', 'unknown carrier')) = ${bind(String(options.carrier).toLowerCase())}`);
@@ -3990,7 +3990,7 @@ async function readFulfillmentConsoleProjectionFacets(viewKey, options = {}) {
       union all select 'channel', coalesce(nullif(data->>'channel', ''), 'Unassigned') from source_rows
       union all select 'labelSource', case when lower(coalesce(data->>'labelSource', '')) = 'dataplus' then 'DataPlus' else 'Marketplace' end from source_rows
       union all select 'channelSync', case when lower(coalesce(data->'channelSync'->>'status', '')) in ('sent', 'synced', 'already_synced') then 'Confirmed' when lower(coalesce(data->'channelSync'->>'status', '')) in ('failed', 'disabled', 'not_supported') then 'Failed' else 'Pending' end from source_rows
-      union all select 'printStatus', case when coalesce(nullif(data->>'labelPrintCount', '')::numeric, 0) > 0 or coalesce(data->>'labelPrintedAt', '') <> '' or coalesce(data->>'labelScanVerifiedAt', '') <> '' then 'Printed' else 'Not printed' end from source_rows
+      union all select 'printStatus', case when coalesce(nullif(data->>'labelPrintCount', '')::numeric, 0) > 0 or coalesce(data->>'labelPrintedAt', '') <> '' then 'Printed' else 'Not printed' end from source_rows
     )
     select facet, lower(label) as value, label, count(*)::int as count
     from facet_values
@@ -10403,6 +10403,9 @@ async function listShipmentTrackingCandidates(options = {}) {
   await initRelationalSchema();
   const limit = Math.max(1, Math.min(500, Number(options.limit || 250)));
   const force = options.force === true;
+  const checkedBefore = options.checkedBefore ? new Date(options.checkedBefore) : null;
+  const checkedBeforeValue = checkedBefore && Number.isFinite(checkedBefore.getTime()) ? checkedBefore : null;
+  const trackingOnly = options.trackingOnly === true;
   const result = await client.query(`
     select
       tracking.order_id,
@@ -10422,6 +10425,8 @@ async function listShipmentTrackingCandidates(options = {}) {
     where tracking.monitoring_complete = false
       and tracking.next_check_at is not null
       and ($1::boolean = true or tracking.next_check_at <= now())
+      and ($2::timestamptz is null or tracking.tracking_checked_at is null or tracking.tracking_checked_at < $2)
+      and ($3::boolean = false or nullif(tracking.tracking_number, '') is not null)
       and lower(coalesce(orders.status, '')) not in (
         'deleted', 'canceled', 'cancelled', 'void', 'voided', 'delivered',
         'completed', 'complete', 'done', 'closed'
@@ -10431,8 +10436,8 @@ async function listShipmentTrackingCandidates(options = {}) {
       tracking.next_check_at asc,
       tracking.order_id,
       tracking.shipment_id
-    limit $2
-  `, [force, limit]);
+    limit $4
+  `, [force, checkedBeforeValue, trackingOnly, limit]);
   return result.rows.map((row) => ({
     orderId: row.order_id,
     shipmentId: row.shipment_id,
@@ -10444,6 +10449,31 @@ async function listShipmentTrackingCandidates(options = {}) {
     batchId: row.batch_id || "",
     workType: row.work_type || "tracking_recovery"
   }));
+}
+
+async function countShipmentTrackingCandidates(options = {}) {
+  const client = getPool();
+  if (!client) return 0;
+  await initRelationalSchema();
+  const force = options.force === true;
+  const checkedBefore = options.checkedBefore ? new Date(options.checkedBefore) : null;
+  const checkedBeforeValue = checkedBefore && Number.isFinite(checkedBefore.getTime()) ? checkedBefore : null;
+  const trackingOnly = options.trackingOnly === true;
+  const result = await client.query(`
+    select count(*)::int as count
+    from order_shipment_tracking tracking
+    join order_records orders on orders.order_id = tracking.order_id
+    where tracking.monitoring_complete = false
+      and tracking.next_check_at is not null
+      and ($1::boolean = true or tracking.next_check_at <= now())
+      and ($2::timestamptz is null or tracking.tracking_checked_at is null or tracking.tracking_checked_at < $2)
+      and ($3::boolean = false or nullif(tracking.tracking_number, '') is not null)
+      and lower(coalesce(orders.status, '')) not in (
+        'deleted', 'canceled', 'cancelled', 'void', 'voided', 'delivered',
+        'completed', 'complete', 'done', 'closed'
+      )
+  `, [force, checkedBeforeValue, trackingOnly]);
+  return Number(result.rows[0]?.count || 0);
 }
 
 async function listFulfillmentLabelBatchRecoveryCandidates(options = {}) {
@@ -10548,46 +10578,6 @@ async function readOrderByKey(key) {
     order by line_index
   `, [result.rows[0].order_id]);
   return orderRowToState(result.rows[0], lines.rows);
-}
-
-async function readOrdersByShippingLabelCode(code, options = {}) {
-  const client = getPool();
-  const value = nullableString(code)?.toLowerCase();
-  if (!client || !value) return [];
-  await initRelationalSchema();
-  const limit = Math.max(1, Math.min(10, Number(options.limit || 4)));
-  const result = await client.query(`
-    with candidate_orders as (
-      select tracking.order_id, 1 as priority
-      from order_shipment_tracking tracking
-      where lower(coalesce(tracking.tracking_number, '')) = $1
-         or lower(coalesce(tracking.shipment_id, '')) = $1
-         or lower(coalesce(tracking.remote_shipment_id, '')) = $1
-      union all
-      select rows.order_id, 2 as priority
-      from fulfillment_label_batch_rows rows
-      where lower(coalesce(rows.tracking_number, '')) = $1
-         or lower(coalesce(rows.shipment_id, '')) = $1
-      union all
-      select orders.order_id, 3 as priority
-      from order_records orders
-      where lower(coalesce(orders.order_id, '')) = $1
-         or lower(coalesce(orders.order_number, '')) = $1
-         or lower(coalesce(orders.internal_order_number, '')) = $1
-         or lower(coalesce(orders.marketplace_order_id, '')) = $1
-         or lower(coalesce(orders.tracking_number, '')) = $1
-         or lower(coalesce(orders.raw->>'channelOrderNumber', '')) = $1
-         or lower(coalesce(orders.raw->>'channelOrderId', '')) = $1
-         or lower(coalesce(orders.raw->>'marketplaceOrderNumber', '')) = $1
-         or lower(coalesce(orders.raw->>'marketplaceOrderId', '')) = $1
-    )
-    select order_id
-    from candidate_orders
-    group by order_id
-    order by min(priority), order_id
-    limit $2
-  `, [value, limit]);
-  return readOrdersByIds(result.rows.map((row) => row.order_id));
 }
 
 async function readOrderFinancialSummary(orderId) {
@@ -18204,6 +18194,7 @@ module.exports = {
   listFulfillmentPickRows,
   listManifestShipments,
   listShipmentTrackingCandidates,
+  countShipmentTrackingCandidates,
   listFulfillmentLabelBatchRecoveryCandidates,
   listFulfillmentLabelTrackingRecoveryBatches,
   listPurchaseOrders,
@@ -18217,7 +18208,6 @@ module.exports = {
   quickSearchProducts,
   quickSearchOperations,
   readOrderByKey,
-  readOrdersByShippingLabelCode,
   readOrderFinancialSummary,
   readChannelOrderForReturn,
   readOrdersByMarketplaceKey,
