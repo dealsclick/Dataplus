@@ -858,6 +858,9 @@ async function initRelationalSchema() {
     create index if not exists order_records_walmart_customer_order_idx on order_records (lower(coalesce(raw->'external'->>'customerOrderId', '')) text_pattern_ops);
     create index if not exists order_records_walmart_purchase_order_idx on order_records (lower(coalesce(raw->'external'->>'purchaseOrderId', '')) text_pattern_ops);
     create index if not exists order_records_tracking_number_idx on order_records (lower(tracking_number));
+    create index if not exists order_records_tracking_compact_idx
+      on order_records ((regexp_replace(lower(tracking_number), '[^a-z0-9]', '', 'g')))
+      where nullif(tracking_number, '') is not null;
     create index if not exists order_records_buyer_lookup_idx on order_records (lower(buyer));
     create index if not exists order_records_buyer_email_lookup_idx on order_records (lower(buyer_email));
 
@@ -919,6 +922,9 @@ async function initRelationalSchema() {
       where monitoring_complete = false and next_check_at is not null;
     create index if not exists order_shipment_tracking_number_idx
       on order_shipment_tracking (lower(tracking_number)) where nullif(tracking_number, '') is not null;
+    create index if not exists order_shipment_tracking_compact_idx
+      on order_shipment_tracking ((regexp_replace(lower(tracking_number), '[^a-z0-9]', '', 'g')))
+      where nullif(tracking_number, '') is not null;
 
     create table if not exists order_shipment_financials (
       order_id text not null,
@@ -10309,6 +10315,51 @@ async function readOrdersByShipmentGroupId(shipmentGroupId) {
   return readOrdersByIds(result.rows.map((row) => row.order_id));
 }
 
+async function readOrdersByTrackingCandidates(values = [], options = {}) {
+  const client = getPool();
+  const candidates = [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => String(value || '').trim().toLowerCase().replace(/[^a-z0-9]/g, ''))
+    .filter((value) => value.length >= 6 && value.length <= 80))].slice(0, 40);
+  if (!client || !candidates.length) return [];
+  await initRelationalSchema();
+  const limit = Math.max(1, Math.min(50, Number(options.limit || 20)));
+  const result = await client.query(`
+    with matches as (
+      select tracking.order_id, tracking.shipment_id,
+        coalesce(tracking.tracking_number, '') as tracking_number,
+        coalesce(tracking.provider, '') as provider,
+        0 as priority
+      from order_shipment_tracking tracking
+      where regexp_replace(lower(coalesce(tracking.tracking_number, '')), '[^a-z0-9]', '', 'g') = any($1::text[])
+      union all
+      select orders.order_id, '' as shipment_id,
+        coalesce(orders.tracking_number, '') as tracking_number,
+        '' as provider,
+        1 as priority
+      from order_records orders
+      where regexp_replace(lower(coalesce(orders.tracking_number, '')), '[^a-z0-9]', '', 'g') = any($1::text[])
+    ), ranked as (
+      select distinct on (matches.order_id)
+        matches.order_id, matches.shipment_id, matches.tracking_number, matches.provider
+      from matches
+      join order_records orders on orders.order_id = matches.order_id
+      where lower(coalesce(orders.status, '')) <> 'deleted'
+      order by matches.order_id, matches.priority, matches.shipment_id
+    )
+    select * from ranked
+    order by order_id
+    limit $2
+  `, [candidates, limit]);
+  const orders = await readOrdersByIds(result.rows.map((row) => row.order_id));
+  const matchByOrder = new Map(result.rows.map((row) => [String(row.order_id), row]));
+  return orders.map((order) => ({
+    order,
+    shipmentId: matchByOrder.get(String(order.id))?.shipment_id || '',
+    trackingNumber: matchByOrder.get(String(order.id))?.tracking_number || order.trackingNumber || '',
+    provider: matchByOrder.get(String(order.id))?.provider || ''
+  }));
+}
+
 async function listManifestShipments(options = {}) {
   const client = getPool();
   const carrier = nullableString(options.carrier);
@@ -18191,6 +18242,7 @@ module.exports = {
   readOrdersByIds,
   readOrdersByFulfillmentRouteIds,
   readOrdersByShipmentGroupId,
+  readOrdersByTrackingCandidates,
   listFulfillmentPickRows,
   listManifestShipments,
   listShipmentTrackingCandidates,

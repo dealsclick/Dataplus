@@ -7,6 +7,7 @@ import { Textarea } from "./ui/textarea"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "./ui/dialog"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select"
 import { ReturnReceiptFields } from "./order-return-details"
+import { TrackingCameraLookup } from "./tracking-camera-lookup"
 
 type Row = Record<string, unknown>
 type Photo = { id: string; name: string; size: number; mimeType: string; dataUrl: string; stage: string }
@@ -61,7 +62,7 @@ export function ReturnReceiving({ warehouses, onUpdated }: { warehouses: Row[]; 
   }
   return <section aria-label="Return receiving" className="grid min-w-0 gap-3 border-y py-4">
     <h2 className="font-semibold">Receive a return</h2>
-    <form className="flex flex-wrap items-end gap-2" onSubmit={event => { event.preventDefault(); if (!busy) void lookup() }}><Label className="grid min-w-0 flex-1 gap-2">Return, order or tracking number<Input value={query} maxLength={200} onChange={event => setQuery(event.target.value)} autoComplete="off" /></Label><Button disabled={busy || !query.trim()}><ScanLine className="size-4" />Find return</Button></form>
+    <form className="flex flex-wrap items-end gap-2" onSubmit={event => { event.preventDefault(); if (!busy) void lookup() }}><Label className="grid min-w-0 flex-1 gap-2">Return, order or tracking number<Input value={query} maxLength={200} onChange={event => setQuery(event.target.value)} autoComplete="off" /></Label><TrackingCameraLookup scope="returns" label="Scan tracking" onReturnSelected={open} /><Button disabled={busy || !query.trim()}><ScanLine className="size-4" />Find return</Button></form>
     {!record && error && <p role="alert" className="text-sm text-destructive">{error}</p>}{message && <p role="status" className="text-sm">{message}</p>}
     {total === 0 && <p className="text-sm text-muted-foreground">No exact match in saved returns.</p>}
     {total !== null && total > 50 && <p className="text-sm text-muted-foreground">Showing 50 of {total} matches. Use the return number to narrow the search.</p>}

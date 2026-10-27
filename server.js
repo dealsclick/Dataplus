@@ -131,6 +131,7 @@ const { findFreshVeeqoRate, isStaleVeeqoRateError, veeqoRateExpiresAt, veeqoRate
 const { findMatchingShippingRate, rateReviewNeedsPurchaseVerification, rateReviewNeedsScheduledRefresh, shippingRatePriceChange } = require("./lib/fulfillment-rate-freshness");
 const { buildReturnLabelPrintPacket } = require("./lib/return-label-print");
 const { findReturnReceipts } = require("./lib/return-receiving-lookup");
+const { trackingLookupCandidates } = require("./lib/tracking-barcode");
 const { normalizeSourceOrderCompletion, sourceOrderFullyShipped } = require("./lib/source-order-completion");
 const { importShopifyReturns } = require("./lib/shopify-return-import");
 const { importTemuReturns, temuReturnRecord, temuReturnResponse } = require("./lib/temu-return-import");
@@ -60737,6 +60738,56 @@ async function handleApi(req, res) {
     const records = postgres.isPostgresEnabled() ? await postgres.readStateField("returns") || [] : (await readDb()).returns || [];
     const matches = findReturnReceipts(records, query);
     return sendJson(res, 200, { returns: matches.slice(0, 50), total: matches.length });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/orders/tracking-lookup" && postgres.isPostgresEnabled()) {
+    const canViewOrders = userCan(authUser, "orders", "view") || userCan(authUser, "orders.queue", "view");
+    const canViewReturns = userCan(authUser, "orders.returns", "view");
+    if (!canViewOrders && !canViewReturns) return sendJson(res, 403, { error: "Order or return view permission is required." });
+    const query = String(url.searchParams.get("q") || "").trim();
+    const scope = ["all", "orders", "returns"].includes(String(url.searchParams.get("scope") || "all").toLowerCase())
+      ? String(url.searchParams.get("scope") || "all").toLowerCase() : "all";
+    if (!query || query.length > 300) return sendJson(res, 400, { error: "Scan or enter a tracking barcode (up to 300 characters)." });
+    const candidates = trackingLookupCandidates(query);
+    if (!candidates.length) return sendJson(res, 400, { error: "The scanned barcode does not contain a usable tracking reference." });
+
+    const orderMatches = canViewOrders && scope !== "returns"
+      ? await postgres.readOrdersByTrackingCandidates(candidates, { limit: 20 }) : [];
+    let returnMatches = [];
+    if (canViewReturns && scope !== "orders") {
+      const records = await postgres.readStateField("returns") || [];
+      const byId = new Map();
+      for (const candidate of candidates) {
+        for (const record of findReturnReceipts(records, candidate)) byId.set(String(record.id || record.returnNumber), record);
+      }
+      returnMatches = returnsWithPublicSlugs([...byId.values()]).slice(0, 20);
+    }
+    const orders = orderMatches.map(({ order, shipmentId, trackingNumber, provider }) => ({
+      id: String(order.id || ""),
+      orderNumber: String(order.orderNumber || order.internalOrderNumber || order.id || ""),
+      channelOrderNumber: String(order.channelOrderNumber || order.marketplaceOrderNumber || order.marketplaceOrderId || ""),
+      channel: String(order.channelSource || order.source || ""),
+      status: String(order.status || order.fulfillmentStatus || ""),
+      buyer: String(order.buyer || order.customerName || ""),
+      orderDate: String(order.orderDate || order.createdAt || ""),
+      trackingNumber: String(trackingNumber || order.trackingNumber || ""),
+      carrier: inferCarrierFromTracking(trackingNumber || order.trackingNumber, order.shippingCarrier || order.carrier || provider),
+      shipmentId: String(shipmentId || ""),
+      href: `/orders/${encodeURIComponent(String(order.id || ""))}`
+    }));
+    const returns = returnMatches.map((record) => ({
+      ...record,
+      href: `/returns/${encodeURIComponent(String(record.returnSlug || record.returnNumber || record.id || "").toLowerCase())}`,
+      receivingHref: `/returns/${encodeURIComponent(String(record.returnSlug || record.returnNumber || record.id || "").toLowerCase())}?tab=receiving`
+    }));
+    return sendJson(res, 200, {
+      scannedValue: query,
+      normalizedCandidates: candidates,
+      orders,
+      returns,
+      total: orders.length + returns.length,
+      ambiguous: orders.length + returns.length > 1
+    });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "allocate-open-orders" && postgres.isPostgresEnabled()) {
