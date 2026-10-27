@@ -74,6 +74,17 @@ assert.match(warehouseRouteSource, /captureCompressedEvidence/);
 assert.match(warehouseRouteSource, /Quick create/);
 assert.match(warehouseRouteSource, /Full create/);
 
+const trackingLookupSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'tracking-camera-lookup.tsx'), 'utf8');
+assert.match(trackingLookupSource, /startFastBarcodeScanner/);
+assert.match(trackingLookupSource, /torchAvailable/);
+assert.doesNotMatch(trackingLookupSource, /BrowserMultiFormatReader|decodeFromConstraints/);
+
+const cameraScannerSources = fs.readdirSync(path.join(__dirname, '..', 'web', 'src', 'components'))
+  .filter(file => file.endsWith('.tsx'))
+  .map(file => fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', file), 'utf8'))
+  .join('\n');
+assert.doesNotMatch(cameraScannerSources, /BrowserMultiFormatReader|decodeFromConstraints/);
+
 assert.match(serverSource, /parts\[3\] === "quick-item"/);
 assert.match(serverSource, /warehouse-audit-quick-create/);
 assert.match(serverSource, /needsProductDetails: true/);
