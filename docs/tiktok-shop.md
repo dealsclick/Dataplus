@@ -6,6 +6,8 @@ DataPlus has a dedicated TikTok Shop channel workspace, signed API client, encry
 
 - Set `DATAPLUS_CREDENTIALS_ENCRYPTION_KEY` to a stable 32-byte base64 value or 64-character hex value before saving credentials in the UI.
 - TikTok app secrets, access tokens, and refresh tokens are encrypted with AES-256-GCM and never returned to the browser.
+- Operators enter the app key, app secret, and Service ID. DataPlus opens TikTok Shop seller authorization, exchanges the one-time authorization code on the server, and stores the generated access and refresh tokens. Tokens are never entered manually in the browser.
+- Configure the Partner Center authorization redirect URL as `https://dataplusapp.duckdns.org/auth/tiktok/callback` for production. Local or alternate deployments must use the exact callback URL displayed in Channels > TikTok Shop > Connection.
 - Environment variables are supported as a server-only fallback. Never use `VITE_*` variables for TikTok credentials.
 - DataPlus refreshes the seller access token when it is within five minutes of expiration and a refresh token is available.
 - Every request is signed over the exact versioned API path, sorted common parameters, and request body.
@@ -46,14 +48,15 @@ Historical order imports set the DataPlus historical isolation fields. They do n
 
 ## Setup
 
-1. Create a seller-developed custom app in TikTok Shop Partner Center and authorize the LINQ shop.
+1. Create a seller-developed custom app in TikTok Shop Partner Center and configure the displayed DataPlus authorization redirect URL.
 2. Request only the scopes needed for the enabled features.
 3. Configure the encryption key in the deployment secret store.
-4. Open Channels > TikTok Shop, save the app key, app secret, seller access token, and refresh token.
-5. Enable the channel, verify the connection, and select the authorized shop if more than one is returned.
-6. Enable individual features and schedules deliberately.
-7. Request Analytics access before enabling LIVE analytics. Request Seller Affiliate Collaboration access before enabling LIVE order attribution; Affiliate APIs are not enabled for every app by default.
-8. Run a small development-shop import and inspect Jobs and channel activity before enabling production schedules.
+4. Open Channels > TikTok Shop, enter the app key, app secret, and Service ID, then select **Save and connect**.
+5. Approve the seller account in TikTok Shop. DataPlus generates and encrypts the access and refresh tokens, enables the channel, and verifies the authorized shop.
+6. Select the authorized shop if more than one is returned.
+7. Enable individual features and schedules deliberately.
+8. Request Analytics access before enabling LIVE analytics. Request Seller Affiliate Collaboration access before enabling LIVE order attribution; Affiliate APIs are not enabled for every app by default.
+9. Run a small development-shop import and inspect Jobs and channel activity before enabling production schedules.
 
 Official references:
 

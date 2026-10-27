@@ -5,6 +5,7 @@ const path = require('node:path');
 
 const { tiktokSignature } = require('../lib/tiktok-client');
 const { createTikTokCredentials } = require('../lib/tiktok-credentials');
+const { exchangeAuthorizationCode, sellerAuthorizationUrl } = require('../lib/tiktok-oauth');
 const { componentRows, mapTikTokOrder, mapTikTokReturn } = require('../lib/tiktok-mappers');
 const { EVENT_TOPICS, reconcileOperation, verifyTikTokShopWebhook, webhookEntity, webhookIdentity, webhookTopic } = require('../lib/tiktok-webhooks');
 const {
@@ -42,18 +43,51 @@ async function main() {
     const env = { DATAPLUS_CREDENTIALS_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64') };
     const credentials = createTikTokCredentials({ directory, env });
     credentials.save('production', {
-      appKey: 'app-key', appSecret: 'app-secret', accessToken: 'access-token', refreshToken: 'refresh-token'
+      appKey: 'app-key', appSecret: 'app-secret', serviceId: 'service-id'
     });
     const savedText = fs.readFileSync(path.join(directory, 'tiktok-runtime-credentials.json'), 'utf8');
     assert.equal(savedText.includes('app-secret'), false);
     assert.equal(savedText.includes('access-token'), false);
-    assert.equal(credentials.get('production').refreshToken, 'refresh-token');
-    credentials.updateTokens('production', { access_token: 'next-access', expires_in: 3600 });
+    assert.equal(credentials.status('production').appConfigured, true);
+    assert.equal(credentials.status('production').configured, false);
+    const authorization = credentials.beginAuthorization('production', { actorId: 'user-1', actorName: 'Luis', returnTo: '/channels?channel=TikTok%20Shop' });
+    assert.match(authorization.state, /^production\./);
+    assert.equal(credentials.status('production').authorizationPending, true);
+    assert.throws(() => credentials.consumeAuthorization('production.invalid'), /invalid or expired/);
+    const consumed = credentials.consumeAuthorization(authorization.state);
+    assert.equal(consumed.environment, 'production');
+    assert.equal(consumed.actorId, 'user-1');
+    assert.equal(consumed.actorName, 'Luis');
+    assert.throws(() => credentials.consumeAuthorization(authorization.state), /invalid or expired/);
+    credentials.updateTokens('production', { access_token: 'next-access', refresh_token: 'refresh-token', expires_in: 3600, user_type: 0 });
     assert.equal(credentials.get('production').accessToken, 'next-access');
+    assert.equal(credentials.get('production').refreshToken, 'refresh-token');
+    assert.equal(credentials.status('production').configured, true);
     assert.equal(credentials.fingerprint('production'), credentials.fingerprint('production'));
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
+
+  const sellerUrl = new URL(sellerAuthorizationUrl({ serviceId: 'service-id', state: 'production.state', region: 'US' }));
+  assert.equal(sellerUrl.origin, 'https://services.us.tiktokshop.com');
+  assert.equal(sellerUrl.pathname, '/open/authorize');
+  assert.equal(sellerUrl.searchParams.get('service_id'), 'service-id');
+  assert.equal(sellerUrl.searchParams.get('state'), 'production.state');
+  const exchanged = await exchangeAuthorizationCode({
+    appKey: 'app-key', appSecret: 'app-secret', authCode: 'auth-code',
+    fetchImpl: async url => {
+      const requestUrl = new URL(url);
+      assert.equal(requestUrl.searchParams.get('grant_type'), 'authorized_code');
+      assert.equal(requestUrl.searchParams.get('auth_code'), 'auth-code');
+      return { ok: true, status: 200, json: async () => ({ code: 0, data: { access_token: 'generated-access', refresh_token: 'generated-refresh', user_type: 0, granted_scopes: 'seller.order,seller.product' } }) };
+    }
+  });
+  assert.equal(exchanged.access_token, 'generated-access');
+  assert.deepEqual(exchanged.granted_scopes, ['seller.order', 'seller.product']);
+  await assert.rejects(exchangeAuthorizationCode({
+    appKey: 'app-key', appSecret: 'app-secret', authCode: 'creator-code',
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ code: 0, data: { access_token: 'creator-access', refresh_token: 'creator-refresh', user_type: 1 } }) })
+  }), /non-seller token/);
 
   const rawOrder = {
     id: '576000001', status: 'AWAITING_SHIPMENT', create_time: 1700000000, update_time: 1700000100,

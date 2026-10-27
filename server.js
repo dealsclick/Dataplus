@@ -21985,6 +21985,12 @@ async function queueWalmartReadinessJob(actor, payload = {}) {
   return getWalmartMarketplace().queue("match", { ...payload, actor, readiness: true });
 }
 
+let tiktokCredentials;
+function getTikTokCredentials() {
+  if (!tiktokCredentials) tiktokCredentials = require('./lib/tiktok-credentials').createTikTokCredentials({ directory: DATA_DIR });
+  return tiktokCredentials;
+}
+
 let tiktokMarketplace;
 function getTikTokMarketplace() {
   if (!tiktokMarketplace) tiktokMarketplace = require('./lib/tiktok-marketplace').createTikTokMarketplace({
@@ -21993,7 +21999,7 @@ function getTikTokMarketplace() {
     log: appendChannelApiLog,
     feeStore: channelFeeStore,
     settlementScope: { tenantId: LEGACY_TENANT, companyId: LEGACY_COMPANY },
-    credentials: require('./lib/tiktok-credentials').createTikTokCredentials({ directory: DATA_DIR }),
+    credentials: getTikTokCredentials(),
     readConnections: () => postgres.readEntityDocumentCollectionFast('connections'),
     webhookAddress: req => {
       const base = configuredPublicAppUrl(req);
@@ -71649,6 +71655,110 @@ async function handleApi(req, res) {
   return notFound(res);
 }
 
+function tiktokAuthorizationResultHtml(options = {}) {
+  const success = options.success === true;
+  const returnTo = String(options.returnTo || '/channels?channel=TikTok%20Shop');
+  const message = String(options.message || (success ? 'TikTok Shop seller authorization saved and verified.' : 'TikTok Shop authorization failed.'));
+  const eventPayload = JSON.stringify({
+    type: success ? 'dataplus:tiktok-authorized' : 'dataplus:tiktok-authorization-error',
+    message,
+    returnTo
+  }).replace(/</g, '\\u003c');
+  return `
+    <!doctype html>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>${success ? 'TikTok Shop Connected' : 'TikTok Shop Authorization Failed'}</title>
+    <body style="font-family:system-ui;padding:32px;line-height:1.5;max-width:760px">
+      <h1>${success ? 'TikTok Shop connected' : 'TikTok Shop authorization failed'}</h1>
+      <p>${escapeHtml(message)}</p>
+      <p><a href="${escapeHtml(returnTo)}">Return to DataPlus</a></p>
+      <script>
+        const result = ${eventPayload};
+        if (window.opener) {
+          window.opener.postMessage(result, window.location.origin);
+          ${success ? 'setTimeout(() => window.close(), 800);' : ''}
+        }
+      </script>
+    </body>
+  `;
+}
+
+async function handleTikTokStart(req, res) {
+  if (String(req.method || 'GET').toUpperCase() !== 'GET') return sendHtml(res, 405, '<h1>Method not allowed</h1>');
+  await hydrateAuthSessionsStore();
+  const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
+  const actor = currentAuthUser(req, settings);
+  if (!actor) return sendHtml(res, 401, tiktokAuthorizationResultHtml({ success: false, message: 'Sign in to DataPlus before connecting TikTok Shop.' }));
+  if (!userCan(actor, 'channels.settings', 'credentials')) return sendHtml(res, 403, tiktokAuthorizationResultHtml({ success: false, message: 'Channel credential permission is required to connect TikTok Shop.' }));
+  const scope = notificationScope(req);
+  if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
+    return sendHtml(res, 409, tiktokAuthorizationResultHtml({ success: false, message: 'TikTok Shop operations are available only for LINQ while company isolation is completed.' }));
+  }
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const environment = url.searchParams.get('environment') === 'development' ? 'development' : 'production';
+  const credentials = getTikTokCredentials();
+  const authorization = credentials.beginAuthorization(environment, { actorId: actor.id, actorName: actor.name || actor.username, returnTo: url.searchParams.get('returnTo') });
+  const saved = credentials.get(environment);
+  const { sellerAuthorizationUrl } = require('./lib/tiktok-oauth');
+  const location = sellerAuthorizationUrl({ serviceId: saved.serviceId, state: authorization.state, region: saved.region });
+  appendChannelApiLog({
+    channel: 'TikTok Shop', transport: 'OAuth', method: 'GET', path: '/auth/tiktok/start',
+    operation: 'Start TikTok seller authorization', statusCode: 302, ok: true,
+    message: `Started ${environment} seller authorization.`
+  });
+  res.writeHead(302, { Location: location, 'Cache-Control': 'no-store' });
+  res.end();
+}
+
+async function handleTikTokCallback(req, res) {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const credentials = getTikTokCredentials();
+  let authorization;
+  try {
+    authorization = credentials.consumeAuthorization(url.searchParams.get('state'));
+  } catch (error) {
+    return sendHtml(res, 400, tiktokAuthorizationResultHtml({ success: false, message: error.message }));
+  }
+  const denied = url.searchParams.get('error_description') || url.searchParams.get('error');
+  if (denied) {
+    appendChannelApiLog({ channel: 'TikTok Shop', transport: 'OAuth', method: 'GET', path: '/auth/tiktok/callback', operation: 'TikTok seller authorization', statusCode: 400, ok: false, message: 'Seller authorization was denied.' });
+    return sendHtml(res, 400, tiktokAuthorizationResultHtml({ success: false, message: `TikTok Shop authorization was not completed: ${denied}`, returnTo: authorization.returnTo }));
+  }
+  const returnedAppKey = String(url.searchParams.get('app_key') || '').trim();
+  if (returnedAppKey && returnedAppKey !== authorization.credentials.appKey) {
+    return sendHtml(res, 400, tiktokAuthorizationResultHtml({ success: false, message: 'TikTok returned authorization for a different app key. Start the connection again.', returnTo: authorization.returnTo }));
+  }
+  const code = url.searchParams.get('code') || url.searchParams.get('auth_code');
+  if (!code) return sendHtml(res, 400, tiktokAuthorizationResultHtml({ success: false, message: 'TikTok did not return an authorization code. Start the connection again.', returnTo: authorization.returnTo }));
+  let tokensStored = false;
+  try {
+    const { exchangeAuthorizationCode } = require('./lib/tiktok-oauth');
+    const tokens = await exchangeAuthorizationCode({
+      appKey: authorization.credentials.appKey,
+      appSecret: authorization.credentials.appSecret,
+      authCode: code,
+      log: appendChannelApiLog
+    });
+    credentials.updateTokens(authorization.environment, tokens);
+    tokensStored = true;
+    const verified = await getTikTokMarketplace().verifyConnection();
+    const shopLabel = verified.shops?.find(shop => shop.id === verified.selectedShopId)?.name
+      || (verified.shops?.length === 1 ? verified.shops[0]?.name || '' : '');
+    const message = shopLabel ? `TikTok Shop connected to ${shopLabel}. Tokens will renew automatically.` : 'TikTok Shop seller authorization saved and verified. Tokens will renew automatically.';
+    void recordUserActivity(req, { id: authorization.actorId, name: authorization.actorName || 'DataPlus user' }, {
+      eventType: 'channel', action: 'Connected TikTok Shop seller account', entityType: 'channel', entityId: 'tiktok-shop',
+      metadata: { environment: authorization.environment, shopCount: verified.shops?.length || 0 }
+    });
+    return sendHtml(res, 200, tiktokAuthorizationResultHtml({ success: true, message, returnTo: authorization.returnTo }));
+  } catch (error) {
+    appendChannelApiLog({ channel: 'TikTok Shop', transport: 'OAuth', method: 'GET', path: '/auth/tiktok/callback', operation: 'Complete TikTok seller authorization', statusCode: apiErrorStatus(error), ok: false, message: error.message });
+    const message = tokensStored
+      ? `TikTok generated the seller tokens, but connection verification failed: ${error.message}. Use Verify connection in DataPlus to retry.`
+      : error.message;
+    return sendHtml(res, apiErrorStatus(error), tiktokAuthorizationResultHtml({ success: false, message, returnTo: authorization.returnTo }));
+  }
+}
+
 async function handleTemuCallback(req, res) {
   const db = await readDb({ skipInventory: postgres.isPostgresEnabled() });
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -72261,6 +72371,14 @@ function startServer() {
     } else if (isEbayOAuthCallbackRequest(req)) {
       handleEbayCallback(req, res).catch((error) => {
         sendHtml(res, 500, `<h1>eBay callback error</h1><p>${escapeHtml(error.message)}</p>`);
+      });
+    } else if (req.url.startsWith("/auth/tiktok/start")) {
+      handleTikTokStart(req, res).catch((error) => {
+        sendHtml(res, apiErrorStatus(error), tiktokAuthorizationResultHtml({ success: false, message: error.message }));
+      });
+    } else if (req.url.startsWith("/auth/tiktok/callback")) {
+      handleTikTokCallback(req, res).catch((error) => {
+        sendHtml(res, 500, tiktokAuthorizationResultHtml({ success: false, message: error.message }));
       });
     } else if (req.url.startsWith("/api/") || req.url.startsWith("/auth/veeqo/") || /^\/\?(?:.*&)?(?:code|error)=/.test(req.url)) {
       handleApi(req, res).catch(async (error) => {

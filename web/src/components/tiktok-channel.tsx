@@ -76,14 +76,14 @@ export function TikTokChannel({
   const [job, setJob] = useState<Json | null>(null)
   const [dateRange, setDateRange] = useState({ startDate: defaultStart(), endDate: defaultEnd() })
   const [historicalBackfill, setHistoricalBackfill] = useState(true)
-  const [credentials, setCredentials] = useState({ appKey: "", appSecret: "", accessToken: "", refreshToken: "" })
+  const [credentials, setCredentials] = useState({ appKey: "", appSecret: "", serviceId: "" })
   const [skuText, setSkuText] = useState("")
   const rules = useMemo(() => ({ ...(channel.settings || {}), ...edits }), [channel.settings, edits])
 
   const refresh = async () => {
     const next = await request("status")
     setStatus(next)
-    setCredentials(current => ({ ...current, appKey: next.appKey || "", appSecret: "", accessToken: "", refreshToken: "" }))
+    setCredentials(current => ({ ...current, appKey: next.appKey || "", appSecret: "", serviceId: next.serviceId || "" }))
     return next
   }
 
@@ -114,7 +114,7 @@ export function TikTokChannel({
     request("status").then(next => {
       if (!active) return
       setStatus(next)
-      setCredentials({ appKey: next.appKey || "", appSecret: "", accessToken: "", refreshToken: "" })
+      setCredentials({ appKey: next.appKey || "", appSecret: "", serviceId: next.serviceId || "" })
     }).catch(reason => active && setError(reason instanceof Error ? reason.message : "TikTok status could not load."))
     return () => { active = false }
   }, [channel.id, channel.settings?.tiktokEnvironment])
@@ -129,6 +129,24 @@ export function TikTokChannel({
     let active = true
     request("workspace").then(next => active && setWorkspace(next)).catch(() => {})
     return () => { active = false }
+  }, [channel.id])
+
+  useEffect(() => {
+    const receiveAuthorization = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return
+      if (event.data?.type === "dataplus:tiktok-authorized") {
+        setError("")
+        setMessage(event.data.message || "TikTok Shop connected.")
+        void refresh().then(() => onRefresh?.()).catch(reason => setError(reason instanceof Error ? reason.message : "TikTok status could not refresh."))
+      }
+      if (event.data?.type === "dataplus:tiktok-authorization-error") {
+        setMessage("")
+        setError(event.data.message || "TikTok Shop authorization failed.")
+        void refresh().catch(() => {})
+      }
+    }
+    window.addEventListener("message", receiveAuthorization)
+    return () => window.removeEventListener("message", receiveAuthorization)
   }, [channel.id])
 
   const run = async (action: () => Promise<Json>) => {
@@ -157,13 +175,29 @@ export function TikTokChannel({
     return { message: "TikTok Shop settings saved." }
   }
 
-  const saveCredentials = async () => {
-    const result = await request("credentials", {
-      environment: rules.tiktokEnvironment || "production",
-      ...credentials,
-    })
-    await refresh()
-    return result
+  const connectSeller = async () => {
+    const popup = window.open("", "dataplus-tiktok-auth", "popup,width=860,height=820")
+    setBusy(true)
+    setError("")
+    setMessage("")
+    try {
+      const environment = rules.tiktokEnvironment === "development" ? "development" : "production"
+      await request("credentials", { environment, ...credentials })
+      await onSave(channel.id, { settings: { ...edits, channelEnabled: true, tiktokEnvironment: environment } })
+      setEdits({})
+      onRefresh?.()
+      const returnTo = `${window.location.pathname}${window.location.search}`
+      const authPath = `/auth/tiktok/start?environment=${encodeURIComponent(environment)}&returnTo=${encodeURIComponent(returnTo)}`
+      if (popup) popup.location.href = authPath
+      else window.location.assign(authPath)
+      setMessage("App credentials saved. Complete seller authorization in the TikTok Shop window.")
+      await refresh()
+    } catch (reason) {
+      popup?.close()
+      setError(reason instanceof Error ? reason.message : "TikTok Shop connection could not start.")
+    } finally {
+      setBusy(false)
+    }
   }
 
   const verify = async () => {
@@ -186,8 +220,14 @@ export function TikTokChannel({
   const selectedSkus = () => [...new Set(skuText.split(/[\s,]+/).map(value => value.trim()).filter(Boolean))]
 
   const configured = status.configured === true
+  const appConfigured = status.appConfigured === true
   const verified = status.connection?.verified === true
   const dirty = Object.keys(edits).length > 0
+  const canConnect = status.encryptedStorageReady === true
+    && Boolean(credentials.appKey.trim())
+    && Boolean(credentials.serviceId.trim())
+    && (Boolean(credentials.appSecret.trim()) || status.appSecretConfigured === true)
+  const callbackUrl = typeof window === "undefined" ? "/auth/tiktok/callback" : `${window.location.origin}/auth/tiktok/callback`
 
   return (
     <Card className="min-w-0">
@@ -211,18 +251,18 @@ export function TikTokChannel({
           <div className="overflow-x-auto"><TabsList className="h-auto min-w-max justify-start"><TabsTrigger value="connection">Connection</TabsTrigger><TabsTrigger value="features">Features</TabsTrigger><TabsTrigger value="sync">Sync</TabsTrigger><TabsTrigger value="catalog">Catalog</TabsTrigger><TabsTrigger value="analytics">Analytics</TabsTrigger><TabsTrigger value="live">LIVE</TabsTrigger><TabsTrigger value="webhooks">Webhooks</TabsTrigger><TabsTrigger value="fulfillment">Shipping</TabsTrigger><TabsTrigger value="capabilities">API access</TabsTrigger></TabsList></div>
 
           <TabsContent value="connection" className="space-y-4">
-            <div className="flex flex-wrap items-center gap-2"><Badge variant={verified ? "default" : "outline"}>{verified ? "Verified" : configured ? "Ready to verify" : "Not configured"}</Badge><span className="text-sm text-muted-foreground">{status.environment || "production"} · {status.shopName || "No shop selected"}</span></div>
+            <div className="flex flex-wrap items-center gap-2"><Badge variant={verified ? "default" : "outline"}>{verified ? "Verified" : configured ? "Authorized - verify connection" : appConfigured ? "App saved - authorization needed" : "Not configured"}</Badge><span className="text-sm text-muted-foreground">{status.environment || "production"} · {status.shopName || "No shop selected"}</span></div>
             {!status.encryptedStorageReady && <Alert variant="destructive"><ShieldCheck className="size-4" /><AlertTitle>Credential encryption key required</AlertTitle><AlertDescription>Set <code>DATAPLUS_CREDENTIALS_ENCRYPTION_KEY</code> in the deployment secret store before saving credentials.</AlertDescription></Alert>}
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="grid gap-1.5 text-sm">Environment<Select value={String(rules.tiktokEnvironment || "production")} onValueChange={value => update("tiktokEnvironment", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="production">Production</SelectItem><SelectItem value="development">Development shop</SelectItem></SelectContent></Select></label>
               <label className="grid gap-1.5 text-sm">App key<Input autoComplete="off" value={credentials.appKey} onChange={event => setCredentials(current => ({ ...current, appKey: event.target.value }))} /></label>
               <label className="grid gap-1.5 text-sm">App secret<Input type="password" autoComplete="new-password" value={credentials.appSecret} onChange={event => setCredentials(current => ({ ...current, appSecret: event.target.value }))} placeholder={status.appSecretConfigured ? "Saved - leave blank to keep" : "Required"} /></label>
-              <label className="grid gap-1.5 text-sm">Seller access token<Input type="password" autoComplete="new-password" value={credentials.accessToken} onChange={event => setCredentials(current => ({ ...current, accessToken: event.target.value }))} placeholder={status.accessTokenConfigured ? "Saved - leave blank to keep" : "Required"} /></label>
-              <label className="grid gap-1.5 text-sm">Refresh token<Input type="password" autoComplete="new-password" value={credentials.refreshToken} onChange={event => setCredentials(current => ({ ...current, refreshToken: event.target.value }))} placeholder={status.refreshTokenConfigured ? "Saved - leave blank to keep" : "Recommended for automatic renewal"} /></label>
+              <label className="grid gap-1.5 text-sm">Service ID<Input autoComplete="off" value={credentials.serviceId} onChange={event => setCredentials(current => ({ ...current, serviceId: event.target.value }))} placeholder="Required for seller authorization" /><span className="text-xs text-muted-foreground">Use the Service ID shown for this app in TikTok Shop Partner Center.</span></label>
+              <label className="grid gap-1.5 text-sm">Authorization redirect URL<Input readOnly value={callbackUrl} /><span className="text-xs text-muted-foreground">Add this exact URL to the app configuration in Partner Center.</span></label>
             </div>
-            <div className="flex flex-wrap gap-2"><Button disabled={busy || !status.encryptedStorageReady || !credentials.appKey.trim()} onClick={() => void run(saveCredentials)}><Save className="size-4" /> Save credentials</Button><Button variant="outline" disabled={busy || !configured || dirty} onClick={() => void run(verify)}>{busy ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />} {rules.channelEnabled ? "Verify connection" : "Enable and verify"}</Button></div>
+            <div className="flex flex-wrap gap-2"><Button disabled={busy || !canConnect} onClick={() => void connectSeller()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />} {configured ? "Reconnect TikTok Shop" : "Save and connect"}</Button>{configured && <Button variant="outline" disabled={busy || dirty} onClick={() => void run(verify)}><ShieldCheck className="size-4" /> Verify connection</Button>}</div>
             {Array.isArray(status.connection?.shops) && status.connection.shops.length > 1 && <label className="grid max-w-lg gap-1.5 text-sm">Authorized shop<Select value={status.shopCipher || ""} onValueChange={shopCipher => void run(async () => { const result = await request("shops/select", { shopCipher }); await refresh(); return result })}><SelectTrigger><SelectValue placeholder="Choose a shop" /></SelectTrigger><SelectContent>{status.connection.shops.map((shop: Json) => <SelectItem key={shop.cipher} value={shop.cipher}>{shop.name || shop.code || shop.id}</SelectItem>)}</SelectContent></Select></label>}
-            {status.accessTokenExpiresAt && <p className="text-xs text-muted-foreground">Access token expires {new Date(status.accessTokenExpiresAt).toLocaleString()}. DataPlus refreshes it automatically when a refresh token is saved.</p>}
+            {status.accessTokenExpiresAt && <p className="text-xs text-muted-foreground">Access token expires {new Date(status.accessTokenExpiresAt).toLocaleString()}. DataPlus securely renews it with the generated refresh token.</p>}
             <a className="inline-flex items-center gap-1 text-sm underline" href="https://partner.tiktokshop.com/docv2/page/authorization-overview" target="_blank" rel="noreferrer">TikTok Shop authorization guide <ExternalLink className="size-3.5" /></a>
           </TabsContent>
 
