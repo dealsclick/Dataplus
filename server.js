@@ -147,6 +147,7 @@ const { buildPrintPreview, attachmentFilePath, restorePurchasedLabelReferences, 
 const { buildLabelPacketIsolated } = require("./lib/isolated-fulfillment-print");
 const { createRequestPerformanceContext, enterRequestPerformanceContext } = require("./lib/performance-context");
 const { recordBatchLabelPdfSave, recordBatchLabelPrint, recordPrintJobCompletion, recordPrintJobPdfSave, recordShipmentLabelPrint } = require("./lib/fulfillment-print-audit");
+const { findShippingLabelMatches, packageShipmentStatus, recordShipmentLabelScan } = require("./lib/fulfillment-label-scan");
 const { normalizeBatchHandlingStatus, setBatchHandlingStatus } = require("./lib/fulfillment-batch-handling");
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
 const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, shouldSyncRecoveredTracking, walmartShipmentNeedsTrackingSync, walmartShipmentReadyForTrackingSync, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
@@ -31964,6 +31965,13 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
       labelLastPrintStation: shipment.labelLastPrintStation || printJob?.lastPrintStation || printJob?.stationName || "",
       labelLastPrinterName: shipment.labelLastPrinterName || printJob?.lastPrinterName || printJob?.printerName || "",
       labelPrintHistory: Array.isArray(shipment.labelPrintHistory) ? shipment.labelPrintHistory : [],
+      labelPrintEvidenceSource: shipment.labelPrintEvidenceSource || "",
+      labelScanVerifiedAt: shipment.labelScanVerifiedAt || "",
+      labelScanVerifiedBy: shipment.labelScanVerifiedBy || "",
+      labelLastScannedAt: shipment.labelLastScannedAt || "",
+      labelLastScannedBy: shipment.labelLastScannedBy || "",
+      labelScanCount: Number(shipment.labelScanCount || 0),
+      labelScanEvidenceSource: shipment.labelScanEvidenceSource || "",
       fulfillmentBatchNumber: printJob?.batchNumber || "",
       pickedAt: batchRow?.pickedAt || "",
       pickedBy: batchRow?.pickedBy || "",
@@ -32241,7 +32249,7 @@ function projectFulfillmentConsoleSnapshot(snapshot = {}, view = "") {
     late: work.filter((row) => fulfillmentConsoleDeadlineState(row) === "late").length,
     readyForLabel: work.filter((row) => String(row.allocationStatus || "").toLowerCase() === "allocated" || String(row.status || "").toLowerCase() === "ready_to_ship").length,
     purchasedLabels: shipmentSets.purchased.length,
-    unprintedPurchasedLabels: shipmentSets.purchased.filter((row) => !row.labelPrintedAt && Number(row.labelPrintCount || 0) <= 0).length,
+    unprintedPurchasedLabels: shipmentSets.purchased.filter((row) => !row.labelScanVerifiedAt && !row.labelPrintedAt && Number(row.labelPrintCount || 0) <= 0).length,
     shipped: shipmentSets.shipped.length,
     exceptions: Array.isArray(snapshot.exceptions) ? snapshot.exceptions.length : 0,
     trackingFailures: Array.isArray(snapshot.exceptions) ? snapshot.exceptions.filter((row) => row.type === "tracking").length : 0,
@@ -51634,6 +51642,91 @@ async function handleApi(req, res) {
     sample.slow = sample.totalMs >= FULFILLMENT_PERFORMANCE_SLOW_TOTAL_MS || sample.renderMs >= FULFILLMENT_PERFORMANCE_SLOW_RENDER_MS;
     retainFulfillmentPerformanceSample("client", sample);
     return sendJson(res, 202, { recorded: true });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/fulfillment/label-scan" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const code = String(body.code || "").trim();
+    if (code.length < 3 || code.length > 160) return sendJson(res, 400, { error: "Scan a tracking barcode, package ID, or order number." });
+    const orders = await postgres.readOrdersByShippingLabelCode(code, { limit: 6 });
+    const matches = findShippingLabelMatches(orders, code);
+    if (!matches.length) return sendJson(res, 404, { error: `No shipping label was found for ${code}. Check the barcode or open the order to confirm tracking was saved.` });
+    if (matches.length > 1) {
+      return sendJson(res, 409, {
+        error: `This scan matches ${matches.length} packages. Scan the tracking barcode instead of the order number.`,
+        matches: matches.slice(0, 6).map(({ order, shipment }) => ({
+          orderId: order.id,
+          orderNumber: order.orderNumber || order.id,
+          shipmentId: shipment.id || "",
+          trackingNumber: shipment.trackingNumber || ""
+        }))
+      });
+    }
+    const { order, shipment, matchedBy } = matches[0];
+    const actor = authUser?.name || authUser?.username || "Warehouse";
+    const firstPhysicalVerification = !shipment.labelScanVerifiedAt;
+    const scan = recordShipmentLabelScan(shipment, {
+      scanId: String(body.scanId || crypto.randomUUID()),
+      scannedBy: actor,
+      code,
+      matchedBy
+    });
+    const packageStatus = packageShipmentStatus(order, shipment);
+    if (scan.recorded) {
+      if (firstPhysicalVerification) {
+        addOrderTimeline(order, {
+          type: "shipping_label_scan",
+          title: "Shipping label physically verified",
+          message: `${shipment.trackingNumber || shipment.id || "Package label"} scanned in Fulfillment. ${scan.addedPrintEvidence ? "The scan supplied the first physical print evidence." : "Existing print evidence was preserved."} Shipment status was not changed.`,
+          user: actor
+        });
+      }
+      order.updatedAt = scan.event.scannedAt;
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      invalidateFulfillmentConsoleSnapshot([order.id]);
+      void recordUserActivity(req, authUser, {
+        eventType: "fulfillment",
+        action: "shipping_label_scanned",
+        path: url.pathname,
+        entityType: "shipment",
+        entityId: String(shipment.id || shipment.trackingNumber || order.id),
+        metadata: { orderId: order.id, trackingNumber: shipment.trackingNumber || "", matchedBy, addedPrintEvidence: scan.addedPrintEvidence, packageStatus: packageStatus.code }
+      });
+    }
+    const shipmentLines = Array.isArray(shipment.lines) && shipment.lines.length ? shipment.lines : (Array.isArray(order.items) ? order.items : []);
+    const printed = Boolean(shipment.labelScanVerifiedAt || shipment.labelPrintedAt || shipment.labelLastPrintedAt || Number(shipment.labelPrintCount || 0) > 0);
+    return sendJson(res, 200, {
+      match: {
+        orderId: order.id,
+        orderNumber: order.orderNumber || order.id,
+        channel: order.channelSource || order.source || "",
+        channelOrderNumber: order.channelOrderNumber || order.marketplaceOrderNumber || order.marketplaceOrderId || "",
+        shipmentId: shipment.id || "",
+        trackingNumber: shipment.trackingNumber || "",
+        carrier: shipment.carrierName || shipment.carrier || shipment.provider || "",
+        service: shipment.serviceName || shipment.service || "",
+        batchId: shipment.fulfillmentBatchId || "",
+        skus: [...new Set(shipmentLines.map((line) => String(line.sku || line.mappedSku || line.originalSku || "").trim()).filter(Boolean))],
+        print: {
+          printed,
+          status: shipment.labelScanVerifiedAt ? "scan_verified" : printed ? "printed" : "not_printed",
+          firstPrintedAt: shipment.labelPrintedAt || shipment.labelScanVerifiedAt || "",
+          lastPrintedAt: shipment.labelLastPrintedAt || shipment.labelPrintedAt || shipment.labelLastScannedAt || shipment.labelScanVerifiedAt || "",
+          printedBy: shipment.labelLastPrintedBy || shipment.labelPrintedBy || shipment.labelLastScannedBy || shipment.labelScanVerifiedBy || "",
+          printCount: Number(shipment.labelPrintCount || 0),
+          evidenceSource: shipment.labelScanVerifiedAt ? "physical_scan" : "print_action",
+          scanVerifiedAt: shipment.labelScanVerifiedAt || "",
+          lastScannedAt: shipment.labelLastScannedAt || "",
+          scanCount: Number(shipment.labelScanCount || 0),
+          addedPrintEvidence: scan.addedPrintEvidence
+        },
+        packageStatus
+      },
+      message: scan.addedPrintEvidence
+        ? "Label verified. The physical scan supplied the first print evidence; shipment status was not changed."
+        : "Label verified. Existing print evidence and shipment status were preserved."
+    });
   }
 
   if (req.method === "GET" && url.pathname === "/api/fulfillment/console" && postgres.isPostgresEnabled()) {

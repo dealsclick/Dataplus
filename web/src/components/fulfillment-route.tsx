@@ -3,7 +3,7 @@ import {
   AlertCircle, AlertTriangle, ArrowLeft, ArrowRight, Boxes, CalendarDays, CheckCircle2,
   ChevronDown, Clock3, Copy, ExternalLink, Eye, FileDown, Info, Link2, ListChecks,
   Loader2, Monitor, MoreHorizontal, Package, PackageCheck, Pencil, Plus, Printer, RefreshCw,
-  RotateCcw, Save, Search, SendHorizontal, ShieldAlert, ShieldCheck, SlidersHorizontal,
+  RotateCcw, Save, ScanBarcode, Search, SendHorizontal, ShieldAlert, ShieldCheck, SlidersHorizontal,
   Trash2, Truck, Filter, X,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -208,7 +208,7 @@ function fulfillmentShipmentSuppliers(row: Record<string, any>) {
 }
 
 function fulfillmentShipmentPrinted(row: Record<string, any>) {
-  return Number(row.labelPrintCount || 0) > 0 || Boolean(row.labelPrintedAt)
+  return Number(row.labelPrintCount || 0) > 0 || Boolean(row.labelPrintedAt || row.labelScanVerifiedAt)
 }
 
 function fulfillmentChannelSyncState(row: Record<string, any>) {
@@ -245,12 +245,12 @@ function FulfillmentShipmentTable({ rows, onPrint, emptyMessage }: { rows: Array
     const labelGenerating = ["label_pending", "purchase_processing"].includes(String(row.status || "").toLowerCase()) || String(row.trackingStatus || "").toLowerCase() === "label_generating"
     const trackingLabel = String(row.trackingStatus || "awaiting_pickup").replace(/_/g, " ")
     const printCount = Math.max(0, Number(row.labelPrintCount || 0))
-    const printed = printCount > 0 || Boolean(row.labelPrintedAt)
-    const lastPrintedAt = String(row.labelLastPrintedAt || row.labelPrintedAt || "")
-    const lastPrintDestination = [row.labelLastPrintStation, row.labelLastPrinterName].filter(Boolean).join(" · ")
+    const printed = printCount > 0 || Boolean(row.labelPrintedAt || row.labelScanVerifiedAt)
+    const lastPrintedAt = String(row.labelLastPrintedAt || row.labelPrintedAt || row.labelLastScannedAt || row.labelScanVerifiedAt || "")
+    const lastPrintDestination = row.labelScanVerifiedAt ? "Quick label scan" : [row.labelLastPrintStation, row.labelLastPrinterName].filter(Boolean).join(" · ")
     const printHistoryTitle = Array.isArray(row.labelPrintHistory) && row.labelPrintHistory.length
       ? row.labelPrintHistory.slice(0, 10).map((entry: Record<string, unknown>) => [entry.printedAt ? dateLabel(String(entry.printedAt)) : "", entry.printedBy, entry.stationName, entry.printerName].filter(Boolean).join(" · ")).join("\n")
-      : [lastPrintedAt ? dateLabel(lastPrintedAt) : "", row.labelLastPrintedBy, lastPrintDestination].filter(Boolean).join(" · ")
+      : [lastPrintedAt ? dateLabel(lastPrintedAt) : "", row.labelLastPrintedBy || row.labelLastScannedBy, lastPrintDestination].filter(Boolean).join(" · ")
     const carrier = String(row.carrierName || row.carrier || "Carrier")
     const service = String(row.service || "").replace(/\s*·\s*(Purchased from DataPlus|Outsourced label)\s*$/i, "").trim() || "Service unavailable"
     const labelSource = String(row.labelSource || "").toLowerCase() === "dataplus" ? "DataPlus" : String(row.channel || row.labelSourceLabel || "External")
@@ -268,7 +268,7 @@ function FulfillmentShipmentTable({ rows, onPrint, emptyMessage }: { rows: Array
       <TableCell><p className="max-w-64 truncate whitespace-nowrap text-xs" title={`${carrier} | ${service} | ${labelSource}`}><span className="font-semibold text-foreground">{carrier}</span><span className="px-1.5 text-muted-foreground">|</span>{service}<span className="px-1.5 text-muted-foreground">|</span><span className="font-medium text-foreground">{labelSource}</span></p></TableCell>
       <TableCell><FulfillmentShipBy row={row} /></TableCell>
       <TableCell><Badge variant={row.trackingRefreshError ? "destructive" : row.trackingStatus === "delivered" ? "success" : row.trackingStatus === "voided" ? "destructive" : row.trackingStatus === "in_transit" ? "secondary" : "outline"}>{row.trackingRefreshError ? "Check failed" : trackingLabel}</Badge>{row.trackingRefreshError ? <p className="mt-1 max-w-52 text-xs text-destructive" title={String(row.trackingRefreshError)}>{String(row.trackingRefreshError)}</p> : null}</TableCell>
-      <TableCell>{labelGenerating ? <Badge variant="outline">Waiting for document</Badge> : printed ? <div title={printHistoryTitle}><Badge variant={printCount > 1 ? "warning" : "success"}>{printCount > 1 ? `Reprinted ${printCount} times` : "Printed once"}</Badge>{lastPrintedAt ? <p className="mt-1 whitespace-nowrap text-xs text-muted-foreground">Last {dateLabel(lastPrintedAt)}</p> : null}{lastPrintDestination ? <p className="max-w-44 truncate text-xs text-muted-foreground">{lastPrintDestination}</p> : null}</div> : <Badge variant="warning">Not printed</Badge>}</TableCell>
+      <TableCell>{labelGenerating ? <Badge variant="outline">Waiting for document</Badge> : printed ? <div title={printHistoryTitle}><Badge variant={printCount > 1 ? "warning" : "success"}>{row.labelScanVerifiedAt ? "Verified by scan" : printCount > 1 ? `Reprinted ${printCount} times` : "Printed once"}</Badge>{lastPrintedAt ? <p className="mt-1 whitespace-nowrap text-xs text-muted-foreground">Last {dateLabel(lastPrintedAt)}</p> : null}{lastPrintDestination ? <p className="max-w-44 truncate text-xs text-muted-foreground">{lastPrintDestination}</p> : null}</div> : <Badge variant="warning">Not printed</Badge>}</TableCell>
       <TableCell><span className="whitespace-nowrap text-xs">{row.trackingCheckedAt ? dateLabel(String(row.trackingCheckedAt)) : "Not checked"}</span></TableCell>
       <TableCell className="sticky right-0 z-10 bg-background text-right shadow-[-1px_0_0_hsl(var(--border))] group-hover:bg-muted/50"><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" aria-label={`Actions for order ${String(row.orderNumber || row.orderId)}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem disabled={!labelDocument || labelGenerating} onSelect={printRow}><Printer className="size-4" /> {printed ? "Reprint label" : "Print label"}</DropdownMenuItem><DropdownMenuItem disabled={!row.fulfillmentBatchId || labelGenerating} onSelect={() => window.open(`/api/fulfillment/label-batches/${encodeURIComponent(String(row.fulfillmentBatchId))}/pick-sheet`, "_blank", "noopener,noreferrer")}><ListChecks className="size-4" /> Pick sheet</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell>
     </TableRow>
@@ -703,6 +703,13 @@ export function FulfillmentPage() {
   const [pairStationOpen, setPairStationOpen] = useState(false)
   const [pairStationName, setPairStationName] = useState("Warehouse desktop")
   const [pairingResult, setPairingResult] = useState<Record<string, any> | null>(null)
+  const [labelScanOpen, setLabelScanOpen] = useState(false)
+  const [labelScanCode, setLabelScanCode] = useState("")
+  const [labelScanBusy, setLabelScanBusy] = useState(false)
+  const [labelScanError, setLabelScanError] = useState("")
+  const [labelScanResult, setLabelScanResult] = useState<Record<string, any> | null>(null)
+  const [recentLabelScans, setRecentLabelScans] = useState<Array<Record<string, any>>>([])
+  const labelScanInputRef = useRef<HTMLInputElement>(null)
   const [printStationToRemove, setPrintStationToRemove] = useState<Record<string, any> | null>(null)
   const [testPrintStation, setTestPrintStation] = useState<Record<string, any> | null>(null)
   const [testPrintDraft, setTestPrintDraft] = useState({ printerName: "", size: "4x6", includePackingSlips: false })
@@ -1791,6 +1798,35 @@ export function FulfillmentPage() {
       toast.error(error instanceof Error ? error.message : "Unable to refresh carrier tracking.")
     } finally { setBusy(false) }
   }
+  const openLabelScanner = () => {
+    setLabelScanOpen(true)
+    setLabelScanError("")
+    setLabelScanResult(null)
+    window.setTimeout(() => labelScanInputRef.current?.focus(), 50)
+  }
+  const scanShippingLabel = async () => {
+    const code = labelScanCode.trim()
+    if (!code || labelScanBusy) return
+    setLabelScanBusy(true)
+    setLabelScanError("")
+    try {
+      const response = await api<{ match?: Record<string, any>; message?: string }>("/api/fulfillment/label-scan", {
+        method: "POST",
+        body: JSON.stringify({ code, scanId: crypto.randomUUID() }),
+      })
+      if (!response.match) throw new Error("The label scan did not return a package.")
+      const scanned = { ...response.match, scanMessage: response.message || "Label verified." }
+      setLabelScanResult(scanned)
+      setRecentLabelScans((current) => [scanned, ...current].slice(0, 10))
+      setLabelScanCode("")
+      void load(false, true)
+      window.setTimeout(() => labelScanInputRef.current?.focus(), 50)
+    } catch (error) {
+      setLabelScanResult(null)
+      setLabelScanError(error instanceof Error ? error.message : "Unable to verify this shipping label.")
+      window.setTimeout(() => labelScanInputRef.current?.select(), 50)
+    } finally { setLabelScanBusy(false) }
+  }
   const printInBrowser = async () => {
     const job = printJobPreview
     if (!job || !printPacketUrl) return
@@ -2318,8 +2354,31 @@ export function FulfillmentPage() {
         eyebrow="Fulfillment operations"
         title="Fulfillment"
         description="Purchase and print labels from pending shipments. Eligible quotes are refreshed automatically according to each provider's expiration window."
-        action={<div className="flex items-center gap-2"><Button size="icon" variant="outline" title="Refresh fulfillment" disabled={loading} onClick={() => void load(true)}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm"><SlidersHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Carrier tracking</DropdownMenuLabel><DropdownMenuItem disabled={busy} onClick={() => void refreshCarrierTracking()}><RefreshCw className="size-4" /> Refresh carrier statuses</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Shipping tools</DropdownMenuLabel><DropdownMenuItem onClick={() => { setPurchasedLabelFilter("unprinted"); setTab("purchased-labels") }}><Printer className="size-4" /> Unprinted purchased labels ({unprintedPurchasedLabelCount})</DropdownMenuItem><DropdownMenuItem asChild><a href="/fulfillment/batches"><Package className="size-4" /> Shipping batch history</a></DropdownMenuItem><DropdownMenuItem onClick={() => setTab("print-stations")}><Monitor className="size-4" /> Print stations</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Optional picking</DropdownMenuLabel><DropdownMenuItem disabled={!selectedRouteIds.size || !selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>}
+        action={<div className="flex items-center gap-2"><Button size="sm" variant="outline" onClick={openLabelScanner}><ScanBarcode className="size-4" /> Scan label</Button><Button size="icon" variant="outline" title="Refresh fulfillment" disabled={loading} onClick={() => void load(true)}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm"><SlidersHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Carrier tracking</DropdownMenuLabel><DropdownMenuItem disabled={busy} onClick={() => void refreshCarrierTracking()}><RefreshCw className="size-4" /> Refresh carrier statuses</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Shipping tools</DropdownMenuLabel><DropdownMenuItem onClick={openLabelScanner}><ScanBarcode className="size-4" /> Scan shipping label</DropdownMenuItem><DropdownMenuItem onClick={() => { setPurchasedLabelFilter("unprinted"); setTab("purchased-labels") }}><Printer className="size-4" /> Unprinted purchased labels ({unprintedPurchasedLabelCount})</DropdownMenuItem><DropdownMenuItem asChild><a href="/fulfillment/batches"><Package className="size-4" /> Shipping batch history</a></DropdownMenuItem><DropdownMenuItem onClick={() => setTab("print-stations")}><Monitor className="size-4" /> Print stations</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Optional picking</DropdownMenuLabel><DropdownMenuItem disabled={!selectedRouteIds.size || !selectedWarehouseOnly} onClick={() => void createPickList()}><ListChecks className="size-4" /> Create pick list</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>}
       />
+      <Dialog open={labelScanOpen} onOpenChange={(open) => { setLabelScanOpen(open); if (!open) { setLabelScanCode(""); setLabelScanError(""); setLabelScanResult(null) } else window.setTimeout(() => labelScanInputRef.current?.focus(), 50) }}>
+        <DialogContent className="flex max-h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-2xl">
+          <DialogHeader className="border-b px-5 py-4 pr-12 text-left"><DialogTitle className="flex items-center gap-2"><ScanBarcode className="size-5" /> Quick label scan</DialogTitle><DialogDescription>Scan the tracking barcode to verify the physical label and see whether its package has shipped.</DialogDescription></DialogHeader>
+          <form className="flex gap-2 border-b bg-muted/20 p-4" onSubmit={(event) => { event.preventDefault(); void scanShippingLabel() }}>
+            <Input ref={labelScanInputRef} autoFocus autoComplete="off" spellCheck={false} className="h-11 font-mono" value={labelScanCode} onChange={(event) => setLabelScanCode(event.target.value)} placeholder="Tracking number, package ID, or order number" aria-label="Shipping label barcode" />
+            <Button type="submit" className="h-11" disabled={labelScanBusy || labelScanCode.trim().length < 3}>{labelScanBusy ? <Loader2 className="size-4 animate-spin" /> : <ScanBarcode className="size-4" />} Verify</Button>
+          </form>
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <p className="border-b px-5 py-3 text-xs text-muted-foreground">A scan records physical print evidence only. It never marks a package shipped or sends fulfillment to a channel.</p>
+            {labelScanError ? <div className="p-4"><Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Label not verified</AlertTitle><AlertDescription>{labelScanError}</AlertDescription></Alert></div> : null}
+            {labelScanResult ? <div role="status" aria-live="polite">
+              <div className="flex flex-wrap items-start justify-between gap-3 border-b px-5 py-4"><div className="min-w-0"><p className="text-xs font-medium uppercase text-muted-foreground">Matched package</p><a href={`/orders/${encodeURIComponent(String(labelScanResult.orderId || ""))}`} className="mt-1 block text-lg font-semibold text-primary hover:underline">Order {String(labelScanResult.orderNumber || labelScanResult.orderId || "")}</a><p className="truncate text-sm text-muted-foreground">{String(labelScanResult.channel || "Channel unavailable")}{labelScanResult.channelOrderNumber ? ` · ${String(labelScanResult.channelOrderNumber)}` : ""}</p></div><Badge variant="success"><CheckCircle2 className="size-3" /> Verified</Badge></div>
+              <div className="grid border-b sm:grid-cols-2">
+                <section className="border-b px-5 py-4 sm:border-b-0 sm:border-r"><p className="text-xs font-medium uppercase text-muted-foreground">Physical label</p><div className="mt-2 flex items-center gap-2"><Badge variant="success">Printed</Badge><span className="text-sm font-medium">{labelScanResult.print?.addedPrintEvidence ? "Verified from this scan" : "Existing record confirmed"}</span></div><p className="mt-1 text-xs text-muted-foreground">{labelScanResult.print?.lastPrintedAt ? `Print evidence ${dateLabel(String(labelScanResult.print.lastPrintedAt))}` : "Print time unavailable"}{Number(labelScanResult.print?.printCount || 0) > 1 ? ` · ${numberLabel(Number(labelScanResult.print.printCount))} print actions` : ""}</p></section>
+                <section className="px-5 py-4"><p className="text-xs font-medium uppercase text-muted-foreground">Package status</p><div className="mt-2 flex items-center gap-2"><Badge variant={labelScanResult.packageStatus?.shipped ? "success" : labelScanResult.packageStatus?.code === "canceled" ? "destructive" : labelScanResult.packageStatus?.code === "unknown" ? "secondary" : "warning"}>{String(labelScanResult.packageStatus?.label || "Unknown")}</Badge>{labelScanResult.packageStatus?.shipped ? <span className="text-sm font-medium text-emerald-700 dark:text-emerald-300">Carrier/package evidence found</span> : <span className="text-sm font-medium">No shipped evidence</span>}</div><p className="mt-1 text-xs text-muted-foreground">{labelScanResult.packageStatus?.occurredAt ? dateLabel(String(labelScanResult.packageStatus.occurredAt)) : "Scanning did not change this status."}</p></section>
+              </div>
+              <dl className="grid gap-x-5 gap-y-3 border-b px-5 py-4 text-sm sm:grid-cols-2"><div><dt className="text-xs text-muted-foreground">Tracking number</dt><dd className="mt-0.5 break-all font-mono font-medium">{String(labelScanResult.trackingNumber || "Not recorded")}</dd></div><div><dt className="text-xs text-muted-foreground">Carrier / service</dt><dd className="mt-0.5 font-medium">{[labelScanResult.carrier, labelScanResult.service].filter(Boolean).join(" · ") || "Not recorded"}</dd></div><div><dt className="text-xs text-muted-foreground">Shipping batch</dt><dd className="mt-0.5 font-medium">{String(labelScanResult.batchId || "Not recorded")}</dd></div><div><dt className="text-xs text-muted-foreground">SKUs</dt><dd className="mt-0.5 truncate font-mono font-medium" title={(labelScanResult.skus || []).join(", ")}>{Array.isArray(labelScanResult.skus) && labelScanResult.skus.length ? labelScanResult.skus.join(", ") : "Not recorded"}</dd></div></dl>
+            </div> : !labelScanError ? <div className="grid min-h-48 place-items-center px-6 py-10 text-center"><div><ScanBarcode className="mx-auto size-8 text-muted-foreground" /><p className="mt-3 font-medium">Ready for a label</p><p className="mt-1 text-sm text-muted-foreground">The input stays focused for USB and Bluetooth barcode scanners.</p></div></div> : null}
+            {recentLabelScans.length ? <section className="border-t"><div className="flex items-center justify-between px-5 py-3"><p className="text-xs font-semibold uppercase text-muted-foreground">Recent scans this session</p><Button type="button" size="sm" variant="ghost" onClick={() => setRecentLabelScans([])}>Clear</Button></div><div className="divide-y">{recentLabelScans.map((scan, index) => <div key={`${String(scan.shipmentId || scan.trackingNumber || scan.orderId)}-${index}`} className="flex items-center justify-between gap-3 px-5 py-3 text-sm"><div className="min-w-0"><p className="truncate font-medium">Order {String(scan.orderNumber || scan.orderId)}</p><p className="truncate font-mono text-xs text-muted-foreground">{String(scan.trackingNumber || "No tracking")}</p></div><div className="flex shrink-0 items-center gap-1.5"><Badge variant="outline">Printed</Badge><Badge variant={scan.packageStatus?.shipped ? "success" : scan.packageStatus?.code === "canceled" ? "destructive" : "warning"}>{String(scan.packageStatus?.label || "Unknown")}</Badge></div></div>)}</div></section> : null}
+          </div>
+          <DialogFooter className="border-t px-5 py-4"><Button variant="outline" onClick={() => setLabelScanOpen(false)}>Close</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
       {loading && !pendingRows.length ? <Card aria-live="polite"><CardContent className="grid gap-3 p-4"><div className="flex items-center gap-2 text-sm font-medium"><Loader2 className="size-4 animate-spin text-primary" /> Loading fulfillment workspace</div><div className="grid gap-2 sm:grid-cols-3"><Skeleton className="h-16" /><Skeleton className="h-16" /><Skeleton className="h-16" /></div></CardContent></Card> : null}
       <div className="grid overflow-hidden rounded-md border bg-card grid-cols-2 lg:grid-cols-6">
         {[
