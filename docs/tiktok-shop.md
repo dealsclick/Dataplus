@@ -20,20 +20,27 @@ DataPlus has a dedicated TikTok Shop channel workspace, signed API client, encry
 | Returns | Import reverse orders and map exact order line IDs before SKU fallback | Return/Refund `202602` |
 | Statements | Import statement transactions as channel-fee ledger rows with source evidence | Finance `202309` and `202501` |
 | Catalog | Reconcile TikTok products to exact seller SKUs and retain remote status | Product search `202502` |
-| Buyer messages | Synchronize conversation metadata | Customer Service `202309` |
+| Product launch | Validate each SKU, submit eligible unlinked products independently, and retain per-SKU failures | Product `202309` |
+| Inventory and price | Update linked SKU IDs only when the computed payload changed | Product `202309` |
+| Buyer messages | Synchronize conversations and message history, mark read, and reply from the shared Messages workspace | Customer Service `202309`, `202601`, and `202606` |
 | Shipping | Query services, require a user-owned preview, create a package once, and retrieve shipping documents | Fulfillment `202309` and package create `202512` |
 | LIVE analytics | Import seller LIVE sessions, sales, traffic, engagement, and per-session product performance | Analytics `202609` and `202512` |
 | LIVE order attribution | Mark imported orders and lines attributed to `LIVE` or `PRE_LIVE` content without changing fulfillment behavior | Affiliate Seller `202410` |
+| Commerce analytics | Save shop, product, SKU, and video performance by bounded date windows | Analytics `202509` |
+| Affiliate and promotions | Read available collaboration, creator, activity, coupon, and engagement-template data without blocking other scopes | Affiliate Seller through `202508`, Promotion `202309`/`202406` |
+| Webhooks | Verify the raw-body HMAC, deduplicate in PostgreSQL, and queue targeted source reconciliation | Event `202309`; inventory event type `71` |
 
 LIVE analytics and LIVE order attribution are separate permissions. Analytics provides session and product performance. Seller affiliate order access provides the content type, content ID, and creator attribution needed to identify a TikTok LIVE order. DataPlus does not infer LIVE origin from an SKU, order time, or title when TikTok does not provide attribution.
 
 TikTok also exposes creator-authorized LIVE-room product-management APIs. Those APIs require a creator access token, which is different from the seller token configured in DataPlus. The current channel page reports that capability but does not allow seller credentials to pin, unpin, add, or remove a creator's LIVE products.
 
-Product creation, positive inventory/price updates, and inbound webhook processing remain guarded. They must not be enabled until category/attribute/media mappings, warehouse mappings, and webhook signature verification are complete and tested against the authorized development shop.
+Product launch remains deliberately bounded and reports incomplete category, TikTok-hosted image, package, weight, price, warehouse, freight, or inactive-product data as row-level review results. Existing linked listings are maintained by the dedicated price and inventory jobs instead of being resent through a create payload.
+
+Webhook subscriptions are configured from Channels > TikTok Shop > Webhooks. TikTok signs `app_key + raw request body` with the app secret using HMAC-SHA256. DataPlus verifies the signature before parsing operational intent, inserts each event identity once, preserves inventory snapshots as evidence, and re-reads authoritative source records before changing local channel metadata.
 
 ## Jobs and isolation
 
-Orders and returns run in `orders-tiktok`. Other manual TikTok work runs in the manual lane, while scheduled settlement imports run as background work. Jobs produce NDJSON evidence and retain normal retry/stop behavior.
+Orders and returns run in `orders-tiktok`. Other manual TikTok work runs in the manual lane, while scheduled imports and webhook recovery run as background work. Jobs produce NDJSON evidence and retain normal retry/stop behavior.
 
 Historical order imports set the DataPlus historical isolation fields. They do not route fulfillment, reserve inventory, create purchase demand, buy labels, or advance another channel's checkpoint. Existing channel orders are refreshed by TikTok Shop identity rather than duplicated.
 

@@ -1120,7 +1120,21 @@ const DEFAULT_CHANNEL_SETTINGS = {
   tiktokFulfillmentEnabled: false,
   tiktokLabelPurchaseEnabled: false,
   tiktokMessagesEnabled: false,
+  tiktokMessageScheduleEnabled: false,
+  tiktokMessageScheduleHours: 1,
   tiktokWebhooksEnabled: false,
+  tiktokAnalyticsEnabled: false,
+  tiktokAnalyticsScheduleEnabled: false,
+  tiktokAnalyticsScheduleHours: 24,
+  tiktokAnalyticsLookbackDays: 30,
+  tiktokAffiliateEnabled: false,
+  tiktokPromotionsEnabled: false,
+  tiktokCustomerEngagementEnabled: false,
+  tiktokWarehouseId: "",
+  tiktokShippingTemplateId: "",
+  tiktokCategoryVersion: "v2",
+  tiktokCurrency: "USD",
+  tiktokInventorySafetyQty: 0,
   ebayPriceInventorySyncScheduleEnabled: false,
   ebayPriceInventorySyncScheduleType: "times",
   ebayPriceInventorySyncScheduleTimes: "04:00,16:00",
@@ -5053,10 +5067,10 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultReplenishableQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "minimumPrice", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayCatalogSyncScheduleEveryHours", "ebayLaunchStatusMaxAgeHours", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuMinimumPrice", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "tiktokOrderScheduleHours", "tiktokOrderLookbackDays", "tiktokReturnScheduleHours", "tiktokReturnLookbackDays", "tiktokSettlementScheduleHours", "tiktokSettlementLookbackDays", "tiktokLiveScheduleHours", "tiktokLiveLookbackDays", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate", "walmartInventoryScheduleHours"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultReplenishableQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "minimumPrice", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayCatalogSyncScheduleEveryHours", "ebayLaunchStatusMaxAgeHours", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuMinimumPrice", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "tiktokOrderScheduleHours", "tiktokOrderLookbackDays", "tiktokReturnScheduleHours", "tiktokReturnLookbackDays", "tiktokSettlementScheduleHours", "tiktokSettlementLookbackDays", "tiktokLiveScheduleHours", "tiktokLiveLookbackDays", "tiktokMessageScheduleHours", "tiktokAnalyticsScheduleHours", "tiktokAnalyticsLookbackDays", "tiktokInventorySafetyQty", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate", "walmartInventoryScheduleHours"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "createMissingOrderSkusFromSource", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayRequireFreshStatusBeforeLaunch", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "tiktokOrdersEnabled", "tiktokOrderScheduleEnabled", "tiktokReturnsEnabled", "tiktokReturnScheduleEnabled", "tiktokSettlementImportEnabled", "tiktokSettlementScheduleEnabled", "tiktokCatalogEnabled", "tiktokLiveAnalyticsEnabled", "tiktokLiveScheduleEnabled", "tiktokLiveOrderAttributionEnabled", "tiktokLaunchEnabled", "tiktokInventoryEnabled", "tiktokPriceEnabled", "tiktokFulfillmentEnabled", "tiktokLabelPurchaseEnabled", "tiktokMessagesEnabled", "tiktokWebhooksEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifySettlementImportEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled", "walmartInventoryScheduleEnabled", "walmartSettlementImportEnabled"]) {
+  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "createMissingOrderSkusFromSource", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayRequireFreshStatusBeforeLaunch", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "tiktokOrdersEnabled", "tiktokOrderScheduleEnabled", "tiktokReturnsEnabled", "tiktokReturnScheduleEnabled", "tiktokSettlementImportEnabled", "tiktokSettlementScheduleEnabled", "tiktokCatalogEnabled", "tiktokLiveAnalyticsEnabled", "tiktokLiveScheduleEnabled", "tiktokLiveOrderAttributionEnabled", "tiktokLaunchEnabled", "tiktokInventoryEnabled", "tiktokPriceEnabled", "tiktokFulfillmentEnabled", "tiktokLabelPurchaseEnabled", "tiktokMessagesEnabled", "tiktokMessageScheduleEnabled", "tiktokWebhooksEnabled", "tiktokAnalyticsEnabled", "tiktokAnalyticsScheduleEnabled", "tiktokAffiliateEnabled", "tiktokPromotionsEnabled", "tiktokCustomerEngagementEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifySettlementImportEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled", "walmartInventoryScheduleEnabled", "walmartSettlementImportEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   settings.replenishableFeedMaxAgeHours = Math.max(0, Number(settings.replenishableFeedMaxAgeHours || 0));
@@ -6677,6 +6691,7 @@ function authRequirementForRequest(req, url, parts = []) {
     }
     if (pathname.startsWith('/api/tiktok/')) {
       if (pathname.endsWith('/credentials')) return { area: 'channels.settings', action: 'credentials' };
+      if (/\/messages(?:\/|$)/.test(pathname) || /\/jobs\/messages$/.test(pathname)) return { area: 'orders', action: method === 'GET' ? 'read' : 'edit' };
       if (/\/fulfillment\//.test(pathname)) return { area: 'channels.settings', action: 'sync' };
       if (/\/jobs\//.test(pathname)) return { area: 'channels.settings', action: 'import' };
       return { area: 'channels.settings', action: 'sync' };
@@ -21980,6 +21995,10 @@ function getTikTokMarketplace() {
     settlementScope: { tenantId: LEGACY_TENANT, companyId: LEGACY_COMPANY },
     credentials: require('./lib/tiktok-credentials').createTikTokCredentials({ directory: DATA_DIR }),
     readConnections: () => postgres.readEntityDocumentCollectionFast('connections'),
+    webhookAddress: req => {
+      const base = configuredPublicAppUrl(req);
+      return base ? `${base}/api/webhooks/tiktok` : '';
+    },
     canManageCredentials: user => userCan(user, 'channels.settings', 'credentials'),
     findActive: task => findActiveImportJobByWorkerTask({}, task),
     createJob: async attrs => {
@@ -21990,6 +22009,33 @@ function getTikTokMarketplace() {
       return job;
     },
     persistJob: persistWorkerImportJob,
+    readProducts: skus => postgres.readProductsByKeys(skus),
+    listTikTokProducts: async ({ linkedOnly = false, limit = 1000 } = {}) => {
+      const result = await postgres.getPool().query(`
+        select sku
+        from products
+        where btrim(coalesce(sku,''))<>''
+          and ($1::boolean=false or btrim(coalesce(raw->'tiktokListing'->>'productId',''))<>'')
+        order by upper(btrim(sku)),product_id
+        limit $2
+      `, [linkedOnly === true, Math.max(1, Math.min(5000, Number(limit || 1000)))]);
+      return postgres.readProductsByKeys(result.rows.map(row => row.sku));
+    },
+    saveProductListing: async (product, listing) => {
+      const productId = sourceTextValue(product?.id || product?.productId);
+      const sku = sourceTextValue(product?.sku);
+      const result = await postgres.getPool().query(`
+        update products
+        set raw=jsonb_set(coalesce(raw,'{}'::jsonb),'{tiktokListing}',coalesce(raw->'tiktokListing','{}'::jsonb)||$3::jsonb),updated_at=now()
+        where ($1<>'' and product_id=$1) or ($2<>'' and upper(btrim(sku))=upper(btrim($2)))
+        returning product_id
+      `, [productId, sku, JSON.stringify(listing)]);
+      if (result.rowCount) await Promise.all([
+        redisCache.deleteByPrefix('dataplus:products:'),
+        redisCache.deleteByPrefix('dataplus:product-detail:')
+      ]);
+      return { matched: result.rowCount };
+    },
     saveProductSnapshot: async raw => {
       const sellerSkus = [...new Set((Array.isArray(raw?.skus) ? raw.skus : [])
         .map(row => sourceTextValue(row?.seller_sku))
@@ -22000,6 +22046,9 @@ function getTikTokMarketplace() {
         status: sourceTextValue(raw.status),
         title: sourceTextValue(raw.title),
         sellerSkus,
+        skus: Array.isArray(raw.skus) ? raw.skus : [],
+        categoryId: sourceTextValue(raw.category?.id || raw.category_id),
+        listingUrl: sourceTextValue(raw.listing_url),
         syncedAt: new Date().toISOString()
       };
       const result = await postgres.getPool().query(`
@@ -49241,6 +49290,23 @@ async function handleApi(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const parts = url.pathname.split("/").filter(Boolean);
   await hydrateAuthSessionsStore();
+
+  if (req.method === "POST" && url.pathname === "/api/webhooks/tiktok") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 503, { error: "TikTok webhooks require PostgreSQL." });
+    const rawBody = await readRawBody(req);
+    if (rawBody.length > 2 * 1024 * 1024) return sendJson(res, 413, { error: "TikTok webhook payload is too large." });
+    let payload;
+    try { payload = rawBody.length ? JSON.parse(rawBody.toString("utf8")) : {}; }
+    catch { return sendJson(res, 400, { error: "TikTok webhook payload is not valid JSON." }); }
+    try {
+      const result = await getTikTokMarketplace().receiveWebhook(rawBody, payload, req.headers.authorization || "");
+      appendChannelApiLog({ channel: "TikTok Shop", transport: "Webhook", method: "POST", path: url.pathname, operation: "Receive TikTok Shop event", statusCode: 200, ok: true, message: result.duplicate ? "Duplicate event acknowledged." : result.disabled ? "Event acknowledged while webhooks are disabled." : `Event ${result.topic || "UNKNOWN"} accepted.` });
+      return sendJson(res, 200, result);
+    } catch (error) {
+      appendChannelApiLog({ channel: "TikTok Shop", transport: "Webhook", method: "POST", path: url.pathname, operation: "Receive TikTok Shop event", statusCode: error.statusCode || 401, ok: false, message: error.message });
+      return sendJson(res, error.statusCode || 401, { error: error.message });
+    }
+  }
 
   if (req.method === "POST" && url.pathname === "/api/webhooks/walmart") {
     const startedAt = Date.now();

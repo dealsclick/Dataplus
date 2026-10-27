@@ -44,6 +44,7 @@ const OrderDetailWorkspace = lazy(() => import("./components/order-detail-route"
 const RmaDetailPage = lazy(() => import("./components/order-detail-route").then((module) => ({ default: module.RmaDetailPage })))
 const ReturnsWorkspace = lazy(() => import("./components/returns-workspace").then((module) => ({ default: module.ReturnsWorkspace })))
 const ChannelsPage = lazy(() => import("./components/channels-route").then((module) => ({ default: module.ChannelsPage })))
+const MessagesRoute = lazy(() => import("./components/messages-route").then((module) => ({ default: module.MessagesRoute })))
 const SettingsPage = lazy(() => import("./components/settings-route").then((module) => ({ default: module.SettingsPage })))
 const WarehouseWorkspace = lazy(() => import("./components/warehouse-route").then((module) => ({ default: module.WarehouseWorkspace })))
 const WarehouseMobileRoute = lazy(() => import("./components/warehouse-route").then((module) => ({ default: module.WarehouseMobileRoute })))
@@ -191,7 +192,7 @@ import { Breadcrumb, BreadcrumbItem, BreadcrumbLink, BreadcrumbList, BreadcrumbP
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { cn } from "@/lib/utils"
 
-type AppView = "order-imports" | "order-review" | "accounting" | "shipping-disputes" | "sales-reports" | "shipping-reports" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "inventory-reports" | "operations" | "customers" | "customer-detail" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "return-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "wiki" | "settings"
+type AppView = "order-imports" | "order-review" | "accounting" | "shipping-disputes" | "sales-reports" | "shipping-reports" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "inventory-reports" | "operations" | "customers" | "customer-detail" | "messages" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "return-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "wiki" | "settings"
 
 type FulfillmentRateRefreshItem = {
   orderId: string
@@ -1429,6 +1430,7 @@ const navGroups: Array<{ label: string; items: NavigationItem[] }> = [
     label: "Customers",
     items: [
       { id: "customers", label: "Customers", icon: Users },
+      { id: "messages", label: "Messages", icon: MessageSquare },
     ],
   },
   {
@@ -1511,6 +1513,7 @@ const viewPaths: Record<AppView, string> = {
   operations: "/orders",
   customers: "/customers",
   "customer-detail": "/customers",
+  messages: "/messages",
   warehouse: "/warehouse/warehouses",
   fulfillment: "/fulfillment",
   purchasing: "/purchasing",
@@ -1539,6 +1542,7 @@ function viewFromPath(pathname = "/"): AppView {
   if (path === "/reports/shipping") return "shipping-reports"
   if (/^\/customers\/[^/]+$/.test(path)) return "customer-detail"
   if (path.startsWith("/customers")) return "customers"
+  if (path.startsWith("/messages")) return "messages"
   if (path === "/orders/data-review") return "order-review"
   if (path === "/orders" || path === "/orders/open" || path === "/orders/all") return "operations"
   if (/^\/jobs\/[^/]+$/.test(path)) return "job-detail"
@@ -1623,6 +1627,7 @@ const viewPermissionArea: Record<AppView, string> = {
   operations: "orders",
   customers: "orders",
   "customer-detail": "orders",
+  messages: "orders",
   warehouse: "warehouse.locations",
   fulfillment: "fulfillment.work",
   purchasing: "purchasing.queue",
@@ -2639,6 +2644,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const commandNavItems = [
     { label: "Orders", view: "operations" as AppView, path: "/orders" },
     { label: "Customers", view: "customers" as AppView, path: "/customers" },
+    { label: "Messages", view: "messages" as AppView, path: "/messages" },
     { label: "Accounting", view: "accounting" as AppView, path: "/accounting" },
     { label: "Shipping disputes", view: "shipping-disputes" as AppView, path: "/accounting/shipping-disputes" },
     { label: "Sales reports", view: "sales-reports" as AppView, path: "/reports/sales" },
@@ -2923,6 +2929,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 {view === "operations" && <OperationsPage />}
                 {view === "customers" && <CustomersPage />}
                 {view === "customer-detail" && <CustomerDetailPage />}
+                {view === "messages" && <MessagesRoute />}
                 {view === "order-review" && <OrderDataReview />}
                 {view === "accounting" && <AccountingPage />}
                 {view === "shipping-disputes" && <ShippingDisputes isSuperuser={authUser.isSuperuser === true} />}

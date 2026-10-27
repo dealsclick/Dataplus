@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { CheckCircle2, ExternalLink, Loader2, Play, Radio, RefreshCw, Save, ShieldCheck } from "lucide-react"
+import { BarChart3, Boxes, CheckCircle2, ExternalLink, Loader2, Play, Radio, RefreshCw, Save, ShieldCheck, Webhook } from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Textarea } from "@/components/ui/textarea"
 import { dateLabel, moneyLabel, numberLabel } from "@/lib/client-api"
 
 type Json = Record<string, any>
@@ -36,6 +37,16 @@ const features = [
   ["tiktokLiveScheduleEnabled", "Scheduled LIVE sync", "Refresh LIVE reporting in its own background job."],
   ["tiktokLiveOrderAttributionEnabled", "LIVE order attribution", "Use approved Affiliate Seller access to mark LIVE and pre-LIVE order lines."],
   ["tiktokMessagesEnabled", "Buyer conversations", "Synchronize conversation metadata for support review."],
+  ["tiktokMessageScheduleEnabled", "Scheduled conversations", "Refresh the customer service inbox every configured interval."],
+  ["tiktokAnalyticsEnabled", "Commerce analytics", "Import shop, product, SKU, video, and LIVE performance."],
+  ["tiktokAnalyticsScheduleEnabled", "Scheduled analytics", "Refresh commerce reporting in the background."],
+  ["tiktokAffiliateEnabled", "Affiliate and creators", "Read collaboration, creator, sample, and affiliate-order data when approved."],
+  ["tiktokPromotionsEnabled", "Promotions", "Read promotion activities, coupons, and engagement templates."],
+  ["tiktokCustomerEngagementEnabled", "Customer engagement", "Enable approved customer engagement tools."],
+  ["tiktokLaunchEnabled", "Product launch", "Check and submit eligible unlinked catalog products."],
+  ["tiktokInventoryEnabled", "Inventory updates", "Submit only linked SKUs whose computed quantity changed."],
+  ["tiktokPriceEnabled", "Price updates", "Submit only linked SKUs whose TikTok price changed."],
+  ["tiktokWebhooksEnabled", "Webhooks", "Receive signed order, return, product, inventory, and message events."],
   ["tiktokFulfillmentEnabled", "Fulfillment", "Enable TikTok shipping-service and package workflows."],
   ["tiktokLabelPurchaseEnabled", "TikTok Shipping labels", "Allow an explicit preview and confirmation before package creation."],
 ] as const
@@ -55,6 +66,8 @@ export function TikTokChannel({
   const [status, setStatus] = useState<Json>({})
   const [liveStatus, setLiveStatus] = useState<Json>({ metrics: {}, sessions: [], analytics: {}, attribution: {} })
   const [liveLoading, setLiveLoading] = useState(false)
+  const [workspace, setWorkspace] = useState<Json>({ commerce: [], affiliate: [], promotions: [], engagement: [], webhooks: {} })
+  const [workspaceLoading, setWorkspaceLoading] = useState(false)
   const [edits, setEdits] = useState<Json>({})
   const [tab, setTab] = useState("connection")
   const [busy, setBusy] = useState(false)
@@ -64,6 +77,7 @@ export function TikTokChannel({
   const [dateRange, setDateRange] = useState({ startDate: defaultStart(), endDate: defaultEnd() })
   const [historicalBackfill, setHistoricalBackfill] = useState(true)
   const [credentials, setCredentials] = useState({ appKey: "", appSecret: "", accessToken: "", refreshToken: "" })
+  const [skuText, setSkuText] = useState("")
   const rules = useMemo(() => ({ ...(channel.settings || {}), ...edits }), [channel.settings, edits])
 
   const refresh = async () => {
@@ -84,6 +98,17 @@ export function TikTokChannel({
     }
   }
 
+  const refreshWorkspace = async () => {
+    setWorkspaceLoading(true)
+    try {
+      const next = await request("workspace")
+      setWorkspace(next)
+      return next
+    } finally {
+      setWorkspaceLoading(false)
+    }
+  }
+
   useEffect(() => {
     let active = true
     request("status").then(next => {
@@ -97,6 +122,12 @@ export function TikTokChannel({
   useEffect(() => {
     let active = true
     request("live").then(next => active && setLiveStatus(next)).catch(() => {})
+    return () => { active = false }
+  }, [channel.id])
+
+  useEffect(() => {
+    let active = true
+    request("workspace").then(next => active && setWorkspace(next)).catch(() => {})
     return () => { active = false }
   }, [channel.id])
 
@@ -146,11 +177,13 @@ export function TikTokChannel({
     return result
   }
 
-  const queue = async (operation: string) => request(`jobs/${operation}`, {
+  const queue = async (operation: string, extra: Json = {}) => request(`jobs/${operation}`, {
     startDate: dateRange.startDate,
     endDate: dateRange.endDate,
     historicalBackfill: operation === "orders" && historicalBackfill,
+    ...extra,
   })
+  const selectedSkus = () => [...new Set(skuText.split(/[\s,]+/).map(value => value.trim()).filter(Boolean))]
 
   const configured = status.configured === true
   const verified = status.connection?.verified === true
@@ -175,7 +208,7 @@ export function TikTokChannel({
         {dirty && <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"><span>Feature changes are not saved yet.</span><div className="flex gap-2"><Button size="sm" disabled={busy} onClick={() => void run(saveSettings)}><Save className="size-4" /> Save</Button><Button size="sm" variant="outline" onClick={() => setEdits({})}>Discard</Button></div></div>}
 
         <Tabs value={tab} onValueChange={setTab}>
-          <div className="overflow-x-auto"><TabsList className="h-auto min-w-max justify-start"><TabsTrigger value="connection">Connection</TabsTrigger><TabsTrigger value="features">Features</TabsTrigger><TabsTrigger value="sync">Sync</TabsTrigger><TabsTrigger value="live">LIVE</TabsTrigger><TabsTrigger value="fulfillment">Shipping</TabsTrigger><TabsTrigger value="capabilities">API access</TabsTrigger></TabsList></div>
+          <div className="overflow-x-auto"><TabsList className="h-auto min-w-max justify-start"><TabsTrigger value="connection">Connection</TabsTrigger><TabsTrigger value="features">Features</TabsTrigger><TabsTrigger value="sync">Sync</TabsTrigger><TabsTrigger value="catalog">Catalog</TabsTrigger><TabsTrigger value="analytics">Analytics</TabsTrigger><TabsTrigger value="live">LIVE</TabsTrigger><TabsTrigger value="webhooks">Webhooks</TabsTrigger><TabsTrigger value="fulfillment">Shipping</TabsTrigger><TabsTrigger value="capabilities">API access</TabsTrigger></TabsList></div>
 
           <TabsContent value="connection" className="space-y-4">
             <div className="flex flex-wrap items-center gap-2"><Badge variant={verified ? "default" : "outline"}>{verified ? "Verified" : configured ? "Ready to verify" : "Not configured"}</Badge><span className="text-sm text-muted-foreground">{status.environment || "production"} · {status.shopName || "No shop selected"}</span></div>
@@ -203,15 +236,42 @@ export function TikTokChannel({
               <label className="grid gap-1.5 text-sm">Return interval (hours)<Input type="number" min="1" max="24" value={rules.tiktokReturnScheduleHours ?? 2} onChange={event => update("tiktokReturnScheduleHours", Number(event.target.value))} /></label>
               <label className="grid gap-1.5 text-sm">Statement interval (hours)<Input type="number" min="1" max="24" value={rules.tiktokSettlementScheduleHours ?? 24} onChange={event => update("tiktokSettlementScheduleHours", Number(event.target.value))} /></label>
               <label className="grid gap-1.5 text-sm">LIVE interval (hours)<Input type="number" min="1" max="24" value={rules.tiktokLiveScheduleHours ?? 24} onChange={event => update("tiktokLiveScheduleHours", Number(event.target.value))} /></label>
+              <label className="grid gap-1.5 text-sm">Message interval (hours)<Input type="number" min="1" max="24" value={rules.tiktokMessageScheduleHours ?? 1} onChange={event => update("tiktokMessageScheduleHours", Number(event.target.value))} /></label>
+              <label className="grid gap-1.5 text-sm">Analytics interval (hours)<Input type="number" min="1" max="24" value={rules.tiktokAnalyticsScheduleHours ?? 24} onChange={event => update("tiktokAnalyticsScheduleHours", Number(event.target.value))} /></label>
             </div>
           </TabsContent>
 
           <TabsContent value="sync" className="space-y-4">
             <div className="grid gap-3 sm:grid-cols-2"><label className="grid gap-1.5 text-sm">From<Input type="date" value={dateRange.startDate} max={dateRange.endDate} onChange={event => setDateRange(current => ({ ...current, startDate: event.target.value }))} /></label><label className="grid gap-1.5 text-sm">Through<Input type="date" value={dateRange.endDate} min={dateRange.startDate} onChange={event => setDateRange(current => ({ ...current, endDate: event.target.value }))} /></label></div>
             <label className="flex max-w-2xl items-center justify-between gap-4 rounded-md border p-3"><span className="min-w-0"><span className="block text-sm font-medium">Historical order backfill</span><span className="block text-xs text-muted-foreground">New orders in this manual range are saved for reporting only. They will not route fulfillment, reserve inventory, create purchase demand, or buy labels.</span></span><Switch checked={historicalBackfill} onCheckedChange={setHistoricalBackfill} /></label>
-            <div className="flex flex-wrap gap-2"><Button disabled={busy || !verified || rules.tiktokOrdersEnabled !== true} onClick={() => void run(() => queue("orders"))}><Play className="size-4" /> Import orders</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokReturnsEnabled !== true} onClick={() => void run(() => queue("returns"))}>Import returns</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokSettlementImportEnabled !== true} onClick={() => void run(() => queue("settlements"))}>Import statements</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokCatalogEnabled !== true} onClick={() => void run(() => queue("products"))}>Reconcile products</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokMessagesEnabled !== true} onClick={() => void run(() => queue("messages"))}>Sync conversations</Button></div>
+            <div className="flex flex-wrap gap-2"><Button disabled={busy || !verified || rules.tiktokOrdersEnabled !== true} onClick={() => void run(() => queue("orders"))}><Play className="size-4" /> Import orders</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokReturnsEnabled !== true} onClick={() => void run(() => queue("returns"))}>Import returns</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokSettlementImportEnabled !== true} onClick={() => void run(() => queue("settlements"))}>Import statements</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokCatalogEnabled !== true} onClick={() => void run(() => queue("products"))}>Reconcile products</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokMessagesEnabled !== true} onClick={() => void run(() => queue("messages"))}>Sync conversations</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokCatalogEnabled !== true} onClick={() => void run(() => queue("commerce"))}>Sync commerce setup</Button></div>
             <p className="text-xs text-muted-foreground">Scheduled order sync remains operational. Historical imports skip existing orders and are marked as non-operational.</p>
             <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Job</TableHead><TableHead>Operation</TableHead><TableHead>Status</TableHead><TableHead>Updated</TableHead></TableRow></TableHeader><TableBody>{(status.recentJobs || []).map((row: Json) => <TableRow key={row.id}><TableCell><a className="underline" href="/jobs">#{row.jobNumber || row.id}</a></TableCell><TableCell>{row.operation}</TableCell><TableCell><Badge variant={row.status === "success" ? "default" : row.status === "failed" ? "destructive" : "outline"}>{row.status}</Badge></TableCell><TableCell className="whitespace-nowrap text-muted-foreground">{row.at ? new Date(row.at).toLocaleString() : "-"}</TableCell></TableRow>)}{!status.recentJobs?.length && <TableRow><TableCell colSpan={4} className="py-8 text-center text-muted-foreground">No TikTok jobs yet.</TableCell></TableRow>}</TableBody></Table></div>
+          </TabsContent>
+
+          <TabsContent value="catalog" className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+              <label className="grid gap-1.5 text-sm sm:col-span-2">Default TikTok warehouse ID<Input value={rules.tiktokWarehouseId || ""} onChange={event => update("tiktokWarehouseId", event.target.value)} /></label>
+              <label className="grid gap-1.5 text-sm sm:col-span-2">Shipping template ID<Input value={rules.tiktokShippingTemplateId || ""} onChange={event => update("tiktokShippingTemplateId", event.target.value)} /></label>
+              <label className="grid gap-1.5 text-sm">Safety quantity<Input type="number" min="0" value={rules.tiktokInventorySafetyQty ?? 0} onChange={event => update("tiktokInventorySafetyQty", Number(event.target.value))} /></label>
+              <label className="grid gap-1.5 text-sm">Currency<Select value={rules.tiktokCurrency || "USD"} onValueChange={value => update("tiktokCurrency", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="USD">USD</SelectItem></SelectContent></Select></label>
+            </div>
+            <label className="grid gap-1.5 text-sm">SKUs<Textarea className="min-h-24 font-mono text-xs" value={skuText} onChange={event => setSkuText(event.target.value)} placeholder="Enter SKUs separated by spaces, commas, or new lines. Leave blank to use the bounded job selection." /></label>
+            <div className="flex flex-wrap gap-2">
+              <Button disabled={busy || !verified || rules.tiktokLaunchEnabled !== true} onClick={() => void run(() => queue("launch", { skus: selectedSkus() }))}><Boxes className="size-4" /> Launch eligible products</Button>
+              <Button variant="outline" disabled={busy || !verified || rules.tiktokInventoryEnabled !== true} onClick={() => void run(() => queue("inventory", { skus: selectedSkus() }))}>Update changed inventory</Button>
+              <Button variant="outline" disabled={busy || !verified || rules.tiktokPriceEnabled !== true} onClick={() => void run(() => queue("price", { skus: selectedSkus() }))}>Update changed prices</Button>
+            </div>
+            <Alert><ShieldCheck className="size-4" /><AlertTitle>Launch validates each SKU</AlertTitle><AlertDescription>Eligible products are submitted independently. Existing linked products are skipped, and every missing field or TikTok rejection is retained in the job artifact for correction.</AlertDescription></Alert>
+          </TabsContent>
+
+          <TabsContent value="analytics" className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-medium">Commerce, affiliate, and promotion data</p><p className="text-xs text-muted-foreground">Each optional TikTok scope is checked independently so one unavailable API does not stop the others.</p></div><Button size="sm" variant="outline" disabled={workspaceLoading} onClick={() => void run(refreshWorkspace)}>{workspaceLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh results</Button></div>
+            <div className="flex flex-wrap gap-2"><Button disabled={busy || !verified || rules.tiktokAnalyticsEnabled !== true} onClick={() => void run(() => queue("analytics"))}><BarChart3 className="size-4" /> Sync analytics</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokAffiliateEnabled !== true} onClick={() => void run(() => queue("affiliate"))}>Sync affiliate data</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokPromotionsEnabled !== true} onClick={() => void run(() => queue("promotions"))}>Sync promotions</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokCustomerEngagementEnabled !== true} onClick={() => void run(() => queue("engagement"))}>Sync engagement setup</Button></div>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+              {[["Analytics responses", workspace.analytics?.snapshots?.length], ["Commerce sources", workspace.commerce?.length], ["Affiliate sources", workspace.affiliate?.length], ["Promotion sources", workspace.promotions?.length], ["Engagement sources", workspace.engagement?.length]].map(([label, value]) => <div key={String(label)} className="rounded-md border bg-muted/20 p-3"><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1 text-xl font-semibold">{numberLabel(Number(value || 0))}</p></div>)}
+            </div>
+            <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Source</TableHead><TableHead>Area</TableHead><TableHead>Updated</TableHead></TableRow></TableHeader><TableBody>{([...(workspace.commerce || []).map((row: Json) => ({ ...row, area: "Commerce" })), ...(workspace.affiliate || []).map((row: Json) => ({ ...row, area: "Affiliate" })), ...(workspace.promotions || []).map((row: Json) => ({ ...row, area: "Promotions" })), ...(workspace.engagement || []).map((row: Json) => ({ ...row, area: "Engagement" }))]).map((row: Json) => <TableRow key={row.key}><TableCell className="font-medium">{String(row.key || "").split(".").pop()?.replaceAll("-", " ")}</TableCell><TableCell>{row.area}</TableCell><TableCell className="whitespace-nowrap text-muted-foreground">{row.updatedAt ? dateLabel(String(row.updatedAt)) : "-"}</TableCell></TableRow>)}{!(workspace.commerce?.length || workspace.affiliate?.length || workspace.promotions?.length || workspace.engagement?.length) && <TableRow><TableCell colSpan={3} className="h-24 text-center text-muted-foreground">Run a sync to load available TikTok data.</TableCell></TableRow>}</TableBody></Table></div>
           </TabsContent>
 
           <TabsContent value="live" className="space-y-4">
@@ -235,6 +295,14 @@ export function TikTokChannel({
             <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground"><span>Last synchronized: {liveStatus.syncedAt ? dateLabel(String(liveStatus.syncedAt)) : "Never"}</span><span>Affiliate orders checked: {numberLabel(Number(liveStatus.attribution?.checked || 0))}</span><span>Unmatched LIVE orders: {numberLabel(Number(liveStatus.attribution?.unmatched || 0))}</span></div>
             <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>LIVE session</TableHead><TableHead>Creator</TableHead><TableHead>Started</TableHead><TableHead className="text-right">GMV</TableHead><TableHead className="text-right">SKU orders</TableHead><TableHead className="text-right">Items</TableHead><TableHead className="text-right">Products</TableHead><TableHead className="text-right">Views</TableHead></TableRow></TableHeader><TableBody>{(liveStatus.sessions || []).map((session: Json) => <TableRow key={session.liveId}><TableCell className="min-w-56"><p className="max-w-80 truncate font-medium">{session.title || "Untitled LIVE"}</p><code className="text-xs text-muted-foreground">{session.liveId}</code></TableCell><TableCell><p>{session.creatorUsername || "Not reported"}</p><p className="text-xs text-muted-foreground">{String(session.accountType || "").replaceAll("_", " ")}</p></TableCell><TableCell className="whitespace-nowrap">{session.startTime ? dateLabel(String(session.startTime)) : "-"}</TableCell><TableCell className="text-right">{moneyLabel(Number(session.gmv || 0))}</TableCell><TableCell className="text-right">{numberLabel(Number(session.skuOrders || 0))}</TableCell><TableCell className="text-right">{numberLabel(Number(session.itemsSold || 0))}</TableCell><TableCell className="text-right">{numberLabel(Array.isArray(session.products) ? session.products.length : 0)}</TableCell><TableCell className="text-right">{numberLabel(Number(session.views || 0))}</TableCell></TableRow>)}{!(liveStatus.sessions || []).length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">{liveLoading ? "Loading LIVE data..." : "No LIVE sessions have been synchronized for this date range."}</TableCell></TableRow>}</TableBody></Table></div>
             <p className="text-xs text-muted-foreground">DataPlus identifies LIVE orders only from TikTok's documented affiliate content type and content ID. It does not infer LIVE sales from SKU text, buyer names, or combined-shipping groups.</p>
+          </TabsContent>
+
+          <TabsContent value="webhooks" className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-medium">Signed TikTok events</p><p className="text-xs text-muted-foreground">Events are deduplicated before targeted order, return, product, inventory, or conversation reconciliation.</p></div><div className="flex gap-2"><Button size="sm" variant="outline" disabled={busy || !verified || rules.tiktokWebhooksEnabled !== true} onClick={() => void run(refreshWorkspace)}><RefreshCw className="size-4" /> Refresh</Button><Button size="sm" disabled={busy || !verified || rules.tiktokWebhooksEnabled !== true} onClick={() => void run(async () => { const result = await request("webhooks/setup", {}); await refreshWorkspace(); return result })}><Webhook className="size-4" /> Configure subscriptions</Button></div></div>
+            <div className="rounded-md border p-3"><p className="text-xs font-medium text-muted-foreground">Callback URL</p><p className="mt-1 break-all font-mono text-sm">{workspace.webhooks?.callbackUrl || "Load webhook status to view the public callback URL."}</p></div>
+            {workspace.webhooks?.warning && <Alert variant="destructive"><AlertTitle>Webhook status needs attention</AlertTitle><AlertDescription>{workspace.webhooks.warning}</AlertDescription></Alert>}
+            <div className="grid gap-3 sm:grid-cols-2"><div className="rounded-md border p-3"><p className="text-sm font-medium">Subscribed</p><p className="mt-1 text-2xl font-semibold">{numberLabel(Number(workspace.webhooks?.configuredTopics?.length || 0))}</p></div><div className="rounded-md border p-3"><p className="text-sm font-medium">Missing</p><p className="mt-1 text-2xl font-semibold">{numberLabel(Number(workspace.webhooks?.missingTopics?.length || 0))}</p></div></div>
+            <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Event</TableHead><TableHead>Status</TableHead><TableHead>Received</TableHead><TableHead>Reference</TableHead></TableRow></TableHeader><TableBody>{(workspace.webhooks?.recentEvents || []).map((row: Json) => <TableRow key={row.eventId}><TableCell className="font-medium">{row.topic}</TableCell><TableCell><Badge variant={row.state === "failed" ? "destructive" : row.state === "processed" ? "default" : "outline"}>{row.state}</Badge></TableCell><TableCell className="whitespace-nowrap">{row.receivedAt ? dateLabel(String(row.receivedAt)) : "-"}</TableCell><TableCell className="max-w-56 truncate font-mono text-xs">{row.entity?.orderId || row.entity?.returnId || row.entity?.productId || row.entity?.conversationId || row.eventId}</TableCell></TableRow>)}{!workspace.webhooks?.recentEvents?.length && <TableRow><TableCell colSpan={4} className="h-24 text-center text-muted-foreground">No TikTok webhook events received yet.</TableCell></TableRow>}</TableBody></Table></div>
           </TabsContent>
 
           <TabsContent value="fulfillment" className="space-y-3">

@@ -6,6 +6,7 @@ const path = require('node:path');
 const { tiktokSignature } = require('../lib/tiktok-client');
 const { createTikTokCredentials } = require('../lib/tiktok-credentials');
 const { componentRows, mapTikTokOrder, mapTikTokReturn } = require('../lib/tiktok-mappers');
+const { EVENT_TOPICS, reconcileOperation, verifyTikTokShopWebhook, webhookEntity, webhookIdentity, webhookTopic } = require('../lib/tiktok-webhooks');
 const {
   applyTikTokLiveAttribution,
   normalizeTikTokLiveAttribution,
@@ -22,6 +23,19 @@ async function main() {
     sign: 'ignored'
   }, '{"page_size":10}', 'app-secret');
   assert.equal(signature, '4023fdd397c99ee51950d7287dc195e2835f56a3ea6f7c8ea3bff1b65435231f');
+
+  const webhookBody = Buffer.from(JSON.stringify({ event_id: 'event-1', event_type: 'ORDER_STATUS_CHANGE', data: { order_id: '576000001' } }));
+  const webhookAuthorization = require('node:crypto').createHmac('sha256', 'app-secret').update(Buffer.concat([Buffer.from('app-key'), webhookBody])).digest('hex');
+  assert.equal(verifyTikTokShopWebhook(webhookBody, webhookAuthorization, 'app-key', 'app-secret'), true);
+  assert.equal(verifyTikTokShopWebhook(webhookBody, `sha256=${webhookAuthorization}`, 'app-key', 'app-secret'), true);
+  assert.equal(verifyTikTokShopWebhook(webhookBody, `${webhookAuthorization}bad`, 'app-key', 'app-secret'), false);
+  assert.equal(webhookIdentity(JSON.parse(webhookBody), webhookBody), 'event-1');
+  assert.equal(webhookTopic(JSON.parse(webhookBody)), 'ORDER_STATUS_CHANGE');
+  assert.equal(webhookEntity(JSON.parse(webhookBody)).orderId, '576000001');
+  assert.equal(reconcileOperation('RETURN_STATUS_CHANGE'), 'returns');
+  assert.equal(reconcileOperation('NEW_MESSAGE'), 'messages');
+  assert.equal(webhookTopic({ type: 71, data: { product_id: 'product-1', sku_id: 'sku-1' } }), 'INVENTORY_CHANGED_BY_SHOP');
+  assert.equal(EVENT_TOPICS.includes('NEW_MESSAGE'), true);
 
   const directory = fs.mkdtempSync(path.join(process.env.DATAPLUS_TEST_TMP_DIR || os.tmpdir(), 'dataplus-tiktok-'));
   try {
