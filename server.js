@@ -95,7 +95,7 @@ const { createAccountingStore } = require("./lib/accounting-store");
 const { createChannelFeeStore } = require("./lib/channel-fee-store");
 const { importTemuSettlementReport } = require("./lib/temu-settlement-report");
 const { createShippingDisputeStore } = require("./lib/shipping-disputes");
-const { createOutboundAuditStore } = require("./lib/outbound-audit-store");
+const { createOutboundAuditStore, publicEvidence } = require("./lib/outbound-audit-store");
 const upsRating = require("./lib/ups-rating");
 const { createCarrierCredentials } = require("./lib/carrier-credentials");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
@@ -215,6 +215,8 @@ const CHANNEL_API_LOG_RETENTION_DAYS = Math.max(365, Number(process.env.CHANNEL_
 const IMPORT_JOB_FILE_DIR = path.join(DATA_DIR, "import-jobs");
 const ORDER_ATTACHMENT_DIR = path.join(DATA_DIR, "order-attachments");
 const WAREHOUSE_AUDIT_ATTACHMENT_DIR = path.join(DATA_DIR, "warehouse-audit-attachments");
+const OUTBOUND_EVIDENCE_DIR = path.resolve(process.env.OUTBOUND_EVIDENCE_DIR || path.join(DATA_DIR, "outbound-audit-evidence"));
+const OUTBOUND_EVIDENCE_MAX_BYTES = 1_572_864;
 
 function tesseractTsv(filePath, template) {
   return new Promise((resolve, reject) => {
@@ -39402,6 +39404,52 @@ async function resolveOutboundAuditTracking(scannedValue = "") {
   };
 }
 
+function outboundEvidenceFilePath(record = {}) {
+  const segments = String(record.storage_key || "").split("/").filter(Boolean);
+  if (segments.length !== 3 || segments.some(segment => !/^[a-zA-Z0-9.-]+$/.test(segment))) {
+    throw Object.assign(new Error("Outbound evidence storage key is invalid."), { statusCode: 500 });
+  }
+  const filePath = path.resolve(OUTBOUND_EVIDENCE_DIR, ...segments);
+  if (!filePath.startsWith(`${OUTBOUND_EVIDENCE_DIR}${path.sep}`)) {
+    throw Object.assign(new Error("Outbound evidence storage path is invalid."), { statusCode: 500 });
+  }
+  return filePath;
+}
+
+async function writeOutboundEvidenceFile(req, filePath) {
+  const declaredBytes = Number(req.headers["content-length"] || 0);
+  if (declaredBytes > OUTBOUND_EVIDENCE_MAX_BYTES) {
+    req.resume();
+    throw Object.assign(new Error("The package photo exceeds the 1.5 MB evidence limit."), { statusCode: 413 });
+  }
+  const { Transform } = require("stream");
+  const { pipeline } = require("stream/promises");
+  const hash = crypto.createHash("sha256");
+  const partialPath = `${filePath}.${crypto.randomUUID()}.uploading`;
+  let byteSize = 0;
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  try {
+    const meter = new Transform({
+      transform(chunk, encoding, callback) {
+        byteSize += chunk.length;
+        if (byteSize > OUTBOUND_EVIDENCE_MAX_BYTES) {
+          return callback(Object.assign(new Error("The package photo exceeds the 1.5 MB evidence limit."), { statusCode: 413 }));
+        }
+        hash.update(chunk);
+        callback(null, chunk);
+      }
+    });
+    await pipeline(req, meter, fs.createWriteStream(partialPath, { flags: "wx" }));
+    if (!byteSize) throw Object.assign(new Error("The package photo is empty."), { statusCode: 400 });
+    await fs.promises.rm(filePath, { force: true });
+    await fs.promises.rename(partialPath, filePath);
+    return { byteSize, sha256: hash.digest("hex") };
+  } catch (error) {
+    await fs.promises.rm(partialPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
 function trackingUrlForCarrier(carrier = "", trackingNumber = "") {
   const tracking = String(trackingNumber || "").trim();
   if (!tracking) return "";
@@ -60789,6 +60837,65 @@ async function handleApi(req, res) {
     }
   }
 
+  const outboundEvidenceMatch = url.pathname.match(/^\/api\/fulfillment\/outbound-audits\/([^/]+)\/scans\/([^/]+)\/evidence(?:\/([^/]+)\/content)?$/);
+  if (outboundEvidenceMatch && postgres.isPostgresEnabled()) {
+    const scope = notificationScope(req);
+    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
+      return sendJson(res, 409, { error: "Outbound handoff evidence is available only for LINQ while fulfillment isolation is completed." });
+    }
+    const auditId = decodeURIComponent(outboundEvidenceMatch[1]);
+    const scanId = decodeURIComponent(outboundEvidenceMatch[2]);
+    const evidenceId = outboundEvidenceMatch[3] ? decodeURIComponent(outboundEvidenceMatch[3]) : "";
+    if (req.method === "POST" && !evidenceId) {
+      const body = await parseBody(req);
+      const intent = await outboundAuditStore.createEvidenceIntent(scope, auditId, scanId, {
+        evidenceId: body.clientEvidenceId,
+        contentType: body.contentType,
+        byteSize: body.byteSize,
+        width: body.width,
+        height: body.height,
+        capturedAt: body.capturedAt
+      }, authUser);
+      return sendJson(res, 201, {
+        evidence: intent.evidence,
+        uploadUrl: `/api/fulfillment/outbound-audits/${encodeURIComponent(auditId)}/scans/${encodeURIComponent(scanId)}/evidence/${encodeURIComponent(intent.evidence.id)}/content`
+      });
+    }
+    if (!evidenceId) return sendJson(res, 405, { error: "Evidence upload action not supported." });
+    const evidence = await outboundAuditStore.readEvidence(scope, auditId, scanId, evidenceId);
+    if (!evidence) return notFound(res);
+    const filePath = outboundEvidenceFilePath(evidence);
+    if (req.method === "PUT") {
+      if (String(req.headers["content-type"] || "").split(";")[0].trim().toLowerCase() !== "image/jpeg") {
+        req.resume();
+        return sendJson(res, 415, { error: "Outbound evidence must be uploaded as a JPEG image." });
+      }
+      if (evidence.status === "ready" && fs.existsSync(filePath)) {
+        req.resume();
+        return sendJson(res, 200, { evidence: publicEvidence(evidence), message: "Package photo was already saved." });
+      }
+      try {
+        const written = await writeOutboundEvidenceFile(req, filePath);
+        const saved = await outboundAuditStore.completeEvidence(scope, auditId, scanId, evidenceId, written);
+        return sendJson(res, 200, { evidence: saved, message: "Package photo saved." });
+      } catch (error) {
+        await outboundAuditStore.failEvidence(scope, auditId, scanId, evidenceId, error.message).catch(() => {});
+        throw error;
+      }
+    }
+    if (req.method === "GET") {
+      if (evidence.status !== "ready" || !fs.existsSync(filePath)) return notFound(res);
+      const stat = await fs.promises.stat(filePath);
+      res.writeHead(200, {
+        "Content-Type": "image/jpeg",
+        "Content-Length": stat.size,
+        "Cache-Control": "private, max-age=300",
+        "Content-Disposition": `inline; filename="${path.basename(evidence.file_name || `${evidenceId}.jpg`)}"`
+      });
+      return fs.createReadStream(filePath).pipe(res);
+    }
+  }
+
   const outboundAuditMatch = url.pathname.match(/^\/api\/fulfillment\/outbound-audits\/([^/]+)(?:\/(scan|close|reconcile|print|export\.csv))?$/);
   if (outboundAuditMatch && postgres.isPostgresEnabled()) {
     const scope = notificationScope(req);
@@ -60854,6 +60961,8 @@ async function handleApi(req, res) {
           tracking_number: scan.trackingNumber,
           detected_carrier: scan.carrier,
           match_status: scan.matchStatus,
+          photo_status: scan.evidenceStatus,
+          photo_count: scan.evidenceCount,
           order_numbers: scan.matches.map((match) => match.orderNumber).filter(Boolean).join(" | "),
           channel_order_numbers: scan.matches.map((match) => match.channelOrderNumber).filter(Boolean).join(" | "),
           channels: [...new Set(scan.matches.map((match) => match.channel).filter(Boolean))].join(" | "),
@@ -60862,15 +60971,16 @@ async function handleApi(req, res) {
           closed_at: audit.session.closedAt,
           driver_name: audit.session.driverName,
           pickup_confirmation: audit.session.pickupConfirmation,
-          notes: audit.session.notes
+          notes: audit.session.notes,
+          evidence_override_reason: audit.session.evidenceOverrideReason
         }));
         return sendCsv(res, rowsToCsv(rows.length ? rows : [{ audit_number: audit.session.auditNumber }]), `${audit.session.auditNumber.toLowerCase()}-outbound-audit.csv`);
       }
       const scanRows = audit.scans.slice().reverse().map((scan, index) => {
         const orders = scan.matches.map((match) => escapeHtml([match.orderNumber, match.channel].filter(Boolean).join(" · "))).join("<br>") || "No matching order";
-        return `<tr><td>${index + 1}</td><td>${escapeHtml(scan.trackingNumber)}</td><td>${escapeHtml(scan.carrier || "Unknown")}</td><td>${orders}</td><td>${escapeHtml(scan.matchStatus.replace("multiple", "multiple orders"))}</td><td>${escapeHtml(scan.scannedByName)}</td><td>${escapeHtml(new Date(scan.scannedAt).toLocaleString())}</td></tr>`;
+        return `<tr><td>${index + 1}</td><td>${escapeHtml(scan.trackingNumber)}</td><td>${escapeHtml(scan.carrier || "Unknown")}</td><td>${orders}</td><td>${escapeHtml(scan.matchStatus.replace("multiple", "multiple orders"))}</td><td>${escapeHtml(scan.evidenceCount ? `${scan.evidenceCount} saved` : scan.evidenceStatus)}</td><td>${escapeHtml(scan.scannedByName)}</td><td>${escapeHtml(new Date(scan.scannedAt).toLocaleString())}</td></tr>`;
       }).join("");
-      return sendHtml(res, 200, `<!doctype html><html><head><title>${escapeHtml(audit.session.auditNumber)} outbound audit</title><style>body{font-family:Arial,sans-serif;margin:30px;color:#111}h1{margin-bottom:4px}.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:18px 0}.meta div{border:1px solid #bbb;padding:8px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #bbb;padding:7px;text-align:left;vertical-align:top}th{background:#eee}.sign{margin-top:28px;display:grid;grid-template-columns:1fr 1fr;gap:36px}.line{border-top:1px solid #111;padding-top:6px;margin-top:28px}@media print{body{margin:10px}}</style></head><body><h1>${escapeHtml(audit.session.auditNumber)} · Outbound handoff audit</h1><p>Internal warehouse custody record. This is not carrier acceptance.</p><div class="meta"><div><strong>Warehouse</strong><br>${escapeHtml(audit.session.warehouseName)}</div><div><strong>Carrier</strong><br>${escapeHtml(audit.session.carrier || "Any carrier")}</div><div><strong>Status</strong><br>${escapeHtml(audit.session.status)}</div><div><strong>Packages</strong><br>${audit.session.packageCount}</div><div><strong>Matched / unmatched</strong><br>${audit.session.matchedCount} / ${audit.session.unmatchedCount}</div><div><strong>Closed</strong><br>${escapeHtml(audit.session.closedAt ? new Date(audit.session.closedAt).toLocaleString() : "Open")}</div></div><table><thead><tr><th>#</th><th>Tracking</th><th>Carrier</th><th>Order</th><th>Match</th><th>Scanned by</th><th>Scanned at</th></tr></thead><tbody>${scanRows || '<tr><td colspan="7">No packages scanned.</td></tr>'}</tbody></table><div class="sign"><div class="line">Warehouse handoff</div><div class="line">Driver / receiving party</div></div></body></html>`);
+      return sendHtml(res, 200, `<!doctype html><html><head><title>${escapeHtml(audit.session.auditNumber)} outbound audit</title><style>body{font-family:Arial,sans-serif;margin:30px;color:#111}h1{margin-bottom:4px}.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:18px 0}.meta div{border:1px solid #bbb;padding:8px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #bbb;padding:7px;text-align:left;vertical-align:top}th{background:#eee}.sign{margin-top:28px;display:grid;grid-template-columns:1fr 1fr;gap:36px}.line{border-top:1px solid #111;padding-top:6px;margin-top:28px}@media print{body{margin:10px}}</style></head><body><h1>${escapeHtml(audit.session.auditNumber)} · Outbound handoff audit</h1><p>Internal warehouse custody record. This is not carrier acceptance.</p><div class="meta"><div><strong>Warehouse</strong><br>${escapeHtml(audit.session.warehouseName)}</div><div><strong>Carrier</strong><br>${escapeHtml(audit.session.carrier || "Any carrier")}</div><div><strong>Status</strong><br>${escapeHtml(audit.session.status)}</div><div><strong>Packages</strong><br>${audit.session.packageCount}</div><div><strong>Photos saved / missing</strong><br>${audit.session.evidenceCompleteCount} / ${audit.session.evidenceMissingCount}</div><div><strong>Closed</strong><br>${escapeHtml(audit.session.closedAt ? new Date(audit.session.closedAt).toLocaleString() : "Open")}</div></div><table><thead><tr><th>#</th><th>Tracking</th><th>Carrier</th><th>Order</th><th>Match</th><th>Photo</th><th>Scanned by</th><th>Scanned at</th></tr></thead><tbody>${scanRows || '<tr><td colspan="8">No packages scanned.</td></tr>'}</tbody></table><div class="sign"><div class="line">Warehouse handoff</div><div class="line">Driver / receiving party</div></div></body></html>`);
     }
   }
 

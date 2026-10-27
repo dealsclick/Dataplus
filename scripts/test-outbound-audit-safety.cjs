@@ -22,9 +22,11 @@ assert.equal(unmatched.matches.length, 0);
 assert.equal(unmatched.trackingNumber, 'EXTERNAL-TRACKING-123');
 
 const dbSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
-assert.match(dbSource, /RELATIONAL_SCHEMA_VERSION = "2026-10-27-outbound-audit-v1"/);
+assert.match(dbSource, /RELATIONAL_SCHEMA_VERSION = "2026-10-27-outbound-evidence-v1"/);
 assert.match(dbSource, /create table if not exists outbound_audit_sessions/);
 assert.match(dbSource, /create table if not exists outbound_audit_scans/);
+assert.match(dbSource, /create table if not exists outbound_audit_evidence/);
+assert.match(dbSource, /storage_backend text not null default 'filesystem'/);
 assert.match(dbSource, /unique \(audit_id, tracking_normalized\)/);
 
 const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
@@ -35,5 +37,18 @@ const routes = serverSource.slice(routeStart, routeEnd);
 for (const forbidden of ['saveOrder(', 'addInventoryLedger(', 'syncOrder', 'purchaseShippingLabel']) {
   assert.equal(routes.includes(forbidden), false, `Outbound audit routes must not call ${forbidden}`);
 }
+assert.match(serverSource, /writeOutboundEvidenceFile/);
+assert.match(serverSource, /createWriteStream/);
+assert.doesNotMatch(routes, /data:image\//);
+
+const scannerSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'lib', 'fast-barcode-scanner.ts'), 'utf8');
+assert.match(scannerSource, /BarcodeDetector/);
+assert.match(scannerSource, /width: \{ ideal: 1280/);
+assert.match(scannerSource, /reader\.possibleFormats/);
+assert.doesNotMatch(scannerSource, /ideal: 1920, max: 1920/);
+
+const workspaceSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'outbound-audit-workspace.tsx'), 'utf8');
+assert.match(workspaceSource, /captureCompressedEvidence/);
+assert.match(workspaceSource, /savePendingOutboundEvidence/);
 
 console.log('outbound audit safety tests passed');

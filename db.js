@@ -24,7 +24,7 @@ const {
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-27-outbound-audit-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-27-outbound-evidence-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -943,6 +943,9 @@ async function initRelationalSchema() {
       matched_count integer not null default 0,
       unmatched_count integer not null default 0,
       multiple_match_count integer not null default 0,
+      evidence_required boolean not null default true,
+      evidence_complete_count integer not null default 0,
+      evidence_override_reason text,
       started_by_id text,
       started_by_name text,
       closed_by_id text,
@@ -965,6 +968,8 @@ async function initRelationalSchema() {
       carrier text,
       match_status text not null default 'unmatched' check (match_status in ('matched', 'multiple', 'unmatched')),
       order_matches jsonb not null default '[]'::jsonb,
+      evidence_status text not null default 'missing' check (evidence_status in ('missing', 'uploading', 'complete', 'failed')),
+      evidence_count integer not null default 0,
       scanned_by_id text,
       scanned_by_name text,
       scanned_at timestamptz not null default now(),
@@ -975,6 +980,41 @@ async function initRelationalSchema() {
       on outbound_audit_scans (audit_id, scanned_at desc);
     create index if not exists outbound_audit_scans_tracking_idx
       on outbound_audit_scans (tracking_normalized, scanned_at desc);
+
+    alter table outbound_audit_sessions add column if not exists evidence_required boolean not null default true;
+    alter table outbound_audit_sessions add column if not exists evidence_complete_count integer not null default 0;
+    alter table outbound_audit_sessions add column if not exists evidence_override_reason text;
+    alter table outbound_audit_scans add column if not exists evidence_status text not null default 'missing';
+    alter table outbound_audit_scans add column if not exists evidence_count integer not null default 0;
+
+    create table if not exists outbound_audit_evidence (
+      evidence_id text primary key,
+      audit_id text not null references outbound_audit_sessions(audit_id) on delete restrict,
+      scan_id text not null references outbound_audit_scans(scan_id) on delete restrict,
+      tenant_id text not null,
+      company_id text not null,
+      evidence_type text not null default 'exterior',
+      status text not null default 'pending' check (status in ('pending', 'ready', 'failed')),
+      storage_backend text not null default 'filesystem',
+      storage_key text not null unique,
+      file_name text,
+      content_type text not null default 'image/jpeg',
+      byte_size integer,
+      width integer,
+      height integer,
+      sha256 text,
+      captured_at timestamptz not null default now(),
+      uploaded_at timestamptz,
+      uploaded_by_id text,
+      uploaded_by_name text,
+      failure_reason text,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    create index if not exists outbound_audit_evidence_scan_idx
+      on outbound_audit_evidence (scan_id, status, captured_at desc);
+    create index if not exists outbound_audit_evidence_company_idx
+      on outbound_audit_evidence (tenant_id, company_id, captured_at desc);
 
     create table if not exists order_shipment_financials (
       order_id text not null,
