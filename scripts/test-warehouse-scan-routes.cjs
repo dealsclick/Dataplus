@@ -4,17 +4,17 @@ const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
 
-async function run(route, { product = null, closed = false, unknowns = [], originalBin } = {}) {
+async function run(route, { product = null, closed = false, unknowns = [], lines = [], originalBin } = {}) {
   const marker = `parts[1] === "warehouse-audits" && parts[2] && parts[3] === "${route}"`;
   const location = source.indexOf(marker);
   assert.ok(location > 0);
   const start = source.lastIndexOf('  if (', location);
   const end = source.indexOf('\n  if (', location);
-  const audit = { id: 'audit', auditNumber: 'AUDIT-TEST', status: closed ? 'completed' : 'in_progress', warehouseId: 'physical', lines: [], unknownBarcodes: unknowns };
+  const audit = { id: 'audit', auditNumber: 'AUDIT-TEST', status: closed ? 'completed' : 'in_progress', warehouseId: 'physical', lines, unknownBarcodes: unknowns };
   let warehouseReads = 0;
   let written;
   let created;
-  const body = { barcode: 'X0039W0Z71', locationBin: 'A-01', quantity: 2, qty: 2, sku: 'TEST-SKU', title: 'Test item', user: 'Test counter' };
+  const body = { barcode: 'X0039W0Z71', locationBin: 'A-01', quantity: 2, qty: 2, sku: 'TEST-SKU', title: 'Test item', user: 'Test counter', clientActionId: 'quick-action-1', photoDataUrl: `data:image/jpeg;base64,${Buffer.from('photo').toString('base64')}` };
   if (originalBin !== undefined) body.unknownLocationBin = originalBin;
   const context = {
     req: { method: 'POST' }, res: {}, parts: ['api', 'warehouse-audits', 'audit', route],
@@ -24,7 +24,8 @@ async function run(route, { product = null, closed = false, unknowns = [], origi
     validateWarehouseBin: (_warehouse, bin) => ({ value: bin }),
     auditProductImageUrl: () => '', auditExpectedQuantity: () => 3,
     normalizeWarehouseStockRow: row => row,
-    crypto: { randomUUID: () => 'created-id' },
+    authUser: { name: 'Test counter' }, Buffer,
+    crypto: { randomUUID: (() => { let value = 0; return () => `created-id-${++value}`; })() },
     redisCache: { deleteByPrefix: async () => {} },
     notFound: () => ({ status: 404 }), sendJson: (_res, status, data) => ({ status, data }),
     postgres: {
@@ -66,13 +67,30 @@ async function run(route, { product = null, closed = false, unknowns = [], origi
   assert.equal(manual.audit.unknownBarcodes.length, 0);
   assert.equal(manual.audit.lines[0].sku, 'TEST-SKU');
   assert.equal(manual.audit.lines[0].countedQty, 2);
+  const quick = await run('quick-item');
+  assert.equal(quick.result.status, 201);
+  assert.equal(quick.created.sku, 'DPS10001');
+  assert.equal(quick.created.status, 'Draft');
+  assert.equal(quick.created.needsProductDetails, true);
+  assert.deepEqual(Array.from(quick.created.tags), ['warehouse-quick-create', 'needs-product-details']);
+  assert.match(quick.created.defaultImage, /^\/api\/warehouse-audits\/audit\/lines\//);
+  assert.equal(quick.audit.lines[0].quickCreated, true);
+  assert.equal(quick.audit.lines[0].reviewStatus, 'needs_details');
+  assert.equal(quick.audit.lines[0].countedQty, 2);
+  const duplicateQuick = await run('quick-item', { lines: [{ id: 'line-1', productId: 'quick-product', sku: 'DPS10001', quickCreateClientId: 'quick-action-1', countedQty: 2 }] });
+  assert.equal(duplicateQuick.result.status, 200);
+  assert.equal(duplicateQuick.result.data.duplicate, true);
+  assert.equal(duplicateQuick.audit.lines[0].countedQty, 2);
+  const racedQuick = await run('quick-item', { product: { id: 'existing', sku: 'EXISTING', barcode: 'X0039W0Z71' } });
+  assert.equal(racedQuick.result.status, 409);
+  assert.equal(racedQuick.created, undefined);
   const resumed = await run('manual-item', { originalBin: 'B-02', unknowns: [{ barcode: 'X0039W0Z71', locationBin: 'A-01', count: 5 }, { barcode: 'X0039W0Z71', locationBin: 'B-02', count: 2 }] });
   assert.equal(resumed.audit.unknownBarcodes[0].createdProductSku, undefined);
   assert.equal(resumed.audit.unknownBarcodes[0].count, 5);
   assert.equal(resumed.audit.unknownBarcodes.length, 1);
   assert.equal(resumed.audit.lines[0].sku, 'TEST-SKU');
   assert.equal(resumed.audit.lines[0].locationBin, 'A-01');
-  for (const route of ['next-sku', 'scan', 'manual-item']) {
+  for (const route of ['next-sku', 'scan', 'quick-item', 'manual-item']) {
     const closed = await run(route, { closed: true });
     assert.equal(closed.result.status, 400);
     assert.equal(closed.warehouseReads, 0);

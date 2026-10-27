@@ -69,5 +69,13 @@ assert.match(warehouseMobileSource, /section === "outbound"/);
 
 const warehouseRouteSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'warehouse-route.tsx'), 'utf8');
 assert.match(warehouseRouteSource, /OutboundAuditWorkspace/);
+assert.match(warehouseRouteSource, /startFastBarcodeScanner/);
+assert.match(warehouseRouteSource, /captureCompressedEvidence/);
+assert.match(warehouseRouteSource, /Quick create/);
+assert.match(warehouseRouteSource, /Full create/);
+
+assert.match(serverSource, /parts\[3\] === "quick-item"/);
+assert.match(serverSource, /warehouse-audit-quick-create/);
+assert.match(serverSource, /needsProductDetails: true/);
 
 console.log('outbound audit safety tests passed');

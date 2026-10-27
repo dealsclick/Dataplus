@@ -8543,7 +8543,7 @@ function auditProductImageUrl(product = {}, sourceItem = {}) {
   ];
   return images
     .map((image) => String(image || "").trim())
-    .find((image) => /^(?:https?:\/\/|data:image\/)/i.test(image)) || "";
+    .find((image) => /^(?:https?:\/\/|data:image\/|\/api\/)/i.test(image)) || "";
 }
 
 function productTimestamp(item = {}) {
@@ -54829,6 +54829,77 @@ async function handleApi(req, res) {
     const csv = [header, ...rows].map((row) => row.map(quote).join(",")).join("\n");
     res.writeHead(200, { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename=${String(audit.auditNumber || "warehouse-audit").replace(/[^a-z0-9_-]/gi, "-")}.csv` });
     return res.end(csv);
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "quick-item" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
+    const quantity = Math.max(1, Math.min(100000, Math.floor(Number(body.qty || body.quantity || 1) || 0)));
+    const clientActionId = String(body.clientActionId || "").trim();
+    const photoDataUrl = String(body.photoDataUrl || "").trim();
+    if (!barcode) return sendJson(res, 400, { error: "Scan a UPC before quick-creating the product." });
+    if (!clientActionId || clientActionId.length > 100) return sendJson(res, 400, { error: "Quick-create request identifier is missing." });
+    const photoMatch = /^data:(image\/(?:jpe?g|webp));base64,([A-Za-z0-9+/=\s]+)$/i.exec(photoDataUrl);
+    if (!photoMatch) return sendJson(res, 400, { error: "Take one product photo before quick create." });
+    const photoBytes = Buffer.from(photoMatch[2], "base64");
+    if (!photoBytes.length || photoBytes.length > 1_572_864) return sendJson(res, 413, { error: "The quick-create photo must be 1.5 MB or smaller." });
+    const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
+    const audit = audits.find((row) => String(row.id) === String(parts[2]));
+    if (!audit) return notFound(res);
+    if (audit.status !== "in_progress") return sendJson(res, 400, { error: "This warehouse audit is closed." });
+    const priorLine = (audit.lines || []).find((line) => String(line.quickCreateClientId || "") === clientActionId);
+    if (priorLine) {
+      const priorProduct = await postgres.readProductByKey(priorLine.productId || priorLine.sku);
+      return sendJson(res, 200, { audit, product: priorProduct || { id: priorLine.productId, sku: priorLine.sku }, duplicate: true, message: `${priorLine.sku} was already created from this scan.` });
+    }
+    const newlyMatched = await resolveScannedCatalogBarcode(barcode);
+    if (newlyMatched.product) return sendJson(res, 409, { error: `${newlyMatched.product.sku} now matches this barcode. Skip quick create and scan it again.` });
+    const db = await postgres.readStateFields(["warehouses"]);
+    const auditWarehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(audit.warehouseId || "") || String(row.name || "").toLowerCase() === String(audit.warehouseName || "").toLowerCase()) || null;
+    const binCheck = validateWarehouseBin(auditWarehouse, String(body.locationBin || "").trim());
+    if (binCheck.error) return sendJson(res, 400, { error: binCheck.error });
+    const locationBin = binCheck.value || String(body.locationBin || "").trim();
+    const sku = await postgres.nextWarehouseSkuAtomic();
+    if (!sku) return sendJson(res, 503, { error: "Automatic SKU generation is unavailable." });
+    const now = new Date().toISOString();
+    const createdBy = String(body.user || authUser?.name || "Warehouse user").trim() || "Warehouse user";
+    const lineId = crypto.randomUUID();
+    const productId = crypto.randomUUID();
+    const imageUrl = `/api/warehouse-audits/${encodeURIComponent(audit.id)}/lines/${encodeURIComponent(lineId)}/image`;
+    const title = `Unidentified product ${barcode}`;
+    const product = {
+      id: productId, sku, title, marketplaceTitle: title, barcode,
+      qty: quantity, stockQty: quantity, reserved: 0, reorderPoint: 0,
+      active: true, status: "Draft", condition: "New", source: "warehouse-audit-quick-create",
+      category: "", mainCategory: "", sourceCategory: "", suggestedPackageCategory: "", supplier: "", brand: "", manufacturer: "", mfrPartNumber: "", vendorSku: "", shortDescription: "", cost: 0, price: 0,
+      locationBin,
+      warehouseStock: [normalizeWarehouseStockRow({ warehouseId: auditWarehouse?.id || audit.warehouseId || "", warehouseName: auditWarehouse?.name || audit.warehouseName || "Warehouse", locationBin, qty: quantity, reserved: 0 }, auditWarehouse)],
+      images: [imageUrl], defaultImage: imageUrl,
+      tags: ["warehouse-quick-create", "needs-product-details"],
+      catalogReviewStatus: "needs_details", needsProductDetails: true,
+      createdAt: now, updatedAt: now, createdBy,
+      createdMethod: "Warehouse audit quick create", createdSource: "Warehouse audit", createdSourceDetail: audit.auditNumber,
+      createdAuditId: audit.id, createdAuditNumber: audit.auditNumber,
+      quickCreate: { barcode, auditId: audit.id, auditNumber: audit.auditNumber, clientActionId, photoCapturedAt: now }
+    };
+    await postgres.upsertProductsFromState([product]);
+    await postgres.upsertInventoryLevelsFromProducts([product]);
+    const line = {
+      id: lineId, productId, sku, title, image: photoDataUrl, barcode, locationBin,
+      expectedQty: quantity, countedQty: quantity, firstScannedAt: now, lastScannedAt: now,
+      reviewStatus: "needs_details", source: "warehouse-audit-quick-create", quickCreated: true,
+      quickCreateClientId: clientActionId, createdProductSku: sku, createdProductId: productId
+    };
+    (audit.lines || (audit.lines = [])).push(line);
+    const unknownIndex = (audit.unknownBarcodes || (audit.unknownBarcodes = [])).findIndex((entry) => String(entry.barcode || "") === barcode && String(entry.locationBin || "").trim().toLowerCase() === locationBin.toLowerCase());
+    if (unknownIndex >= 0) audit.unknownBarcodes.splice(unknownIndex, 1);
+    audit.updatedAt = now;
+    audit.lifecycleEvents = [...(Array.isArray(audit.lifecycleEvents) ? audit.lifecycleEvents : []), { type: "quick_product_created", at: now, user: createdBy, sku, barcode }].slice(-100);
+    await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500) });
+    line.image = imageUrl;
+    await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
+    return sendJson(res, 201, { audit, product, message: `${sku} was quick-created as a draft. Add its product details later from Catalog.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "manual-item" && postgres.isPostgresEnabled()) {

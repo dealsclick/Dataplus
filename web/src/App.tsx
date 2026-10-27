@@ -4715,6 +4715,7 @@ function catalogImageUrlValue(image: unknown) {
     ? String((image as { url?: unknown; src?: unknown; href?: unknown }).url || (image as { src?: unknown }).src || (image as { href?: unknown }).href || "").trim()
     : String(image || "").trim()
   if (!value || value.startsWith("__dataplus_catalog_image__")) return ""
+  if (value.startsWith("/api/")) return value
   try {
     const parsed = new URL(value)
     return ["http:", "https:"].includes(parsed.protocol) ? parsed.toString() : ""

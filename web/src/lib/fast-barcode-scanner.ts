@@ -26,11 +26,11 @@ async function applyCameraDefaults(track: MediaStreamTrack) {
   if (advanced.length) await track.applyConstraints({ advanced } as unknown as MediaTrackConstraints).catch(() => {})
 }
 
-export async function startFastBarcodeScanner(video: HTMLVideoElement, onDecode: (value: string) => void): Promise<ScannerControls> {
+export async function startFastBarcodeScanner(video: HTMLVideoElement, onDecode: (value: string) => void, options: { deviceId?: string } = {}): Promise<ScannerControls> {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: false,
     video: {
-      facingMode: { ideal: "environment" },
+      ...(options.deviceId ? { deviceId: { exact: options.deviceId } } : { facingMode: { ideal: "environment" } }),
       width: { ideal: 1280, max: 1920 },
       height: { ideal: 720, max: 1080 },
       frameRate: { ideal: 30, max: 30 },
