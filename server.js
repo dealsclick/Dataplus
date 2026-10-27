@@ -95,10 +95,12 @@ const { createAccountingStore } = require("./lib/accounting-store");
 const { createChannelFeeStore } = require("./lib/channel-fee-store");
 const { importTemuSettlementReport } = require("./lib/temu-settlement-report");
 const { createShippingDisputeStore } = require("./lib/shipping-disputes");
+const { createOutboundAuditStore } = require("./lib/outbound-audit-store");
 const upsRating = require("./lib/ups-rating");
 const { createCarrierCredentials } = require("./lib/carrier-credentials");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
 const shippingDisputeStore = createShippingDisputeStore(() => postgres.getPool(), { ensureSchema: () => postgres.initRelationalSchema() });
+const outboundAuditStore = createOutboundAuditStore(() => postgres.getPool(), { ensureSchema: () => postgres.initRelationalSchema() });
 const { createAccountingHandler, accountingPermission } = require("./lib/accounting-http");
 const accountingHandler = createAccountingHandler({
   store: createAccountingStore(() => postgres.getPool()),
@@ -131,7 +133,7 @@ const { findFreshVeeqoRate, isStaleVeeqoRateError, veeqoRateExpiresAt, veeqoRate
 const { findMatchingShippingRate, rateReviewNeedsPurchaseVerification, rateReviewNeedsScheduledRefresh, shippingRatePriceChange } = require("./lib/fulfillment-rate-freshness");
 const { buildReturnLabelPrintPacket } = require("./lib/return-label-print");
 const { findReturnReceipts } = require("./lib/return-receiving-lookup");
-const { trackingLookupCandidates } = require("./lib/tracking-barcode");
+const { canonicalTrackingValue, trackingLookupCandidates } = require("./lib/tracking-barcode");
 const { normalizeSourceOrderCompletion, sourceOrderFullyShipped } = require("./lib/source-order-completion");
 const { importShopifyReturns } = require("./lib/shopify-return-import");
 const { importTemuReturns, temuReturnRecord, temuReturnResponse } = require("./lib/temu-return-import");
@@ -39370,6 +39372,36 @@ function inferCarrierFromTracking(trackingNumber = "", fallback = "") {
   return detectCarrierFromTracking(trackingNumber, fallback);
 }
 
+async function resolveOutboundAuditTracking(scannedValue = "") {
+  const raw = String(scannedValue || "").trim();
+  const candidates = trackingLookupCandidates(raw);
+  if (!candidates.length) throw Object.assign(new Error("The scanned barcode does not contain a usable tracking reference."), { statusCode: 400 });
+  const orderMatches = await postgres.readOrdersByTrackingCandidates(candidates, { limit: 20 });
+  const matches = orderMatches.map(({ order, shipmentId, trackingNumber, provider }) => {
+    const savedTracking = String(trackingNumber || order.trackingNumber || raw).trim();
+    return {
+      orderId: String(order.id || ""),
+      orderNumber: String(order.orderNumber || order.internalOrderNumber || order.id || ""),
+      channelOrderNumber: String(order.channelOrderNumber || order.marketplaceOrderNumber || order.marketplaceOrderId || ""),
+      channel: String(order.channelSource || order.source || ""),
+      status: String(order.status || order.fulfillmentStatus || ""),
+      shipmentId: String(shipmentId || ""),
+      trackingNumber: savedTracking,
+      carrier: inferCarrierFromTracking(savedTracking, order.shippingCarrier || order.carrier || provider),
+      href: `/orders/${encodeURIComponent(String(order.id || ""))}`
+    };
+  });
+  const trackingNumber = String(matches[0]?.trackingNumber || raw).trim();
+  return {
+    scannedValue: raw,
+    normalizedCandidates: candidates,
+    trackingNumber,
+    trackingNormalized: canonicalTrackingValue(trackingNumber || raw),
+    carrier: inferCarrierFromTracking(trackingNumber || raw, matches[0]?.carrier || ""),
+    matches
+  };
+}
+
 function trackingUrlForCarrier(carrier = "", trackingNumber = "") {
   const tracking = String(trackingNumber || "").trim();
   if (!tracking) return "";
@@ -60738,6 +60770,108 @@ async function handleApi(req, res) {
     const records = postgres.isPostgresEnabled() ? await postgres.readStateField("returns") || [] : (await readDb()).returns || [];
     const matches = findReturnReceipts(records, query);
     return sendJson(res, 200, { returns: matches.slice(0, 50), total: matches.length });
+  }
+
+  if (url.pathname === "/api/fulfillment/outbound-audits" && postgres.isPostgresEnabled()) {
+    const scope = notificationScope(req);
+    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
+      return sendJson(res, 409, { error: "Outbound handoff audits are available only for LINQ while fulfillment isolation is completed." });
+    }
+    if (req.method === "GET") {
+      const audits = await outboundAuditStore.list(scope, { limit: url.searchParams.get("limit") });
+      return sendJson(res, 200, { audits });
+    }
+    if (req.method === "POST") {
+      const body = await parseBody(req);
+      const audit = await outboundAuditStore.start(scope, body, authUser);
+      void recordUserActivity(req, authUser, { eventType: "fulfillment", action: "Started outbound handoff audit", entityType: "outbound_audit", entityId: audit.id, metadata: { auditNumber: audit.auditNumber, warehouseId: audit.warehouseId, carrier: audit.carrier } });
+      return sendJson(res, 201, { audit, message: `${audit.auditNumber} is ready for package scans.` });
+    }
+  }
+
+  const outboundAuditMatch = url.pathname.match(/^\/api\/fulfillment\/outbound-audits\/([^/]+)(?:\/(scan|close|reconcile|print|export\.csv))?$/);
+  if (outboundAuditMatch && postgres.isPostgresEnabled()) {
+    const scope = notificationScope(req);
+    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
+      return sendJson(res, 409, { error: "Outbound handoff audits are available only for LINQ while fulfillment isolation is completed." });
+    }
+    const auditId = decodeURIComponent(outboundAuditMatch[1]);
+    const action = outboundAuditMatch[2] || "";
+    if (req.method === "GET" && !action) {
+      const audit = await outboundAuditStore.read(scope, auditId);
+      return audit ? sendJson(res, 200, audit) : notFound(res);
+    }
+    if (req.method === "POST" && action === "scan") {
+      const body = await parseBody(req);
+      const resolved = await resolveOutboundAuditTracking(body.trackingNumber || body.trackingRaw || body.value);
+      const result = await outboundAuditStore.recordScan(scope, auditId, {
+        clientScanId: body.clientScanId,
+        trackingRaw: resolved.scannedValue,
+        trackingNumber: resolved.trackingNumber,
+        trackingNormalized: resolved.trackingNormalized,
+        carrier: resolved.carrier,
+        matches: resolved.matches
+      }, authUser);
+      const message = result.duplicate
+        ? `${result.scan.trackingNumber} was already scanned into this handoff.`
+        : resolved.matches.length === 1
+          ? `${resolved.trackingNumber} matched order ${resolved.matches[0].orderNumber}.`
+          : resolved.matches.length > 1
+            ? `${resolved.trackingNumber} matched ${resolved.matches.length} orders and was retained with every match.`
+            : `${resolved.trackingNumber} has no matching order and was retained in the handoff record.`;
+      return sendJson(res, result.duplicate ? 200 : 201, { ...result, resolution: resolved, message });
+    }
+    if (req.method === "POST" && action === "reconcile") {
+      const audit = await outboundAuditStore.read(scope, auditId);
+      if (!audit) return notFound(res);
+      let linked = 0;
+      const unmatched = audit.scans.filter((scan) => scan.matchStatus === "unmatched").slice(0, 100);
+      for (const scan of unmatched) {
+        const resolved = await resolveOutboundAuditTracking(scan.trackingRaw || scan.trackingNumber);
+        if (!resolved.matches.length) continue;
+        await outboundAuditStore.replaceScanMatches(scope, auditId, scan.id, resolved);
+        linked += 1;
+      }
+      const refreshed = await outboundAuditStore.read(scope, auditId);
+      return sendJson(res, 200, { ...refreshed, linked, checked: unmatched.length, message: linked ? `${linked} previously unmatched package${linked === 1 ? "" : "s"} linked to current orders.` : "No additional order matches were found." });
+    }
+    if (req.method === "POST" && action === "close") {
+      const body = await parseBody(req);
+      const audit = await outboundAuditStore.close(scope, auditId, body, authUser);
+      void recordUserActivity(req, authUser, { eventType: "fulfillment", action: "Closed outbound handoff audit", entityType: "outbound_audit", entityId: audit.id, metadata: { auditNumber: audit.auditNumber, packageCount: audit.packageCount, unmatchedCount: audit.unmatchedCount } });
+      return sendJson(res, 200, { audit, message: `${audit.auditNumber} closed with ${audit.packageCount} package${audit.packageCount === 1 ? "" : "s"}.` });
+    }
+    if (req.method === "GET" && (action === "print" || action === "export.csv")) {
+      const audit = await outboundAuditStore.read(scope, auditId);
+      if (!audit) return notFound(res);
+      if (action === "export.csv") {
+        const rows = audit.scans.map((scan, index) => ({
+          sequence: audit.scans.length - index,
+          audit_number: audit.session.auditNumber,
+          status: audit.session.status,
+          warehouse: audit.session.warehouseName,
+          handoff_carrier: audit.session.carrier || "Any carrier",
+          tracking_number: scan.trackingNumber,
+          detected_carrier: scan.carrier,
+          match_status: scan.matchStatus,
+          order_numbers: scan.matches.map((match) => match.orderNumber).filter(Boolean).join(" | "),
+          channel_order_numbers: scan.matches.map((match) => match.channelOrderNumber).filter(Boolean).join(" | "),
+          channels: [...new Set(scan.matches.map((match) => match.channel).filter(Boolean))].join(" | "),
+          scanned_by: scan.scannedByName,
+          scanned_at: scan.scannedAt,
+          closed_at: audit.session.closedAt,
+          driver_name: audit.session.driverName,
+          pickup_confirmation: audit.session.pickupConfirmation,
+          notes: audit.session.notes
+        }));
+        return sendCsv(res, rowsToCsv(rows.length ? rows : [{ audit_number: audit.session.auditNumber }]), `${audit.session.auditNumber.toLowerCase()}-outbound-audit.csv`);
+      }
+      const scanRows = audit.scans.slice().reverse().map((scan, index) => {
+        const orders = scan.matches.map((match) => escapeHtml([match.orderNumber, match.channel].filter(Boolean).join(" · "))).join("<br>") || "No matching order";
+        return `<tr><td>${index + 1}</td><td>${escapeHtml(scan.trackingNumber)}</td><td>${escapeHtml(scan.carrier || "Unknown")}</td><td>${orders}</td><td>${escapeHtml(scan.matchStatus.replace("multiple", "multiple orders"))}</td><td>${escapeHtml(scan.scannedByName)}</td><td>${escapeHtml(new Date(scan.scannedAt).toLocaleString())}</td></tr>`;
+      }).join("");
+      return sendHtml(res, 200, `<!doctype html><html><head><title>${escapeHtml(audit.session.auditNumber)} outbound audit</title><style>body{font-family:Arial,sans-serif;margin:30px;color:#111}h1{margin-bottom:4px}.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:18px 0}.meta div{border:1px solid #bbb;padding:8px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #bbb;padding:7px;text-align:left;vertical-align:top}th{background:#eee}.sign{margin-top:28px;display:grid;grid-template-columns:1fr 1fr;gap:36px}.line{border-top:1px solid #111;padding-top:6px;margin-top:28px}@media print{body{margin:10px}}</style></head><body><h1>${escapeHtml(audit.session.auditNumber)} · Outbound handoff audit</h1><p>Internal warehouse custody record. This is not carrier acceptance.</p><div class="meta"><div><strong>Warehouse</strong><br>${escapeHtml(audit.session.warehouseName)}</div><div><strong>Carrier</strong><br>${escapeHtml(audit.session.carrier || "Any carrier")}</div><div><strong>Status</strong><br>${escapeHtml(audit.session.status)}</div><div><strong>Packages</strong><br>${audit.session.packageCount}</div><div><strong>Matched / unmatched</strong><br>${audit.session.matchedCount} / ${audit.session.unmatchedCount}</div><div><strong>Closed</strong><br>${escapeHtml(audit.session.closedAt ? new Date(audit.session.closedAt).toLocaleString() : "Open")}</div></div><table><thead><tr><th>#</th><th>Tracking</th><th>Carrier</th><th>Order</th><th>Match</th><th>Scanned by</th><th>Scanned at</th></tr></thead><tbody>${scanRows || '<tr><td colspan="7">No packages scanned.</td></tr>'}</tbody></table><div class="sign"><div class="line">Warehouse handoff</div><div class="line">Driver / receiving party</div></div></body></html>`);
+    }
   }
 
   if (req.method === "GET" && url.pathname === "/api/orders/tracking-lookup" && postgres.isPostgresEnabled()) {

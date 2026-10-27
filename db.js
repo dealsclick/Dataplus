@@ -926,6 +926,56 @@ async function initRelationalSchema() {
       on order_shipment_tracking ((regexp_replace(lower(tracking_number), '[^a-z0-9]', '', 'g')))
       where nullif(tracking_number, '') is not null;
 
+    create table if not exists outbound_audit_sessions (
+      audit_id text primary key,
+      audit_number bigserial not null,
+      tenant_id text not null,
+      company_id text not null,
+      warehouse_id text not null,
+      warehouse_name text,
+      carrier text,
+      status text not null default 'open' check (status in ('open', 'closed')),
+      handoff_method text not null default 'pickup',
+      driver_name text,
+      pickup_confirmation text,
+      notes text,
+      package_count integer not null default 0,
+      matched_count integer not null default 0,
+      unmatched_count integer not null default 0,
+      multiple_match_count integer not null default 0,
+      started_by_id text,
+      started_by_name text,
+      closed_by_id text,
+      closed_by_name text,
+      started_at timestamptz not null default now(),
+      closed_at timestamptz,
+      updated_at timestamptz not null default now(),
+      unique (tenant_id, company_id, audit_number)
+    );
+    create index if not exists outbound_audit_sessions_company_status_idx
+      on outbound_audit_sessions (tenant_id, company_id, status, started_at desc);
+
+    create table if not exists outbound_audit_scans (
+      scan_id text primary key,
+      audit_id text not null references outbound_audit_sessions(audit_id) on delete restrict,
+      client_scan_id text not null,
+      tracking_raw text not null,
+      tracking_number text not null,
+      tracking_normalized text not null,
+      carrier text,
+      match_status text not null default 'unmatched' check (match_status in ('matched', 'multiple', 'unmatched')),
+      order_matches jsonb not null default '[]'::jsonb,
+      scanned_by_id text,
+      scanned_by_name text,
+      scanned_at timestamptz not null default now(),
+      unique (audit_id, client_scan_id),
+      unique (audit_id, tracking_normalized)
+    );
+    create index if not exists outbound_audit_scans_audit_time_idx
+      on outbound_audit_scans (audit_id, scanned_at desc);
+    create index if not exists outbound_audit_scans_tracking_idx
+      on outbound_audit_scans (tracking_normalized, scanned_at desc);
+
     create table if not exists order_shipment_financials (
       order_id text not null,
       shipment_id text not null,
