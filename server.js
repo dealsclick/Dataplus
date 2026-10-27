@@ -175,6 +175,7 @@ const carrierCredentials = createCarrierCredentials({ directory: DATA_DIR });
 const DB_FILE = path.join(DATA_DIR, "db.json");
 const EXPORT_MAPPINGS_FILE = path.join(DATA_DIR, "export-mappings.json");
 const SYSTEM_SETTINGS_FILE = path.join(DATA_DIR, "system-settings.json");
+const SYSTEM_LOGO_FILE = path.join(DATA_DIR, "system-logo");
 const { DEFAULT_SHIPPING_RULES, normalizeShippingRules, classifyShipping } = require("./lib/shipping-classification");
 const { retiredSupplier, retirementPhysicalQty, retirementLaunchReason, createRetirementService } = require("./lib/supplier-retirement");
 const { productIsMasterInactive } = require("./lib/product-selling-status");
@@ -1272,6 +1273,10 @@ const DEFAULT_SYSTEM_SETTINGS = {
   catalogSearchDebounceMs: 350,
   skuChangeTrackedFields: ["cost", "price", "list_price", "qty", "stock_status", "to_be_discontinued", "brand", "mfr_part_number", "vendor_sku", "category", "default_image"],
   organizationName: "DataPlus",
+  organizationLogoUrl: "",
+  organizationLogoMimeType: "",
+  organizationLogoUpdatedAt: "",
+  organizationLogoFileName: "",
   organizationLegalName: "",
   organizationEmail: "",
   organizationPhone: "",
@@ -5936,6 +5941,30 @@ function normalizeShippingPackagePresets(presets = []) {
   return normalized.slice(0, 25);
 }
 
+function normalizeOrganizationLogoDataUrl(value) {
+  const dataUrl = String(value || "").trim();
+  if (!dataUrl) return "";
+  if (dataUrl.length > 700_000) return "";
+  const match = dataUrl.match(/^data:image\/(png|jpeg|webp|svg\+xml);base64,([a-z0-9+/=]+)$/i);
+  if (!match) return "";
+  let bytes;
+  try {
+    bytes = Buffer.from(match[2], "base64");
+  } catch {
+    return "";
+  }
+  if (!bytes.length || bytes.length > 512 * 1024) return "";
+  const type = match[1].toLowerCase();
+  if (type === "png" && bytes.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a") return "";
+  if (type === "jpeg" && bytes.subarray(0, 2).toString("hex") !== "ffd8") return "";
+  if (type === "webp" && (bytes.subarray(0, 4).toString("ascii") !== "RIFF" || bytes.subarray(8, 12).toString("ascii") !== "WEBP")) return "";
+  if (type === "svg+xml") {
+    const svg = bytes.toString("utf8").trim();
+    if (!/<svg\b/i.test(svg) || /<script\b|<foreignObject\b|\son\w+\s*=|(?:href|xlink:href)\s*=\s*["'](?:https?:|\/\/|javascript:)/i.test(svg)) return "";
+  }
+  return dataUrl;
+}
+
 function normalizeSystemSettings(settings = {}) {
   const normalized = { ...DEFAULT_SYSTEM_SETTINGS, ...(settings && typeof settings === "object" ? settings : {}) };
   Object.assign(normalized, normalizeShippingRules(normalized));
@@ -5993,6 +6022,7 @@ function normalizeSystemSettings(settings = {}) {
   normalized.catalogSearchDebounceMs = Math.max(100, Math.min(1500, Number(normalized.catalogSearchDebounceMs || 350) || 350));
   for (const field of [
     "organizationName", "organizationLegalName", "organizationEmail", "organizationPhone",
+    "organizationLogoFileName", "organizationLogoUpdatedAt",
     "organizationAddressLine1", "organizationAddressLine2", "organizationCity", "organizationState",
     "organizationPostalCode", "organizationCountry", "organizationTimezone", "organizationCurrency", "organizationLocale",
     "wikiHandbookShelf", "wikiDefaultOwner", "wikiLastHealthCheckAt", "wikiLastHealthStatus", "wikiLastHealthMessage",
@@ -6000,6 +6030,9 @@ function normalizeSystemSettings(settings = {}) {
     "returnMerchantLabelTemplateTitle", "returnMerchantLabelTemplateInstructions",
     "returnCustomerLabelTemplateTitle", "returnCustomerLabelTemplateInstructions"
   ]) normalized[field] = sourceTextValue(normalized[field] || DEFAULT_SYSTEM_SETTINGS[field] || "");
+  normalized.organizationLogoFileName = normalized.organizationLogoFileName.slice(0, 160);
+  normalized.organizationLogoUrl = /^\/api\/system-logo\?version=\d+$/.test(String(normalized.organizationLogoUrl || "")) ? String(normalized.organizationLogoUrl) : "";
+  normalized.organizationLogoMimeType = ["image/svg+xml", "image/png", "image/jpeg", "image/webp"].includes(String(normalized.organizationLogoMimeType || "")) ? String(normalized.organizationLogoMimeType) : "";
   const configuredWikiUrl = sourceTextValue(normalized.wikiBaseUrl || "").replace(/\/+$/, "");
   normalized.wikiBaseUrl = /^https:\/\/dataplusapp\.duckdns\.org\/wiki$/i.test(configuredWikiUrl)
     ? configuredWikiUrl
@@ -49823,6 +49856,16 @@ async function handleApi(req, res) {
   const authUser = currentAuthUser(req, authSettings);
   if (!authUser) return sendJson(res, 401, { error: "Sign in to DataPlus first." });
   dbCache.data = { ...(dbCache.data || {}), systemSettings: authSettings };
+  if (req.method === "GET" && url.pathname === "/api/system-logo") {
+    if (!authSettings.organizationLogoUrl || !authSettings.organizationLogoMimeType || !fs.existsSync(SYSTEM_LOGO_FILE)) return notFound(res);
+    res.writeHead(200, {
+      "Content-Type": authSettings.organizationLogoMimeType,
+      "Content-Length": fs.statSync(SYSTEM_LOGO_FILE).size,
+      "Cache-Control": "private, max-age=86400, immutable",
+      "X-Content-Type-Options": "nosniff"
+    });
+    return fs.createReadStream(SYSTEM_LOGO_FILE).pipe(res);
+  }
   if (url.pathname === "/api/organization" || url.pathname.startsWith("/api/organization/")) {
     return companyHandler(req, res, url, authUser);
   }
@@ -63857,6 +63900,26 @@ async function handleApi(req, res) {
   if (req.method === "PATCH" && url.pathname === "/api/system-settings") {
     const body = await parseBody(req);
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    if (body.organizationLogoDataUrl !== undefined) {
+      const logoDataUrl = String(body.organizationLogoDataUrl || "").trim();
+      const normalizedLogo = normalizeOrganizationLogoDataUrl(logoDataUrl);
+      if (logoDataUrl && !normalizedLogo) return sendJson(res, 400, { error: "System logo must be a safe SVG, PNG, JPEG, or WebP file no larger than 512 KB." });
+      if (normalizedLogo) {
+        const match = normalizedLogo.match(/^data:image\/(png|jpeg|webp|svg\+xml);base64,([a-z0-9+/=]+)$/i);
+        const mimeType = `image/${String(match?.[1] || "").toLowerCase()}`;
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+        fs.writeFileSync(SYSTEM_LOGO_FILE, Buffer.from(String(match?.[2] || ""), "base64"));
+        const version = Date.now();
+        current.organizationLogoUrl = `/api/system-logo?version=${version}`;
+        current.organizationLogoMimeType = mimeType;
+        current.organizationLogoUpdatedAt = new Date(version).toISOString();
+      } else {
+        current.organizationLogoUrl = "";
+        current.organizationLogoMimeType = "";
+        current.organizationLogoUpdatedAt = "";
+        if (fs.existsSync(SYSTEM_LOGO_FILE)) fs.unlinkSync(SYSTEM_LOGO_FILE);
+      }
+    }
     if (body.productDumpResourceProfile !== undefined && String(body.productDumpResourceProfile || "") !== String(current.productDumpResourceProfile || "")) {
       const activeImport = (await postgres.readOperationJobs(250)).find((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()) && String(job.workerTask || job.raw?.workerTask || "") === "product-dump-import");
       if (activeImport) return sendJson(res, 409, { error: `Cannot change the datadump resource profile while Job ${activeImport.id} is active.` });
@@ -63868,7 +63931,7 @@ async function handleApi(req, res) {
     }
     for (const field of Object.keys(DEFAULT_SYSTEM_SETTINGS)) {
       if (body[field] === undefined) continue;
-      if (["warehouseAuditAdminPinHash", "warehouseAuditAdminPinSalt"].includes(field)) continue;
+      if (["warehouseAuditAdminPinHash", "warehouseAuditAdminPinSalt", "organizationLogoUrl", "organizationLogoMimeType", "organizationLogoUpdatedAt"].includes(field)) continue;
       if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "boolean") current[field] = body[field] === true || String(body[field]).toLowerCase() === "true";
       else if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "number") current[field] = Number(body[field] || 0);
       else if (Array.isArray(DEFAULT_SYSTEM_SETTINGS[field])) current[field] = Array.isArray(body[field]) ? body[field] : current[field];

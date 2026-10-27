@@ -2879,12 +2879,13 @@ function WarehouseAuditPanel({
 
 export { WarehouseWorkspace }
 
-function WarehouseMobileRoute({ canPurchase, returns, fulfillment, inventory, account, canReceive, canManageBins, canAudit, operatorName, purchaseOrder, warehouses }: {
+function WarehouseMobileRoute({ canPurchase, returns, fulfillment, inventory, account, brand, canReceive, canManageBins, canAudit, operatorName, purchaseOrder, warehouses }: {
   canPurchase: boolean
   returns: ReactNode
   fulfillment: ReactNode
   inventory: ReactNode
   account: ReactNode
+  brand: ReactNode
   canReceive: boolean
   canManageBins: boolean
   canAudit: boolean
@@ -2899,6 +2900,7 @@ function WarehouseMobileRoute({ canPurchase, returns, fulfillment, inventory, ac
     fulfillment={fulfillment}
     inventory={inventory}
     account={account}
+    brand={brand}
     manual={canReceive ? <ManualReceivingPanel mobile /> : <p>Receiving access is required.</p>}
     outbound={<OutboundAuditWorkspace warehouses={warehouses} />}
     bins={canManageBins ? <WarehouseBinManager mobile /> : <p>Bin access is required.</p>}

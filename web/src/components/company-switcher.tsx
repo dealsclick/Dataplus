@@ -21,7 +21,7 @@ export async function activateCompany(company: { tenant_id: string; id: string }
   try { localStorage.setItem('dataplus-company-changed', `${Date.now()}:${company.tenant_id}:${company.id}`) } catch { /* Storage may be disabled. */ }
   return result
 }
-export function CompanySwitcher() {
+function useCompanyDirectory() {
   const [directory, setDirectory] = useState<CompanyDirectory | null>(null)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
@@ -42,6 +42,31 @@ export function CompanySwitcher() {
       window.location.assign(tools ? '/orders/tools' : '/orders')
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to switch company.'); setBusy(false) }
   }
+  return { active, busy, directory, error, query, select, setQuery }
+}
+
+function CompanyChoices({ showSearch = false }: { showSearch?: boolean }) {
+  const { active, busy, directory, error, query, select, setQuery } = useCompanyDirectory()
+  const matches = directory?.companies.filter(c => c.name.toLowerCase().includes(query.toLowerCase())) || []
+  return <>
+    <DropdownMenuLabel>Company</DropdownMenuLabel>
+    {error && <p role="alert" className="px-2 py-1 text-sm text-destructive">{error}</p>}
+    {directory?.initialized === false ? <><p className="px-2 py-2 text-sm text-muted-foreground">LINQ is your current operational company. Complete one-time setup to enable company switching.</p><DropdownMenuItem asChild><a href="/settings?tab=companies">Open Companies settings</a></DropdownMenuItem></> : <>
+      {showSearch && Number(directory?.companies.length || 0) > 6 ? <div className="p-2"><Input aria-label="Search companies" placeholder="Search companies..." value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => e.stopPropagation()}/></div> : null}
+      <div className="max-h-72 overflow-y-auto">{matches.map(c => <DropdownMenuItem key={`${c.tenant_id}/${c.id}`} disabled={busy} onSelect={() => void select(c)} className="items-start py-2">
+        <Check className={`mt-0.5 size-4 shrink-0 ${active?.id === c.id && active.tenant_id === c.tenant_id ? '' : 'invisible'}`}/><span className="min-w-0"><span className="block break-words">{c.name}</span><span className="block text-xs text-muted-foreground">Company {c.company_number} · {directory?.tenants.find(t => t.id === c.tenant_id)?.name}</span></span>
+      </DropdownMenuItem>)}</div>
+      {directory && !matches.length && <p className="p-2 text-sm text-muted-foreground">No accessible companies found.</p>}
+    </>}
+  </>
+}
+
+export function CompanyMenuItems() {
+  return <CompanyChoices showSearch />
+}
+
+export function CompanySwitcher() {
+  const { active, busy, directory, error, query, select, setQuery } = useCompanyDirectory()
   const label = active?.name || (directory?.initialized === false ? 'LINQ USA dba Dealsclick' : directory ? 'Select company' : error ? 'Company unavailable' : 'Loading company…')
   return <DropdownMenu onOpenChange={open => { if (!open) setQuery('') }}><DropdownMenuTrigger asChild>
     <Button variant="outline" disabled={busy} className="max-w-full sm:max-w-72" aria-label={`Current company: ${label}. Switch company`} title={label}><Building2 className="size-4 shrink-0"/><span className="truncate">{label}</span><ChevronsUpDown className="size-4 shrink-0"/></Button>

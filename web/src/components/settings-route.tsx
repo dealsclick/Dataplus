@@ -247,6 +247,31 @@ function SettingsPage({
     setDraft((current) => ({ ...current, [field]: next }))
   }
 
+  async function updateOrganizationLogo(file?: File | null) {
+    if (!file) return
+    const allowedTypes = new Set(["image/svg+xml", "image/png", "image/jpeg", "image/webp"])
+    if (!allowedTypes.has(file.type)) return toast.error("Use an SVG, PNG, JPEG, or WebP logo.")
+    if (file.size > 512 * 1024) return toast.error("System logos must be 512 KB or smaller.")
+    if (file.type === "image/svg+xml") {
+      const svg = await file.text()
+      if (!/<svg\b/i.test(svg) || /<script\b|<foreignObject\b|\son\w+\s*=|(?:href|xlink:href)\s*=\s*["'](?:https?:|\/\/|javascript:)/i.test(svg)) {
+        return toast.error("That SVG contains unsupported active or external content.")
+      }
+    }
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result || ""))
+        reader.onerror = () => reject(new Error("Unable to read the selected logo."))
+        reader.readAsDataURL(file)
+      })
+      update("organizationLogoDataUrl", dataUrl)
+      update("organizationLogoFileName", file.name.slice(0, 160))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to read the selected logo.")
+    }
+  }
+
   const shippingPackagePresets = (Array.isArray(value("shippingPackagePresets")) ? value("shippingPackagePresets") as Array<Record<string, unknown>> : [])
   const updateShippingPackagePreset = (index: number, patch: Record<string, unknown>) => {
     const next = shippingPackagePresets.map((preset, presetIndex) => presetIndex === index ? { ...preset, ...patch } : preset)
@@ -939,6 +964,17 @@ function SettingsPage({
         </TabsContent>
         <TabsContent value="templates" className="grid gap-4"><ReturnTemplateSettings settings={{ ...settings, ...draft }} editing={editing} onChange={update} /></TabsContent>
         <TabsContent value="organization" className="grid gap-4">
+          <Card>
+            <CardHeader><CardTitle className="text-base">System branding</CardTitle><CardDescription>Upload the logo shown in DataPlus navigation and mobile warehouse screens.</CardDescription></CardHeader>
+            <CardContent className="flex flex-col gap-4 sm:flex-row sm:items-center">
+              <div className="flex h-24 w-36 shrink-0 items-center justify-center rounded-md border bg-zinc-950 p-3"><img src={String(value("organizationLogoDataUrl") || value("organizationLogoUrl") || "/dataplus-symbol-white.svg")} alt="System logo preview" className="max-h-full max-w-full object-contain" /></div>
+              <div className="grid min-w-0 flex-1 gap-2">
+                <Field label="Logo file"><Input type="file" disabled={!editing} accept="image/svg+xml,image/png,image/jpeg,image/webp" onChange={(event) => void updateOrganizationLogo(event.target.files?.[0])} /></Field>
+                <p className="text-xs text-muted-foreground">SVG, PNG, JPEG, or WebP up to 512 KB. Wide or square marks are scaled without cropping.</p>
+                <div className="flex flex-wrap items-center gap-2"><span className="max-w-full truncate text-xs text-muted-foreground">{String(value("organizationLogoFileName") || "Dataplus_symbol_white.svg")}</span>{editing && (String(value("organizationLogoDataUrl") || "") || String(value("organizationLogoUrl") || "")) ? <Button type="button" size="sm" variant="outline" onClick={() => { update("organizationLogoDataUrl", ""); update("organizationLogoUrl", ""); update("organizationLogoFileName", "") }}><Trash2 className="size-4" /> Use default</Button> : null}</div>
+              </div>
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader><CardTitle className="text-base">Company profile</CardTitle><CardDescription>Shared identity and regional defaults used by documents, notifications, purchasing, and warehouse operations.</CardDescription></CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">

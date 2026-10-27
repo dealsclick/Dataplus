@@ -15,10 +15,11 @@ const sections = [
   { id: "more", label: "More", icon: Menu },
 ]
 
-export function WarehouseMobile({ api, canPurchase, account, manual, outbound, audits, bins, purchaseOrder, audit, returns, fulfillment, inventory }: {
+export function WarehouseMobile({ api, canPurchase, account, brand, manual, outbound, audits, bins, purchaseOrder, audit, returns, fulfillment, inventory }: {
   api: <T>(url: string, options?: RequestInit) => Promise<T>
   canPurchase: boolean
   account: ReactNode
+  brand: ReactNode
   manual: ReactNode
   outbound: ReactNode
   audits: ReactNode
@@ -38,7 +39,7 @@ export function WarehouseMobile({ api, canPurchase, account, manual, outbound, a
     return () => document.body.classList.remove("warehouse-mobile-mode")
   }, [])
   return <MobileTables><div className="warehouse-mobile min-h-dvh bg-background">
-    <header className="border-b bg-card px-4 py-3"><div className="mx-auto flex max-w-3xl flex-wrap items-center justify-between gap-3"><a href={base} className="font-semibold">DataPlus · Warehouse</a><Button variant="outline" asChild><a href="/warehouse/warehouses">Full app</a></Button><div className="w-full">{account}</div></div></header>
+    <header className="border-b bg-card px-3 py-2"><div className="mx-auto flex max-w-3xl items-center justify-between gap-2"><a href={base} className="flex min-w-0 items-center gap-2">{brand}</a>{account}</div></header>
     <main className="mx-auto grid max-w-3xl gap-4 p-3 pb-28 sm:p-6 sm:pb-28">
       {id && <Button variant="outline" className="justify-self-start" asChild><a href={`${base}/${section}`}>← Back to {section === "receiving" ? "POs" : "audits"}</a></Button>}
       {section === "receiving" && (canPurchase ? id ? purchaseOrder(id) : <PurchaseQueue api={api} /> : <p>Your account does not have purchasing access. Choose Other stock, Audits, or Bins below.</p>)}

@@ -1,6 +1,7 @@
 import { JobChannelFeeds } from "./components/job-channel-feeds"
 import { VendorCreateDialog } from "./components/vendor-create-dialog"
-import { CompanySwitcher } from "./components/company-switcher"
+import { CompanyMenuItems, CompanySwitcher } from "./components/company-switcher"
+import { SystemBrandMark } from "./components/system-brand-mark"
 import { NotificationCapture, NotificationCenter } from "./components/notification-center"
 import { MentionCenter } from "./components/mention-center"
 import { CategoryMappingOverview, MappingIndicator } from "./components/category-mapping-overview"
@@ -2619,7 +2620,8 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
       returns={userCan(authUser, "orders", "view") ? <OperationsPage mobileReturns /> : <p>Returns access is required.</p>}
       fulfillment={userCan(authUser, "fulfillment", "view") ? <FulfillmentPage /> : <p>Fulfillment access is required.</p>}
       inventory={userCan(authUser, "warehouse.inventory", "view") ? <InventoryWorkspace /> : <p>Inventory access is required.</p>}
-      account={<div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap"><CompanySwitcher /><Button size="sm" variant="outline" onClick={() => setPasswordOpen(true)}><LockKeyhole className="size-4" /> Password</Button><Button size="sm" variant="outline" className="col-span-2 text-destructive hover:text-destructive sm:col-span-1" onClick={() => void signOut()}><UnlockKeyhole className="size-4" /> Sign out</Button></div>}
+      brand={<><SystemBrandMark settings={state.systemSettings} className="size-8" /><span className="truncate font-semibold">Warehouse</span></>}
+      account={<DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" className="max-w-44"><Users className="size-4" /><span className="truncate">{authUser.name || authUser.username || "Account"}</span><ChevronDown className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-72 max-w-[calc(100vw-1rem)]"><DropdownMenuLabel><span className="block truncate text-sm text-foreground">{authUser.name || authUser.username}</span><span className="block truncate font-normal">{authUser.role || "Warehouse user"}</span></DropdownMenuLabel><DropdownMenuSeparator /><CompanyMenuItems /><DropdownMenuSeparator /><DropdownMenuItem asChild><a href="/warehouse/warehouses"><Warehouse className="size-4" /> Full app</a></DropdownMenuItem><DropdownMenuItem onClick={() => setPasswordOpen(true)}><LockKeyhole className="size-4" /> Change password</DropdownMenuItem><DropdownMenuItem variant="destructive" onClick={() => void signOut()}><UnlockKeyhole className="size-4" /> Sign out</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
       canReceive={userCan(authUser, "warehouse.receiving", "view")}
       canManageBins={userCan(authUser, "warehouse.locations", "view")}
       canAudit={userCan(authUser, "warehouse.audits", "view")}
@@ -2699,7 +2701,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
         <Sidebar collapsible="icon" variant="sidebar" className="dataplus-sidebar">
           <SidebarHeader className="p-3">
             <div className="flex items-center gap-3 rounded-md px-2 py-2">
-              <div className="grid size-8 place-items-center rounded-md bg-primary text-primary-foreground"><Database className="size-4" /></div>
+              <SystemBrandMark settings={state.systemSettings} />
               <div className="min-w-0 group-data-[collapsible=icon]:hidden"><p className="truncate text-sm font-semibold leading-none">DataPlus</p><p className="mt-1 text-xs text-muted-foreground">Operations console</p></div>
             </div>
           </SidebarHeader>
@@ -2754,9 +2756,10 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
             <div className="flex flex-wrap items-center justify-between gap-2 sm:flex-nowrap sm:gap-3">
               <div className="flex min-w-0 flex-1 items-center gap-2">
                 <SidebarTrigger className="hidden size-8 md:inline-flex" />
-                <div className="min-w-0">
+                <div className="hidden min-w-0 sm:block">
                   <CompanySwitcher/>
                 </div>
+                <a href="/" className="sm:hidden" aria-label="DataPlus home"><SystemBrandMark settings={state.systemSettings} /></a>
               </div>
               <div className="flex w-full shrink-0 items-center justify-end gap-1.5 sm:w-auto sm:gap-2">
                 <Badge className="hidden md:inline-flex" variant={workerStatus.online ? "success" : "secondary"}>
@@ -2781,13 +2784,15 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 </Button>
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
-                    <Button variant="outline" size="sm" className="hidden max-w-48 truncate sm:inline-flex"><Users className="size-4" /> {authUser.name || authUser.username}</Button>
+                    <Button variant="outline" size="sm" className="inline-flex max-w-32 sm:max-w-48"><Users className="size-4" /><span className="truncate">{authUser.name || authUser.username}</span></Button>
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-56">
+                  <DropdownMenuContent align="end" className="w-72 max-w-[calc(100vw-1rem)]">
                     <DropdownMenuLabel>
                       <span className="block truncate">{authUser.name || authUser.username}</span>
                       <span className="block truncate text-xs font-normal text-muted-foreground">{authUser.role || "User"}</span>
                     </DropdownMenuLabel>
+                    <DropdownMenuSeparator />
+                    <CompanyMenuItems />
                     <DropdownMenuSeparator />
                     <DropdownMenuCheckboxItem checked={colorblindMode} onCheckedChange={(checked) => updateColorblindMode(checked === true)}><Accessibility className="size-4" /> Colorblind-friendly colors</DropdownMenuCheckboxItem>
                     <DropdownMenuSeparator />

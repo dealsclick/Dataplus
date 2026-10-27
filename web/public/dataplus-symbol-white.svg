@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="310" height="205" viewBox="0 0 310 205" role="img" aria-label="DataPlus logo"><g transform="translate(12,6)"><g>
+<path fill="#FFFFFF" fill-rule="evenodd" d="M18 22 H110 C154 22 179 48 179 92 C179 136 153 162 110 162 H18 V76 H48 V132 H108 C132 132 149 117 149 92 C149 67 133 52 108 52 H18 Z"/>
+<path fill="#FFFFFF" d="M169 52 H209 C249 52 270 73 270 103 C270 134 248 152 210 152 H184 L157 181 H117 L179 116 H209 C228 116 238 111 238 101 C238 90 227 85 208 85 H169 Z"/>
+<path fill="#FFFFFF" d="M169 78 H208 C228 78 241 88 241 103 C241 119 226 128 207 128 H188 L159 159 H145 L180 119 H208 C226 119 238 114 238 103 C238 91 227 85 208 85 H169 Z" opacity="0.0"/>
+<rect x="169" y="12" width="25" height="25" rx="2" fill="#FF6A00"/>
+<rect x="146" y="36" width="18" height="18" rx="1.5" fill="#FF6A00"/>
+</g></g></svg>
