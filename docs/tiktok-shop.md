@@ -22,6 +22,12 @@ DataPlus has a dedicated TikTok Shop channel workspace, signed API client, encry
 | Catalog | Reconcile TikTok products to exact seller SKUs and retain remote status | Product search `202502` |
 | Buyer messages | Synchronize conversation metadata | Customer Service `202309` |
 | Shipping | Query services, require a user-owned preview, create a package once, and retrieve shipping documents | Fulfillment `202309` and package create `202512` |
+| LIVE analytics | Import seller LIVE sessions, sales, traffic, engagement, and per-session product performance | Analytics `202609` and `202512` |
+| LIVE order attribution | Mark imported orders and lines attributed to `LIVE` or `PRE_LIVE` content without changing fulfillment behavior | Affiliate Seller `202410` |
+
+LIVE analytics and LIVE order attribution are separate permissions. Analytics provides session and product performance. Seller affiliate order access provides the content type, content ID, and creator attribution needed to identify a TikTok LIVE order. DataPlus does not infer LIVE origin from an SKU, order time, or title when TikTok does not provide attribution.
+
+TikTok also exposes creator-authorized LIVE-room product-management APIs. Those APIs require a creator access token, which is different from the seller token configured in DataPlus. The current channel page reports that capability but does not allow seller credentials to pin, unpin, add, or remove a creator's LIVE products.
 
 Product creation, positive inventory/price updates, and inbound webhook processing remain guarded. They must not be enabled until category/attribute/media mappings, warehouse mappings, and webhook signature verification are complete and tested against the authorized development shop.
 
@@ -39,7 +45,8 @@ Historical order imports set the DataPlus historical isolation fields. They do n
 4. Open Channels > TikTok Shop, save the app key, app secret, seller access token, and refresh token.
 5. Enable the channel, verify the connection, and select the authorized shop if more than one is returned.
 6. Enable individual features and schedules deliberately.
-7. Run a small development-shop import and inspect Jobs and channel activity before enabling production schedules.
+7. Request Analytics access before enabling LIVE analytics. Request Seller Affiliate Collaboration access before enabling LIVE order attribution; Affiliate APIs are not enabled for every app by default.
+8. Run a small development-shop import and inspect Jobs and channel activity before enabling production schedules.
 
 Official references:
 

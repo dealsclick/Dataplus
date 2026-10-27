@@ -41,7 +41,7 @@ const WORKER_POST_JOB_DRAIN_TIMEOUT_MS = Math.max(1_000, Number(
   process.env.DATAPLUS_WORKER_POST_JOB_DRAIN_TIMEOUT_MS || 15_000
 ) || 15_000);
 const SUPPORTED_TASKS = [
-  "tiktok-orders", "tiktok-returns", "tiktok-settlements", "tiktok-products", "tiktok-messages",
+  "tiktok-orders", "tiktok-returns", "tiktok-settlements", "tiktok-products", "tiktok-messages", "tiktok-live",
   "walmart-pricing", "walmart-bulk-launch", "walmart-launch-reconcile", "walmart-existing-launch", "walmart-reconcile", "walmart-match", "walmart-orders", "walmart-returns", "walmart-webhook", "walmart-taxonomy", "walmart-launch", "walmart-feed", "walmart-preview", "walmart-update", "walmart-retire", "walmart-inventory-sync", "walmart-settlements",
   "status-inventory",
   "inactive-inventory-temu",

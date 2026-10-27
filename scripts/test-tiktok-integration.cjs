@@ -6,6 +6,13 @@ const path = require('node:path');
 const { tiktokSignature } = require('../lib/tiktok-client');
 const { createTikTokCredentials } = require('../lib/tiktok-credentials');
 const { componentRows, mapTikTokOrder, mapTikTokReturn } = require('../lib/tiktok-mappers');
+const {
+  applyTikTokLiveAttribution,
+  normalizeTikTokLiveAttribution,
+  normalizeTikTokLiveProduct,
+  normalizeTikTokLiveSession,
+  summarizeTikTokLiveSessions
+} = require('../lib/tiktok-live');
 
 async function main() {
   const signature = tiktokSignature('/order/202309/orders/search', {
@@ -99,6 +106,66 @@ async function main() {
   assert.equal(adjustment.length, 1);
   assert.equal(adjustment[0].feeType, 'adjustment_amount');
   assert.equal(adjustment[0].feeAmount, -4.25);
+
+  const liveSession = normalizeTikTokLiveSession({
+    id: 'live-1', title: 'Weekend hardware show', username: 'creator-one', start_time: 1700000000,
+    sales: { gmv: { amount: '125.50', currency: 'USD' }, attributed_sku_orders: 4, attributed_items_sold: 6 },
+    traffic: { views: 900, product_clicks: 80 }
+  }, 'AFFILIATE_ACCOUNTS');
+  assert.equal(liveSession.liveId, 'live-1');
+  assert.equal(liveSession.gmv, 125.5);
+  assert.equal(liveSession.skuOrders, 4);
+  assert.equal(liveSession.views, 900);
+
+  const currentLiveSession = normalizeTikTokLiveSession({
+    live_id: 'live-202609', account_type: 'OFFICIAL_ACCOUNTS',
+    sales_performance: {
+      live_attributed_gmv: { amount: '88.20', currency: 'USD' },
+      live_attributed_sku_orders: 3,
+      live_attributed_items_sold: 5,
+      products_sold: 2
+    },
+    traffic: { products_added: 7 }
+  });
+  assert.equal(currentLiveSession.gmv, 88.2);
+  assert.equal(currentLiveSession.skuOrders, 3);
+  assert.equal(currentLiveSession.itemsSold, 5);
+  assert.equal(currentLiveSession.productsAdded, 7);
+  assert.equal(currentLiveSession.differentProductsSold, 2);
+
+  const liveProduct = normalizeTikTokLiveProduct({
+    product_id: 'product-1', product_name: 'Live product',
+    sales: { gmv: { amount: '40.00', currency: 'USD' }, sku_orders: 2 },
+    traffic: { product_impressions: 100, product_clicks: 15 }
+  });
+  assert.equal(liveProduct.productId, 'product-1');
+  assert.equal(liveProduct.productClicks, 15);
+
+  const attribution = normalizeTikTokLiveAttribution({
+    id: '576000001', status: 'COMPLETED', create_time: 1700000000,
+    skus: [
+      { product_id: 'product-1', content_type: 'LIVE', content_id: 'live-1', creator_username: 'creator-one', quantity: 2 },
+      { product_id: 'product-2', content_type: 'VIDEO', content_id: 'video-1', creator_username: 'creator-two', quantity: 1 }
+    ]
+  });
+  assert.equal(attribution.isLive, true);
+  assert.deepEqual(attribution.contentIds, ['live-1']);
+  assert.equal(attribution.lines.length, 1);
+
+  const attributedOrder = applyTikTokLiveAttribution({
+    ...order,
+    items: [{ ...order.items[0], productId: 'product-1' }, { ...order.items[1], productId: 'product-2' }]
+  }, attribution);
+  assert.equal(attributedOrder.salesOrigin, 'tiktok_live');
+  assert.equal(attributedOrder.isTikTokLive, true);
+  assert.deepEqual(attributedOrder.tiktokLive.creators, ['creator-one']);
+  assert.equal(attributedOrder.items[0].isTikTokLive, true);
+  assert.equal(attributedOrder.items[1].isTikTokLive, undefined);
+
+  const liveSummary = summarizeTikTokLiveSessions([liveSession, { ...liveSession, liveId: 'live-2', gmv: 10, skuOrders: 1 }]);
+  assert.equal(liveSummary.sessionCount, 2);
+  assert.equal(liveSummary.gmv, 135.5);
+  assert.equal(liveSummary.skuOrders, 5);
 
   console.log('TikTok Shop integration tests passed.');
 }
