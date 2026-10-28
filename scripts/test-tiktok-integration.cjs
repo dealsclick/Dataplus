@@ -5,7 +5,7 @@ const path = require('node:path');
 
 const { tiktokSignature } = require('../lib/tiktok-client');
 const { createTikTokCredentials } = require('../lib/tiktok-credentials');
-const { exchangeAuthorizationCode, sellerAuthorizationUrl } = require('../lib/tiktok-oauth');
+const { exchangeAuthorizationCode, isTikTokAuthorizationCallbackUrl, sellerAuthorizationUrl } = require('../lib/tiktok-oauth');
 const { componentRows, mapTikTokOrder, mapTikTokReturn } = require('../lib/tiktok-mappers');
 const { EVENT_TOPICS, reconcileOperation, verifyTikTokShopWebhook, webhookEntity, webhookIdentity, webhookTopic } = require('../lib/tiktok-webhooks');
 const {
@@ -73,6 +73,11 @@ async function main() {
   assert.equal(sellerUrl.pathname, '/open/authorize');
   assert.equal(sellerUrl.searchParams.get('service_id'), 'service-id');
   assert.equal(sellerUrl.searchParams.get('state'), 'production.state');
+  assert.equal(isTikTokAuthorizationCallbackUrl('/auth/tiktok/callback?code=auth-code&state=production.state'), true);
+  assert.equal(isTikTokAuthorizationCallbackUrl('/?auth_code=auth-code&state=production.state'), true);
+  assert.equal(isTikTokAuthorizationCallbackUrl('/?error=access_denied&state=development.state'), true);
+  assert.equal(isTikTokAuthorizationCallbackUrl('/?code=auth-code&state=ebay-state'), false);
+  assert.equal(isTikTokAuthorizationCallbackUrl('/auth/ebay/callback?code=auth-code&state=production.state'), false);
   const exchanged = await exchangeAuthorizationCode({
     appKey: 'app-key', appSecret: 'app-secret', authCode: 'auth-code',
     fetchImpl: async url => {

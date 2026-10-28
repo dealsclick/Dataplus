@@ -72880,6 +72880,11 @@ function tiktokAuthorizationResultHtml(options = {}) {
   `;
 }
 
+function isTikTokOAuthCallbackRequest(req) {
+  const { isTikTokAuthorizationCallbackUrl } = require('./lib/tiktok-oauth');
+  return isTikTokAuthorizationCallbackUrl(req.url, `http://${req.headers.host || 'localhost'}`);
+}
+
 async function handleTikTokStart(req, res) {
   if (String(req.method || 'GET').toUpperCase() !== 'GET') return sendHtml(res, 405, '<h1>Method not allowed</h1>');
   await hydrateAuthSessionsStore();
@@ -73565,17 +73570,17 @@ function startServer() {
       handleEbayStart(req, res).catch((error) => {
         sendHtml(res, 500, `<h1>eBay auth start error</h1><p>${escapeHtml(error.message)}</p>`);
       });
-    } else if (isEbayOAuthCallbackRequest(req)) {
-      handleEbayCallback(req, res).catch((error) => {
-        sendHtml(res, 500, `<h1>eBay callback error</h1><p>${escapeHtml(error.message)}</p>`);
-      });
     } else if (req.url.startsWith("/auth/tiktok/start")) {
       handleTikTokStart(req, res).catch((error) => {
         sendHtml(res, apiErrorStatus(error), tiktokAuthorizationResultHtml({ success: false, message: error.message }));
       });
-    } else if (req.url.startsWith("/auth/tiktok/callback")) {
+    } else if (isTikTokOAuthCallbackRequest(req)) {
       handleTikTokCallback(req, res).catch((error) => {
         sendHtml(res, 500, tiktokAuthorizationResultHtml({ success: false, message: error.message }));
+      });
+    } else if (isEbayOAuthCallbackRequest(req)) {
+      handleEbayCallback(req, res).catch((error) => {
+        sendHtml(res, 500, `<h1>eBay callback error</h1><p>${escapeHtml(error.message)}</p>`);
       });
     } else if (req.url.startsWith("/api/") || req.url.startsWith("/auth/veeqo/") || /^\/\?(?:.*&)?(?:code|error)=/.test(req.url)) {
       handleApi(req, res).catch(async (error) => {
