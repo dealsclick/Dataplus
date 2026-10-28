@@ -9691,10 +9691,11 @@ export function UniversalShippingLabelDialog({ open, onOpenChange, orderId, orde
     toast.success(result.message || "Shipping label purchased and ready to print.")
   }
   const printPurchasedLabel = async () => {
-    printFrameRef.current?.contentWindow?.print()
     if (!printPreview?.shipmentId) return
+    const printCompletion = api<{ message?: string; channelResult?: { status?: string; error?: string } }>(`/api/orders/${encodeURIComponent(orderId)}/shipments/${encodeURIComponent(printPreview.shipmentId)}/printed`, { method: "POST", body: "{}" })
+    printFrameRef.current?.contentWindow?.print()
     try {
-      const result = await api<{ message?: string; channelResult?: { status?: string; error?: string } }>(`/api/orders/${encodeURIComponent(orderId)}/shipments/${encodeURIComponent(printPreview.shipmentId)}/printed`, { method: "POST", body: "{}" })
+      const result = await printCompletion
       if (result.channelResult && !["sent", "already_synced"].includes(String(result.channelResult.status || "").toLowerCase())) toast.warning(result.message || "The label was printed, but marketplace tracking needs attention.")
       else toast.success(result.message || "Label printed and marketplace tracking sent.")
       await onUpdated()

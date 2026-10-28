@@ -140,6 +140,7 @@ const { importTemuReturns, temuReturnRecord, temuReturnResponse } = require("./l
 const { indexSavedTemuReturns, linkSavedTemuReturns } = require("./lib/temu-return-linking");
 const { temuOrderPages } = require("./lib/temu-order-pagination");
 const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
+const { applyPrintedShipmentFulfillment } = require("./lib/printed-shipment-fulfillment");
 const { mergeImportedShipments } = require("./lib/imported-shipment-merge");
 const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, packageFor: fulfillmentPackageFor, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
 const shipmentConsolidation = require("./lib/shipment-consolidation");
@@ -31983,6 +31984,160 @@ function fulfillmentPrintJobOrderIds(printJob = {}, state = {}) {
   return fulfillmentBatchOrderIds(batch || {});
 }
 
+function warehouseForPrintedShipment(db = {}, order = {}, shipment = {}) {
+  const shipmentLineIndexes = new Set((shipment.lines || []).map((line) => Number(line.lineIndex)).filter(Number.isInteger));
+  const shipmentSkus = new Set((shipment.lines || []).map((line) => String(line.sku || "").trim().toLowerCase()).filter(Boolean));
+  const route = (order.fulfillmentRoutes || []).find((entry) => shipmentLineIndexes.has(Number(entry.lineIndex)) || shipmentSkus.has(String(entry.sku || "").trim().toLowerCase()));
+  const preferredIds = [shipment.warehouseId, route?.warehouseId, order.fulfillmentWarehouseId, order.reservationWarehouseId].map((value) => String(value || "")).filter(Boolean);
+  const warehouses = Array.isArray(db.warehouses) ? db.warehouses : [];
+  return preferredIds.map((id) => warehouses.find((warehouse) => String(warehouse.id || "") === id)).find(isPhysicalFulfillmentWarehouse)
+    || findPreferredOrderWarehouse(db, order);
+}
+
+async function completePrintedPurchasedShipment(db, order, shipment, actor = "Warehouse", completedAt = new Date().toISOString()) {
+  let result = null;
+  let warehouse = null;
+  try {
+    warehouse = warehouseForPrintedShipment(db, order, shipment);
+    result = applyPrintedShipmentFulfillment(order, shipment, { actor, completedAt });
+    if (!result.changed) return result;
+
+    const warnings = [];
+    const touchedProducts = [];
+    if (warehouse) {
+      shipment.warehouseId = shipment.warehouseId || warehouse.id;
+      shipment.warehouseName = shipment.warehouseName || warehouse.name;
+      order.fulfillmentWarehouseId = order.fulfillmentWarehouseId || warehouse.id;
+      order.fulfillmentWarehouseName = order.fulfillmentWarehouseName || warehouse.name;
+    } else if (result.completedLines.length) {
+      warnings.push("No active physical warehouse was linked, so inventory was not adjusted.");
+    }
+
+    for (const completedLine of result.completedLines) {
+      if (!warehouse) break;
+      const orderLine = orderLineItems(order)[completedLine.lineIndex];
+      const inventory = await postgres.readProductByKey(completedLine.sku);
+      if (!inventory) {
+        warnings.push(`${completedLine.sku} was marked shipped, but its catalog inventory record was not found.`);
+        continue;
+      }
+      const inventoryQty = completedLine.qty * orderLineInventoryMultiplier(orderLine, inventory);
+      const stockRow = ensureInventoryWarehouseStock(inventory, warehouse);
+      const qtyBefore = Number(stockRow.qty || 0);
+      const reservedBefore = Number(stockRow.reserved || 0);
+      if (qtyBefore < inventoryQty) warnings.push(`${completedLine.sku} shipped ${inventoryQty} piece${inventoryQty === 1 ? "" : "s"}, but ${warehouse.name} recorded only ${qtyBefore}. Inventory was reduced to zero for review.`);
+      stockRow.reserved = Math.max(0, reservedBefore - inventoryQty);
+      stockRow.qty = Math.max(0, qtyBefore - inventoryQty);
+      stockRow.updatedAt = completedAt;
+      syncInventoryTotalsFromWarehouses(inventory);
+      inventory.updatedAt = completedAt;
+      addInventoryLedger(db, inventory, {
+        type: "order_fulfillment",
+        source: "shipping_label_print",
+        referenceId: order.id,
+        referenceNumber: order.orderNumber,
+        warehouseId: warehouse.id,
+        warehouseName: warehouse.name,
+        locationBin: stockRow.locationBin || "",
+        quantityChange: Number(stockRow.qty || 0) - qtyBefore,
+        reservedChange: Number(stockRow.reserved || 0) - reservedBefore,
+        qtyBefore,
+        qtyAfter: Number(stockRow.qty || 0),
+        reservedBefore,
+        reservedAfter: Number(stockRow.reserved || 0),
+        reason: `Shipping label printed for ${order.orderNumber || order.id}; fulfilled ${completedLine.qty} sell unit${completedLine.qty === 1 ? "" : "s"} of ${completedLine.sku}.`,
+        user: actor
+      });
+      touchedProducts.push(inventory);
+    }
+
+    if (touchedProducts.length) {
+      const uniqueProducts = [...new Map(touchedProducts.map((product) => [String(product.id || product.sku), product])).values()];
+      await postgres.upsertProductsFromState(uniqueProducts);
+      await postgres.upsertInventoryLevelsFromProducts(uniqueProducts);
+      await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+    }
+
+    shipment.printFulfillment.warnings = warnings;
+    appendOrderShippingEvent(order, {
+      provider: orderSourceChannelName(order, "Shipping"),
+      action: "label_print_fulfillment",
+      status: warnings.length ? "completed_with_warning" : "completed",
+      message: `${shipment.trackingNumber || shipment.reference || "The purchased label"} was printed and ${result.completedLines.reduce((sum, line) => sum + line.qty, 0)} unit${result.completedLines.reduce((sum, line) => sum + line.qty, 0) === 1 ? "" : "s"} marked shipped.`,
+      details: { shipmentId: shipment.id || "", warehouseId: warehouse?.id || "", warnings }
+    });
+    addOrderWorkflowEvent(order, {
+      step: "print_and_fulfill_shipment",
+      title: result.fullyFulfilled ? "Order fulfilled from label print" : "Order partially fulfilled from label print",
+      message: `${shipment.carrierName || shipment.carrier || "Carrier"} tracking ${shipment.trackingNumber || "was saved"}. The purchased label print completed this shipment.${warnings.length ? ` ${warnings.join(" ")}` : ""}`,
+      user: actor
+    });
+    order.operationalStatus = result.fullyFulfilled ? "completed" : "partially_fulfilled";
+    order.workflowStatus = order.operationalStatus;
+    return { ...result, warnings, warehouseId: warehouse?.id || "", warehouseName: warehouse?.name || "" };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (result?.changed) {
+      const warning = `The shipment was marked fulfilled, but its inventory update needs review: ${message}`;
+      shipment.printFulfillment = { ...(shipment.printFulfillment || {}), status: "completed", warnings: [...new Set([...(shipment.printFulfillment?.warnings || []), warning])] };
+      addOrderTimeline(order, { type: "inventory", title: "Printed shipment inventory needs review", message: warning, user: actor });
+      return { ...result, warnings: shipment.printFulfillment.warnings, warehouseId: warehouse?.id || "", warehouseName: warehouse?.name || "" };
+    }
+    shipment.printFulfillment = { status: "failed", attemptedAt: completedAt, attemptedBy: actor, message };
+    addOrderTimeline(order, { type: "fulfillment", title: "Printed label needs fulfillment review", message, user: actor });
+    return { status: "failed", changed: false, error: message, warnings: [message] };
+  }
+}
+
+async function reconcilePrintedShipmentFulfillment(orderKey, shipmentKey = "", actor = "DataPlus repair") {
+  const order = await postgres.readOrderByKey(orderKey);
+  if (!order) throw new Error(`Order ${orderKey} was not found.`);
+  const shipments = Array.isArray(order.shipments) ? order.shipments : [];
+  const shipment = shipmentKey
+    ? shipments.find((row) => String(row.id || "") === String(shipmentKey))
+    : shipments.find((row) => row.voidStatus !== "voided" && row.trackingNumber && row.documents?.some((document) => document.documentType === "shipping_label" || document.documentId));
+  if (!shipment) throw new Error(`A purchased shipment${shipmentKey ? ` matching ${shipmentKey}` : ""} was not found on order ${order.orderNumber || order.id}.`);
+
+  const completedAt = new Date().toISOString();
+  const repairPrintJob = {
+    id: `repair-${shipment.id}`,
+    printNumber: `Label ${order.orderNumber || order.id}`,
+    printedAt: completedAt,
+    printedBy: actor,
+    lastPrintedAt: completedAt,
+    lastPrintedBy: actor,
+    lastPrintStation: "DataPlus repair",
+    lastPrintAttemptId: crypto.randomUUID()
+  };
+  const printAudit = recordShipmentLabelPrint(shipment, repairPrintJob, actor);
+  if (printAudit.recorded) addOrderTimeline(order, {
+    type: "shipping_label",
+    title: printAudit.firstPrint ? "Shipping label print recovered" : "Shipping label fulfillment recovered",
+    message: "DataPlus recovered a purchased-label print that did not complete the order workflow.",
+    user: actor
+  });
+  const db = await readDbFast({ skipInventory: true });
+  const fulfillmentResult = await completePrintedPurchasedShipment(db, order, shipment, actor, completedAt);
+  const channelResult = fulfillmentResult.status !== "failed" && shipment.trackingNumber
+    ? await syncDropshipShipmentToChannel(db, order, shipment, actor)
+    : null;
+  order.updatedAt = completedAt;
+  await postgres.saveOrder(order);
+  clearOrderApiCache(order.id);
+  return {
+    orderId: order.id,
+    orderNumber: order.orderNumber || order.id,
+    orderStatus: order.status || "",
+    operationalStatus: order.operationalStatus || "",
+    shipmentId: shipment.id,
+    shipmentStatus: shipment.status || "",
+    trackingNumber: shipment.trackingNumber || "",
+    fulfillmentResult,
+    channelResult,
+    channelSync: shipment.channelSync || null
+  };
+}
+
 async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "Warehouse") {
   if (printJob?.kind === "shipment_packet" && printJob.orderId && printJob.shipmentId) {
     const order = await postgres.readOrderByKey(printJob.orderId);
@@ -31996,18 +32151,20 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
     shipment.updatedAt = printedAt;
     addOrderTimeline(order, { type: "shipping_label", title: firstPrint ? "Shipping label printed" : "Shipping label reprinted", message: `${printJob.printNumber || "Label packet"} printed at ${printAudit.event.stationName || "the selected station"}. Print count: ${shipment.labelPrintCount}.`, user: actor });
     const channelResults = [];
+    const db = await readDbFast({ skipInventory: true });
+    const fulfillmentResult = await completePrintedPurchasedShipment(db, order, shipment, actor, printedAt);
     const needsTemuPrintSync = String(order.source || order.channelSource || "").toLowerCase() === "temu"
       && (firstPrint || !["sent", "unsupported"].includes(String(shipment.temuPrintSync?.status || "").toLowerCase()));
     const needsTrackingSync = shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase());
-    const db = needsTemuPrintSync || needsTrackingSync ? await readDbFast({ skipInventory: true }) : null;
     if (needsTemuPrintSync) channelResults.push({ orderId: order.id, shipmentId: shipment.id, ...(await syncTemuLabelPrintedStatus(order, shipment, db, actor)) });
-    if (needsTrackingSync) {
+    if (needsTrackingSync && fulfillmentResult.status !== "failed") {
       channelResults.push({ orderId: order.id, shipmentId: shipment.id, ...(await syncDropshipShipmentToChannel(db, order, shipment, actor)) });
     }
     order.updatedAt = printedAt;
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
     printJob.channelSyncResults = channelResults;
+    printJob.fulfillmentResults = [{ orderId: order.id, shipmentId: shipment.id, ...fulfillmentResult }];
     return 1;
   }
   if (!printJob?.batchId) return 0;
@@ -32019,6 +32176,7 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
   recordBatchLabelPrint(batch, printJob);
   const db = await readDbFast({ skipInventory: true });
   const channelResults = [];
+  const fulfillmentResults = [];
   let updated = 0;
   for (const order of orders) {
     let orderChanged = false;
@@ -32031,10 +32189,12 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
       shipment.updatedAt = printedAt;
       orderChanged = true;
       addOrderTimeline(order, { type: "shipping_label", title: firstPrint ? "Shipping label printed" : "Shipping label reprinted", message: `${printJob.printNumber || printJob.batchNumber || "Label packet"} printed at ${printAudit.event.stationName || "the selected station"}. Print count: ${shipment.labelPrintCount}.`, user: actor });
+      const fulfillmentResult = await completePrintedPurchasedShipment(db, order, shipment, actor, printedAt);
+      fulfillmentResults.push({ orderId: order.id, shipmentId: shipment.id, ...fulfillmentResult });
       const needsTemuPrintSync = String(order.source || order.channelSource || "").toLowerCase() === "temu"
         && (firstPrint || !["sent", "unsupported"].includes(String(shipment.temuPrintSync?.status || "").toLowerCase()));
       if (needsTemuPrintSync) channelResults.push({ orderId: order.id, shipmentId: shipment.id, ...(await syncTemuLabelPrintedStatus(order, shipment, db, actor)) });
-      if (shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) {
+      if (fulfillmentResult.status !== "failed" && shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) {
         channelResults.push({ orderId: order.id, shipmentId: shipment.id, ...(await syncDropshipShipmentToChannel(db, order, shipment, actor)) });
       }
     }
@@ -32045,6 +32205,7 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
     updated += 1;
   }
   printJob.channelSyncResults = channelResults;
+  printJob.fulfillmentResults = fulfillmentResults;
   return updated;
 }
 
@@ -34258,6 +34419,8 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
     package: options.package || {},
     packages: options.package ? [{ id: crypto.randomUUID(), ...options.package }] : [],
     lines: Array.isArray(options.lines) ? options.lines : [],
+    warehouseId: String(options.warehouseId || order.fulfillmentWarehouseId || ""),
+    warehouseName: String((db.warehouses || []).find((warehouse) => String(warehouse.id || "") === String(options.warehouseId || order.fulfillmentWarehouseId || ""))?.name || order.fulfillmentWarehouseName || ""),
     documents: [{ url: document.url, format, documentType: "shipping_label", documentId: document.id }],
     voidable: true,
     voidStatus: "available",
@@ -48073,7 +48236,7 @@ async function syncShopifyShipment(order = {}, shipment = {}) {
       if (localIndex < 0) continue;
       const localShipmentLine = shipmentLines.find((line) => Number(line.lineIndex || 0) === localIndex)
         || shipmentLines.find((line) => sku && String(line.sku || "").trim().toLowerCase() === sku);
-      const quantity = Math.min(Number(localShipmentLine?.qtyFulfilled || localShipmentLine?.qtyAllocated || 0), Number(fulfillmentLine.remainingQuantity || 0));
+      const quantity = Math.min(Number(localShipmentLine?.qtyFulfilled || localShipmentLine?.qtyAllocated || localShipmentLine?.qty || 0), Number(fulfillmentLine.remainingQuantity || 0));
       if (quantity > 0) fulfillmentOrderLineItems.push({ id: fulfillmentLine.id, quantity });
     }
     if (fulfillmentOrderLineItems.length) lineItemsByFulfillmentOrder.push({ fulfillmentOrderId: fulfillmentOrder.id, fulfillmentOrderLineItems });
@@ -56270,16 +56433,14 @@ async function handleApi(req, res) {
     shipment.updatedAt = printedAt;
     addOrderTimeline(order, { type: "shipping_label", title: firstPrint ? "Shipping label printed" : "Shipping label reprinted", message: `The purchased label was printed in the browser. Print count: ${shipment.labelPrintCount}.`, user: actor });
     const channelResults = [];
-    const db = String(order.source || order.channelSource || "").toLowerCase() === "temu"
-      || (shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase()))
-      ? await readDbFast({ skipInventory: true })
-      : null;
+    const db = await readDbFast({ skipInventory: true });
+    const fulfillmentResult = await completePrintedPurchasedShipment(db, order, shipment, actor, printedAt);
     if (String(order.source || order.channelSource || "").toLowerCase() === "temu"
       && (firstPrint || !["sent", "unsupported"].includes(String(shipment.temuPrintSync?.status || "").toLowerCase()))) {
       channelResults.push(await syncTemuLabelPrintedStatus(order, shipment, db, actor));
     }
     let channelResult = null;
-    if (shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) {
+    if (fulfillmentResult.status !== "failed" && shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) {
       channelResult = await syncDropshipShipmentToChannel(db, order, shipment, actor);
       channelResults.push(channelResult);
     }
@@ -56289,7 +56450,17 @@ async function handleApi(req, res) {
     const syncWarning = channelResult && !["sent", "already_synced"].includes(String(channelResult.status || "").toLowerCase())
       ? ` Marketplace tracking was not sent: ${channelResult.error || shipment.channelSync?.message || channelResult.status}.`
       : "";
-    return sendJson(res, 200, { shipment, channelResult, channelResults, message: `${firstPrint ? "Shipping label marked printed." : `Shipping label reprinted. Total prints: ${shipment.labelPrintCount}.`}${syncWarning}` });
+    const fulfillmentWarning = fulfillmentResult.status === "failed"
+      ? ` The print was recorded, but the order was not marked fulfilled: ${fulfillmentResult.error}`
+      : fulfillmentResult.warnings?.length
+        ? ` Order marked fulfilled with inventory review: ${fulfillmentResult.warnings.join(" ")}`
+        : "";
+    const fulfillmentMessage = fulfillmentResult.status === "completed"
+      ? " Order marked fulfilled."
+      : fulfillmentResult.status === "already_completed"
+        ? " Order was already fulfilled."
+        : "";
+    return sendJson(res, 200, { shipment, fulfillmentResult, channelResult, channelResults, message: `${firstPrint ? "Shipping label marked printed." : `Shipping label reprinted. Total prints: ${shipment.labelPrintCount}.`}${fulfillmentMessage}${fulfillmentWarning}${syncWarning}` });
   }
 
   if (req.method === "POST" && url.pathname === "/api/fulfillment/pack/scan" && postgres.isPostgresEnabled()) {
@@ -73479,6 +73650,7 @@ async function runSupplierRetirementWorkerJob(job) {
 }
 
 module.exports = {
+  reconcilePrintedShipmentFulfillment,
   refreshFulfillmentConsoleSnapshot,
   drainFulfillmentConsoleProjectionPatches,
   drainChannelApiLogWrites,
