@@ -1,11 +1,8 @@
-import { useEffect, useRef, useState, type ReactNode } from "react"
-import { Archive, Boxes, CheckCircle2, Package, Search, Loader2, Menu, ScanBarcode } from "lucide-react"
+import { useEffect, type ReactNode } from "react"
+import { Archive, Boxes, CheckCircle2, Package, Menu, ScanBarcode } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Card, CardContent } from "@/components/ui/card"
 import { MobileTables } from "@/components/ui/table"
 
-type Row = Record<string, unknown>
 const base = "/warehouse/mobile"
 const sections = [
   { id: "receiving", label: "Receive POs", icon: Package },
@@ -15,11 +12,11 @@ const sections = [
   { id: "more", label: "More", icon: Menu },
 ]
 
-export function WarehouseMobile({ api, canPurchase, account, brand, manual, outbound, audits, bins, purchaseOrder, audit, returns, fulfillment, inventory }: {
-  api: <T>(url: string, options?: RequestInit) => Promise<T>
+export function WarehouseMobile({ canPurchase, account, brand, receiving, manual, outbound, audits, bins, purchaseOrder, audit, returns, fulfillment, inventory }: {
   canPurchase: boolean
   account: ReactNode
   brand: ReactNode
+  receiving: ReactNode
   manual: ReactNode
   outbound: ReactNode
   audits: ReactNode
@@ -42,7 +39,7 @@ export function WarehouseMobile({ api, canPurchase, account, brand, manual, outb
     <header className="border-b bg-card px-3 py-2"><div className="mx-auto flex max-w-3xl items-center justify-between gap-2"><a href={base} className="flex min-w-0 items-center gap-2">{brand}</a>{account}</div></header>
     <main className="mx-auto grid max-w-3xl gap-4 p-3 pb-28 sm:p-6 sm:pb-28">
       {id && <Button variant="outline" className="justify-self-start" asChild><a href={`${base}/${section}`}>← Back to {section === "receiving" ? "POs" : "audits"}</a></Button>}
-      {section === "receiving" && (canPurchase ? id ? purchaseOrder(id) : <PurchaseQueue api={api} /> : <p>Your account does not have purchasing access. Choose Other stock, Audits, or Bins below.</p>)}
+      {section === "receiving" && (id ? canPurchase ? purchaseOrder(id) : <p>Your account does not have purchasing access.</p> : receiving)}
       {section === "manual" && manual}
       {section === "outbound" && outbound}
       {section === "audits" && (id ? audit(id) : audits)}
@@ -55,47 +52,4 @@ export function WarehouseMobile({ api, canPurchase, account, brand, manual, outb
     </main>
     <nav aria-label="Warehouse tasks" className="fixed inset-x-0 bottom-0 z-40 border-t bg-background pb-[env(safe-area-inset-bottom)]"><div className="mx-auto grid max-w-3xl grid-cols-5 gap-1 p-2">{sections.map(({ id: key, label, icon: Icon }) => <a key={key} href={`${base}/${key}`} aria-current={activeSection === key ? "page" : undefined} className={`flex min-h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-md px-1 text-center text-xs font-medium ${activeSection === key ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}><Icon className="size-5" />{label}</a>)}</div></nav>
   </div></MobileTables>
-}
-
-function PurchaseQueue({ api }: { api: <T>(url: string, options?: RequestInit) => Promise<T> }) {
-  const [rows, setRows] = useState<Row[]>([])
-  const [query, setQuery] = useState("")
-  const [submitted, setSubmitted] = useState("")
-  const [loading, setLoading] = useState(false)
-  const [hasMore, setHasMore] = useState(false)
-  const [error, setError] = useState("")
-  const request = useRef<AbortController | null>(null)
-  useEffect(() => () => request.current?.abort(), [])
-  const changeQuery = (value: string) => {
-    request.current?.abort(); request.current = null
-    setQuery(value); setSubmitted(""); setRows([]); setError(""); setLoading(false); setHasMore(false)
-  }
-  const search = async () => {
-    const term = query.trim()
-    if (!term) return
-    request.current?.abort()
-    const controller = new AbortController()
-    request.current = controller
-    setLoading(true); setError(""); setRows([]); setSubmitted(term); setHasMore(false)
-    try {
-      const result = await api<{ purchaseOrders?: Row[]; hasMore?: boolean }>(`/api/purchasing/receiving-search?q=${encodeURIComponent(term)}`, { signal: controller.signal })
-      if (request.current !== controller || controller.signal.aborted) return
-      setRows(result.purchaseOrders || []); setHasMore(Boolean(result.hasMore))
-    } catch (err) {
-      if (request.current === controller && !controller.signal.aborted) setError(err instanceof Error ? err.message : "Unable to search POs")
-    } finally {
-      if (request.current === controller) setLoading(false)
-    }
-  }
-  return <>
-    <h1 className="text-xl font-semibold">Receive purchase orders</h1>
-    <form className="grid gap-2" onSubmit={event => { event.preventDefault(); void search() }}>
-      <label className="grid gap-2 text-sm font-medium">Scan or search PO number<Input autoFocus autoComplete="off" enterKeyHint="search" maxLength={120} value={query} onChange={event => changeQuery(event.target.value)} placeholder="PO number or supplier" /></label>
-      <Button type="submit" disabled={loading || !query.trim()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search POs</Button>
-    </form>
-    {!submitted ? <p className="text-sm text-muted-foreground">Scan or enter a PO number or supplier, then search to find a delivery.</p>
-      : loading ? <p role="status">Searching purchase orders…</p>
-      : error ? <div role="alert" className="text-destructive">{error}<Button variant="outline" onClick={() => void search()}>Retry search</Button></div>
-      : <><p role="status" className="text-sm text-muted-foreground">{rows.length ? `${rows.length} matching purchase order${rows.length === 1 ? "" : "s"}` : "No open purchase orders match this search."}{hasMore && " · More matches available. Use a more specific PO number or supplier."}</p>{rows.map(row => <Card key={String(row.id)}><CardContent className="grid gap-3 p-4"><div className="flex flex-wrap justify-between gap-2"><strong>{String(row.poNumber || row.id)}</strong><span className="text-sm text-muted-foreground">{String(row.status || "draft").replaceAll("_", " ")}</span></div><p className="break-words">{String(row.supplier || "Unassigned supplier")}</p><p className="text-sm text-muted-foreground">{String(row.warehouseName || "No destination")} · Expected {String(row.expectedAt || "date unavailable").slice(0, 10)}</p><Button asChild><a href={`${base}/receiving/${encodeURIComponent(String(row.id))}`}>Open receiving</a></Button></CardContent></Card>)}</>}
-  </>
 }

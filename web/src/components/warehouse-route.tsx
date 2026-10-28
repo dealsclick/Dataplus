@@ -3141,14 +3141,14 @@ function WarehouseMobileRoute({ canPurchase, returns, fulfillment, inventory, ac
   warehouses: Array<Record<string, unknown>>
 }) {
   return <WarehouseMobile
-    api={api}
     canPurchase={canPurchase}
     returns={returns}
     fulfillment={fulfillment}
     inventory={inventory}
     account={account}
     brand={brand}
-    manual={canReceive ? <div className="grid gap-4"><InboundReceivingLauncher mobile operatorName={operatorName} /><ManualReceivingPanel mobile /></div> : <p>Receiving access is required.</p>}
+    receiving={canReceive ? <InboundReceivingLauncher mobile operatorName={operatorName} /> : <p>Receiving access is required.</p>}
+    manual={canReceive ? <ManualReceivingPanel mobile /> : <p>Receiving access is required.</p>}
     outbound={<OutboundAuditWorkspace warehouses={warehouses} />}
     bins={canManageBins ? <WarehouseBinManager mobile /> : <p>Bin access is required.</p>}
     audits={canAudit ? <><WarehouseAuditPanel createOnly mobile operatorName={operatorName} /><WarehouseAuditHistory mobile /></> : <p>Audit access is required.</p>}
