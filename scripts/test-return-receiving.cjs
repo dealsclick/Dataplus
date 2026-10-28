@@ -14,6 +14,20 @@ test('exact scans match closed returns, order references and tracking without me
   assert.equal(findReturnReceipts(records, 'ABC').length, 0);
   assert.equal(findReturnReceipts(records, '').length, 0);
 });
+test('carrier label scans use shared normalization across channel tracking fields', () => {
+  const records = [
+    { id: 'short', orderNumber: '12345' },
+    { id: 'ups', returnTracking: [{ trackingNo: '1Z 999-AA1-01 2345 6784' }] },
+    { id: 'usps', returnTracking: [{ mailNo: '9400111899560000000000' }] },
+    { id: 'fedex', returnTracking: [{ trackingCode: '1234 5678 9012' }] },
+    { id: 'label-history', returnLabelHistory: [{ waybillNumber: 'JJD000225478000123456' }] },
+  ];
+  assert.equal(findReturnReceipts(records, ']C11Z999AA10123456784')[0].id, 'ups');
+  assert.equal(findReturnReceipts(records, '420100019400111899560000000000')[0].id, 'usps');
+  assert.equal(findReturnReceipts(records, 'https://carrier.test/track?trackingNumber=123456789012')[0].id, 'fedex');
+  assert.equal(findReturnReceipts(records, 'JJD000225478000123456')[0].id, 'label-history');
+  assert.equal(findReturnReceipts(records, 'routing-0000012345').length, 0);
+});
 test('receiving requires every expected line, bounded quantities and physical locations', () => {
   const record = { items: [{ sku: 'A', qty: 2 }, { sku: 'B', qty: 1 }] };
   const warehouse = { id: 'w', isPhysical: true, warehouseType: 'Returns Center', active: true };
