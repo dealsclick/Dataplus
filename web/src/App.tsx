@@ -2803,6 +2803,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                     <DropdownMenuSeparator />
                     <CompanyMenuItems />
                     <DropdownMenuSeparator />
+                    {userCan(authUser, "warehouse", "view") && <DropdownMenuItem asChild className="sm:hidden"><a href="/warehouse/mobile"><Warehouse className="size-4" /> Warehouse Mobile</a></DropdownMenuItem>}
                     <DropdownMenuCheckboxItem checked={colorblindMode} onCheckedChange={(checked) => updateColorblindMode(checked === true)}><Accessibility className="size-4" /> Colorblind-friendly colors</DropdownMenuCheckboxItem>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem onClick={() => setPasswordOpen(true)}><LockKeyhole className="size-4" /> Change password</DropdownMenuItem>
