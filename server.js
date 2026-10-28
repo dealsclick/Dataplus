@@ -57237,7 +57237,7 @@ async function handleApi(req, res) {
     return sendCsv(res, csv, `dataplus-order-accounting-${new Date().toISOString().slice(0, 10)}.csv`);
   }
 
-  if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[2] !== "tracking-lookup" && !parts[3] && postgres.isPostgresEnabled()) {
     const requestedCacheKey = `dataplus:order-detail:v8:${parts[2]}:`;
     const cached = await redisCache.getJson(requestedCacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });

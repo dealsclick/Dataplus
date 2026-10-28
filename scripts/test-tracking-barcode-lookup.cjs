@@ -1,4 +1,6 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { canonicalTrackingValue, trackingLookupCandidates } = require('../lib/tracking-barcode');
 const { findReturnReceipts } = require('../lib/return-receiving-lookup');
 
@@ -7,6 +9,7 @@ assert(trackingLookupCandidates('4209801994055118901234567890').includes('940551
 assert(trackingLookupCandidates('(00) 123456789012345678').includes('123456789012345678'));
 assert(trackingLookupCandidates('ABCD').includes('ABCD'));
 assert(trackingLookupCandidates('JJD000225478000123456').includes('JJD000225478000123456'));
+assert(trackingLookupCandidates(']C1SPXBDL011972610090001070').includes('SPXBDL011972610090001070'));
 assert.equal(canonicalTrackingValue(']C11Z999AA10123456784'), '1Z999AA10123456784');
 assert.equal(canonicalTrackingValue('4209801994055118901234567890'), '94055118901234567890');
 assert.equal(canonicalTrackingValue('4201234567899405511890123456789012'), '9405511890123456789012');
@@ -19,4 +22,8 @@ const returns = [
 assert.deepEqual(findReturnReceipts(returns, '4209801994055118901234567890').map(row => row.id), ['ret-1']);
 assert.deepEqual(findReturnReceipts(returns, ']C11Z999AA10123456784').map(row => row.id), ['ret-2']);
 assert.deepEqual(findReturnReceipts(returns, 'RMA-1').map(row => row.id), ['ret-1']);
+
+const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+assert.match(serverSource, /parts\[2\] !== "tracking-lookup"[\s\S]*readOrderByKey\(parts\[2\]\)/, 'tracking lookup must bypass the generic order-detail route');
+assert.match(serverSource, /url\.pathname === "\/api\/orders\/tracking-lookup"[\s\S]*readOrdersByTrackingCandidates\(candidates/, 'tracking lookup must resolve normalized candidates through the relational tracking index');
 console.log('tracking barcode lookup tests passed');
