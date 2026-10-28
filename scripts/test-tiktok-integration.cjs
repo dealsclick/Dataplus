@@ -42,6 +42,12 @@ async function main() {
   try {
     const env = { DATAPLUS_CREDENTIALS_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64') };
     const credentials = createTikTokCredentials({ directory, env });
+    credentials.save('development', {
+      appKey: 'development-app-key', appSecret: 'development-app-secret'
+    });
+    assert.equal(credentials.status('development').appSecretConfigured, true);
+    assert.equal(credentials.status('development').appConfigured, false);
+    assert.throws(() => credentials.beginAuthorization('development'), /Service ID/);
     credentials.save('production', {
       appKey: 'app-key', appSecret: 'app-secret', serviceId: 'service-id'
     });
