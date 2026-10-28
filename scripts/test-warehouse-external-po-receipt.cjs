@@ -19,6 +19,9 @@ assert.match(warehouseUi, /External PO number/, 'warehouse UI captures and displ
 assert.match(warehouseUi, /isReceivingAuditReason\(current\.reason\)/, 'external receipts retain the receiving-document workflow');
 assert.match(warehouseUi, /Receive existing PO/, 'receiving offers the linked DataPlus PO path');
 assert.match(warehouseUi, /Receive external or manual PO/, 'receiving offers the external PO path');
+assert.match(warehouseUi, /CommandInput placeholder="Search supplier\.\.\."/, 'external receiving offers searchable supplier selection');
+assert.match(warehouseUi, /!\["retired", "deleted"\]\.includes\(status\)/, 'external receiving includes inactive manual suppliers but excludes retired and deleted suppliers');
+assert.match(warehouseUi, /status !== "active".*capitalize/, 'inactive suppliers are clearly identified in the receiving picker');
 assert.match(warehouseUi, /capture="environment"/, 'mobile receiving offers direct packing-slip camera capture');
 assert.match(warehouseUi, /compressEvidenceImage/, 'packing-slip photos are compressed before upload');
 assert.match(warehouseUi, /Packing slip required/, 'the UI explains the packing-slip completion safeguard');

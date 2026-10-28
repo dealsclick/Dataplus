@@ -551,6 +551,7 @@ function InboundReceivingLauncher({ mobile = false, operatorName = "Warehouse" }
   const [vendors, setVendors] = useState<Vendor[]>([])
   const [warehouseId, setWarehouseId] = useState("")
   const [vendorId, setVendorId] = useState("")
+  const [vendorOpen, setVendorOpen] = useState(false)
   const [externalPoNumber, setExternalPoNumber] = useState("")
   const [query, setQuery] = useState("")
   const [purchaseOrders, setPurchaseOrders] = useState<ReceivingPurchaseOrder[]>([])
@@ -559,13 +560,15 @@ function InboundReceivingLauncher({ mobile = false, operatorName = "Warehouse" }
   const [searching, setSearching] = useState(false)
 
   const loadReferenceData = async () => {
-    if (warehouses.length) return
     try {
       const state = await api<LiteState>("/api/state?lite=1")
       const physical = (state.warehouses || []).filter((item) => item.isPhysical !== false && item.inventorySourceType !== "supplier_feed" && item.allowReceiving !== false)
       setWarehouses(physical as typeof warehouses)
-      setWarehouseId(String(physical.find((item) => item.isDefaultReceiving)?.id || physical[0]?.id || ""))
-      setVendors((state.vendors || []).filter((vendor) => String(vendor.status || "active").toLowerCase() === "active"))
+      setWarehouseId((current) => current || String(physical.find((item) => item.isDefaultReceiving)?.id || physical[0]?.id || ""))
+      setVendors((state.vendors || []).filter((vendor) => {
+        const status = String(vendor.status || "active").trim().toLowerCase()
+        return !["retired", "deleted"].includes(status) && !vendor.retirement?.retiredAt
+      }).sort((left, right) => String(left.name || "").localeCompare(String(right.name || ""), undefined, { sensitivity: "base" })))
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load receiving options.")
     }
@@ -575,6 +578,7 @@ function InboundReceivingLauncher({ mobile = false, operatorName = "Warehouse" }
     setMode(nextMode)
     setSelectedPo(null)
     setPurchaseOrders([])
+    setVendorOpen(false)
     setOpen(true)
     void loadReferenceData()
   }
@@ -651,7 +655,7 @@ function InboundReceivingLauncher({ mobile = false, operatorName = "Warehouse" }
             <Field label="Find open PO"><div className="flex gap-2"><Input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void searchPurchaseOrders() } }} placeholder="PO number, supplier, or warehouse" /><Button type="button" variant="outline" disabled={searching || !query.trim()} onClick={() => void searchPurchaseOrders()}>{searching ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search</Button></div></Field>
             {purchaseOrders.length > 0 && <div className="max-h-64 overflow-y-auto rounded-md border divide-y">{purchaseOrders.map((po) => <button type="button" key={po.id} className={cn("flex w-full items-start justify-between gap-3 p-3 text-left hover:bg-muted/50", selectedPo?.id === po.id && "bg-primary/10 ring-1 ring-inset ring-primary")} onClick={() => { setSelectedPo(po); const warehouse = warehouses.find((row) => String(row.name || "").toLowerCase() === String(po.warehouseName || "").toLowerCase()); if (warehouse?.id) setWarehouseId(String(warehouse.id)) }}><span className="min-w-0"><span className="block font-medium">{po.poNumber || po.id}</span><span className="block truncate text-sm text-muted-foreground">{po.supplier || "Supplier not recorded"} · {po.warehouseName || "Warehouse not assigned"}</span></span><Badge variant="outline" className="shrink-0">{String(po.status || "open").replace(/_/g, " ")}</Badge></button>)}</div>}
           </div> : <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="Supplier"><Select value={vendorId} onValueChange={setVendorId}><SelectTrigger><SelectValue placeholder="Select supplier" /></SelectTrigger><SelectContent>{vendors.map((vendor) => <SelectItem key={vendor.id} value={vendor.id}>{vendor.name}{vendor.code ? ` (${vendor.code})` : ""}</SelectItem>)}</SelectContent></Select></Field>
+            <Field label="Supplier"><Popover open={vendorOpen} onOpenChange={setVendorOpen}><PopoverTrigger asChild><Button type="button" variant="outline" role="combobox" aria-expanded={vendorOpen} className="w-full justify-between font-normal"><span className="truncate">{(() => { const vendor = vendors.find((row) => row.id === vendorId); return vendor ? `${vendor.name}${vendor.code ? ` (${vendor.code})` : ""}` : "Search supplier" })()}</span><ChevronDown className="size-4 shrink-0 opacity-60" /></Button></PopoverTrigger><PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] p-0"><Command><CommandInput placeholder="Search supplier..." /><CommandList className="max-h-72"><CommandEmpty>No supplier found.</CommandEmpty><CommandGroup>{vendors.map((vendor) => { const status = String(vendor.status || "active").trim().toLowerCase(); return <CommandItem key={vendor.id} value={`${vendor.name || ""} ${vendor.code || ""}`} onSelect={() => { setVendorId(vendor.id); setVendorOpen(false) }}><CheckCircle2 className={cn("size-4 shrink-0", vendor.id === vendorId ? "opacity-100" : "opacity-0")} /><span className="min-w-0 flex-1 truncate">{vendor.name}{vendor.code ? ` (${vendor.code})` : ""}</span>{status !== "active" && <Badge variant="outline" className="shrink-0 capitalize">{status}</Badge>}</CommandItem> })}</CommandGroup></CommandList></Command></PopoverContent></Popover></Field>
             <Field label="External PO number"><Input value={externalPoNumber} onChange={(event) => setExternalPoNumber(event.target.value)} placeholder="PO number from the other system" /></Field>
           </div>}
           <Field label="Receiving warehouse"><Select value={warehouseId} onValueChange={setWarehouseId}><SelectTrigger><SelectValue placeholder="Select physical warehouse" /></SelectTrigger><SelectContent>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || "Warehouse")}</SelectItem>)}</SelectContent></Select></Field>
