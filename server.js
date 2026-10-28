@@ -32099,23 +32099,25 @@ async function reconcilePrintedShipmentFulfillment(orderKey, shipmentKey = "", a
   if (!shipment) throw new Error(`A purchased shipment${shipmentKey ? ` matching ${shipmentKey}` : ""} was not found on order ${order.orderNumber || order.id}.`);
 
   const completedAt = new Date().toISOString();
-  const repairPrintJob = {
-    id: `repair-${shipment.id}`,
-    printNumber: `Label ${order.orderNumber || order.id}`,
-    printedAt: completedAt,
-    printedBy: actor,
-    lastPrintedAt: completedAt,
-    lastPrintedBy: actor,
-    lastPrintStation: "DataPlus repair",
-    lastPrintAttemptId: crypto.randomUUID()
-  };
-  const printAudit = recordShipmentLabelPrint(shipment, repairPrintJob, actor);
-  if (printAudit.recorded) addOrderTimeline(order, {
-    type: "shipping_label",
-    title: printAudit.firstPrint ? "Shipping label print recovered" : "Shipping label fulfillment recovered",
-    message: "DataPlus recovered a purchased-label print that did not complete the order workflow.",
-    user: actor
-  });
+  if (shipment.printFulfillment?.status !== "completed" && !["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase())) {
+    const repairPrintJob = {
+      id: `repair-${shipment.id}`,
+      printNumber: `Label ${order.orderNumber || order.id}`,
+      printedAt: completedAt,
+      printedBy: actor,
+      lastPrintedAt: completedAt,
+      lastPrintedBy: actor,
+      lastPrintStation: "DataPlus repair",
+      lastPrintAttemptId: crypto.randomUUID()
+    };
+    const printAudit = recordShipmentLabelPrint(shipment, repairPrintJob, actor);
+    if (printAudit.recorded) addOrderTimeline(order, {
+      type: "shipping_label",
+      title: printAudit.firstPrint ? "Shipping label print recovered" : "Shipping label fulfillment recovered",
+      message: "DataPlus recovered a purchased-label print that did not complete the order workflow.",
+      user: actor
+    });
+  }
   const db = await readDbFast({ skipInventory: true });
   const fulfillmentResult = await completePrintedPurchasedShipment(db, order, shipment, actor, completedAt);
   const channelResult = fulfillmentResult.status !== "failed" && shipment.trackingNumber
