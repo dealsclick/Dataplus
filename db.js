@@ -2410,6 +2410,102 @@ async function readWarehouseAudits() {
   }));
 }
 
+async function listWarehouseAuditsPage(options = {}) {
+  const client = getPool();
+  if (!client) return { audits: [], total: 0, page: 1, pageSize: 25, totalPages: 1 };
+  await initRelationalSchema();
+  const pageSize = Math.max(1, Math.min(100, Number(options.pageSize || options.limit || 25)));
+  const page = Math.max(1, Number(options.page || 1));
+  const offset = (page - 1) * pageSize;
+  const status = nullableString(options.status)?.toLowerCase() || "";
+  const values = [];
+  const conditions = [];
+  if (status) {
+    values.push(status);
+    conditions.push(`lower(coalesce(a.status, a.audit_payload->>'status', '')) = $${values.length}`);
+  }
+  const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
+  const sort = String(options.sort || "newest").toLowerCase();
+  const orderBy = sort === "oldest"
+    ? "a.created_at asc, a.audit_id"
+    : sort === "identifier"
+      ? "lower(coalesce(a.audit_number, a.audit_payload->>'auditNumber', a.audit_id)), a.audit_id"
+      : "a.created_at desc, a.audit_id desc";
+  const [countResult, rows] = await Promise.all([
+    client.query(`select count(*)::int as total from warehouse_audits a ${where}`, values),
+    client.query(`
+      select a.audit_id, a.audit_number, a.warehouse_id, a.supplier_id, a.status,
+        a.audit_payload, a.created_at, a.updated_at,
+        count(l.line_id)::int as line_count
+      from warehouse_audits a
+      left join warehouse_audit_lines l on l.audit_id = a.audit_id
+      ${where}
+      group by a.audit_id
+      order by ${orderBy}
+      limit $${values.length + 1} offset $${values.length + 2}
+    `, [...values, pageSize, offset])
+  ]);
+  const total = Number(countResult.rows[0]?.total || 0);
+  const audits = rows.rows.map((row) => {
+    const payload = row.audit_payload && typeof row.audit_payload === "object" ? row.audit_payload : {};
+    return {
+      id: payload.id || row.audit_id,
+      auditNumber: payload.auditNumber || row.audit_number || row.audit_id,
+      warehouseId: payload.warehouseId || row.warehouse_id || "",
+      warehouseName: payload.warehouseName || "",
+      supplierId: payload.supplierId || row.supplier_id || "",
+      supplierName: payload.supplierName || "",
+      status: payload.status || row.status || "",
+      reason: payload.reason || "",
+      createdBy: payload.createdBy || "",
+      reviewer: payload.reviewer || "",
+      createdAt: payload.createdAt || row.created_at?.toISOString?.() || String(row.created_at || ""),
+      updatedAt: payload.updatedAt || row.updated_at?.toISOString?.() || String(row.updated_at || ""),
+      completedAt: payload.completedAt || "",
+      lineCount: Number(row.line_count || 0),
+      unknownBarcodeCount: Array.isArray(payload.unknownBarcodes) ? payload.unknownBarcodes.length : 0
+    };
+  });
+  return { audits, total, page, pageSize, totalPages: Math.max(1, Math.ceil(total / pageSize)) };
+}
+
+async function readWarehouseAudit(auditId = "") {
+  const client = getPool();
+  const normalizedAuditId = String(auditId || "").trim();
+  if (!client || !normalizedAuditId) return null;
+  await initRelationalSchema();
+  const auditResult = await client.query(`
+    select audit_id, audit_payload, created_at, updated_at
+    from warehouse_audits
+    where audit_id = $1 or lower(coalesce(audit_number, '')) = lower($1)
+    order by (audit_id = $1) desc
+    limit 1
+  `, [normalizedAuditId]);
+  const row = auditResult.rows[0];
+  if (!row) return null;
+  const linesResult = await client.query(`
+    select l.audit_id, l.line_id, l.line_payload,
+      exists (
+        select 1 from warehouse_audit_media m
+        where m.audit_id = l.audit_id and m.line_id = l.line_id and m.media_key = 'image'
+      ) as has_image
+    from warehouse_audit_lines l
+    where l.audit_id = $1
+    order by l.position, l.line_id
+  `, [row.audit_id]);
+  const lines = linesResult.rows.map((lineRow) => {
+    const payload = lineRow.line_payload && typeof lineRow.line_payload === "object" ? { ...lineRow.line_payload } : {};
+    payload.id = payload.id || lineRow.line_id;
+    if (lineRow.has_image) payload.image = warehouseAuditMediaUrl(lineRow.audit_id, lineRow.line_id);
+    return payload;
+  });
+  return {
+    ...(row.audit_payload && typeof row.audit_payload === "object" ? row.audit_payload : {}),
+    id: row.audit_payload?.id || row.audit_id,
+    lines
+  };
+}
+
 async function replaceWarehouseAudits(audits = [], options = {}) {
   const pool = getPool();
   if (!pool) return false;
@@ -2424,6 +2520,9 @@ async function replaceWarehouseAudits(audits = [], options = {}) {
       const audit = normalized[auditPosition] && typeof normalized[auditPosition] === "object" ? normalized[auditPosition] : {};
       const auditId = nullableString(audit.id) || crypto.createHash("sha256").update(JSON.stringify(audit)).digest("hex");
       auditIds.push(auditId);
+      const storedPosition = options.preserveOthers
+        ? Number((await client.query("select position from warehouse_audits where audit_id = $1", [auditId])).rows[0]?.position ?? auditPosition)
+        : auditPosition;
       const { lines = [], ...auditPayload } = audit;
       await client.query(`
         insert into warehouse_audits (
@@ -2448,7 +2547,7 @@ async function replaceWarehouseAudits(audits = [], options = {}) {
         nullableString(audit.warehouseId),
         nullableString(audit.supplierId),
         nullableString(audit.status),
-        auditPosition,
+        storedPosition,
         JSON.stringify({ ...auditPayload, id: auditId }),
         nullableString(audit.createdAt) || "",
         nullableString(audit.updatedAt) || ""
@@ -2490,7 +2589,9 @@ async function replaceWarehouseAudits(audits = [], options = {}) {
       }
       await client.query("delete from warehouse_audit_lines where audit_id = $1 and not (line_id = any($2::text[]))", [auditId, lineIds]);
     }
-    await client.query("delete from warehouse_audits where not (audit_id = any($1::text[]))", [auditIds]);
+    if (!options.preserveOthers) {
+      await client.query("delete from warehouse_audits where not (audit_id = any($1::text[]))", [auditIds]);
+    }
     if (ownClient) await client.query("commit");
     return true;
   } catch (error) {
@@ -2499,6 +2600,11 @@ async function replaceWarehouseAudits(audits = [], options = {}) {
   } finally {
     if (ownClient) client.release();
   }
+}
+
+async function saveWarehouseAudit(audit = {}, options = {}) {
+  if (!audit || typeof audit !== "object" || !nullableString(audit.id)) return false;
+  return replaceWarehouseAudits([audit], { ...options, preserveOthers: true });
 }
 
 async function readWarehouseAuditMedia(auditId, lineId, mediaKey = "image") {
@@ -11231,6 +11337,98 @@ async function readOrderReturns(order = {}) {
   return result.rows.map(row => row.data);
 }
 
+async function listReturnsWorkspace(options = {}) {
+  const client = getPool();
+  const pageSize = Math.max(1, Math.min(100, Number(options.pageSize || options.limit || 25)));
+  const page = Math.max(1, Number(options.page || 1));
+  if (!client) return {
+    returns: [], total: 0, counts: { all: 0, new: 0, in_process: 0, needs_revision: 0, complete: 0 },
+    channels: [], page, pageSize, totalPages: 1
+  };
+  await initRelationalSchema();
+  const queue = ["all", "new", "in_process", "needs_revision", "complete"].includes(String(options.queue || ""))
+    ? String(options.queue)
+    : "all";
+  const channel = String(options.channel || "all").trim();
+  const query = String(options.query || options.q || "").trim().toLowerCase();
+  const values = [];
+  const conditions = [];
+  if (queue !== "all") {
+    values.push(queue);
+    conditions.push(`return_queue = $${values.length}`);
+  }
+  if (channel && channel.toLowerCase() !== "all") {
+    values.push(channel.toLowerCase());
+    conditions.push(`lower(channel_value) = $${values.length}`);
+  }
+  if (query) {
+    values.push(`%${query}%`);
+    conditions.push(`lower(data::text) like $${values.length}`);
+  }
+  const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
+  const sourceCte = `
+    with source as (
+      select entity_id, data, updated_at,
+        lower(coalesce(nullif(data->>'status', ''), nullif(data->>'returnStatus', ''), '')) as status_value,
+        lower(coalesce(data->>'receivingStatus', '')) as receiving_value,
+        lower(coalesce(data->>'inspectionStatus', '')) as inspection_value,
+        lower(coalesce(data->'channelSync'->>'status', data->>'channelStatus', '')) as sync_value,
+        coalesce(nullif(data->>'channelSource', ''), nullif(data->>'salesChannel', ''), nullif(data->>'source', ''), 'Local') as channel_value
+      from entity_documents
+      where collection = 'returns'
+    ), classified as (
+      select *, case
+        when status_value = any(array['done','closed','complete','completed','refunded','restocked','canceled','cancelled']::text[])
+          or (coalesce(data->>'restockedAt', '') <> '' and (receiving_value = any(array['done','closed']::text[]) or status_value = any(array['done','closed']::text[])))
+          then 'complete'
+        when lower(coalesce(data->>'refundAmountUnverified', 'false')) = 'true'
+          or concat_ws(' ', status_value, inspection_value, sync_value) ~ '(failed|rejected|error|needs_review|needs_revision)'
+          or coalesce(nullif(data->>'orderId', ''), nullif(data->>'orderNumber', ''), '') = ''
+          or coalesce(nullif(data->>'warehouseId', ''), nullif(data->>'warehouseName', ''), '') = ''
+          then 'needs_revision'
+        when status_value = any(array['','new','requested','authorized','pending']::text[])
+          and coalesce(data->>'receivedAt', '') = '' and receiving_value = ''
+          then 'new'
+        else 'in_process'
+      end as return_queue
+      from source
+    )
+  `;
+  const offset = (page - 1) * pageSize;
+  const [pageResult, totalResult, summaryResult] = await Promise.all([
+    client.query(`${sourceCte}
+      select data, return_queue, channel_value
+      from classified ${where}
+      order by updated_at desc, entity_id desc
+      limit $${values.length + 1} offset $${values.length + 2}
+    `, [...values, pageSize, offset]),
+    client.query(`${sourceCte} select count(*)::int as total from classified ${where}`, values),
+    client.query(`${sourceCte}
+      select return_queue, channel_value, count(*)::int as count
+      from classified
+      group by return_queue, channel_value
+    `)
+  ]);
+  const counts = { all: 0, new: 0, in_process: 0, needs_revision: 0, complete: 0 };
+  const channels = new Set();
+  for (const row of summaryResult.rows) {
+    const count = Number(row.count || 0);
+    counts.all += count;
+    if (Object.prototype.hasOwnProperty.call(counts, row.return_queue)) counts[row.return_queue] += count;
+    if (row.channel_value) channels.add(String(row.channel_value));
+  }
+  const total = Number(totalResult.rows[0]?.total || 0);
+  return {
+    returns: pageResult.rows.map((row) => row.data),
+    total,
+    counts,
+    channels: [...channels].sort((left, right) => left.localeCompare(right)),
+    page,
+    pageSize,
+    totalPages: Math.max(1, Math.ceil(total / pageSize))
+  };
+}
+
 async function saveOrder(order = {}) {
   const result = await upsertOrdersFromState([order], { replace: false });
   return result;
@@ -18255,6 +18453,7 @@ module.exports = {
   applyInternalOrderResequence,
   getPool,
   readOrderReturns,
+  listReturnsWorkspace,
   closePool,
   canonicalSupplierName,
   databaseHealth,
@@ -18425,7 +18624,10 @@ module.exports = {
   readStateField,
   readStateFields,
   readWarehouseAudits,
+  listWarehouseAuditsPage,
+  readWarehouseAudit,
   replaceWarehouseAudits,
+  saveWarehouseAudit,
   readWarehouseAuditMedia,
   readAuthSessions,
   replaceAuthSessions,
