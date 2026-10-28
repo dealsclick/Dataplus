@@ -30474,7 +30474,7 @@ async function fulfillmentProductsForOrders(orders = []) {
 async function missingCatalogOrderExceptions(orders = []) {
   const candidates = [];
   for (const order of orders || []) {
-    if (isTerminalCustomerDemand(order)) continue;
+    if (orderIsReportingOnly(order) || isTerminalCustomerDemand(order)) continue;
     const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [];
     orderLineItems(order).forEach((line, lineIndex) => {
       const sku = String(line.sku || line.originalSku || "").trim();
@@ -31466,7 +31466,7 @@ let fulfillmentConsoleProjectionReconciliationPromise = null;
 const fulfillmentConsoleProjectionPendingOrderIds = new Set();
 const FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS = 30 * 60_000;
 const FULFILLMENT_CONSOLE_SNAPSHOT_DIRTY_COOLDOWN_MS = 30_000;
-const FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 4;
+const FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 5;
 const SYSTEM_PERFORMANCE_RETENTION_MS = 60 * 60_000;
 const SYSTEM_PERFORMANCE_MAX_SERVER_SAMPLES = 600;
 const SYSTEM_PERFORMANCE_MAX_CLIENT_SAMPLES = 300;
@@ -32276,6 +32276,8 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
     });
   const shipments = [...persistedShipments, ...generatingShipments]
     .sort((a, b) => String(b.createdAt || b.shippedAt || "").localeCompare(String(a.createdAt || a.shippedAt || "")));
+  const activeFulfillmentOrders = orders.filter((order) => !orderIsReportingOnly(order) && !isTerminalCustomerDemand(order));
+  const activeFulfillmentOrderIds = new Set(activeFulfillmentOrders.map((order) => String(order.id || "")).filter(Boolean));
   const workExceptions = work.filter((row) => row.status === "exception" || row.labelReadiness?.ready !== true).map((row) => ({
     id: `work-${row.id}`,
     type: "readiness",
@@ -32293,7 +32295,7 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
     status: "open",
     createdAt: row.updatedAt || ""
   }));
-  const orderExceptions = orders.flatMap((order) => (order.workflowExceptions || [])
+  const orderExceptions = activeFulfillmentOrders.flatMap((order) => (order.workflowExceptions || [])
     .filter((entry) => entry.status !== "resolved" && ["Fulfillment", "Order Operations"].includes(String(entry.owner || "Order Operations")))
     .map((entry) => ({
       id: `order-${order.id}-${entry.id}`,
@@ -32309,7 +32311,10 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
       status: entry.status || "open",
       createdAt: entry.createdAt || order.updatedAt || order.createdAt || ""
     })));
-  const batchExceptions = state.batches.flatMap((batch) => (batch.rows || []).filter((row) => ["failed", "blocked"].includes(row.status)).map((row) => ({ id: `batch-${batch.id}-${row.id || row.orderId}`, type: "label", routeIds: row.routeIds || [], batchId: batch.id, batchNumber: batch.batchNumber, orderId: row.orderId, orderNumber: row.orderNumber, message: row.error || "Label processing failed.", status: "open", createdAt: row.updatedAt || batch.updatedAt || batch.createdAt })));
+  const batchExceptions = state.batches.flatMap((batch) => (batch.rows || [])
+    .filter((row) => activeFulfillmentOrderIds.has(String(row.orderId || "")))
+    .filter((row) => ["failed", "blocked"].includes(String(row.status || "").toLowerCase()) && !row.releasedAt)
+    .map((row) => ({ id: `batch-${batch.id}-${row.id || row.orderId}`, type: "label", routeIds: row.routeIds || [], batchId: batch.id, batchNumber: batch.batchNumber, orderId: row.orderId, orderNumber: row.orderNumber, message: row.error || "Label processing failed.", status: "open", createdAt: row.updatedAt || batch.updatedAt || batch.createdAt })));
   const trackingExceptions = shipments.filter((shipment) => shipment.trackingRefreshError).map((shipment) => ({
     id: `tracking-${shipment.orderId}-${shipment.id}`,
     type: "tracking",
@@ -32328,7 +32333,13 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
     result[carrier].cost += Number(shipment.shippingCost || 0);
     return result;
   }, {}));
-  const exceptions = [...trackingExceptions, ...detectedMissingProducts, ...batchExceptions, ...orderExceptions.filter((entry) => entry.type !== "missing_catalog_product"), ...workExceptions]
+  const exceptions = [...new Map([
+    ...trackingExceptions,
+    ...detectedMissingProducts,
+    ...batchExceptions,
+    ...orderExceptions.filter((entry) => entry.type !== "missing_catalog_product"),
+    ...workExceptions
+  ].map((entry) => [String(entry.id || `${entry.type}:${entry.orderId}:${entry.routeId || ""}`), entry])).values()]
     .map((entry) => {
       const order = orderById.get(String(entry.orderId || ""));
       return {
@@ -32349,7 +32360,7 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
       ...currentDisposition,
       detectedAt: persistedDisposition.reasonCode === currentDisposition.reasonCode ? persistedDisposition.detectedAt : ""
     } : null;
-    if (!disposition) return null;
+    if (!disposition || disposition.kind !== "recovery_required") return null;
     const orderShipments = Array.isArray(order.shipments) ? order.shipments : [];
     const shipment = orderShipments.find((entry) => (
       String(entry.trackingNumber || "").trim() === String(disposition.trackingNumber || "").trim()
@@ -35405,6 +35416,9 @@ function orderedQuantity(order = {}) {
 
 function orderExternalStatusValues(order = {}) {
   const external = order.external && typeof order.external === "object" ? order.external : {};
+  const marketplaceCancellation = order.marketplaceCancellation && typeof order.marketplaceCancellation === "object"
+    ? order.marketplaceCancellation
+    : {};
   return [
     order.status,
     order.fulfillmentStatus,
@@ -35418,14 +35432,16 @@ function orderExternalStatusValues(order = {}) {
     external.orderFulfillmentStatus,
     external.parentOrderStatus,
     external.packageStatus,
-    external.shippingStatus
+    external.shippingStatus,
+    external.cancelStatus?.cancelState,
+    marketplaceCancellation.status
   ].map(normalizedOrderStatusValue).filter(Boolean);
 }
 
 function orderTerminalDemandReason(order = {}) {
   const statuses = orderExternalStatusValues(order);
   const financialStatus = normalizedOrderStatusValue(order.financialStatus || "");
-  if (order.cancelledAt || statuses.some((status) => ORDER_CANCELED_STATUS_VALUES.has(status))) return "canceled";
+  if (order.cancelledAt || order.canceledAt || statuses.some((status) => ORDER_CANCELED_STATUS_VALUES.has(status))) return "canceled";
   if (ORDER_REFUNDED_STATUS_VALUES.has(financialStatus) || statuses.some((status) => ORDER_REFUNDED_STATUS_VALUES.has(status))) return "refunded";
   if (order.shipmentCorrection?.active) return "";
   const completed = statuses.find((status) => ORDER_COMPLETED_STATUS_VALUES.has(status));

@@ -681,7 +681,7 @@ export function FulfillmentPage() {
   const [purchasedChannelSyncFilter, setPurchasedChannelSyncFilter] = useState("all")
   const [printBatchPickerOpen, setPrintBatchPickerOpen] = useState(false)
   const [printBatchSearch, setPrintBatchSearch] = useState("")
-  const [doNotShipFilter, setDoNotShipFilter] = useState("all")
+  const doNotShipFilter = "all"
   const [consolidationOrder, setConsolidationOrder] = useState<Record<string, any> | null>(null)
   const [consolidationCandidates, setConsolidationCandidates] = useState<Array<Record<string, any>>>([])
   const [consolidationSelection, setConsolidationSelection] = useState<Set<string>>(new Set())
@@ -2363,7 +2363,7 @@ export function FulfillmentPage() {
           ["Ready for label", Number(consoleCounts.readyForLabel ?? pendingRows.filter((row) => row.status === "Ready to ship").length), "bg-emerald-500"],
           ["Purchased labels", Number(consoleCounts.purchasedLabels ?? purchasedLabelQueue.length), "bg-violet-500"],
           ["Carrier confirmed", Number(consoleCounts.shipped ?? shippedQueue.length), "bg-teal-500"],
-          ["Do not ship / recovery", Number(consoleCounts.doNotShip ?? doNotShipQueue.length), "bg-amber-500"],
+          ["Shipment cancellations", Number(consoleCounts.doNotShip ?? doNotShipQueue.length), "bg-amber-500"],
         ].map(([label, value, tone], index) => <div key={String(label)} className={cn("min-w-0 px-4 py-3", index % 2 === 0 ? "border-r" : "", index < 4 ? "border-b lg:border-b-0" : "", index < 5 ? "lg:border-r" : "")}><div className="flex items-center gap-2"><span className={cn("size-2 shrink-0 rounded-full", String(tone))} /><p className="truncate text-xs font-medium text-muted-foreground">{String(label)}</p></div><p className="mt-1 text-xl font-semibold tabular-nums">{numberLabel(Number(value))}</p></div>)}
       </div>
       <div className={cn("flex flex-col gap-2 rounded-md border px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between", trackingFailureCount || carrierScanFailed ? "border-destructive/40 bg-destructive/5" : "bg-muted/20")}>
@@ -2393,7 +2393,7 @@ export function FulfillmentPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      <Tabs value={tab} onValueChange={(next) => { setTab(next); setStatus("all"); setSelectedRouteIds(new Set()) }} className="min-w-0"><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="ready">Pending shipment</TabsTrigger><TabsTrigger value="purchased-labels">Purchased labels ({numberLabel(Number(consoleCounts.purchasedLabels ?? purchasedLabelQueue.length))})</TabsTrigger><TabsTrigger value="shipments">Shipped ({numberLabel(Number(consoleCounts.shipped ?? shippedQueue.length))})</TabsTrigger><TabsTrigger value="exceptions">Exceptions {Number(consoleCounts.exceptions ?? exceptions.length) > 0 && <Badge variant="destructive" className="ml-1">{numberLabel(Number(consoleCounts.exceptions ?? exceptions.length))}</Badge>}</TabsTrigger><TabsTrigger value="do-not-ship">Do Not Ship &amp; Recovery {Number(consoleCounts.doNotShip ?? doNotShipQueue.length) > 0 && <Badge variant="destructive" className="ml-1">{numberLabel(Number(consoleCounts.doNotShip ?? doNotShipQueue.length))}</Badge>}</TabsTrigger><TabsTrigger value="all-shipments">All shipments ({numberLabel(Number(consoleCounts.allShipments ?? allShipmentRows.length))})</TabsTrigger><TabsTrigger value="outbound-audit">Outbound audit</TabsTrigger><TabsTrigger value="manifests">Manifests</TabsTrigger><TabsTrigger value="reports">Reports</TabsTrigger><TabsTrigger value="carriers">Carriers</TabsTrigger><TabsTrigger value="settings">Settings</TabsTrigger></TabsList></div>
+      <Tabs value={tab} onValueChange={(next) => { setTab(next); setStatus("all"); setSelectedRouteIds(new Set()) }} className="min-w-0"><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="ready">Pending shipment</TabsTrigger><TabsTrigger value="purchased-labels">Purchased labels ({numberLabel(Number(consoleCounts.purchasedLabels ?? purchasedLabelQueue.length))})</TabsTrigger><TabsTrigger value="shipments">Shipped ({numberLabel(Number(consoleCounts.shipped ?? shippedQueue.length))})</TabsTrigger><TabsTrigger value="exceptions">Exceptions {Number(consoleCounts.exceptions ?? exceptions.length) > 0 && <Badge variant="destructive" className="ml-1">{numberLabel(Number(consoleCounts.exceptions ?? exceptions.length))}</Badge>}</TabsTrigger><TabsTrigger value="do-not-ship">Shipment cancellations {Number(consoleCounts.doNotShip ?? doNotShipQueue.length) > 0 && <Badge variant="destructive" className="ml-1">{numberLabel(Number(consoleCounts.doNotShip ?? doNotShipQueue.length))}</Badge>}</TabsTrigger><TabsTrigger value="all-shipments">All shipments ({numberLabel(Number(consoleCounts.allShipments ?? allShipmentRows.length))})</TabsTrigger><TabsTrigger value="outbound-audit">Outbound audit</TabsTrigger><TabsTrigger value="manifests">Manifests</TabsTrigger><TabsTrigger value="reports">Reports</TabsTrigger><TabsTrigger value="carriers">Carriers</TabsTrigger><TabsTrigger value="settings">Settings</TabsTrigger></TabsList></div>
         {["ready", "all-shipments", "do-not-ship", "purchased-labels", "shipments", "exceptions"].includes(tab) && <form className="mt-3 flex flex-col gap-2 rounded-md border bg-card p-3 sm:flex-row" onSubmit={(event) => { event.preventDefault(); setQuery(searchDraft.trim()); setWorkPage(1); setSelectedRouteIds(new Set()) }}>
           <div className="relative min-w-0 flex-1">
             <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
@@ -2490,10 +2490,9 @@ export function FulfillmentPage() {
         <TabsContent value="do-not-ship" className="mt-4">
           <Card>
             <CardHeader className="gap-3 border-b lg:flex-row lg:items-start lg:justify-between">
-              <div><CardTitle>Do Not Ship &amp; Recovery</CardTitle><CardDescription>Channel cancellations and refunds are blocked from fulfillment. Orders that already moved with a carrier require a return or marketplace reimbursement review.</CardDescription></div>
+              <div><CardTitle>Shipment cancellations</CardTitle><CardDescription>Only canceled or refunded orders that already moved with a carrier appear here. Ordinary cancellations remain in Orders.</CardDescription></div>
               <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
                 <div className="flex min-w-0 flex-wrap gap-2 sm:w-auto"><div className="relative min-w-64 flex-1 sm:w-80"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} onPaste={(event) => normalizePastedSearch(event, query, setQuery)} placeholder="Search or paste orders, SKUs, tracking..." /></div><BulkSearchActions onApply={setQuery} /></div>
-                <Select value={doNotShipFilter} onValueChange={setDoNotShipFilter}><SelectTrigger className="w-full sm:w-48"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All blocked orders</SelectItem><SelectItem value="do_not_ship">Do not ship</SelectItem><SelectItem value="recovery_required">Recovery required</SelectItem></SelectContent></Select>
               </div>
             </CardHeader>
             <CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Channel</TableHead><TableHead>Disposition</TableHead><TableHead>Reason</TableHead><TableHead>Shipment evidence</TableHead><TableHead>Detected</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
@@ -2506,7 +2505,7 @@ export function FulfillmentPage() {
                 <TableCell><p className="whitespace-nowrap text-sm">{row.detectedAt ? dateLabel(String(row.detectedAt)) : "Not recorded"}</p></TableCell>
                 <TableCell className="text-right"><Button size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(String(row.orderId || row.orderNumber || ""))}`}><Eye className="size-4" /> Open order</a></Button></TableCell>
               </TableRow>)}
-              {!displayedDoNotShipQueue.length && <TableRow><TableCell colSpan={7} className="h-32 text-center text-muted-foreground">No blocked or recovery orders match these filters.</TableCell></TableRow>}
+              {!displayedDoNotShipQueue.length && <TableRow><TableCell colSpan={7} className="h-32 text-center text-muted-foreground">No post-shipment cancellations require recovery.</TableCell></TableRow>}
             </TableBody></Table></div></CardContent>
           </Card>
           <FulfillmentQueuePager total={activeQueueTotal} shown={displayedDoNotShipQueue.length} page={activeQueuePage} pageCount={activeQueuePageCount} pageSize={workPageSize} onPage={setWorkPage} onPageSize={setWorkPageSize} />
