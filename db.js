@@ -139,6 +139,27 @@ async function initDatabase() {
   return true;
 }
 
+async function ensureProductShadowSkuSchema(client) {
+  await client.query(`
+    create table if not exists product_shadow_skus (
+      shadow_id text primary key,
+      product_id text not null references products(product_id) on delete cascade,
+      shadow_sku text not null,
+      marketplace_sku text,
+      channel_sku text,
+      marketplace text,
+      active boolean not null default true,
+      raw jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    create index if not exists product_shadow_skus_product_idx on product_shadow_skus (product_id);
+    create index if not exists product_shadow_skus_shadow_lookup_idx on product_shadow_skus (lower(shadow_sku)) where active = true;
+    create index if not exists product_shadow_skus_marketplace_lookup_idx on product_shadow_skus (lower(marketplace_sku)) where active = true;
+    create index if not exists product_shadow_skus_channel_lookup_idx on product_shadow_skus (lower(channel_sku)) where active = true;
+  `);
+}
+
 async function initRelationalSchema() {
   const dbPool = getPool();
   if (!dbPool) return false;
@@ -159,6 +180,7 @@ async function initRelationalSchema() {
           [RELATIONAL_SCHEMA_VERSION]
         );
         if (schemaVersion.rows[0]?.current === true) {
+          await ensureProductShadowSkuSchema(client);
           relationalSchemaReady = true;
           return true;
         }
