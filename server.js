@@ -55353,11 +55353,10 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "manual-item" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
-    const sku = String(body.sku || "").trim();
+    let sku = String(body.sku || "").trim();
     const title = String(body.title || "").trim();
     const quantity = Number(body.qty || 0);
     if (!barcode) return sendJson(res, 400, { error: "A UPC is required." });
-    if (!sku) return sendJson(res, 400, { error: "SKU is required to create a catalog item." });
     if (!title) return sendJson(res, 400, { error: "Product name is required to create a catalog item." });
     if (!Number.isFinite(quantity) || quantity <= 0) return sendJson(res, 400, { error: "Quantity must be greater than zero." });
     const suppliedPhotos = Array.isArray(body.photoDataUrls) ? body.photoDataUrls : [body.photoDataUrl];
@@ -55371,6 +55370,10 @@ async function handleApi(req, res) {
     const audit = await postgres.readWarehouseAudit(parts[2]);
     if (!audit) return notFound(res);
     if (audit.status !== "in_progress") return sendJson(res, 400, { error: "This warehouse audit is closed." });
+    if (!sku) {
+      sku = String(await postgres.nextWarehouseSkuAtomic() || "").trim();
+      if (!sku) return sendJson(res, 503, { error: "Automatic SKU generation is unavailable." });
+    }
     const existingProduct = await postgres.readProductByKey(sku);
     if (existingProduct) return sendJson(res, 409, { error: `Catalog SKU ${existingProduct.sku} already exists.` });
     const db = await postgres.readStateFields(["warehouses"]);

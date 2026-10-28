@@ -4,7 +4,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
 
-async function run(route, { product = null, closed = false, unknowns = [], lines = [], originalBin } = {}) {
+async function run(route, { product = null, closed = false, unknowns = [], lines = [], originalBin, omitSku = false } = {}) {
   const marker = `parts[1] === "warehouse-audits" && parts[2] && parts[3] === "${route}"`;
   const location = source.indexOf(marker);
   assert.ok(location > 0);
@@ -15,6 +15,7 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
   let written;
   let created;
   const body = { barcode: 'X0039W0Z71', locationBin: 'A-01', quantity: 2, qty: 2, sku: 'TEST-SKU', title: 'Test item', user: 'Test counter', clientActionId: 'quick-action-1', photoDataUrl: `data:image/jpeg;base64,${Buffer.from('photo').toString('base64')}` };
+  if (omitSku) delete body.sku;
   if (originalBin !== undefined) body.unknownLocationBin = originalBin;
   const context = {
     req: { method: 'POST' }, res: {}, parts: ['api', 'warehouse-audits', 'audit', route],
@@ -30,6 +31,8 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
     notFound: () => ({ status: 404 }), sendJson: (_res, status, data) => ({ status, data }),
     postgres: {
       isPostgresEnabled: () => true,
+      readWarehouseAudit: async () => audit,
+      saveWarehouseAudit: async next => { written = { warehouseAudits: [next] }; return next; },
       readStateField: async key => { assert.equal(key, 'warehouseAudits'); return [audit]; },
       readStateFields: async keys => { assert.deepEqual(Array.from(keys), ['warehouses']); warehouseReads++; return { warehouses: [{ id: 'physical', name: 'Physical', isPhysical: true }] }; },
       readVendorCatalogSupplierCoverageBySkus: async () => [],
@@ -67,6 +70,10 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
   assert.equal(manual.audit.unknownBarcodes.length, 0);
   assert.equal(manual.audit.lines[0].sku, 'TEST-SKU');
   assert.equal(manual.audit.lines[0].countedQty, 2);
+  const generatedManual = await run('manual-item', { omitSku: true });
+  assert.equal(generatedManual.result.status, 201);
+  assert.equal(generatedManual.created.sku, 'DPS10001');
+  assert.equal(generatedManual.audit.lines[0].sku, 'DPS10001');
   const quick = await run('quick-item');
   assert.equal(quick.result.status, 201);
   assert.equal(quick.created.sku, 'DPS10001');

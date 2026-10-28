@@ -1085,7 +1085,7 @@ function WarehouseAuditPanel({
   const [ebayReadinessBusy, setEbayReadinessBusy] = useState(false);
   const [ebayShadowLaunchBusy, setEbayShadowLaunchBusy] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const manualSkuRef = useRef<HTMLInputElement | null>(null);
+  const manualTitleRef = useRef<HTMLInputElement | null>(null);
   const manualCreateRef = useRef<HTMLDivElement | null>(null);
   const photoAnalysisRequestRef = useRef(0);
   const scanRef = useRef(false);
@@ -1884,11 +1884,28 @@ function WarehouseAuditPanel({
       setBusy(false);
     }
   };
-  const startManualSkuCreation = () => {
+  const startManualSkuCreation = async (draft = manualUnknown) => {
     setUpcResearch(null);
+    if (!resumedAudit || !draft || manualSkuLoading) return;
+    if (!String(draft.sku || "").trim()) {
+      setManualSkuLoading(true);
+      try {
+        const result = await api<{ sku?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/next-sku`, { method: "POST" });
+        const generatedSku = String(result.sku || "").trim();
+        if (!generatedSku) throw new Error("Automatic SKU generation did not return a SKU.");
+        setManualUnknown((entry) => entry && entry.barcode === draft.barcode && String(entry.unknownLocationBin || "") === String(draft.unknownLocationBin || "")
+          ? { ...entry, sku: generatedSku }
+          : entry);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Unable to generate the next DataPlus SKU.");
+        return;
+      } finally {
+        setManualSkuLoading(false);
+      }
+    }
     window.setTimeout(() => {
-      manualSkuRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-      manualSkuRef.current?.focus();
+      manualTitleRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      manualTitleRef.current?.focus();
     }, 0);
   };
   const reopenUnknownSku = async (item: Record<string, unknown>, mode: "quick" | "full" = "full") => {
@@ -1908,22 +1925,7 @@ function WarehouseAuditPanel({
     setCameraOpen(false);
     window.setTimeout(() => manualCreateRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
     if (mode === "quick") return;
-    if (draft.sku) {
-      startManualSkuCreation();
-      return;
-    }
-    setManualSkuLoading(true);
-    try {
-      const result = await api<{ sku?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/next-sku`, { method: "POST" });
-      setManualUnknown((entry) => entry && entry.barcode === draft.barcode && entry.unknownLocationBin === draft.unknownLocationBin
-        ? { ...entry, sku: String(result.sku || "") }
-        : entry);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to generate the next DataPlus SKU.");
-    } finally {
-      setManualSkuLoading(false);
-      startManualSkuCreation();
-    }
+    await startManualSkuCreation(draft);
   };
   const shareAuditLink = async () => {
     if (!resumedAudit?.id) return;
@@ -2614,7 +2616,7 @@ function WarehouseAuditPanel({
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={startManualSkuCreation}
+                      onClick={() => void startManualSkuCreation()}
                     >
                       <Pencil className="size-4" /> Full create
                     </Button>
@@ -2673,21 +2675,17 @@ function WarehouseAuditPanel({
                   <Field label="UPC">
                     <Input value={manualUnknown.barcode} disabled />
                   </Field>
-                  <Field label="SKU">
+                  <Field label="DataPlus SKU">
                     <Input
-                      ref={manualSkuRef}
                       value={manualUnknown.sku}
-                      disabled={manualSkuLoading}
-                      onChange={(event) =>
-                        setManualUnknown((entry) =>
-                          entry ? { ...entry, sku: event.target.value } : entry,
-                        )
-                      }
-                      placeholder={manualSkuLoading ? "Generating SKU..." : "Required SKU"}
+                      disabled
+                      readOnly
+                      placeholder={manualSkuLoading ? "Generating SKU..." : "Generated automatically"}
                     />
                   </Field>
                   <div className="col-span-2 lg:col-span-1"><Field label="Product name">
                     <Input
+                      ref={manualTitleRef}
                       value={manualUnknown.title}
                       onChange={(event) =>
                         setManualUnknown((entry) =>
@@ -2897,7 +2895,6 @@ function WarehouseAuditPanel({
                     disabled={
                       busy ||
                       manualSkuLoading ||
-                      !manualUnknown.sku.trim() ||
                       !manualUnknown.title.trim() ||
                       Number(manualUnknown.qty || 0) <= 0
                     }
