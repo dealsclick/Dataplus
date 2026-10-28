@@ -192,3 +192,28 @@ export async function captureCompressedEvidence(video: HTMLVideoElement) {
     image.close()
   }
 }
+
+export async function compressEvidenceImage(file: File) {
+  const image = await createImageBitmap(file)
+  try {
+    const maxEdge = 2560
+    const scale = Math.min(1, maxEdge / Math.max(image.width, image.height))
+    const canvas = document.createElement("canvas")
+    canvas.width = Math.max(1, Math.round(image.width * scale))
+    canvas.height = Math.max(1, Math.round(image.height * scale))
+    const context = canvas.getContext("2d", { alpha: false })
+    if (!context) throw new Error("Unable to prepare the receiving document.")
+    context.drawImage(image, 0, 0, canvas.width, canvas.height)
+    let quality = 0.82
+    let blob = await canvasJpeg(canvas, quality)
+    while (blob.size > 1_500_000 && quality > 0.5) {
+      quality -= 0.08
+      blob = await canvasJpeg(canvas, quality)
+    }
+    if (blob.size > 1_500_000) throw new Error("The photo is still too large. Move closer to the document and try again.")
+    const stem = file.name.replace(/\.[^.]+$/, "") || "packing-slip"
+    return new File([blob], `${stem}.jpg`, { type: "image/jpeg", lastModified: Date.now() })
+  } finally {
+    image.close()
+  }
+}

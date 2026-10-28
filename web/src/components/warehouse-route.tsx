@@ -28,7 +28,7 @@ import { WarehouseMobile } from "./warehouse-mobile"
 import { OutboundAuditWorkspace } from "./outbound-audit-workspace"
 import { VendorCreateDialog } from "./vendor-create-dialog"
 import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
-import { captureCompressedEvidence, startFastBarcodeScanner } from "../lib/fast-barcode-scanner"
+import { captureCompressedEvidence, compressEvidenceImage, startFastBarcodeScanner } from "../lib/fast-barcode-scanner"
 import { Detail, Field, PageHeader, ProductDetailSheet } from "../App"
 import type { CatalogItem, ImportJob, LiteState, SystemSettings, Vendor } from "../App"
 type WarehouseRegisterRecord = {
@@ -535,6 +535,134 @@ function WarehouseDetailPage({ warehouseId }: { warehouseId: string }) {
   </div>
 }
 
+type ReceivingPurchaseOrder = {
+  id: string
+  poNumber?: string
+  status?: string
+  supplier?: string
+  warehouseName?: string
+  expectedAt?: string
+}
+
+function InboundReceivingLauncher({ mobile = false, operatorName = "Warehouse" }: { mobile?: boolean; operatorName?: string } = {}) {
+  const [open, setOpen] = useState(false)
+  const [mode, setMode] = useState<"purchase_order" | "manual">("purchase_order")
+  const [warehouses, setWarehouses] = useState<Array<{ id?: string; name?: string }>>([])
+  const [vendors, setVendors] = useState<Vendor[]>([])
+  const [warehouseId, setWarehouseId] = useState("")
+  const [vendorId, setVendorId] = useState("")
+  const [externalPoNumber, setExternalPoNumber] = useState("")
+  const [query, setQuery] = useState("")
+  const [purchaseOrders, setPurchaseOrders] = useState<ReceivingPurchaseOrder[]>([])
+  const [selectedPo, setSelectedPo] = useState<ReceivingPurchaseOrder | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [searching, setSearching] = useState(false)
+
+  const loadReferenceData = async () => {
+    if (warehouses.length) return
+    try {
+      const state = await api<LiteState>("/api/state?lite=1")
+      const physical = (state.warehouses || []).filter((item) => item.isPhysical !== false && item.inventorySourceType !== "supplier_feed" && item.allowReceiving !== false)
+      setWarehouses(physical as typeof warehouses)
+      setWarehouseId(String(physical.find((item) => item.isDefaultReceiving)?.id || physical[0]?.id || ""))
+      setVendors((state.vendors || []).filter((vendor) => String(vendor.status || "active").toLowerCase() === "active"))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load receiving options.")
+    }
+  }
+
+  const show = (nextMode: "purchase_order" | "manual") => {
+    setMode(nextMode)
+    setSelectedPo(null)
+    setPurchaseOrders([])
+    setOpen(true)
+    void loadReferenceData()
+  }
+
+  const searchPurchaseOrders = async () => {
+    if (!query.trim()) return
+    setSearching(true)
+    try {
+      const result = await api<{ purchaseOrders?: ReceivingPurchaseOrder[] }>(`/api/purchasing/receiving-search?q=${encodeURIComponent(query.trim())}`)
+      setPurchaseOrders(result.purchaseOrders || [])
+      if (!(result.purchaseOrders || []).length) toast.info("No open purchase orders matched that search.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to search purchase orders.")
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  const startReceiving = async () => {
+    const vendor = vendors.find((row) => row.id === vendorId)
+    if (!warehouseId || (mode === "purchase_order" ? !selectedPo : !vendor || !externalPoNumber.trim())) return
+    setLoading(true)
+    try {
+      const result = await api<{ audit?: Record<string, unknown>; message?: string }>("/api/warehouse-audits", {
+        method: "POST",
+        body: JSON.stringify({
+          warehouseId,
+          reason: mode === "purchase_order" ? "purchase_order_receipt" : "external_po_receipt",
+          purchaseOrderId: selectedPo?.id || "",
+          supplierId: mode === "manual" ? vendor?.id || "" : "",
+          supplierName: mode === "manual" ? vendor?.name || "" : "",
+          externalPurchaseOrderNumber: mode === "manual" ? externalPoNumber.trim() : "",
+          user: operatorName,
+        }),
+      })
+      if (!result.audit?.id) throw new Error("The inbound receiving workspace could not be created.")
+      toast.success(result.message || "Inbound receiving started.")
+      window.location.assign(`${mobile ? "/warehouse/mobile/audits" : "/warehouse/audits"}/${encodeURIComponent(String(result.audit.id))}`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to start inbound receiving.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return <>
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Receive inbound shipment</CardTitle>
+        <CardDescription>Scan every item into one receiving record, photograph or upload the packing slip, and compare the document to the physical delivery before inventory is posted.</CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-3 sm:grid-cols-2">
+        <button type="button" className="flex min-h-28 items-start gap-3 rounded-md border p-4 text-left transition-colors hover:bg-muted/50" onClick={() => show("purchase_order")}>
+          <FileText className="mt-0.5 size-5 shrink-0 text-primary" />
+          <span><span className="block font-medium">Receive existing PO</span><span className="mt-1 block text-sm text-muted-foreground">Find an open DataPlus purchase order, scan the delivery, and update the PO receipt history.</span></span>
+        </button>
+        <button type="button" className="flex min-h-28 items-start gap-3 rounded-md border p-4 text-left transition-colors hover:bg-muted/50" onClick={() => show("manual")}>
+          <ScanBarcode className="mt-0.5 size-5 shrink-0 text-primary" />
+          <span><span className="block font-medium">Receive external or manual PO</span><span className="mt-1 block text-sm text-muted-foreground">Receive a shipment ordered outside DataPlus while preserving its supplier, external PO, scans, and packing slips.</span></span>
+        </button>
+      </CardContent>
+    </Card>
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogContent className="max-h-[100dvh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{mode === "purchase_order" ? "Receive existing purchase order" : "Receive external inbound shipment"}</DialogTitle>
+          <DialogDescription>{mode === "purchase_order" ? "Choose the DataPlus PO and receiving warehouse. Its open lines become the expected quantities for the scan." : "Record the supplier and source-system PO number, then scan the entire shipment."}</DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4">
+          <Tabs value={mode} onValueChange={(value) => { setMode(value as typeof mode); setSelectedPo(null) }}>
+            <TabsList className="grid w-full grid-cols-2"><TabsTrigger value="purchase_order">Existing PO</TabsTrigger><TabsTrigger value="manual">Manual / external</TabsTrigger></TabsList>
+          </Tabs>
+          {mode === "purchase_order" ? <div className="grid gap-3">
+            <Field label="Find open PO"><div className="flex gap-2"><Input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void searchPurchaseOrders() } }} placeholder="PO number, supplier, or warehouse" /><Button type="button" variant="outline" disabled={searching || !query.trim()} onClick={() => void searchPurchaseOrders()}>{searching ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Search</Button></div></Field>
+            {purchaseOrders.length > 0 && <div className="max-h-64 overflow-y-auto rounded-md border divide-y">{purchaseOrders.map((po) => <button type="button" key={po.id} className={cn("flex w-full items-start justify-between gap-3 p-3 text-left hover:bg-muted/50", selectedPo?.id === po.id && "bg-primary/10 ring-1 ring-inset ring-primary")} onClick={() => { setSelectedPo(po); const warehouse = warehouses.find((row) => String(row.name || "").toLowerCase() === String(po.warehouseName || "").toLowerCase()); if (warehouse?.id) setWarehouseId(String(warehouse.id)) }}><span className="min-w-0"><span className="block font-medium">{po.poNumber || po.id}</span><span className="block truncate text-sm text-muted-foreground">{po.supplier || "Supplier not recorded"} · {po.warehouseName || "Warehouse not assigned"}</span></span><Badge variant="outline" className="shrink-0">{String(po.status || "open").replace(/_/g, " ")}</Badge></button>)}</div>}
+          </div> : <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Supplier"><Select value={vendorId} onValueChange={setVendorId}><SelectTrigger><SelectValue placeholder="Select supplier" /></SelectTrigger><SelectContent>{vendors.map((vendor) => <SelectItem key={vendor.id} value={vendor.id}>{vendor.name}{vendor.code ? ` (${vendor.code})` : ""}</SelectItem>)}</SelectContent></Select></Field>
+            <Field label="External PO number"><Input value={externalPoNumber} onChange={(event) => setExternalPoNumber(event.target.value)} placeholder="PO number from the other system" /></Field>
+          </div>}
+          <Field label="Receiving warehouse"><Select value={warehouseId} onValueChange={setWarehouseId}><SelectTrigger><SelectValue placeholder="Select physical warehouse" /></SelectTrigger><SelectContent>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || "Warehouse")}</SelectItem>)}</SelectContent></Select></Field>
+          <Alert><Camera className="size-4" /><AlertTitle>Packing slip required</AlertTitle><AlertDescription>The receiving workspace will ask for a packing-slip photo or upload and compare extracted lines with the scanned items before final posting.</AlertDescription></Alert>
+        </div>
+        <DialogFooter><Button variant="outline" disabled={loading} onClick={() => setOpen(false)}>Cancel</Button><Button disabled={loading || !warehouseId || (mode === "purchase_order" ? !selectedPo : !vendorId || !externalPoNumber.trim())} onClick={() => void startReceiving()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <ArrowRight className="size-4" />} Start receiving</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  </>
+}
+
 function WarehouseWorkspace() {
   const path = window.location.pathname.replace(/\/+$/, "")
   if (path.startsWith("/warehouse/audits/")) return <WarehouseAuditDetailPage />
@@ -545,7 +673,7 @@ function WarehouseWorkspace() {
     setTab(next)
     window.history.replaceState({}, "", next === "audits" ? "/warehouse/audits" : next === "bins" ? "/warehouse/bins" : next === "receiving" ? "/warehouse/receiving" : "/warehouse/warehouses")
   }
-  return <div className="grid min-w-0 gap-5"><PageHeader eyebrow="Warehouse operations" title="Warehouse" description="See every location, receive inventory, manage counts, and keep an auditable record of physical-stock changes." /><Tabs className="min-w-0" value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="warehouses">Warehouses</TabsTrigger><TabsTrigger value="receiving">Receiving</TabsTrigger><TabsTrigger value="audits">Warehouse audits</TabsTrigger><TabsTrigger value="bins">Bins</TabsTrigger></TabsList></div><TabsContent value="warehouses" className="mt-4 min-w-0"><WarehouseRegister /></TabsContent><TabsContent value="receiving" className="mt-4 grid min-w-0 gap-4"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"><Detail label="Manual receipts" value="Receive arrivals without a PO" /><Detail label="PO receipts" value="Receive supplier orders in Purchasing" /><Detail label="Return receipts" value="Inspect and restock from the order" /></div><ManualReceivingPanel /><Card><CardHeader className="flex-row items-center justify-between gap-3"><div><CardTitle className="text-sm">Purchase-order receiving</CardTitle><CardDescription>Receive expected supplier deliveries against their PO to update remaining quantities and release linked fulfillment demand.</CardDescription></div><Button size="sm" variant="outline" asChild><a href="/purchasing">Open purchasing</a></Button></CardHeader></Card></TabsContent><TabsContent value="audits" className="mt-4 grid min-w-0 gap-4"><WarehouseAuditHistory /><WarehouseAuditPanel createOnly /></TabsContent><TabsContent value="bins" className="mt-4 min-w-0"><WarehouseBinManager /></TabsContent></Tabs></div>
+  return <div className="grid min-w-0 gap-5"><PageHeader eyebrow="Warehouse operations" title="Warehouse" description="See every location, receive inventory, manage counts, and keep an auditable record of physical-stock changes." /><Tabs className="min-w-0" value={tab} onValueChange={selectTab}><div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="warehouses">Warehouses</TabsTrigger><TabsTrigger value="receiving">Receiving</TabsTrigger><TabsTrigger value="audits">Warehouse audits</TabsTrigger><TabsTrigger value="bins">Bins</TabsTrigger></TabsList></div><TabsContent value="warehouses" className="mt-4 min-w-0"><WarehouseRegister /></TabsContent><TabsContent value="receiving" className="mt-4 grid min-w-0 gap-4"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"><Detail label="Inbound shipment" value="Scan the full delivery and verify its packing slip" /><Detail label="PO receipts" value="Receive against an existing DataPlus PO" /><Detail label="Return receipts" value="Inspect and restock from the order" /></div><InboundReceivingLauncher /><ManualReceivingPanel /></TabsContent><TabsContent value="audits" className="mt-4 grid min-w-0 gap-4"><WarehouseAuditHistory /><WarehouseAuditPanel createOnly /></TabsContent><TabsContent value="bins" className="mt-4 min-w-0"><WarehouseBinManager /></TabsContent></Tabs></div>
 }
 
 function WarehouseAuditDetailPage() {
@@ -815,12 +943,13 @@ const warehouseAuditReasonOptions = [
 ] as const;
 
 function isReceivingAuditReason(value: unknown) {
-  return ["receiving_inventory", "external_po_receipt"].includes(String(value || ""));
+  return ["receiving_inventory", "external_po_receipt", "purchase_order_receipt"].includes(String(value || ""));
 }
 
 function warehouseAuditReasonLabel(value: unknown, savedLabel?: unknown) {
   const explicit = String(savedLabel || "").trim();
   if (explicit) return explicit;
+  if (String(value || "") === "purchase_order_receipt") return "DataPlus PO receipt";
   return warehouseAuditReasonOptions.find((option) => option.value === String(value || ""))?.label || "";
 }
 
@@ -1299,9 +1428,12 @@ function WarehouseAuditPanel({
       setBusy(false);
     }
   };
-  const uploadReceivingDocuments = async (files: FileList | null) => {
+  const uploadReceivingDocuments = async (files: FileList | File[] | null) => {
     if (!current?.id || !files?.length) return;
-    const selected = Array.from(files);
+    const selected = await Promise.all(Array.from(files).map(async (file) => {
+      if (!/^image\/(?:jpe?g|png|webp)$/i.test(file.type)) return file;
+      try { return await compressEvidenceImage(file); } catch { return file; }
+    }));
     if (selected.some((file) => file.size > 15 * 1024 * 1024)) return toast.error("Each receiving document must be 15 MB or smaller.");
     setReceivingDocumentBusy(true);
     try {
@@ -1317,6 +1449,16 @@ function WarehouseAuditPanel({
         setReceivingDocumentPreview(uploadedDocuments.at(-1) || null);
       }
       toast.success(`${selected.length} receiving document${selected.length === 1 ? "" : "s"} uploaded.`);
+      if (selected.some((file) => /^image\/(?:jpe?g|png|webp)$/i.test(file.type)) && current.supplierName) {
+        try {
+          const analyzed = await api<{ audit?: Record<string, unknown>; message?: string; fallbackRecommended?: boolean }>(`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/analyze-receiving-documents`, { method: "POST", body: JSON.stringify({ user: operatorName, mode: "ocr" }) });
+          if (analyzed.audit) applyAuditUpdate(analyzed.audit);
+          if (analyzed.fallbackRecommended) toast.warning(analyzed.message || "Packing slip extracted. Review the low-confidence rows.");
+          else toast.success(analyzed.message || "Packing slip compared with the scanned shipment.");
+        } catch (error) {
+          toast.warning(error instanceof Error ? `Document saved. Automatic extraction needs review: ${error.message}` : "Document saved. Run packing-slip extraction when ready.");
+        }
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to upload receiving documents.");
     } finally { setReceivingDocumentBusy(false); }
@@ -1869,6 +2011,10 @@ function WarehouseAuditPanel({
     setActionPreview(null);
     setActionPreviewError("");
     setReturnDespiteDemand(false);
+    if (String(resumedAudit.reason || "") === "purchase_order_receipt" && resumedAudit.linkedPurchaseOrderId) {
+      setActionPreviewLoading(false);
+      return;
+    }
     setActionPreviewLoading(true);
     try {
       const result = await api<{ preview?: Record<string, unknown> }>(
@@ -1885,8 +2031,68 @@ function WarehouseAuditPanel({
   };
   const complete = async () => {
     if (!resumedAudit) return;
+    if (isReceivingAuditReason(resumedAudit.reason) && !(Array.isArray(resumedAudit.receivingDocuments) && resumedAudit.receivingDocuments.some((document) => String((document as Record<string, unknown>).documentType || "") === "packing_slip"))) {
+      toast.error("Add at least one packing-slip photo or file before finishing this receipt.");
+      return;
+    }
     setBusy(true);
     try {
+      if (String(resumedAudit.reason || "") === "purchase_order_receipt" && resumedAudit.linkedPurchaseOrderId) {
+        const expectedLines = Array.isArray(resumedAudit.purchaseOrderExpectedLines) ? resumedAudit.purchaseOrderExpectedLines as Array<Record<string, unknown>> : [];
+        const identifierKeys = (value: unknown) => {
+          const key = String(value || "").replace(/[^0-9a-z]/gi, "").toLowerCase();
+          return key ? [...new Set([key, /^\d+$/.test(key) ? key.replace(/^0+(?=\d)/, "") : key])] : [];
+        };
+        const matchingExpected = (line: Record<string, unknown>) => expectedLines.filter((expected) => {
+          const sku = new Set([line.sku, line.selectedSupplierSku].flatMap(identifierKeys));
+          if (identifierKeys(expected.sku).some((key) => sku.has(key))) return true;
+          const vendor = new Set([line.selectedVendorSku, line.vendorSku].flatMap(identifierKeys));
+          if (identifierKeys(expected.vendorItemNumber).some((key) => vendor.has(key))) return true;
+          const upc = new Set([line.selectedSupplierUpc, line.barcode, line.upc].flatMap(identifierKeys));
+          return identifierKeys(expected.upc).some((key) => upc.has(key));
+        });
+        const countedLines = (Array.isArray(resumedAudit.lines) ? resumedAudit.lines as Array<Record<string, unknown>> : []).filter((line) => Number(line.countedQty || 0) > 0 && String(line.reviewStatus || "") !== "excluded");
+        const unmatched = countedLines.filter((line) => !matchingExpected(line).length);
+        if (unmatched.length) throw new Error(`${unmatched.slice(0, 5).map((line) => String(line.sku || line.barcode || "Unknown item")).join(", ")} ${unmatched.length === 1 ? "is" : "are"} not on this purchase order. Remove the count or receive the shipment as an external PO.`);
+        const allocatedByExpectedId = new Map<string, number>();
+        const items: Array<Record<string, unknown>> = [];
+        for (const line of countedLines) {
+          let remaining = Number(line.countedQty || 0);
+          const candidates = matchingExpected(line);
+          for (const expected of candidates) {
+            if (remaining <= 0) break;
+            const expectedId = String(expected.id || expected.lineIndex || expected.sku || "");
+            const available = Math.max(0, Number(expected.expectedQty || 0) - Number(allocatedByExpectedId.get(expectedId) || 0));
+            const qtyReceived = Math.min(remaining, available);
+            if (qtyReceived <= 0) continue;
+            allocatedByExpectedId.set(expectedId, Number(allocatedByExpectedId.get(expectedId) || 0) + qtyReceived);
+            items.push({
+              lineIndex: Number(expected.lineIndex),
+              routeId: String(expected.routeId || ""),
+              sku: String(expected.sku || line.sku || ""),
+              qtyReceived,
+              locationBin: String(line.locationBin || ""),
+              varianceStatus: qtyReceived === Number(expected.expectedQty || 0) ? "none" : "quantity_variance",
+              varianceNote: qtyReceived === Number(expected.expectedQty || 0) ? "" : `Scanned receipt allocated ${qtyReceived} of ${Number(expected.expectedQty || 0)} open units.`,
+            });
+            remaining -= qtyReceived;
+          }
+          if (remaining > 0) throw new Error(`${String(line.sku || line.barcode || "This item")} has ${remaining} scanned unit${remaining === 1 ? "" : "s"} above the open quantity on ${String(resumedAudit.linkedPurchaseOrderNumber || "this PO")}. Correct the count before posting.`);
+        }
+        const received = await api<{ purchaseOrder?: Record<string, unknown>; receipt?: Record<string, unknown> }>(`/api/purchase-orders/${encodeURIComponent(String(resumedAudit.linkedPurchaseOrderId))}/receive`, {
+          method: "POST",
+          body: JSON.stringify({ mode: "final", warehouseId: resumedAudit.warehouseId, items, note: dispositionNote || `Received through ${String(resumedAudit.auditNumber || "inbound receiving")}`, user: operatorName, sourceAuditId: resumedAudit.id, sourceAuditNumber: resumedAudit.auditNumber }),
+        });
+        const finalized = await api<{ audit?: Record<string, unknown>; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/complete`, {
+          method: "POST",
+          body: JSON.stringify({ user: operatorName, dispositionType: "purchase_order_receipt", sourceReceiptId: received.receipt?.id || "", sourceReceiptNumber: received.receipt?.receiptNumber || "", dispositionNote }),
+        });
+        setActive(finalized.audit || null);
+        setDispositionOpen(false);
+        toast.success(finalized.message || "Purchase order receipt completed.");
+        await load();
+        return;
+      }
       const result = await api<{
         audit?: Record<string, unknown>;
         message?: string;
@@ -1994,14 +2200,22 @@ function WarehouseAuditPanel({
   const current = resumedAudit;
   const lines = sortWarehouseAuditRows(Array.isArray(current?.lines) ? current.lines as Array<Record<string, unknown>> : [], itemSort, true);
   const unknowns = sortWarehouseAuditRows(Array.isArray(current?.unknownBarcodes) ? current.unknownBarcodes as Array<Record<string, unknown>> : [], itemSort, true);
+  const isReceivingAudit = isReceivingAuditReason(current?.reason);
+  const receivingDocuments = Array.isArray(current?.receivingDocuments) ? current.receivingDocuments as Array<Record<string, unknown>> : [];
+  const hasPackingSlip = receivingDocuments.some((document) => String(document.documentType || "") === "packing_slip");
+  const isLinkedPurchaseOrderReceipt = String(current?.reason || "") === "purchase_order_receipt" && Boolean(current?.linkedPurchaseOrderId);
   const receivingReview = current?.packingSlipReview && typeof current.packingSlipReview === "object" ? current.packingSlipReview as Record<string, unknown> : null;
   const receivingReviewLines = Array.isArray(receivingReview?.lines) ? receivingReview.lines as Array<Record<string, unknown>> : [];
+  const purchaseOrderExpectedLines = Array.isArray(current?.purchaseOrderExpectedLines) ? current.purchaseOrderExpectedLines as Array<Record<string, unknown>> : [];
+  const receivingExpectedLines = purchaseOrderExpectedLines.length ? purchaseOrderExpectedLines : receivingReviewLines;
   const receivingIdentifierKeys = (value: unknown) => {
     const key = String(value || "").replace(/[^0-9a-z]/gi, "").toLowerCase();
     if (!key) return [];
     return [...new Set([key, /^\d+$/.test(key) ? key.replace(/^0+(?=\d)/, "") : key].filter(Boolean))];
   };
   const receivingLineMatch = (auditLine: Record<string, unknown>, poLine: Record<string, unknown>) => {
+    const skuKeys = new Set([auditLine.sku, auditLine.selectedSupplierSku].flatMap(receivingIdentifierKeys));
+    if (receivingIdentifierKeys(poLine.sku).some((key) => skuKeys.has(key))) return "sku";
     const vendorKeys = new Set([auditLine.selectedVendorSku, auditLine.vendorSku].flatMap(receivingIdentifierKeys));
     const poVendorKeys = receivingIdentifierKeys(poLine.vendorItemNumber);
     if (vendorKeys.size && poVendorKeys.some((key) => vendorKeys.has(key))) return "vendor_sku";
@@ -2011,12 +2225,18 @@ function WarehouseAuditPanel({
   const baseAuditItems = [...(Array.isArray(current?.lines) ? current.lines as Array<Record<string, unknown>> : []).map(row => ({ ...row, auditItemKind: "known" })), ...(Array.isArray(current?.unknownBarcodes) ? current.unknownBarcodes as Array<Record<string, unknown>> : []).map(row => ({ ...row, auditItemKind: "unknown" }))];
   const matchedReceivingIds = new Set<string>();
   const receivingAuditItems = baseAuditItems.map((row) => {
-    const poLine = receivingReviewLines.find((candidate) => receivingLineMatch(row, candidate));
-    if (!poLine) return row;
-    matchedReceivingIds.add(String(poLine.id));
-    return { ...row, receivingPoLine: poLine, receivingMatchBasis: receivingLineMatch(row, poLine) };
+    const poLines = receivingExpectedLines.filter((candidate) => receivingLineMatch(row, candidate));
+    if (!poLines.length) return row;
+    poLines.forEach((poLine) => matchedReceivingIds.add(String(poLine.id)));
+    const poLine = poLines.length === 1 ? poLines[0] : {
+      ...poLines[0],
+      id: poLines.map((candidate) => String(candidate.id)).join("::"),
+      expectedQty: poLines.reduce((sum, candidate) => sum + Number(candidate.expectedQty ?? candidate.quantity ?? 0), 0),
+      orderedQty: poLines.reduce((sum, candidate) => sum + Number(candidate.orderedQty ?? candidate.quantity ?? 0), 0),
+    };
+    return { ...row, receivingPoLine: poLine, receivingPoLines: poLines, receivingMatchBasis: receivingLineMatch(row, poLines[0]) };
   });
-  const expectedOnlyItems = receivingReviewLines.filter((line) => !matchedReceivingIds.has(String(line.id))).map((line) => ({ ...line, auditItemKind: "po_expected", receivingPoLine: line, receivingMatchBasis: "", barcode: line.upc, selectedVendorSku: line.vendorItemNumber, selectedManufacturerSku: line.manufacturerSku, title: line.description, countedQty: 0 }));
+  const expectedOnlyItems = receivingExpectedLines.filter((line) => !matchedReceivingIds.has(String(line.id))).map((line) => ({ ...line, auditItemKind: "po_expected", receivingPoLine: line, receivingMatchBasis: "", barcode: line.upc, selectedVendorSku: line.vendorItemNumber, selectedManufacturerSku: line.manufacturerSku, title: line.description || line.title, countedQty: 0 }));
   const sortedItems = sortWarehouseAuditRows([...receivingAuditItems, ...expectedOnlyItems], itemSort, true);
   const auditStatus = String(current?.status || "");
   const foundStockLines = lines.filter((line) => String(line.source || "").includes("found-stock") || Boolean(line.foundStock));
@@ -2040,6 +2260,14 @@ function WarehouseAuditPanel({
   const compatibleDemandQty = Number(actionPreview?.totalUsableQty || 0);
   const compatibleOrderCount = Number(actionPreview?.affectedOrderCount || compatibleOrders.length || 0);
   const multipleSupplierActionLines = Number(actionPreview?.multipleSupplierLineCount || 0);
+  const finishActionBlocked = busy
+    || (isReceivingAudit && !hasPackingSlip)
+    || (!isLinkedPurchaseOrderReceipt && (
+      actionPreviewLoading
+      || Boolean(actionPreviewError)
+      || (dispositionType === "transfer" && !destinationWarehouseId)
+      || (dispositionType === "return_to_supplier" && (missingReturnSupplierLines.length > 0 || (compatibleDemandQty > 0 && !returnDespiteDemand)))
+    ));
   const dispositionReturns = Array.isArray(auditDisposition?.supplierReturns)
     ? auditDisposition.supplierReturns as Array<Record<string, unknown>>
     : [];
@@ -2175,10 +2403,11 @@ function WarehouseAuditPanel({
                     <Badge variant="outline" className="border-amber-400 bg-amber-50 text-amber-950 dark:border-amber-600 dark:bg-amber-950/50 dark:text-amber-100"><AlertTriangle className="mr-1 size-3" /> Reason missing</Badge>
                   )}
                   {String(current.externalPurchaseOrderNumber || "") && <Badge variant="outline">External PO {String(current.externalPurchaseOrderNumber)}</Badge>}
+                  {String(current.linkedPurchaseOrderNumber || "") && <Badge variant="outline">DataPlus PO {String(current.linkedPurchaseOrderNumber)}</Badge>}
                   {auditDisposition && <Badge variant="secondary">{String(auditDisposition.label || "Inventory outcome applied")}</Badge>}
                   {Boolean(auditDisposition?.supplierReturnNumber) && <Badge variant="outline">{String(auditDisposition?.supplierReturnNumber)} draft</Badge>}
                   {offlineScanCount > 0 && <Badge variant="outline">{syncingOfflineScans ? "Syncing offline scans" : `${offlineScanCount} scan${offlineScanCount === 1 ? "" : "s"} queued offline`}</Badge>}
-                  {auditStatus === "pending_review" && <span className="text-xs text-muted-foreground">Count complete · choose what happens to the inventory</span>}
+                  {auditStatus === "pending_review" && <span className="text-xs text-muted-foreground">{isReceivingAudit ? "Shipment scan complete · verify the packing slip and post the receipt" : "Count complete · choose what happens to the inventory"}</span>}
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-2 sm:flex sm:w-auto">
@@ -2202,9 +2431,9 @@ function WarehouseAuditPanel({
                   <Camera className="size-4" /> Use phone camera
                 </Button>
                 {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setLastScan(null); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}><ScanBarcode className="size-4" /> Scan bin</Button>}
-                {["in_progress", "pending_review"].includes(auditStatus) && <Button size="sm" disabled={busy || !lines.length} onClick={() => void openInventoryAction()}><ArrowRight className="size-4" /> Finish count</Button>}
+                {["in_progress", "pending_review"].includes(auditStatus) && <Button size="sm" disabled={busy || !lines.length || (isReceivingAudit && !hasPackingSlip)} title={isReceivingAudit && !hasPackingSlip ? "Add a packing slip before finishing this receipt" : undefined} onClick={() => void openInventoryAction()}><ArrowRight className="size-4" /> {isReceivingAudit ? "Finish receipt" : "Finish count"}</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}><Play className="size-4" /> Continue counting</Button>}
-                <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setBinLabelsOpen(true)}><Printer className="size-4" /> Print bin labels</DropdownMenuItem><DropdownMenuItem onSelect={() => void shareAuditLink()}><Share2 className="size-4" /> Share audit link</DropdownMenuItem>{activeBin && auditStatus === "in_progress" && <DropdownMenuItem disabled={busy || clearBinBusy} onSelect={requestClearBin}><X className="size-4" /> Clear bin</DropdownMenuItem>}{!mobile && desktopAuditTools && <DropdownMenuItem onSelect={() => setAuditToolsOpen(true)}><FileUp className="size-4" /> Import stock / eBay tools</DropdownMenuItem>}<DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem><DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+                <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setBinLabelsOpen(true)}><Printer className="size-4" /> Print bin labels</DropdownMenuItem><DropdownMenuItem onSelect={() => void shareAuditLink()}><Share2 className="size-4" /> Share audit link</DropdownMenuItem>{activeBin && auditStatus === "in_progress" && <DropdownMenuItem disabled={busy || clearBinBusy} onSelect={requestClearBin}><X className="size-4" /> Clear bin</DropdownMenuItem>}{!mobile && desktopAuditTools && <DropdownMenuItem onSelect={() => setAuditToolsOpen(true)}><FileUp className="size-4" /> Import stock / eBay tools</DropdownMenuItem>}{!isLinkedPurchaseOrderReceipt && <DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem>}<DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
               </div>
             </div>
             <Dialog open={Boolean(shareAuditUrl)} onOpenChange={(open) => { if (!open) setShareAuditUrl(""); }}>
@@ -2242,9 +2471,9 @@ function WarehouseAuditPanel({
 
             {isReceivingAuditReason(current.reason) && (() => {
               const documents = Array.isArray(current.receivingDocuments) ? current.receivingDocuments as Array<Record<string, unknown>> : [];
-              const review = null as Record<string, unknown> | null;
-              const reviewLines: Array<Record<string, unknown>> = [];
-              return <Card className="border-blue-500/30"><CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Receiving documents</CardTitle><CardDescription>Select the supplier, upload packing-slip photos, preview the originals, then extract every image with the saved local OCR template. David reviews only the first two photos when you explicitly use the fallback.</CardDescription></div><div className="flex flex-wrap gap-2"><Badge variant="outline">{String(current.supplierName || "Supplier not set")}</Badge>{String(current.externalPurchaseOrderNumber || "") && <Badge variant="outline">External PO {String(current.externalPurchaseOrderNumber)}</Badge>}</div></div></CardHeader><CardContent className="grid gap-4"><div className="flex flex-wrap items-end gap-2"><Field label="Document type"><Select value={receivingDocumentType} onValueChange={(value) => setReceivingDocumentType(value as "packing_slip" | "purchase_order")}><SelectTrigger className="w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="packing_slip">Packing slip</SelectItem><SelectItem value="purchase_order">Purchase order</SelectItem></SelectContent></Select></Field><label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted"><FileUp className="size-4" /> Upload documents<input className="sr-only" type="file" multiple accept="application/pdf,image/jpeg,image/png,image/webp,image/heic,image/heif" disabled={receivingDocumentBusy} onChange={(event) => { void uploadReceivingDocuments(event.target.files); event.currentTarget.value = "" }} /></label><Button disabled={receivingDocumentBusy || !current.supplierName || !documents.some((document) => /^image\/(?:jpe?g|png|webp)$/i.test(String(document.mimeType || "")))} onClick={() => void analyzeReceivingDocuments("ocr")}>{receivingDocumentBusy ? <Loader2 className="size-4 animate-spin" /> : <ScanSearch className="size-4" />} Extract with local OCR</Button><Button variant="outline" disabled={receivingDocumentBusy || !documents.some((document) => /^image\/(?:jpe?g|png|webp)$/i.test(String(document.mimeType || "")))} onClick={() => void analyzeReceivingDocuments("ai")}><Sparkles className="size-4" /> Use David fallback</Button></div>{documents.length > 0 && <div className="flex flex-wrap gap-2">{documents.map((document) => <Button key={String(document.id)} size="sm" variant="outline" onClick={() => setReceivingDocumentPreview(document)}><Eye className="size-3.5" /> {String(document.name || "Document")}</Button>)}</div>}{review && <div className="grid gap-3"><div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><Badge variant={String(review.provider) === "local-ocr" ? "success" : "secondary"}>{String(review.provider) === "local-ocr" ? "Local OCR" : "David fallback"}</Badge><Badge variant="outline">{String(review.templateKey || "generic-packing-slip-v1")}</Badge><span>{numberLabel(Number((review.documentsAnalyzed as unknown[] || []).length))} of {numberLabel(Number(review.documentCount || documents.length))} documents analyzed</span>{Number(review.averageConfidence || 0) > 0 && <span>{numberLabel(Number(review.averageConfidence || 0))}% confidence</span>}<span>{dateLabel(String(review.analyzedAt || ""))}</span></div>{Array.isArray(review.warnings) && review.warnings.length > 0 && <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Review extraction warnings</AlertTitle><AlertDescription>{(review.warnings as string[]).join(" ")}</AlertDescription></Alert>}<div className="max-h-80 overflow-auto rounded-md border"><Table><TableHeader className="sticky top-0 z-10 bg-background"><TableRow><TableHead>Vendor item</TableHead><TableHead>UPC / Mfr SKU</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Slip qty</TableHead><TableHead className="text-right">Scanned</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{reviewLines.map((line) => <TableRow key={String(line.id)}><TableCell className="font-medium">{String(line.vendorItemNumber || "-")}</TableCell><TableCell><p>{String(line.upc || "-")}</p><p className="text-xs text-muted-foreground">{String(line.manufacturerSku || "-")}</p></TableCell><TableCell className="max-w-56 truncate">{String(line.description || "-")}</TableCell><TableCell className="text-right">{numberLabel(Number(line.expectedQty || 0))}</TableCell><TableCell className="text-right">{numberLabel(Number(line.countedQty || 0))}</TableCell><TableCell><Badge variant={line.status === "matched" ? "default" : line.status === "variance" ? "destructive" : "outline"}>{line.status === "matched" ? "Matched" : line.status === "variance" ? `Variance ${Number(line.variance || 0) > 0 ? "+" : ""}${numberLabel(Number(line.variance || 0))}` : "Not scanned"}</Badge></TableCell></TableRow>)}{!reviewLines.length && <TableRow><TableCell colSpan={6} className="h-20 text-center text-muted-foreground">No readable line items were extracted. Review this supplier's column mapping or use David fallback.</TableCell></TableRow>}</TableBody></Table></div><p className="text-xs text-muted-foreground">This comparison is receiving evidence only. A warehouse user must resolve variances and finish the audit before inventory is posted.</p></div>}</CardContent></Card>;
+              const review = receivingReview;
+              const reviewLines = receivingReviewLines;
+              return <Card className="border-blue-500/30"><CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Packing slip and receiving documents</CardTitle><CardDescription>Take packing-slip photos or upload files. DataPlus saves the originals, runs local OCR automatically, and compares the extracted quantities with the shipment scans.</CardDescription></div><div className="flex flex-wrap gap-2"><Badge variant="outline">{String(current.supplierName || "Supplier not set")}</Badge>{String(current.externalPurchaseOrderNumber || "") && <Badge variant="outline">External PO {String(current.externalPurchaseOrderNumber)}</Badge>}{String(current.linkedPurchaseOrderNumber || "") && <Badge variant="outline">DataPlus PO {String(current.linkedPurchaseOrderNumber)}</Badge>}</div></div></CardHeader><CardContent className="grid gap-4"><div className="flex flex-wrap items-end gap-2"><Field label="Document type"><Select value={receivingDocumentType} onValueChange={(value) => setReceivingDocumentType(value as "packing_slip" | "purchase_order")}><SelectTrigger className="w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="packing_slip">Packing slip</SelectItem><SelectItem value="purchase_order">Purchase order</SelectItem></SelectContent></Select></Field><label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted"><FileUp className="size-4" /> Upload files<input className="sr-only" type="file" multiple accept="application/pdf,image/jpeg,image/png,image/webp,image/heic,image/heif" disabled={receivingDocumentBusy} onChange={(event) => { void uploadReceivingDocuments(event.target.files); event.currentTarget.value = "" }} /></label><label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted"><Camera className="size-4" /> Take photo<input className="sr-only" type="file" accept="image/*" capture="environment" disabled={receivingDocumentBusy} onChange={(event) => { void uploadReceivingDocuments(event.target.files); event.currentTarget.value = "" }} /></label><Button disabled={receivingDocumentBusy || !current.supplierName || !documents.some((document) => /^image\/(?:jpe?g|png|webp)$/i.test(String(document.mimeType || "")))} onClick={() => void analyzeReceivingDocuments("ocr")}>{receivingDocumentBusy ? <Loader2 className="size-4 animate-spin" /> : <ScanSearch className="size-4" />} Re-run local OCR</Button><Button variant="outline" disabled={receivingDocumentBusy || !documents.some((document) => /^image\/(?:jpe?g|png|webp)$/i.test(String(document.mimeType || "")))} onClick={() => void analyzeReceivingDocuments("ai")}><Sparkles className="size-4" /> Use David fallback</Button></div>{!hasPackingSlip && <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Packing slip required</AlertTitle><AlertDescription>Add at least one packing slip before the receipt can be posted.</AlertDescription></Alert>}{documents.length > 0 && <div className="flex flex-wrap gap-2">{documents.map((document) => <Button key={String(document.id)} size="sm" variant="outline" onClick={() => setReceivingDocumentPreview(document)}><Eye className="size-3.5" /> {String(document.name || "Document")}</Button>)}</div>}{review && <div className="grid gap-3"><div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><Badge variant={String(review.provider) === "local-ocr" ? "success" : "secondary"}>{String(review.provider) === "local-ocr" ? "Local OCR" : "David fallback"}</Badge><Badge variant="outline">{String(review.templateKey || "generic-packing-slip-v1")}</Badge><span>{numberLabel(Number((review.documentsAnalyzed as unknown[] || []).length))} of {numberLabel(Number(review.documentCount || documents.length))} documents analyzed</span>{Number(review.averageConfidence || 0) > 0 && <span>{numberLabel(Number(review.averageConfidence || 0))}% confidence</span>}<span>{dateLabel(String(review.analyzedAt || ""))}</span></div>{Array.isArray(review.warnings) && review.warnings.length > 0 && <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Review extraction warnings</AlertTitle><AlertDescription>{(review.warnings as string[]).join(" ")}</AlertDescription></Alert>}<div className="max-h-80 overflow-auto rounded-md border"><Table><TableHeader className="sticky top-0 z-10 bg-background"><TableRow><TableHead>Vendor item</TableHead><TableHead>UPC / Mfr SKU</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Slip qty</TableHead><TableHead className="text-right">Scanned</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{reviewLines.map((line) => <TableRow key={String(line.id)}><TableCell className="font-medium">{String(line.vendorItemNumber || "-")}</TableCell><TableCell><p>{String(line.upc || "-")}</p><p className="text-xs text-muted-foreground">{String(line.manufacturerSku || "-")}</p></TableCell><TableCell className="max-w-56 truncate">{String(line.description || "-")}</TableCell><TableCell className="text-right">{numberLabel(Number(line.expectedQty || 0))}</TableCell><TableCell className="text-right">{numberLabel(Number(line.countedQty || 0))}</TableCell><TableCell><Badge variant={line.status === "matched" ? "default" : line.status === "variance" ? "destructive" : "outline"}>{line.status === "matched" ? "Matched" : line.status === "variance" ? `Variance ${Number(line.variance || 0) > 0 ? "+" : ""}${numberLabel(Number(line.variance || 0))}` : "Not scanned"}</Badge></TableCell></TableRow>)}{!reviewLines.length && <TableRow><TableCell colSpan={6} className="h-20 text-center text-muted-foreground">No readable line items were extracted. Review this supplier's column mapping or use David fallback.</TableCell></TableRow>}</TableBody></Table></div><p className="text-xs text-muted-foreground">The packing slip is evidence, not inventory. Review any slip-only, scan-only, over, or short lines before posting the receipt.</p></div>}</CardContent></Card>;
             })()}
 
             <Dialog open={Boolean(receivingDocumentPreview)} onOpenChange={(open) => !open && setReceivingDocumentPreview(null)}>
@@ -2276,14 +2505,16 @@ function WarehouseAuditPanel({
               </DialogContent>
             </Dialog>
 
-            {auditStatus === "pending_review" && <div className="grid gap-2 rounded-md border border-blue-200 bg-blue-50/60 p-3 text-sm dark:border-blue-500/30 dark:bg-blue-500/10"><p className="font-medium">Count complete. Inventory action required.</p><p className="text-muted-foreground">Choose whether these units should serve open customer orders, remain in this warehouse, transfer elsewhere, or be returned to their suppliers.</p>{Boolean(current.reviewNote) && <p className="text-muted-foreground">Counter note: {String(current.reviewNote)}</p>}</div>}
+            {auditStatus === "pending_review" && <div className="grid gap-2 rounded-md border border-blue-200 bg-blue-50/60 p-3 text-sm dark:border-blue-500/30 dark:bg-blue-500/10"><p className="font-medium">{isReceivingAudit ? "Shipment scan complete. Receipt review required." : "Count complete. Inventory action required."}</p><p className="text-muted-foreground">{isLinkedPurchaseOrderReceipt ? `Review the scanned quantities against ${String(current.linkedPurchaseOrderNumber || "the purchase order")} and its packing slip, then post the receipt.` : isReceivingAudit ? "Review the shipment against its packing slip, then stock it here or use the received units for eligible open orders." : "Choose whether these units should serve open customer orders, remain in this warehouse, transfer elsewhere, or be returned to their suppliers."}</p>{Boolean(current.reviewNote) && <p className="text-muted-foreground">Counter note: {String(current.reviewNote)}</p>}</div>}
             {auditDisposition && <div className="grid gap-2 rounded-md border bg-muted/20 p-3 text-sm"><p className="font-medium">Inventory outcome: {String(auditDisposition.label || "Applied")}</p>{Boolean(auditDisposition.destinationWarehouseName) && <p className="text-muted-foreground">Destination: {String(auditDisposition.destinationWarehouseName)}</p>}{Number(auditDisposition.allocatedQty || 0) > 0 && <p className="text-muted-foreground">Allocated: {numberLabel(Number(auditDisposition.allocatedQty || 0))} units across {numberLabel(dispositionOrders.filter((row) => Number(row.allocatedQty || 0) > 0).length)} open orders.</p>}{Number(auditDisposition.blockedQty || 0) > 0 && <p className="text-amber-700 dark:text-amber-300">{numberLabel(Number(auditDisposition.blockedQty || 0))} units remain tied to submitted supplier POs and require buyer follow-up.</p>}{dispositionOrders.length > 0 && <div className="flex flex-wrap gap-2">{dispositionOrders.filter((row) => Number(row.allocatedQty || 0) > 0).map((row) => <Button key={String(row.id)} size="sm" variant="outline" asChild><a href={`/orders/${encodeURIComponent(String(row.id))}`}>#{String(row.orderNumber || row.id)} · {numberLabel(Number(row.allocatedQty || 0))}</a></Button>)}</div>}{dispositionReturns.length > 0 && <div className="grid gap-1"><p className="text-muted-foreground">Supplier return drafts:</p><div className="flex flex-wrap gap-2">{dispositionReturns.map((row) => <Badge key={String(row.id || row.returnNumber)} variant="outline">{String(row.returnNumber || "Return draft")} · {String(row.supplierName || "Supplier")} · {numberLabel(Number(row.totalUnits || 0))}</Badge>)}</div></div>}{Boolean(auditDisposition.note) && <p className="text-muted-foreground">Note: {String(auditDisposition.note)}</p>}</div>}
             <Dialog open={dispositionOpen} onOpenChange={setDispositionOpen}>
               <DialogContent className="max-w-3xl">
                 <DialogHeader>
-                  <DialogTitle>Finish count</DialogTitle>
-                  <DialogDescription>The audit is the review record. DataPlus checks supplier-equivalent SKUs against open orders before inventory can be returned.</DialogDescription>
+                  <DialogTitle>{isReceivingAudit ? "Finish inbound receipt" : "Finish count"}</DialogTitle>
+                  <DialogDescription>{isLinkedPurchaseOrderReceipt ? `Post the scanned quantities to ${String(current.linkedPurchaseOrderNumber || "the linked purchase order")} and add the packing-slip evidence to its receipt history.` : isReceivingAudit ? "Post the scanned shipment as new inbound inventory. The receiving audit and original packing slips remain attached as evidence." : "The audit is the review record. DataPlus checks supplier-equivalent SKUs against open orders before inventory can be returned."}</DialogDescription>
                 </DialogHeader>
+                {isLinkedPurchaseOrderReceipt && <div className="grid gap-3 rounded-md border bg-muted/30 p-4 sm:grid-cols-3"><div><p className="text-xs text-muted-foreground">Purchase order</p><p className="font-medium">{String(current.linkedPurchaseOrderNumber || "-")}</p></div><div><p className="text-xs text-muted-foreground">Scanned units</p><p className="font-medium">{numberLabel(lines.reduce((sum, line) => sum + Number(line.countedQty || 0), 0))}</p></div><div><p className="text-xs text-muted-foreground">Packing slips</p><p className="font-medium">{numberLabel(receivingDocuments.filter((document) => String(document.documentType || "") === "packing_slip").length)}</p></div></div>}
+                {!isLinkedPurchaseOrderReceipt && <>
                 {actionPreviewLoading && <div className="flex items-center gap-2 rounded-md border bg-muted/30 p-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Checking open orders across supplier-equivalent SKUs...</div>}
                 {actionPreviewError && <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">{actionPreviewError}</div>}
                 {!actionPreviewLoading && !actionPreviewError && actionPreview && <div className={`rounded-md border p-4 ${compatibleDemandQty > 0 ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-700 dark:bg-emerald-950/35 dark:text-emerald-100" : "bg-muted/30"}`}><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">{compatibleDemandQty > 0 ? `${numberLabel(compatibleDemandQty)} counted units can serve open orders` : "No compatible open order demand found"}</p><p className="mt-1 text-xs text-muted-foreground">Matched across UPC, manufacturer part number, vendor SKU, and equivalent supplier SKUs.</p></div>{compatibleOrderCount > 0 && <Badge className="bg-emerald-600 text-white">{numberLabel(compatibleOrderCount)} order{compatibleOrderCount === 1 ? "" : "s"}</Badge>}</div>{compatibleOrders.length > 0 && <ScrollArea className="mt-3 max-h-40"><div className="grid gap-2 pr-3">{compatibleOrders.slice(0, 12).map((order) => <a key={String(order.id)} href={`/orders/${encodeURIComponent(String(order.id))}`} className="flex items-center justify-between gap-3 rounded-md border border-emerald-300/70 bg-background/80 px-3 py-2 text-sm hover:bg-background"><span className="min-w-0"><span className="block font-medium">#{String(order.orderNumber || order.id)}</span><span className="block truncate text-xs text-muted-foreground">{String(order.orderSku || order.auditSku || "Matched item")}</span></span><span className="flex shrink-0 items-center gap-2"><Badge variant="outline">{String(order.matchedBy || "") === "supplier_family" ? "Supplier-equivalent" : "Catalog SKU"}</Badge><span className="text-muted-foreground">{numberLabel(Number(order.remainingQty || 0))} needed</span></span></a>)}</div></ScrollArea>}</div>}
@@ -2293,14 +2524,16 @@ function WarehouseAuditPanel({
                     { value: "stock_here", title: "Stock here", description: `Make the approved units available in ${String(current.warehouseName)}.` },
                     { value: "transfer", title: "Transfer", description: "Count the units here, then move them to another physical warehouse." },
                     { value: "return_to_supplier", title: "Return to supplier", description: "Hold the units from sale and create a supplier-return draft." },
-                  ].map((option) => <button key={option.value} type="button" onClick={() => setDispositionType(option.value as typeof dispositionType)} className={`rounded-md border p-4 text-left transition-colors ${dispositionType === option.value ? "border-primary bg-primary/10 ring-1 ring-primary" : "bg-background hover:bg-muted/60"}`}><span className="font-medium">{option.title}</span><span className="mt-1 block text-xs text-muted-foreground">{option.description}</span></button>)}
+                  ].filter((option) => !isReceivingAudit || ["fulfill_orders", "stock_here"].includes(option.value)).map((option) => <button key={option.value} type="button" onClick={() => setDispositionType(option.value as typeof dispositionType)} className={`rounded-md border p-4 text-left transition-colors ${dispositionType === option.value ? "border-primary bg-primary/10 ring-1 ring-primary" : "bg-background hover:bg-muted/60"}`}><span className="font-medium">{option.title}</span><span className="mt-1 block text-xs text-muted-foreground">{option.description}</span></button>)}
                 </div>
                 {dispositionType === "transfer" && <Field label="Destination warehouse"><Select value={destinationWarehouseId} onValueChange={setDestinationWarehouseId}><SelectTrigger><SelectValue placeholder="Choose a physical warehouse" /></SelectTrigger><SelectContent>{transferDestinations.map((item) => <SelectItem key={String(item.id || item.name)} value={String(item.id || "")}>{String(item.name || "Warehouse")}{item.code ? ` (${String(item.code)})` : ""}</SelectItem>)}</SelectContent></Select></Field>}
                 {dispositionType === "return_to_supplier" && <div className={`rounded-md border p-3 text-sm ${missingReturnSupplierLines.length || compatibleDemandQty > 0 ? "border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100" : "bg-muted/30"}`}><p className="font-medium">Returns are created separately for each verified supplier</p><p className="mt-1 text-xs text-muted-foreground">A mixed audit can create multiple supplier-return drafts. Confirm every multi-supplier line first so one item is not returned to multiple vendors.</p>{multipleSupplierActionLines > 0 && <p className="mt-2">{numberLabel(multipleSupplierActionLines)} counted line{multipleSupplierActionLines === 1 ? " has" : "s have"} multiple supplier coverage.</p>}{missingReturnSupplierLines.length > 0 && <p className="mt-2 font-medium">{numberLabel(missingReturnSupplierLines.length)} line{missingReturnSupplierLines.length === 1 ? "" : "s"} still need a supplier.</p>}{compatibleDemandQty > 0 && <label className="mt-3 flex items-start gap-2 rounded-md border border-amber-400/60 bg-background/70 p-3"><Checkbox checked={returnDespiteDemand} onCheckedChange={(checked) => setReturnDespiteDemand(checked === true)} /><span><span className="block font-medium">Return despite open customer demand</span><span className="mt-0.5 block text-xs text-muted-foreground">I reviewed {numberLabel(compatibleOrderCount)} compatible order{compatibleOrderCount === 1 ? "" : "s"} and still want supplier-return drafts created.</span></span></label>}</div>}
                 <Field label="Outcome note"><Textarea value={dispositionNote} onChange={(event) => setDispositionNote(event.target.value)} placeholder="Optional handling instructions, return reason, or transfer note" /></Field>
+                </>}
+                {isLinkedPurchaseOrderReceipt && <Field label="Receipt note"><Textarea value={dispositionNote} onChange={(event) => setDispositionNote(event.target.value)} placeholder="Optional receiving note" /></Field>}
                 <DialogFooter>
                   <Button variant="outline" onClick={() => setDispositionOpen(false)}>Cancel</Button>
-                  <Button disabled={busy || actionPreviewLoading || Boolean(actionPreviewError) || (dispositionType === "transfer" && !destinationWarehouseId) || (dispositionType === "return_to_supplier" && (missingReturnSupplierLines.length > 0 || (compatibleDemandQty > 0 && !returnDespiteDemand)))} onClick={() => void complete()}>{busy && <Loader2 className="size-4 animate-spin" />}{dispositionType === "fulfill_orders" ? "Use for open orders" : dispositionType === "transfer" ? "Apply & transfer" : dispositionType === "return_to_supplier" ? "Create supplier return draft(s)" : "Apply & stock"}</Button>
+                  <Button disabled={finishActionBlocked} onClick={() => void complete()}>{busy && <Loader2 className="size-4 animate-spin" />}{isLinkedPurchaseOrderReceipt ? "Post PO receipt" : dispositionType === "fulfill_orders" ? "Receive & use for open orders" : dispositionType === "transfer" ? "Apply & transfer" : dispositionType === "return_to_supplier" ? "Create supplier return draft(s)" : isReceivingAudit ? "Receive & stock" : "Apply & stock"}</Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>
@@ -2737,7 +2970,7 @@ function WarehouseAuditPanel({
                     const poNumber = String(poLine?.poNumber || receivingReview?.documentNumber || "").trim();
                     const expectedQty = poLine ? Number(poLine.expectedQty ?? poLine.quantity ?? 0) : 0;
                     const rowCountedQty = Number(line.countedQty ?? line.count ?? 0);
-                    const poMatchBadge = poLine ? <Badge className="border-yellow-400 bg-yellow-100 text-yellow-950 dark:border-yellow-600 dark:bg-yellow-400/20 dark:text-yellow-100" variant="outline" title={line.receivingMatchBasis === "vendor_sku" ? "Matched by vendor SKU" : line.receivingMatchBasis === "upc" ? "Matched by UPC" : "Expected from packing slip"}><CheckCircle2 className="mr-1 size-3" /> Yes</Badge> : <span className="text-xs text-muted-foreground">No</span>;
+                    const poMatchBadge = poLine ? <Badge className="border-yellow-400 bg-yellow-100 text-yellow-950 dark:border-yellow-600 dark:bg-yellow-400/20 dark:text-yellow-100" variant="outline" title={line.receivingMatchBasis === "vendor_sku" ? "Matched by vendor SKU" : line.receivingMatchBasis === "upc" ? "Matched by UPC" : line.receivingMatchBasis === "sku" ? "Matched by catalog SKU" : "Expected from packing slip"}><CheckCircle2 className="mr-1 size-3" /> Yes</Badge> : <span className="text-xs text-muted-foreground">No</span>;
                     const poStatusBadge = poLine ? rowCountedQty === expectedQty ? <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Matched</Badge> : <Badge variant="destructive">Variance {rowCountedQty - expectedQty > 0 ? "+" : ""}{numberLabel(rowCountedQty - expectedQty)}</Badge> : null;
                     if (line.auditItemKind === "po_expected") {
                       return (<TableRow className="bg-yellow-50/50 dark:bg-yellow-400/5" key={`po-expected-${String(line.id)}`}>
@@ -2915,7 +3148,7 @@ function WarehouseMobileRoute({ canPurchase, returns, fulfillment, inventory, ac
     inventory={inventory}
     account={account}
     brand={brand}
-    manual={canReceive ? <ManualReceivingPanel mobile /> : <p>Receiving access is required.</p>}
+    manual={canReceive ? <div className="grid gap-4"><InboundReceivingLauncher mobile operatorName={operatorName} /><ManualReceivingPanel mobile /></div> : <p>Receiving access is required.</p>}
     outbound={<OutboundAuditWorkspace warehouses={warehouses} />}
     bins={canManageBins ? <WarehouseBinManager mobile /> : <p>Bin access is required.</p>}
     audits={canAudit ? <><WarehouseAuditPanel createOnly mobile operatorName={operatorName} /><WarehouseAuditHistory mobile /></> : <p>Audit access is required.</p>}

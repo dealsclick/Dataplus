@@ -8,9 +8,19 @@ const warehouseUi = fs.readFileSync(path.join(root, 'web', 'src', 'components', 
 
 assert.match(server, /external_po_receipt:\s*"External PO receipt"/, 'server accepts the external PO receipt audit reason');
 assert.match(server, /Enter the PO number from the external system\./, 'server requires the external PO identity');
-assert.match(server, /linkedPurchaseOrderId:\s*""/, 'audit reserves a future DataPlus PO link');
+assert.match(server, /purchase_order_receipt:\s*"DataPlus PO receipt"/, 'server accepts a linked DataPlus PO receipt');
+assert.match(server, /purchaseOrderExpectedLines/, 'linked PO receipts save their open expected lines');
+assert.match(server, /existingAuditReceipt/, 'PO receipt posting is idempotent by source audit');
+assert.match(server, /sourceAuditId/, 'PO receipts retain their inbound audit identity');
+assert.match(server, /stockRow\.qty = receivingAudit \? qtyBefore \+ countedQty : countedQty/, 'inbound receipts add inventory while ordinary audits preserve count semantics');
+assert.match(server, /Add at least one packing slip before posting this inbound receipt/, 'inbound completion requires packing-slip evidence');
 assert.match(warehouseUi, /value:\s*"external_po_receipt",\s*label:\s*"External PO receipt"/, 'warehouse UI exposes the reason');
 assert.match(warehouseUi, /External PO number/, 'warehouse UI captures and displays the external PO number');
 assert.match(warehouseUi, /isReceivingAuditReason\(current\.reason\)/, 'external receipts retain the receiving-document workflow');
+assert.match(warehouseUi, /Receive existing PO/, 'receiving offers the linked DataPlus PO path');
+assert.match(warehouseUi, /Receive external or manual PO/, 'receiving offers the external PO path');
+assert.match(warehouseUi, /capture="environment"/, 'mobile receiving offers direct packing-slip camera capture');
+assert.match(warehouseUi, /compressEvidenceImage/, 'packing-slip photos are compressed before upload');
+assert.match(warehouseUi, /Packing slip required/, 'the UI explains the packing-slip completion safeguard');
 
-console.log('External PO warehouse receipts preserve supplier, source PO identity, receiving evidence, and future PO-link fields.');
+console.log('Inbound receiving supports linked and external POs, additive inventory, scanner reuse, packing-slip evidence, OCR comparison, and idempotent PO posting.');
