@@ -87,7 +87,9 @@ async function main() {
   assert.match(workerSource, /shadow\.channelListings\.ebay/, 'eBay listing identity must be persisted on the shadow');
   assert.match(source, /shadowWarehouseId/, 'imported shadow orders must retain their assigned warehouse');
   assert.match(source, /warehouse_shadow_inventory_shortage/, 'shadow orders must stop instead of falling back to supplier stock');
-  assert.match(databaseSource, /jsonb_array_elements[\s\S]*shadowSkus[\s\S]*marketplaceSku/, 'PostgreSQL must resolve shadows without catalog aliases');
+  assert.match(databaseSource, /create table if not exists product_shadow_skus/, 'PostgreSQL must persist shadows separately from catalog aliases');
+  assert.match(databaseSource, /from product_shadow_skus[\s\S]*marketplace_sku/, 'PostgreSQL must resolve shadows through the indexed shadow table');
+  assert.doesNotMatch(databaseSource.slice(databaseSource.indexOf('async function readProductsByKeys'), databaseSource.indexOf('async function readProductsByEbayListingKeys')), /jsonb_array_elements/, 'bulk product lookup must not scan product JSON for shadows');
   const orderShadowSource = source.slice(
     source.indexOf('function createShadowSkuFromOrderLine('),
     source.indexOf('function createInventoryFromOrderLine('),

@@ -536,6 +536,23 @@ async function initRelationalSchema() {
     create index if not exists product_aliases_alias_lookup_idx on product_aliases (lower(alias_sku));
     create unique index if not exists product_aliases_active_alias_unique_idx on product_aliases (lower(alias_sku)) where active = true;
 
+    create table if not exists product_shadow_skus (
+      shadow_id text primary key,
+      product_id text not null references products(product_id) on delete cascade,
+      shadow_sku text not null,
+      marketplace_sku text,
+      channel_sku text,
+      marketplace text,
+      active boolean not null default true,
+      raw jsonb not null default '{}'::jsonb,
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now()
+    );
+    create index if not exists product_shadow_skus_product_idx on product_shadow_skus (product_id);
+    create index if not exists product_shadow_skus_shadow_lookup_idx on product_shadow_skus (lower(shadow_sku)) where active = true;
+    create index if not exists product_shadow_skus_marketplace_lookup_idx on product_shadow_skus (lower(marketplace_sku)) where active = true;
+    create index if not exists product_shadow_skus_channel_lookup_idx on product_shadow_skus (lower(channel_sku)) where active = true;
+
     create table if not exists vendor_offers (
       offer_id bigserial primary key,
       product_id text not null references products(product_id) on delete cascade,
@@ -8313,6 +8330,31 @@ function aliasRecordsFromState(item = {}) {
     .filter(Boolean);
 }
 
+function shadowSkuRecordsFromState(item = {}) {
+  const productId = nullableString(item.id) || nullableString(item.sku);
+  if (!productId) return [];
+  const shadows = Array.isArray(item.shadowSkus) ? item.shadowSkus : [];
+  return shadows
+    .map((shadow, index) => {
+      const shadowSku = nullableString(shadow.shadowSku || shadow.sku);
+      if (!shadowSku) return null;
+      const marketplace = nullableString(shadow.marketplace || shadow.channel || shadow.company);
+      return {
+        shadow_id: nullableString(shadow.id) || crypto.createHash("sha1").update(`${productId}:${shadowSku}:${marketplace || ""}:${index}`).digest("hex"),
+        product_id: productId,
+        shadow_sku: shadowSku,
+        marketplace_sku: nullableString(shadow.marketplaceSku || shadow.externalSku),
+        channel_sku: nullableString(shadow.channelSku),
+        marketplace,
+        active: shadow.active !== false && !["deleted", "inactive"].includes(String(shadow.status || "").trim().toLowerCase()),
+        raw: shadow,
+        created_at: nullableString(shadow.createdAt),
+        updated_at: nullableString(shadow.updatedAt || shadow.createdAt)
+      };
+    })
+    .filter(Boolean);
+}
+
 function categoryChannelMappingRecordsFromState(categorySettings = []) {
   const rowsById = new Map();
   for (const category of Array.isArray(categorySettings) ? categorySettings : []) {
@@ -12355,6 +12397,7 @@ async function upsertProductsFromState(items = [], options = {}) {
   const identifiers = [];
   const offers = [];
   const aliases = [];
+  const shadowSkus = [];
   const insertedIds = new Set();
   for (const item of Array.isArray(items) ? items : []) {
     const product = productRecordFromState(item);
@@ -12364,6 +12407,7 @@ async function upsertProductsFromState(items = [], options = {}) {
     if (vendor) vendorMap.set(vendor.vendor_id, vendor);
     identifiers.push(...identifierRecordsFromState(item));
     aliases.push(...aliasRecordsFromState(item));
+    shadowSkus.push(...shadowSkuRecordsFromState(item));
     const offer = offerRecordFromState(item);
     if (offer) offers.push(offer);
   }
@@ -12445,7 +12489,7 @@ async function upsertProductsFromState(items = [], options = {}) {
     }
 
     if (options.insertOnly) {
-      for (const rows of [products, identifiers, aliases, offers]) {
+      for (const rows of [products, identifiers, aliases, shadowSkus, offers]) {
         for (let i = rows.length - 1; i >= 0; i -= 1) {
           if (!insertedIds.has(rows[i].product_id)) rows.splice(i, 1);
         }
@@ -12495,6 +12539,34 @@ async function upsertProductsFromState(items = [], options = {}) {
           raw = excluded.raw,
           updated_at = now()
       `, [JSON.stringify(aliases.slice(i, i + batchSize))]);
+    }
+
+    for (let i = 0; i < products.length; i += batchSize) {
+      await client.query("delete from product_shadow_skus where product_id = any($1::text[])", [products.slice(i, i + batchSize).map((row) => row.product_id)]);
+    }
+    for (let i = 0; i < shadowSkus.length; i += batchSize) {
+      await client.query(`
+        insert into product_shadow_skus (
+          shadow_id, product_id, shadow_sku, marketplace_sku, channel_sku, marketplace,
+          active, raw, created_at, updated_at
+        )
+        select shadow_id, product_id, shadow_sku, marketplace_sku, channel_sku, marketplace,
+          active, raw, coalesce(created_at, now()), coalesce(updated_at, now())
+        from jsonb_to_recordset($1::jsonb) as x(
+          shadow_id text, product_id text, shadow_sku text, marketplace_sku text,
+          channel_sku text, marketplace text, active boolean, raw jsonb,
+          created_at timestamptz, updated_at timestamptz
+        )
+        on conflict (shadow_id) do update set
+          product_id = excluded.product_id,
+          shadow_sku = excluded.shadow_sku,
+          marketplace_sku = excluded.marketplace_sku,
+          channel_sku = excluded.channel_sku,
+          marketplace = excluded.marketplace,
+          active = excluded.active,
+          raw = excluded.raw,
+          updated_at = now()
+      `, [JSON.stringify(shadowSkus.slice(i, i + batchSize))]);
     }
 
     for (let i = 0; i < offers.length; i += batchSize) {
@@ -13423,6 +13495,7 @@ const BACKUP_CORE_TABLES = [
   "products",
   "product_identifiers",
   "product_aliases",
+  "product_shadow_skus",
   "vendor_offers",
   "inventory_levels",
   "vendor_feed_runs",
@@ -13942,15 +14015,14 @@ async function readProductByKey(key) {
   if (!productRow) {
     const shadowResult = await client.query(`
       select p.*
-      from products p
-      where exists (
-        select 1
-        from jsonb_array_elements(
-          case when jsonb_typeof(p.raw -> 'shadowSkus') = 'array' then p.raw -> 'shadowSkus' else '[]'::jsonb end
-        ) shadow
-        where lower(coalesce(shadow ->> 'shadowSku', '')) = lower($1)
-          or lower(coalesce(shadow ->> 'marketplaceSku', '')) = lower($1)
-      )
+      from product_shadow_skus shadow
+      join products p on p.product_id = shadow.product_id
+      where shadow.active = true
+        and (
+          lower(shadow.shadow_sku) = lower($1)
+          or lower(coalesce(shadow.marketplace_sku, '')) = lower($1)
+          or lower(coalesce(shadow.channel_sku, '')) = lower($1)
+        )
       limit 1
     `, [value]);
     productRow = shadowResult.rows[0] || null;
@@ -14150,16 +14222,14 @@ async function readProductsByKeys(keys = [], options = {}) {
       where lower(alias_sku) = any($1)
         and active = true
       union
-      select p.product_id
-      from products p
-      where exists (
-        select 1
-        from jsonb_array_elements(
-          case when jsonb_typeof(p.raw -> 'shadowSkus') = 'array' then p.raw -> 'shadowSkus' else '[]'::jsonb end
-        ) shadow
-        where lower(coalesce(shadow ->> 'shadowSku', '')) = any($1)
-          or lower(coalesce(shadow ->> 'marketplaceSku', '')) = any($1)
-      )
+      select product_id
+      from product_shadow_skus
+      where active = true
+        and (
+          lower(shadow_sku) = any($1)
+          or lower(coalesce(marketplace_sku, '')) = any($1)
+          or lower(coalesce(channel_sku, '')) = any($1)
+        )
     )
     select products.*
     from products
@@ -14289,16 +14359,14 @@ async function readProductsForOrderSkus(keys = []) {
       where active = true
         and lower(alias_sku) = any($1)
       union
-      select p.product_id
-      from products p
-      where exists (
-        select 1
-        from jsonb_array_elements(
-          case when jsonb_typeof(p.raw -> 'shadowSkus') = 'array' then p.raw -> 'shadowSkus' else '[]'::jsonb end
-        ) shadow
-        where lower(coalesce(shadow ->> 'shadowSku', '')) = any($1)
-          or lower(coalesce(shadow ->> 'marketplaceSku', '')) = any($1)
-      )
+      select product_id
+      from product_shadow_skus
+      where active = true
+        and (
+          lower(shadow_sku) = any($1)
+          or lower(coalesce(marketplace_sku, '')) = any($1)
+          or lower(coalesce(channel_sku, '')) = any($1)
+        )
       union
       select product_id
       from shopify_product_statuses
