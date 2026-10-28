@@ -942,6 +942,7 @@ const warehouseAuditReasonOptions = [
   { value: "cycle_count", label: "Cycle count" },
   { value: "new_inventory_onboarding", label: "New inventory onboarding" },
   { value: "extra_stock", label: "Extra stock" },
+  { value: "ebay_one_time_listing", label: "One-time eBay listings" },
   { value: "receiving_inventory", label: "Receive inventory" },
   { value: "external_po_receipt", label: "External PO receipt" },
 ] as const;
@@ -1087,6 +1088,7 @@ function WarehouseAuditPanel({
   const [includeAlreadyListedFoundStock, setIncludeAlreadyListedFoundStock] = useState(false);
   const [foundStockImporting, setFoundStockImporting] = useState(false);
   const [ebayReadinessBusy, setEbayReadinessBusy] = useState(false);
+  const [ebayShadowLaunchBusy, setEbayShadowLaunchBusy] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const photoVideoRef = useRef<HTMLVideoElement | null>(null);
   const manualSkuRef = useRef<HTMLInputElement | null>(null);
@@ -1526,6 +1528,26 @@ function WarehouseAuditPanel({
       toast.error(error instanceof Error ? error.message : "Unable to queue eBay readiness.");
     } finally {
       setEbayReadinessBusy(false);
+    }
+  };
+  const launchAuditShadowsOnEbay = async () => {
+    if (!resumedAudit) return;
+    setEbayShadowLaunchBusy(true);
+    try {
+      const result = await api<{ audit?: Record<string, unknown>; job?: ImportJob; duplicate?: boolean; message?: string }>(
+        `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/ebay-shadow-launch`,
+        { method: "POST", body: JSON.stringify({ user: operatorName }) },
+      );
+      if (result.audit) applyAuditUpdate(result.audit);
+      toast.success(result.message || "Warehouse shadow launch queued for eBay.");
+      if (result.job?.id) window.setTimeout(() => {
+        window.history.pushState({}, "", `/jobs/${encodeURIComponent(String(result.job?.id))}`);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      }, 500);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to queue the warehouse shadows for eBay.");
+    } finally {
+      setEbayShadowLaunchBusy(false);
     }
   };
   const submit = async (value = barcode, quantity = 1) => {
@@ -2015,6 +2037,12 @@ function WarehouseAuditPanel({
     setActionPreview(null);
     setActionPreviewError("");
     setReturnDespiteDemand(false);
+    if (String(resumedAudit.reason || "") === "ebay_one_time_listing") {
+      setDispositionType("stock_here");
+      setActionPreview({ totalUsableQty: 0, affectedOrderCount: 0, orders: [], lines: [] });
+      setActionPreviewLoading(false);
+      return;
+    }
     if (String(resumedAudit.reason || "") === "purchase_order_receipt" && resumedAudit.linkedPurchaseOrderId) {
       setActionPreviewLoading(false);
       return;
@@ -2205,6 +2233,7 @@ function WarehouseAuditPanel({
   const lines = sortWarehouseAuditRows(Array.isArray(current?.lines) ? current.lines as Array<Record<string, unknown>> : [], itemSort, true);
   const unknowns = sortWarehouseAuditRows(Array.isArray(current?.unknownBarcodes) ? current.unknownBarcodes as Array<Record<string, unknown>> : [], itemSort, true);
   const isReceivingAudit = isReceivingAuditReason(current?.reason);
+  const isEbayOneTimeAudit = String(current?.reason || "") === "ebay_one_time_listing";
   const receivingDocuments = Array.isArray(current?.receivingDocuments) ? current.receivingDocuments as Array<Record<string, unknown>> : [];
   const hasPackingSlip = receivingDocuments.some((document) => String(document.documentType || "") === "packing_slip");
   const isLinkedPurchaseOrderReceipt = String(current?.reason || "") === "purchase_order_receipt" && Boolean(current?.linkedPurchaseOrderId);
@@ -2247,6 +2276,7 @@ function WarehouseAuditPanel({
   const latestFoundStockImport = Array.isArray(current?.foundStockImports) ? current?.foundStockImports[0] as Record<string, unknown> : null;
   const latestFoundStockSummary = latestFoundStockImport?.summary && typeof latestFoundStockImport.summary === "object" ? latestFoundStockImport.summary as Record<string, unknown> : null;
   const auditDisposition = current?.disposition && typeof current.disposition === "object" ? current.disposition as Record<string, unknown> : null;
+  const marketplaceShadows = Array.isArray(auditDisposition?.marketplaceShadows) ? auditDisposition.marketplaceShadows as Array<Record<string, unknown>> : [];
   const transferDestinations = auditWarehouses.filter((item) =>
     String(item.id || "") !== String(current?.warehouseId || "") &&
     warehouseTypeOption(item.warehouseType).isPhysical &&
@@ -2435,11 +2465,13 @@ function WarehouseAuditPanel({
                   <Camera className="size-4" /> Use phone camera
                 </Button>
                 {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setLastScan(null); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}><ScanBarcode className="size-4" /> Scan bin</Button>}
-                {["in_progress", "pending_review"].includes(auditStatus) && <Button size="sm" disabled={busy || !lines.length || (isReceivingAudit && !hasPackingSlip)} title={isReceivingAudit && !hasPackingSlip ? "Add a packing slip before finishing this receipt" : undefined} onClick={() => void openInventoryAction()}><ArrowRight className="size-4" /> {isReceivingAudit ? "Finish receipt" : "Finish count"}</Button>}
+                  {["in_progress", "pending_review"].includes(auditStatus) && <Button size="sm" disabled={busy || !lines.length || (isReceivingAudit && !hasPackingSlip)} title={isReceivingAudit && !hasPackingSlip ? "Add a packing slip before finishing this receipt" : undefined} onClick={() => void openInventoryAction()}><ArrowRight className="size-4" /> {isReceivingAudit ? "Finish receipt" : isEbayOneTimeAudit ? "Create shadows" : "Finish count"}</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}><Play className="size-4" /> Continue counting</Button>}
+                {auditStatus === "completed" && String(current.reason || "") === "ebay_one_time_listing" && <Button size="sm" disabled={ebayShadowLaunchBusy} onClick={() => void launchAuditShadowsOnEbay()}>{ebayShadowLaunchBusy ? <Loader2 className="size-4 animate-spin" /> : <Store className="size-4" />} Launch shadows</Button>}
                 <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setBinLabelsOpen(true)}><Printer className="size-4" /> Print bin labels</DropdownMenuItem><DropdownMenuItem onSelect={() => void shareAuditLink()}><Share2 className="size-4" /> Share audit link</DropdownMenuItem>{activeBin && auditStatus === "in_progress" && <DropdownMenuItem disabled={busy || clearBinBusy} onSelect={requestClearBin}><X className="size-4" /> Clear bin</DropdownMenuItem>}{!mobile && desktopAuditTools && <DropdownMenuItem onSelect={() => setAuditToolsOpen(true)}><FileUp className="size-4" /> Import stock / eBay tools</DropdownMenuItem>}{!isLinkedPurchaseOrderReceipt && <DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem>}<DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
               </div>
             </div>
+            {isEbayOneTimeAudit && auditStatus === "completed" && <div className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">Warehouse shadows ready</p><p className="mt-1 text-xs text-muted-foreground">{numberLabel(marketplaceShadows.length)} reusable shadow SKU{marketplaceShadows.length === 1 ? "" : "s"} tied to {String(current.warehouseName)}. Launching reuses their saved channel data.</p></div>{Number(current.lastEbayShadowLaunchJobNumber || 0) > 0 && <Badge variant="outline">Job #{numberLabel(Number(current.lastEbayShadowLaunchJobNumber))}</Badge>}</div>{marketplaceShadows.length > 0 && <div className="mt-2 flex max-h-24 flex-wrap gap-1 overflow-y-auto">{marketplaceShadows.map((shadow) => <Badge key={String(shadow.shadowId || shadow.shadowSku)} variant="secondary" className="font-mono">{String(shadow.shadowSku || "Shadow")}</Badge>)}</div>}</div>}
             <Dialog open={Boolean(shareAuditUrl)} onOpenChange={(open) => { if (!open) setShareAuditUrl(""); }}>
               <DialogContent className="sm:max-w-lg">
                 <DialogHeader><DialogTitle>Share audit link</DialogTitle><DialogDescription>Copy this link and send it to a teammate. They must sign in and have access to this audit.</DialogDescription></DialogHeader>
@@ -2521,14 +2553,15 @@ function WarehouseAuditPanel({
                 {!isLinkedPurchaseOrderReceipt && <>
                 {actionPreviewLoading && <div className="flex items-center gap-2 rounded-md border bg-muted/30 p-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Checking open orders across supplier-equivalent SKUs...</div>}
                 {actionPreviewError && <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">{actionPreviewError}</div>}
-                {!actionPreviewLoading && !actionPreviewError && actionPreview && <div className={`rounded-md border p-4 ${compatibleDemandQty > 0 ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-700 dark:bg-emerald-950/35 dark:text-emerald-100" : "bg-muted/30"}`}><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">{compatibleDemandQty > 0 ? `${numberLabel(compatibleDemandQty)} counted units can serve open orders` : "No compatible open order demand found"}</p><p className="mt-1 text-xs text-muted-foreground">Matched across UPC, manufacturer part number, vendor SKU, and equivalent supplier SKUs.</p></div>{compatibleOrderCount > 0 && <Badge className="bg-emerald-600 text-white">{numberLabel(compatibleOrderCount)} order{compatibleOrderCount === 1 ? "" : "s"}</Badge>}</div>{compatibleOrders.length > 0 && <ScrollArea className="mt-3 max-h-40"><div className="grid gap-2 pr-3">{compatibleOrders.slice(0, 12).map((order) => <a key={String(order.id)} href={`/orders/${encodeURIComponent(String(order.id))}`} className="flex items-center justify-between gap-3 rounded-md border border-emerald-300/70 bg-background/80 px-3 py-2 text-sm hover:bg-background"><span className="min-w-0"><span className="block font-medium">#{String(order.orderNumber || order.id)}</span><span className="block truncate text-xs text-muted-foreground">{String(order.orderSku || order.auditSku || "Matched item")}</span></span><span className="flex shrink-0 items-center gap-2"><Badge variant="outline">{String(order.matchedBy || "") === "supplier_family" ? "Supplier-equivalent" : "Catalog SKU"}</Badge><span className="text-muted-foreground">{numberLabel(Number(order.remainingQty || 0))} needed</span></span></a>)}</div></ScrollArea>}</div>}
+                {!isEbayOneTimeAudit && !actionPreviewLoading && !actionPreviewError && actionPreview && <div className={`rounded-md border p-4 ${compatibleDemandQty > 0 ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-700 dark:bg-emerald-950/35 dark:text-emerald-100" : "bg-muted/30"}`}><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">{compatibleDemandQty > 0 ? `${numberLabel(compatibleDemandQty)} counted units can serve open orders` : "No compatible open order demand found"}</p><p className="mt-1 text-xs text-muted-foreground">Matched across UPC, manufacturer part number, vendor SKU, and equivalent supplier SKUs.</p></div>{compatibleOrderCount > 0 && <Badge className="bg-emerald-600 text-white">{numberLabel(compatibleOrderCount)} order{compatibleOrderCount === 1 ? "" : "s"}</Badge>}</div>{compatibleOrders.length > 0 && <ScrollArea className="mt-3 max-h-40"><div className="grid gap-2 pr-3">{compatibleOrders.slice(0, 12).map((order) => <a key={String(order.id)} href={`/orders/${encodeURIComponent(String(order.id))}`} className="flex items-center justify-between gap-3 rounded-md border border-emerald-300/70 bg-background/80 px-3 py-2 text-sm hover:bg-background"><span className="min-w-0"><span className="block font-medium">#{String(order.orderNumber || order.id)}</span><span className="block truncate text-xs text-muted-foreground">{String(order.orderSku || order.auditSku || "Matched item")}</span></span><span className="flex shrink-0 items-center gap-2"><Badge variant="outline">{String(order.matchedBy || "") === "supplier_family" ? "Supplier-equivalent" : "Catalog SKU"}</Badge><span className="text-muted-foreground">{numberLabel(Number(order.remainingQty || 0))} needed</span></span></a>)}</div></ScrollArea>}</div>}
+                {isEbayOneTimeAudit && <Alert className="border-blue-500/30 bg-blue-500/10"><Store className="size-4" /><AlertTitle>Reusable warehouse shadows</AlertTitle><AlertDescription>DataPlus will stock these counts here and create or reuse one cross-channel shadow per product using this warehouse code. Supplier inventory will not replenish these shadows.</AlertDescription></Alert>}
                 <div className="grid gap-3 md:grid-cols-2">
                   {[
                     { value: "fulfill_orders", title: "Use for open orders", description: "Stock the count here, then allocate compatible units and reroute affected orders." },
                     { value: "stock_here", title: "Stock here", description: `Make the approved units available in ${String(current.warehouseName)}.` },
                     { value: "transfer", title: "Transfer", description: "Count the units here, then move them to another physical warehouse." },
                     { value: "return_to_supplier", title: "Return to supplier", description: "Hold the units from sale and create a supplier-return draft." },
-                  ].filter((option) => !isReceivingAudit || ["fulfill_orders", "stock_here"].includes(option.value)).map((option) => <button key={option.value} type="button" onClick={() => setDispositionType(option.value as typeof dispositionType)} className={`rounded-md border p-4 text-left transition-colors ${dispositionType === option.value ? "border-primary bg-primary/10 ring-1 ring-primary" : "bg-background hover:bg-muted/60"}`}><span className="font-medium">{option.title}</span><span className="mt-1 block text-xs text-muted-foreground">{option.description}</span></button>)}
+                  ].filter((option) => isEbayOneTimeAudit ? option.value === "stock_here" : !isReceivingAudit || ["fulfill_orders", "stock_here"].includes(option.value)).map((option) => <button key={option.value} type="button" onClick={() => setDispositionType(option.value as typeof dispositionType)} className={`rounded-md border p-4 text-left transition-colors ${dispositionType === option.value ? "border-primary bg-primary/10 ring-1 ring-primary" : "bg-background hover:bg-muted/60"}`}><span className="font-medium">{isEbayOneTimeAudit ? "Stock here and create shadows" : option.title}</span><span className="mt-1 block text-xs text-muted-foreground">{isEbayOneTimeAudit ? `Keep inventory in ${String(current.warehouseName)} and prepare reusable temporary-listing SKUs.` : option.description}</span></button>)}
                 </div>
                 {dispositionType === "transfer" && <Field label="Destination warehouse"><Select value={destinationWarehouseId} onValueChange={setDestinationWarehouseId}><SelectTrigger><SelectValue placeholder="Choose a physical warehouse" /></SelectTrigger><SelectContent>{transferDestinations.map((item) => <SelectItem key={String(item.id || item.name)} value={String(item.id || "")}>{String(item.name || "Warehouse")}{item.code ? ` (${String(item.code)})` : ""}</SelectItem>)}</SelectContent></Select></Field>}
                 {dispositionType === "return_to_supplier" && <div className={`rounded-md border p-3 text-sm ${missingReturnSupplierLines.length || compatibleDemandQty > 0 ? "border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100" : "bg-muted/30"}`}><p className="font-medium">Returns are created separately for each verified supplier</p><p className="mt-1 text-xs text-muted-foreground">A mixed audit can create multiple supplier-return drafts. Confirm every multi-supplier line first so one item is not returned to multiple vendors.</p>{multipleSupplierActionLines > 0 && <p className="mt-2">{numberLabel(multipleSupplierActionLines)} counted line{multipleSupplierActionLines === 1 ? " has" : "s have"} multiple supplier coverage.</p>}{missingReturnSupplierLines.length > 0 && <p className="mt-2 font-medium">{numberLabel(missingReturnSupplierLines.length)} line{missingReturnSupplierLines.length === 1 ? "" : "s"} still need a supplier.</p>}{compatibleDemandQty > 0 && <label className="mt-3 flex items-start gap-2 rounded-md border border-amber-400/60 bg-background/70 p-3"><Checkbox checked={returnDespiteDemand} onCheckedChange={(checked) => setReturnDespiteDemand(checked === true)} /><span><span className="block font-medium">Return despite open customer demand</span><span className="mt-0.5 block text-xs text-muted-foreground">I reviewed {numberLabel(compatibleOrderCount)} compatible order{compatibleOrderCount === 1 ? "" : "s"} and still want supplier-return drafts created.</span></span></label>}</div>}
@@ -2537,7 +2570,7 @@ function WarehouseAuditPanel({
                 {isLinkedPurchaseOrderReceipt && <Field label="Receipt note"><Textarea value={dispositionNote} onChange={(event) => setDispositionNote(event.target.value)} placeholder="Optional receiving note" /></Field>}
                 <DialogFooter>
                   <Button variant="outline" onClick={() => setDispositionOpen(false)}>Cancel</Button>
-                  <Button disabled={finishActionBlocked} onClick={() => void complete()}>{busy && <Loader2 className="size-4 animate-spin" />}{isLinkedPurchaseOrderReceipt ? "Post PO receipt" : dispositionType === "fulfill_orders" ? "Receive & use for open orders" : dispositionType === "transfer" ? "Apply & transfer" : dispositionType === "return_to_supplier" ? "Create supplier return draft(s)" : isReceivingAudit ? "Receive & stock" : "Apply & stock"}</Button>
+                  <Button disabled={finishActionBlocked} onClick={() => void complete()}>{busy && <Loader2 className="size-4 animate-spin" />}{isLinkedPurchaseOrderReceipt ? "Post PO receipt" : isEbayOneTimeAudit ? "Apply & create shadows" : dispositionType === "fulfill_orders" ? "Receive & use for open orders" : dispositionType === "transfer" ? "Apply & transfer" : dispositionType === "return_to_supplier" ? "Create supplier return draft(s)" : isReceivingAudit ? "Receive & stock" : "Apply & stock"}</Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>

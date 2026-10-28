@@ -13938,8 +13938,25 @@ async function readProductByKey(key) {
       )
     limit 1
   `, [value]);
-  if (!result.rows[0]) return null;
-  const item = productRowToState(result.rows[0]);
+  let productRow = result.rows[0] || null;
+  if (!productRow) {
+    const shadowResult = await client.query(`
+      select p.*
+      from products p
+      where exists (
+        select 1
+        from jsonb_array_elements(
+          case when jsonb_typeof(p.raw -> 'shadowSkus') = 'array' then p.raw -> 'shadowSkus' else '[]'::jsonb end
+        ) shadow
+        where lower(coalesce(shadow ->> 'shadowSku', '')) = lower($1)
+          or lower(coalesce(shadow ->> 'marketplaceSku', '')) = lower($1)
+      )
+      limit 1
+    `, [value]);
+    productRow = shadowResult.rows[0] || null;
+  }
+  if (!productRow) return null;
+  const item = productRowToState(productRow);
   const productId = item.id;
   const sku = item.sku || "";
   const [aliases, identifiers, offers, levels, changes, sourceRows, shopifyStatus, sourceEnrichment] = await Promise.all([
@@ -14132,6 +14149,17 @@ async function readProductsByKeys(keys = [], options = {}) {
       from product_aliases
       where lower(alias_sku) = any($1)
         and active = true
+      union
+      select p.product_id
+      from products p
+      where exists (
+        select 1
+        from jsonb_array_elements(
+          case when jsonb_typeof(p.raw -> 'shadowSkus') = 'array' then p.raw -> 'shadowSkus' else '[]'::jsonb end
+        ) shadow
+        where lower(coalesce(shadow ->> 'shadowSku', '')) = any($1)
+          or lower(coalesce(shadow ->> 'marketplaceSku', '')) = any($1)
+      )
     )
     select products.*
     from products
@@ -14260,6 +14288,17 @@ async function readProductsForOrderSkus(keys = []) {
       from product_aliases
       where active = true
         and lower(alias_sku) = any($1)
+      union
+      select p.product_id
+      from products p
+      where exists (
+        select 1
+        from jsonb_array_elements(
+          case when jsonb_typeof(p.raw -> 'shadowSkus') = 'array' then p.raw -> 'shadowSkus' else '[]'::jsonb end
+        ) shadow
+        where lower(coalesce(shadow ->> 'shadowSku', '')) = any($1)
+          or lower(coalesce(shadow ->> 'marketplaceSku', '')) = any($1)
+      )
       union
       select product_id
       from shopify_product_statuses

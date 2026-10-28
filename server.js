@@ -4885,6 +4885,9 @@ function normalizeShadowSku(shadow = {}, parent = {}) {
   const createdAt = shadow.createdAt || new Date().toISOString();
   const requestedUnitsPerPack = Number(shadow.unitsPerPack || shadow.inventoryMultiplier || shadow.uomQty || 1);
   const unitsPerPack = Number.isFinite(requestedUnitsPerPack) && requestedUnitsPerPack >= 1 ? requestedUnitsPerPack : 1;
+  const channels = [...new Set((Array.isArray(shadow.channels) ? shadow.channels : [marketplace])
+    .map((value) => String(value || "").trim())
+    .filter(Boolean))];
   return {
     id: shadow.id || crypto.randomUUID(),
     parentSku: shadow.parentSku || parent.sku || "",
@@ -4894,6 +4897,17 @@ function normalizeShadowSku(shadow = {}, parent = {}) {
     inventoryMultiplier: unitsPerPack,
     marketplace,
     company: marketplace,
+    channels,
+    kind: String(shadow.kind || shadow.shadowType || "marketplace").trim().toLowerCase(),
+    warehouseId: String(shadow.warehouseId || "").trim(),
+    warehouseName: String(shadow.warehouseName || "").trim(),
+    warehouseCode: String(shadow.warehouseCode || "").trim().toUpperCase(),
+    sourceAuditIds: [...new Set((Array.isArray(shadow.sourceAuditIds) ? shadow.sourceAuditIds : [shadow.sourceAuditId])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean))],
+    channelListings: shadow.channelListings && typeof shadow.channelListings === "object" && !Array.isArray(shadow.channelListings)
+      ? shadow.channelListings
+      : {},
     price: Number(shadow.price ?? parent.price ?? 0),
     handlingTimeDays: Number(shadow.handlingTimeDays ?? shadow.handlingTime ?? 2),
     safetyQty: Number(shadow.safetyQty ?? 0),
@@ -4928,6 +4942,25 @@ function normalizeShadowSku(shadow = {}, parent = {}) {
     createdAt,
     updatedAt: shadow.updatedAt || createdAt
   };
+}
+
+function normalizedWarehouseShadowCode(warehouse = {}) {
+  const explicit = String(warehouse.code || "").trim().toUpperCase().replace(/[^A-Z0-9]+/g, "");
+  if (explicit) return explicit.slice(0, 12);
+  const words = String(warehouse.name || "Warehouse")
+    .trim()
+    .toUpperCase()
+    .split(/[^A-Z0-9]+/)
+    .filter((word) => word && !["WAREHOUSE", "WH", "CENTER", "CENTRE", "LOCATION"].includes(word));
+  const code = words.map((word) => /^\d+$/.test(word) ? word : word[0]).join("");
+  return (code || "WH").slice(0, 12);
+}
+
+function warehouseShadowSku(parentSku = "", warehouse = {}) {
+  const code = normalizedWarehouseShadowCode(warehouse);
+  const suffix = `-${code}`;
+  const cleaned = String(parentSku || "SKU").trim().replace(/\s+/g, "-").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-+/g, "-");
+  return `${cleaned.slice(0, Math.max(1, 50 - suffix.length))}${suffix}`;
 }
 
 function normalizeProductAlias(alias = {}, parent = {}) {
@@ -5034,7 +5067,8 @@ function backfillAliasesFromMappedOrders(db = {}) {
     const items = orderLineItems(order);
     for (let index = 0; index < items.length; index += 1) {
       const line = items[index];
-      const aliasSku = String(line.originalSku || line.mappedFromSku || line.shadowSku || "").trim();
+      if (line.shadowId || line.shadowSku || String(line.skuMappingMode || "").includes("shadow")) continue;
+      const aliasSku = String(line.originalSku || line.mappedFromSku || "").trim();
       const parentSku = String(line.parentSku || line.sku || "").trim();
       if (!aliasSku || !parentSku || aliasSku.toLowerCase() === parentSku.toLowerCase()) continue;
       const product = (db.inventory || []).find((item) => String(item.sku || "").toLowerCase() === parentSku.toLowerCase());
@@ -5043,7 +5077,7 @@ function backfillAliasesFromMappedOrders(db = {}) {
         const before = (product.aliases || []).length;
         addProductAlias(db, product, aliasSku, {
           source: order.source,
-          type: String(line.skuMappingMode || "").includes("shadow") ? "shadow" : "direct",
+          type: "direct",
           createdFromOrderId: order.id,
           createdFromOrderNumber: order.orderNumber,
           createdFromLineIndex: index,
@@ -22266,6 +22300,8 @@ async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
     paymentPolicyId: String(body.paymentPolicyId || settings.ebayPaymentPolicyId || ""),
     returnPolicyId: String(body.returnPolicyId || settings.ebayReturnPolicyId || ""),
     fulfillmentPolicyId: String(body.fulfillmentPolicyId || settings.ebayFulfillmentPolicyId || ""),
+    shadowLaunches: Array.isArray(body.shadowLaunches) ? body.shadowLaunches : [],
+    sourceAuditId: String(body.sourceAuditId || ""),
     categoryId: String(body.categoryId || settings.ebayDefaultCategoryId || ""),
     storeCategoryId: String(body.storeCategoryId || settings.ebayDefaultStoreCategoryId || ""),
     storeCategoryName: String(body.storeCategoryName || settings.ebayDefaultStoreCategoryName || ""),
@@ -25343,6 +25379,13 @@ const EBAY_LISTING_LAUNCH_RESULT_COLUMNS = [
 
 async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
+  const shadowLaunches = Array.isArray(payload.shadowLaunches) ? payload.shadowLaunches : [];
+  const shadowLaunchByProduct = new Map();
+  for (const entry of shadowLaunches) {
+    for (const key of [entry.productId, entry.parentSku].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)) {
+      shadowLaunchByProduct.set(key, entry);
+    }
+  }
   const lifecycleAction = normalizeEbayListingLifecycleAction(payload.lifecycleAction || "launch");
   // A revision updates an existing offer without publishing a new listing, so
   // `publish: false` must not accidentally turn that lifecycle action into a dry run.
@@ -25426,6 +25469,21 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
     await postgres.upsertOperationArtifact(job, "original").catch(() => {});
     const issuePreviews = [];
     let pendingTouched = [];
+    const shadowContexts = new WeakMap();
+    const markTouched = (item) => {
+      const context = shadowContexts.get(item);
+      if (context) {
+        context.shadow.channelListings = context.shadow.channelListings && typeof context.shadow.channelListings === "object" ? context.shadow.channelListings : {};
+        context.shadow.channelListings.ebay = { ...(item.ebayListing || {}), merchantSku: context.shadow.shadowSku };
+        context.shadow.channels = [...new Set([...(Array.isArray(context.shadow.channels) ? context.shadow.channels : []), "eBay"])];
+        context.shadow.status = item.ebayListing?.listingId ? "Live" : item.ebayListing?.offerId ? "Prepared" : context.shadow.status || "Draft";
+        context.shadow.updatedAt = new Date().toISOString();
+        context.parent.updatedAt = context.shadow.updatedAt;
+        if (!pendingTouched.includes(context.parent)) pendingTouched.push(context.parent);
+        return;
+      }
+      if (!pendingTouched.includes(item)) pendingTouched.push(item);
+    };
     let launched = 0;
     let ready = 0;
     let skipped = 0;
@@ -25448,7 +25506,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
           ...extra
         }
       };
-      if (!pendingTouched.includes(item)) pendingTouched.push(item);
+      markTouched(item);
     };
     for (let batchOffset = 0; batchOffset < candidateKeys.length; batchOffset += batchSize) {
       await assertImportJobStillActive(job.id);
@@ -25472,7 +25530,38 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
         results.push({ sku: key, lifecycle_action: lifecycleAction, marketplace: String(payload.marketplaceId || "EBAY_US"), dry_run: dryRun, status: "skipped", reason: "Product no longer exists in the selected catalog scope", processed_at: new Date().toISOString() });
       }
       for (let batchIndex = 0; batchIndex < candidates.length; batchIndex += 1) {
-      const item = candidates[batchIndex];
+      const parentItem = candidates[batchIndex];
+      const shadowLaunch = shadowLaunchByProduct.get(String(parentItem.id || "").toLowerCase())
+        || shadowLaunchByProduct.get(String(parentItem.sku || "").toLowerCase());
+      const shadow = shadowLaunch
+        ? (parentItem.shadowSkus || []).find((candidate) => String(candidate.id || "") === String(shadowLaunch.shadowId || "")
+          || String(candidate.shadowSku || "").toLowerCase() === String(shadowLaunch.shadowSku || "").toLowerCase())
+        : null;
+      const warehouseRows = shadow ? (parentItem.warehouseStock || []).filter((row) => String(row.warehouseId || "") === String(shadow.warehouseId || shadowLaunch.warehouseId || "")) : [];
+      const shadowQuantity = shadow ? Math.max(0, Math.floor(warehouseRows.reduce((sum, row) => sum + Number(row.qty || 0) - Number(row.reserved || 0), 0))) : null;
+      const item = shadow ? {
+        ...parentItem,
+        sku: shadow.shadowSku,
+        qty: shadowQuantity,
+        stockQty: shadowQuantity,
+        reserved: 0,
+        shadowSkus: [],
+        ebayListing: { ...(shadow.channelListings?.ebay || {}), merchantSku: shadow.shadowSku }
+      } : parentItem;
+      if (shadow) shadowContexts.set(item, { parent: parentItem, shadow });
+      const itemPayload = shadow ? {
+        ...payload,
+        shadowLaunch: true,
+        merchantSku: shadow.shadowSku,
+        quantity: shadowQuantity,
+        ebaySettings: {
+          ...(shadow.channelListings?.ebay?.settings || {}),
+          useChannelDefaults: shadow.channelListings?.ebay?.settings?.useChannelDefaults !== false,
+          ebayInventoryConnected: false,
+          ebayUseChannelDefaultQuantity: false,
+          ebayQuantityOverride: shadowQuantity
+        }
+      } : payload;
       const sku = String(item.sku || item.id || "");
       const title = String(item.marketplaceTitle || item.title || item.name || "").trim();
       const supplier = String(item.supplier || item.vendor || item.supplierName || "").trim();
@@ -25500,7 +25589,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
           results.push({ ...resultContext, status: "skipped", reason: launchBlockReason });
           reviewIssues.push(standardImportError({ sku, supplier, field: "status", issue: launchBlockReason, details: `${label} skipped this SKU.` }));
         } else {
-          const readiness = await ebayListingReadiness(workDb, item, payload);
+          const readiness = await ebayListingReadiness(workDb, item, itemPayload);
           const config = readiness.config || {};
           const calculatedPrice = Number(readiness.price || 0);
           const grossProfit = calculatedPrice - unitCost;
@@ -25537,8 +25626,8 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
             warningIssues.push(standardImportError({ sku, supplier, field: "status", issue: "Inactive/discontinued inventory bypass", details: launchInventoryWarning }));
           }
           if (lifecycleAction === "end") {
-            const listing = await withdrawEbayListing(workDb, item, payload);
-            pendingTouched.push(item);
+            const listing = await withdrawEbayListing(workDb, item, itemPayload);
+            markTouched(item);
             launched += 1;
             results.push({ ...resultBase, status: "ended", offer_id: listing.offerId || "", listing_id: listing.listingId || "" });
           } else if (!readiness.ready || (lifecycleAction === "relist" && readiness.status === "disabled")) {
@@ -25561,12 +25650,12 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
           } else {
             // Let the SKU resolve its own eBay inheritance/override profile. Bulk-level
             // payload fields still win when the operator explicitly supplied them.
-            const result = await createOrUpdateEbayListing(workDb, item, payload, {
+            const result = await createOrUpdateEbayListing(workDb, item, itemPayload, {
               publish: lifecycleAction === "relist" || (lifecycleAction === "launch" && payload.publish !== false),
               catalogMatchCache,
               jobId: job.id || ""
             });
-            pendingTouched.push(item);
+            markTouched(item);
             launched += 1;
             results.push({ ...resultBase, status: result.config?.listingId ? "live" : "offer", offer_id: result.config?.offerId || "", listing_id: result.config?.listingId || "", listing_url: result.config?.listingUrl || "", price: result.config?.price || readiness.price, quantity: result.config?.quantity || readiness.quantity, catalog_match: result.config?.catalogMatch?.status || "", ebay_product_id: result.config?.ePid || "", catalog_match_method: result.config?.catalogMatch?.matchedBy || "" });
           }
@@ -25574,7 +25663,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
       } catch (error) {
         const issue = error.message || "eBay listing request failed";
         if (lifecycleAction !== "end") saveReadiness(item, "error", [issue], { lifecycleAction });
-        if (error.ebayListingSaved && item.ebayListing?.offerId && !pendingTouched.includes(item)) pendingTouched.push(item);
+        if (error.ebayListingSaved && item.ebayListing?.offerId) markTouched(item);
         errors.push(standardImportError({ sku, supplier, field: "ebay_api", issue, details: `${label} failed for this SKU.` }));
         results.push({ ...resultContext, status: "failed", reason: "eBay API error", error: issue });
       }
@@ -34812,6 +34901,12 @@ function updateOrderLineSku(order, lineIndex, nextSku, body = {}) {
   if (Number(body.inventoryMultiplier) > 0) line.inventoryMultiplier = Math.max(1, Number(body.inventoryMultiplier));
   else delete line.inventoryMultiplier;
   if (body.marketplaceSku) line.marketplaceSku = String(body.marketplaceSku).trim();
+  if (body.shadowWarehouseId) line.shadowWarehouseId = String(body.shadowWarehouseId).trim();
+  else delete line.shadowWarehouseId;
+  if (body.shadowWarehouseCode) line.shadowWarehouseCode = String(body.shadowWarehouseCode).trim();
+  else delete line.shadowWarehouseCode;
+  if (body.shadowInventoryPolicy) line.shadowInventoryPolicy = String(body.shadowInventoryPolicy).trim();
+  else delete line.shadowInventoryPolicy;
   order.items = items;
   if (lineIndex === 0 || String(order.sku || "").toLowerCase() === previousSku.toLowerCase()) order.sku = nextSku;
   order.updatedAt = new Date().toISOString();
@@ -34858,6 +34953,9 @@ function unmapOrderLineSku(db, order, lineIndex, body = {}) {
   delete line.shadowId;
   delete line.marketplaceSku;
   delete line.inventoryMultiplier;
+  delete line.shadowWarehouseId;
+  delete line.shadowWarehouseCode;
+  delete line.shadowInventoryPolicy;
   line.skuMappingMode = "unmapped";
   line.skuUnmappedAt = new Date().toISOString();
   line.skuUnmappedBy = body.user || "Luis";
@@ -34919,15 +35017,6 @@ function createShadowSkuFromOrderLine(db, product, order, line, body = {}) {
   if (unitsPerPack > 1) {
     product.inventoryTrackingMode = "piece";
     product.inventoryBaseUnit = "each";
-  }
-  for (const aliasSku of [...new Set([shadowSku, marketplaceSku].filter(Boolean))]) {
-    addProductAlias(db, product, aliasSku, {
-      source: marketplace,
-      type: "shadow",
-      unitsPerPack,
-      inventoryMultiplier: unitsPerPack,
-      notes: shadow.notes
-    });
   }
   product.updatedAt = new Date().toISOString();
   return shadow;
@@ -35001,7 +35090,11 @@ async function ensureProductsForImportedOrders(db = {}, orders = [], options = {
   const existing = await postgres.readProductsByKeys([...firstLineBySku.values()].map((entry) => entry.sku), { includeMarketplaceIds: false });
   const resolved = new Set();
   for (const product of existing || []) {
-    for (const value of [product.sku, ...(product.aliases || []).map((alias) => alias.aliasSku || alias.sku || alias.value)]) {
+    for (const value of [
+      product.sku,
+      ...(product.aliases || []).map((alias) => alias.aliasSku || alias.sku || alias.value),
+      ...(product.shadowSkus || []).flatMap((shadow) => [shadow.shadowSku, shadow.marketplaceSku])
+    ]) {
       if (value) resolved.add(String(value).trim().toLowerCase());
     }
   }
@@ -37324,7 +37417,8 @@ function fulfillmentWarehousePlan(db = {}, order = {}, line = {}, product = {}, 
   const rules = normalizeWarehouseRoutingRules(settings.warehouseRoutingRules);
   const matchedRule = rules.find((rule) => routingRuleMatches(rule, order, line, product));
   const runtimeSettings = orderRuntimeSettings(db, systemSettings);
-  const requested = [order.warehouseId, line.warehouseId, matchedRule?.warehouseId, settings.defaultShipFromWarehouseId,
+  const shadowWarehouseId = String(line.shadowWarehouseId || "").trim();
+  const requested = [shadowWarehouseId, order.warehouseId, line.warehouseId, matchedRule?.warehouseId, settings.defaultShipFromWarehouseId,
     runtimeSettings.inventoryDefaultFulfillmentWarehouseId,
     ...(matchedRule?.fallbackWarehouseIds || []), ...(settings.fallbackWarehouseIds || []),
     ...mappings.sort((left, right) => left.orderRoutingPriority - right.orderRoutingPriority).map((mapping) => mapping.sourceWarehouseId)]
@@ -37334,6 +37428,7 @@ function fulfillmentWarehousePlan(db = {}, order = {}, line = {}, product = {}, 
   const warehouses = (db.warehouses || []).filter((warehouse) => {
     if (warehouse.status && String(warehouse.status).toLowerCase() !== "active") return false;
     if (warehouse.isSellable === false) return false;
+    if (shadowWarehouseId && String(warehouse.id || "") !== shadowWarehouseId) return false;
     if (restrict && !mappingByWarehouse.has(String(warehouse.id || "").toLowerCase())) return false;
     const supplierSource = String(warehouse.inventorySourceType || "").toLowerCase() === "supplier_feed"
       || warehouse.fulfillmentNetwork === "supplier";
@@ -37343,7 +37438,7 @@ function fulfillmentWarehousePlan(db = {}, order = {}, line = {}, product = {}, 
     const rightPriority = priority.get(String(right.id || "").toLowerCase()) ?? 9999;
     return leftPriority - rightPriority || String(left.name || "").localeCompare(String(right.name || ""));
   });
-  return { channel, settings, mappings, mappingByWarehouse, matchedRule, warehouses, restrict };
+  return { channel, settings, mappings, mappingByWarehouse, matchedRule, warehouses, restrict: restrict || Boolean(shadowWarehouseId), shadowWarehouseId };
 }
 
 async function fulfillmentProductForOrderedSku(importedSku = "", db = {}) {
@@ -37456,7 +37551,10 @@ async function routeOrderForFulfillment(db, order, body = {}) {
         shadowSku: matchedShadow?.shadowSku || (matchedAlias?.type === "shadow" ? importedSku : ""),
         shadowId: matchedShadow?.id || "",
         marketplaceSku: matchedShadow?.marketplaceSku || importedSku,
-        inventoryMultiplier
+        inventoryMultiplier,
+        shadowWarehouseId: matchedShadow?.warehouseId || "",
+        shadowWarehouseCode: matchedShadow?.warehouseCode || "",
+        shadowInventoryPolicy: matchedShadow?.inventoryPolicy || ""
       });
     }
     resolveOrderRoutingExceptions(order, lineIndex, ["missing_catalog_product"]);
@@ -37495,6 +37593,22 @@ async function routeOrderForFulfillment(db, order, body = {}) {
       explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "routed", routeType: "warehouse", qty, reason: plan.matchedRule ? `Matched routing rule ${plan.matchedRule.name}.` : "Selected by channel warehouse priority and available stock." });
       addInventoryLedger(db, product, { type: "workflow_reservation", source: "order_workflow", referenceId: order.id, referenceNumber: order.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name, quantityChange: 0, reservedChange: inventoryQty, reason: `Workflow allocation for ${order.orderNumber}: ${qty} sell unit${qty === 1 ? "" : "s"} (${inventoryQty} piece${inventoryQty === 1 ? "" : "s"})`, user: body.user || "System" });
       remaining -= qty;
+    }
+    if (remaining > 0 && plan.shadowWarehouseId) {
+      const shadowWarehouse = (db.warehouses || []).find((warehouse) => String(warehouse.id || "") === plan.shadowWarehouseId);
+      const message = `${line.shadowSku || line.marketplaceSku || line.sku} is a warehouse-only shadow with insufficient available inventory at ${shadowWarehouse?.name || line.shadowWarehouseCode || "its assigned warehouse"}.`;
+      explanation.decisions.push({ warehouseId: plan.shadowWarehouseId, warehouseName: shadowWarehouse?.name || "", status: "blocked", reason: message });
+      created.push(createWorkflowRoute(order, {
+        type: "warehouse", status: "inventory_shortage", lineIndex, sku: line.sku, title: line.title || line.sku,
+        qty: remaining, warehouseId: plan.shadowWarehouseId, warehouseName: shadowWarehouse?.name || "",
+        productId: product?.id || "", shadowSku: line.shadowSku || "", marketplaceSku: line.marketplaceSku || ""
+      }));
+      createOrderException(order, {
+        type: "warehouse_shadow_inventory_shortage", severity: "blocking", owner: "Fulfillment", lineIndex,
+        sku: line.shadowSku || line.marketplaceSku || line.sku, title: line.title || line.sku,
+        source: order.source || order.channelSource || "", description: message
+      });
+      continue;
     }
     if (remaining > 0) {
       const supplierOffers = routingSupplierOffers(db, product || {}, line);
@@ -37754,6 +37868,9 @@ function applyOrderSkuAliases(db, order = {}) {
       line.shadowId = shadow.id;
       line.marketplaceSku = shadow.marketplaceSku || importedSku;
       line.inventoryMultiplier = Math.max(1, Number(shadow.inventoryMultiplier || shadow.unitsPerPack || 1));
+      line.shadowWarehouseId = String(shadow.warehouseId || "");
+      line.shadowWarehouseCode = String(shadow.warehouseCode || "");
+      line.shadowInventoryPolicy = String(shadow.inventoryPolicy || "");
     } else if (alias) {
       line.inventoryMultiplier = Math.max(1, Number(alias.inventoryMultiplier || alias.uomQty || 1));
     }
@@ -40364,7 +40481,7 @@ async function ebayListingReadiness(db, item = {}, overrides = {}) {
   if (item.catalogAttentionRequired === true || item.raw?.catalogAttentionRequired === true) missing.unshift("System-created SKU needs catalog review");
   let purchaseUnits = null;
   try {
-    purchaseUnits = ebayPurchaseUnitPlan(db, item, overrides, config);
+    purchaseUnits = overrides.shadowLaunch === true ? null : ebayPurchaseUnitPlan(db, item, overrides, config);
     if (purchaseUnits && !missing.length) purchaseUnits = await ebayPurchaseUnitGrouping(db, item, config, purchaseUnits);
     if (purchaseUnits) {
       for (const child of purchaseUnits.variants) {
@@ -42709,7 +42826,7 @@ async function createOrUpdateEbayListing(db, item, body = {}, options = {}) {
   await enrichItemWithCatalogSource(db, item);
   const config = options.purchaseUnitConfig || ebayListingConfig(db, item, body);
   if (!options.purchaseUnitConfig) await applyEbayCatalogMatch(db, item, config, options);
-  if (!options.purchaseUnitConfig) {
+  if (!options.purchaseUnitConfig && body.shadowLaunch !== true) {
     const plan = ebayPurchaseUnitPlan(db, item, body, config);
     if (plan) return createOrUpdateEbayPurchaseUnits(db, item, body, options, config, plan);
   }
@@ -43884,6 +44001,89 @@ function auditWarehouseStockRow(product, audit, locationBin = "") {
     || (warehouseName && String(row.warehouseName || "").trim().toLowerCase() === warehouseName));
   if (bin) return warehouseRows.find((row) => String(row.locationBin || "").trim().toLowerCase() === bin) || warehouseRows[0] || null;
   return warehouseRows[0] || null;
+}
+
+function ebayShadowListingSeed(product = {}, shadowSku = "") {
+  const parent = product.ebayListing && typeof product.ebayListing === "object" ? product.ebayListing : {};
+  const settings = parent.settings && typeof parent.settings === "object" ? parent.settings : {};
+  return {
+    categoryId: parent.categoryId || "",
+    categoryPath: parent.categoryPath || "",
+    taxonomyVersion: parent.taxonomyVersion || "",
+    aspects: parent.aspects || {},
+    categoryAttributes: Array.isArray(parent.categoryAttributes) ? parent.categoryAttributes : [],
+    identifierType: parent.identifierType || "",
+    identifierValue: parent.identifierValue || "",
+    identifierUnavailable: parent.identifierUnavailable === true,
+    identifierUnavailableText: parent.identifierUnavailableText || "",
+    mpn: parent.mpn || product.mfrPartNumber || product.vendorSku || "",
+    merchantSku: shadowSku,
+    inventorySource: "warehouse shadow",
+    settings: {
+      ...settings,
+      useChannelDefaults: settings.useChannelDefaults !== false,
+      ebayInventoryConnected: false,
+      ebayUseChannelDefaultQuantity: false,
+      ebayQuantityOverride: ""
+    }
+  };
+}
+
+async function ensureWarehouseAuditShadows(audit = {}, warehouse = {}, products = []) {
+  const uniqueProducts = [...new Map((products || []).map((product) => [String(product.id || product.sku), product])).values()];
+  const created = [];
+  const reused = [];
+  const auditShadowOwners = new Map();
+  const warehouseCode = normalizedWarehouseShadowCode(warehouse);
+  if (!warehouseCode) throw new Error("Add a warehouse code before creating temporary marketplace shadows.");
+  for (const product of uniqueProducts) {
+    product.shadowSkus = Array.isArray(product.shadowSkus) ? product.shadowSkus : [];
+    let shadow = product.shadowSkus.find((candidate) => candidate.kind === "warehouse_clearance"
+      && String(candidate.warehouseId || "") === String(warehouse.id || ""));
+    if (!shadow) {
+      const shadowSku = warehouseShadowSku(product.sku, warehouse);
+      const pendingOwner = auditShadowOwners.get(shadowSku.toLowerCase());
+      if (pendingOwner && String(pendingOwner.id || pendingOwner.sku) !== String(product.id || product.sku)) {
+        throw new Error(`Shadow SKU ${shadowSku} would be shared by ${pendingOwner.sku} and ${product.sku}. Shorten one parent SKU or assign a different warehouse code.`);
+      }
+      const owner = await postgres.readProductByKey(shadowSku);
+      if (owner && String(owner.id || owner.sku) !== String(product.id || product.sku)) {
+        throw new Error(`Shadow SKU ${shadowSku} already belongs to ${owner.sku}. Assign a unique warehouse code before completing this audit.`);
+      }
+      shadow = normalizeShadowSku({
+        shadowSku,
+        marketplaceSku: shadowSku,
+        marketplace: "Cross-channel",
+        channels: ["eBay"],
+        kind: "warehouse_clearance",
+        warehouseId: warehouse.id,
+        warehouseName: warehouse.name,
+        warehouseCode,
+        sourceAuditIds: [audit.id],
+        unitsPerPack: 1,
+        inventoryPolicy: "Warehouse only",
+        price: Number(product.price || product.websitePrice || 0),
+        status: "Draft",
+        notes: `Reusable one-time listing shadow for ${warehouse.name || warehouseCode}.`,
+        channelListings: { ebay: ebayShadowListingSeed(product, shadowSku) }
+      }, product);
+      product.shadowSkus.push(shadow);
+      auditShadowOwners.set(shadowSku.toLowerCase(), product);
+      created.push({ productId: product.id, parentSku: product.sku, shadowId: shadow.id, shadowSku, warehouseId: warehouse.id, warehouseCode });
+    } else {
+      shadow.channels = [...new Set([...(Array.isArray(shadow.channels) ? shadow.channels : []), "eBay"])];
+      shadow.sourceAuditIds = [...new Set([...(Array.isArray(shadow.sourceAuditIds) ? shadow.sourceAuditIds : []), String(audit.id || "")].filter(Boolean))];
+      shadow.warehouseName = warehouse.name || shadow.warehouseName;
+      shadow.warehouseCode = warehouseCode;
+      shadow.inventoryPolicy = "Warehouse only";
+      shadow.channelListings = shadow.channelListings && typeof shadow.channelListings === "object" ? shadow.channelListings : {};
+      shadow.channelListings.ebay = { ...ebayShadowListingSeed(product, shadow.shadowSku), ...(shadow.channelListings.ebay || {}), merchantSku: shadow.shadowSku };
+      shadow.updatedAt = new Date().toISOString();
+      reused.push({ productId: product.id, parentSku: product.sku, shadowId: shadow.id, shadowSku: shadow.shadowSku, warehouseId: warehouse.id, warehouseCode });
+    }
+    product.updatedAt = new Date().toISOString();
+  }
+  return { warehouseId: warehouse.id, warehouseName: warehouse.name, warehouseCode, created, reused, shadows: [...created, ...reused] };
 }
 
 function auditExpectedQuantity(product, audit, locationBin = "") {
@@ -53624,6 +53824,7 @@ async function handleApi(req, res) {
       cycle_count: "Cycle count",
       new_inventory_onboarding: "New inventory onboarding",
       extra_stock: "Extra stock",
+      ebay_one_time_listing: "One-time eBay listings",
       receiving_inventory: "Receive inventory",
       external_po_receipt: "External PO receipt",
       purchase_order_receipt: "DataPlus PO receipt"
@@ -53735,6 +53936,7 @@ async function handleApi(req, res) {
       cycle_count: "Cycle count",
       new_inventory_onboarding: "New inventory onboarding",
       extra_stock: "Extra stock",
+      ebay_one_time_listing: "One-time eBay listings",
       receiving_inventory: "Receive inventory",
       external_po_receipt: "External PO receipt",
       purchase_order_receipt: "DataPlus PO receipt"
@@ -54144,6 +54346,71 @@ async function handleApi(req, res) {
     await postgres.saveWarehouseAudit(audit);
     const jobs = await mergedImportJobsAsync(db);
     return sendJson(res, result.duplicate ? 200 : 202, { job: clientImportJob(result.job), duplicate: result.duplicate, importJobs: clientImportJobs(jobs), message: result.duplicate ? "An eBay found-stock readiness job is already running." : `eBay readiness review queued for ${skus.length.toLocaleString()} found-stock SKU${skus.length === 1 ? "" : "s"}.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "ebay-shadow-launch" && postgres.isPostgresEnabled()) {
+    if (!userCan(authUser, "channels.ebay", "launch")) {
+      return sendJson(res, 403, {
+        error: "Your account does not have eBay launch access.",
+        missingPermission: { area: "channels.ebay", action: "launch" }
+      });
+    }
+    const audit = await postgres.readWarehouseAudit(parts[2]);
+    if (!audit) return notFound(res);
+    if (String(audit.reason || "") !== "ebay_one_time_listing") return sendJson(res, 400, { error: "This audit was not created for one-time eBay listings." });
+    if (String(audit.status || "") !== "completed") return sendJson(res, 409, { error: "Complete and apply the warehouse audit before launching its shadows." });
+    const productKeys = [...new Set((audit.lines || [])
+      .filter((line) => String(line.reviewStatus || "").toLowerCase() !== "excluded" && Number(line.countedQty || 0) > 0)
+      .map((line) => String(line.productId || line.sku || "").trim())
+      .filter(Boolean))];
+    const products = await postgres.readProductsByKeys(productKeys, { includeMarketplaceIds: false, includeInventoryLevels: true });
+    const shadowLaunches = [];
+    for (const product of products) {
+      const shadow = (product.shadowSkus || []).find((candidate) => candidate.kind === "warehouse_clearance"
+        && String(candidate.warehouseId || "") === String(audit.warehouseId || ""));
+      if (!shadow) continue;
+      shadowLaunches.push({
+        productId: product.id,
+        parentSku: product.sku,
+        shadowId: shadow.id,
+        shadowSku: shadow.shadowSku,
+        warehouseId: shadow.warehouseId,
+        warehouseCode: shadow.warehouseCode
+      });
+    }
+    if (!shadowLaunches.length) return sendJson(res, 409, { error: "No reusable warehouse shadows were found. Reopen or recreate the audit before launching." });
+    const db = await readDbFast({ skipInventory: true });
+    const result = await queueEbayListingLaunchJob(db, {
+      skus: shadowLaunches.map((entry) => entry.productId || entry.parentSku),
+      shadowLaunches,
+      sourceAuditId: audit.id,
+      lifecycleAction: "launch",
+      publish: true,
+      batchSize: Math.min(1000, Math.max(25, shadowLaunches.length))
+    }, { operation: `eBay warehouse shadows ${audit.auditNumber || ""}`.trim() });
+    const duplicateSourceAuditId = String(result.workerPayload?.sourceAuditId || result.job?.workerPayload?.sourceAuditId || "");
+    if (result.duplicate && duplicateSourceAuditId !== String(audit.id || "")) {
+      const activeReference = result.job?.jobNumber ? `Job #${result.job.jobNumber}` : "Another eBay launch job";
+      return sendJson(res, 409, {
+        error: `${activeReference} is already running. Launch these warehouse shadows after that job finishes.`,
+        activeJob: clientImportJob(result.job)
+      });
+    }
+    audit.lastEbayShadowLaunchJobId = result.job?.id || "";
+    audit.lastEbayShadowLaunchJobNumber = Number(result.job?.jobNumber || 0) || 0;
+    audit.lastEbayShadowLaunchAt = new Date().toISOString();
+    audit.updatedAt = audit.lastEbayShadowLaunchAt;
+    await postgres.saveWarehouseAudit(audit);
+    const jobs = await mergedImportJobsAsync(db);
+    return sendJson(res, result.duplicate ? 200 : 202, {
+      audit,
+      job: clientImportJob(result.job),
+      duplicate: result.duplicate,
+      importJobs: clientImportJobs(jobs),
+      message: result.duplicate
+        ? "An eBay listing launch is already active. Open Jobs to monitor it before retrying this audit."
+        : `eBay launch queued for ${shadowLaunches.length.toLocaleString()} warehouse shadow${shadowLaunches.length === 1 ? "" : "s"}.`
+    });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "next-sku" && postgres.isPostgresEnabled()) {
@@ -54646,6 +54913,7 @@ async function handleApi(req, res) {
     const dispositionType = String(body.dispositionType || "").trim().toLowerCase();
     if (!["fulfill_orders", "stock_here", "transfer", "return_to_supplier"].includes(dispositionType)) return sendJson(res, 400, { error: "Choose whether to use the stock for open orders, stock it, transfer it, or return it." });
     if (receivingAudit && !["fulfill_orders", "stock_here"].includes(dispositionType)) return sendJson(res, 400, { error: "Inbound receipts can be stocked here or used for open orders after receipt." });
+    if (String(audit.reason || "") === "ebay_one_time_listing" && dispositionType !== "stock_here") return sendJson(res, 400, { error: "One-time marketplace inventory must remain stocked in its audited warehouse." });
     const actionPreview = await buildWarehouseAuditActionPreview(audit);
     if (dispositionType === "return_to_supplier" && actionPreview.totalUsableQty > 0 && body.returnDespiteDemand !== true) {
       return sendJson(res, 409, { error: `${actionPreview.totalUsableQty} counted unit${actionPreview.totalUsableQty === 1 ? "" : "s"} can serve ${actionPreview.affectedOrderCount} open order${actionPreview.affectedOrderCount === 1 ? "" : "s"}. Review that demand and confirm the supplier return before continuing.`, preview: actionPreview });
@@ -54744,6 +55012,11 @@ async function handleApi(req, res) {
         dispositionLines.push({ sku: product.sku || line.sku, productId: product.id || line.productId || "", title: product.title || line.title || "", quantity: countedQty, qtyReceived: countedQty, qtyBefore, qtyAfter: Number(stockRow?.qty ?? product.qty ?? 0), locationBin: line.locationBin || stockRow?.locationBin || "", supplierId: lineSupplier?.vendorId || audit.supplierId || "", supplierName: lineSupplier?.supplierName || audit.supplierName || "", supplierCode: lineSupplier?.supplierCode || "", vendorSku: lineSupplier?.vendorSku || "", unitCost: Number(lineSupplier?.cost || 0), supplierMatchType: lineSupplier?.matchType || "" });
       }
       products.push(product);
+    }
+    let marketplaceShadowSummary = null;
+    if (String(audit.reason || "") === "ebay_one_time_listing" && products.length) {
+      marketplaceShadowSummary = await ensureWarehouseAuditShadows(audit, auditWarehouse, products);
+      audit.marketplaceShadowSummary = marketplaceShadowSummary;
     }
     if (products.length) { await postgres.upsertProductsFromState(products); await postgres.upsertInventoryLevelsFromProducts(products); }
     const routedOrders = [];
@@ -54921,7 +55194,7 @@ async function handleApi(req, res) {
     audit.status = "completed"; audit.completedAt = new Date().toISOString(); audit.approvedAt = audit.completedAt; audit.approvedBy = String(body.user || "Approver").trim() || "Approver"; audit.appliedLines = products.length;
     const allocatedQty = routedOrders.reduce((sum, row) => sum + Number(row.allocatedQty || 0), 0);
     const blockedQty = routedOrders.reduce((sum, row) => sum + Number(row.blockedQty || 0), 0);
-    audit.disposition = { type: receivingAudit ? "inbound_receipt" : dispositionType, label: receivingAudit ? `Inbound receipt ${inboundReceipt?.receiptNumber || "posted"}` : dispositionType === "fulfill_orders" ? "Allocated to open orders" : dispositionType === "transfer" ? "Transferred" : dispositionType === "return_to_supplier" ? "Return to suppliers" : "Stocked here", receiptId: inboundReceipt?.id || "", receiptNumber: inboundReceipt?.receiptNumber || "", destinationWarehouseId: destinationWarehouse?.id || "", destinationWarehouseName: destinationWarehouse?.name || "", supplierReturns: createdSupplierReturns.map((row) => ({ id: row.id, returnNumber: row.returnNumber, supplierId: row.supplierId, supplierName: row.supplierName, totalUnits: row.totalUnits })), routedOrders, allocatedQty, blockedQty, compatibleDemand: { orderCount: actionPreview.affectedOrderCount, usableQty: actionPreview.totalUsableQty }, note: String(body.dispositionNote || "").trim(), appliedAt: audit.completedAt, appliedBy: audit.approvedBy };
+    audit.disposition = { type: receivingAudit ? "inbound_receipt" : dispositionType, label: receivingAudit ? `Inbound receipt ${inboundReceipt?.receiptNumber || "posted"}` : dispositionType === "fulfill_orders" ? "Allocated to open orders" : dispositionType === "transfer" ? "Transferred" : dispositionType === "return_to_supplier" ? "Return to suppliers" : "Stocked here", receiptId: inboundReceipt?.id || "", receiptNumber: inboundReceipt?.receiptNumber || "", destinationWarehouseId: destinationWarehouse?.id || "", destinationWarehouseName: destinationWarehouse?.name || "", supplierReturns: createdSupplierReturns.map((row) => ({ id: row.id, returnNumber: row.returnNumber, supplierId: row.supplierId, supplierName: row.supplierName, totalUnits: row.totalUnits })), routedOrders, allocatedQty, blockedQty, compatibleDemand: { orderCount: actionPreview.affectedOrderCount, usableQty: actionPreview.totalUsableQty }, marketplaceShadows: marketplaceShadowSummary?.shadows || [], note: String(body.dispositionNote || "").trim(), appliedAt: audit.completedAt, appliedBy: audit.approvedBy };
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500), inventoryLedger: db.inventoryLedger || [], ...(manualWarehouseReceipts ? { manualWarehouseReceipts: manualWarehouseReceipts.slice(0, 5000) } : {}) });
     const outcome = dispositionType === "fulfill_orders" ? `stocked in ${auditWarehouse.name}; ${allocatedQty} unit${allocatedQty === 1 ? " was" : "s were"} allocated to open orders${blockedQty ? ` and ${blockedQty} remained tied to submitted supplier POs` : ""}` : dispositionType === "transfer" ? `transferred to ${destinationWarehouse.name}` : dispositionType === "return_to_supplier" ? `placed on hold in ${createdSupplierReturns.length} supplier return draft${createdSupplierReturns.length === 1 ? "" : "s"}` : `stocked in ${auditWarehouse.name}`;
     return sendJson(res, 200, { audit, receipt: inboundReceipt, supplierReturn: createdSupplierReturns[0] || null, supplierReturns: createdSupplierReturns, routedOrders, actionPreview, message: receivingAudit ? `${audit.auditNumber} completed. ${inboundReceipt?.receiptNumber || "The inbound receipt"} added ${dispositionLines.reduce((sum, line) => sum + Number(line.quantity || 0), 0)} unit${dispositionLines.reduce((sum, line) => sum + Number(line.quantity || 0), 0) === 1 ? "" : "s"} to ${auditWarehouse.name}.` : `${audit.auditNumber} completed. ${products.length} catalog counts were ${outcome}.` });
@@ -60006,15 +60279,6 @@ async function handleApi(req, res) {
     if (unitsPerPack > 1) {
       item.inventoryTrackingMode = "piece";
       item.inventoryBaseUnit = "each";
-    }
-    for (const aliasSku of [...new Set([shadowSku, marketplaceSku].filter(Boolean))]) {
-      addProductAlias(db, item, aliasSku, {
-        source: marketplace,
-        type: "shadow",
-        unitsPerPack,
-        inventoryMultiplier: unitsPerPack,
-        notes: String(body.notes || "").trim()
-      });
     }
     item.updatedAt = new Date().toISOString();
     await postgres.upsertProductsFromState([item]);
