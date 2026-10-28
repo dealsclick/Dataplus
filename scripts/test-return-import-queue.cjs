@@ -32,6 +32,7 @@ for (const workerName of [
 }
 
 const externalWorker = fs.readFileSync(path.join(__dirname, 'dataplus-worker.js'), 'utf8');
+const database = fs.readFileSync(path.join(__dirname, '../db.js'), 'utf8');
 assert.match(externalWorker, /async function checkScheduledEbayReturnImport\(/);
 assert.match(externalWorker, /queueEbayReturnImportJob\(stateDb/);
 assert.match(externalWorker, /async function checkScheduledTemuReturnImport\(/);
@@ -39,5 +40,7 @@ assert.match(externalWorker, /queueTemuReturnImportJob\(stateDb/);
 assert.match(externalWorker, /await checkScheduledEbayReturnImport\(\)/);
 assert.match(externalWorker, /await checkScheduledTemuReturnImport\(\)/);
 assert.match(server, /queueTemuReturnImportJob,/);
+assert.match(database, /"channelEbayReturnImportSchedules"/);
+assert.match(database, /"channelTemuReturnImportSchedules"/);
 
 console.log('PASS return imports queue and run without loading operational order state');

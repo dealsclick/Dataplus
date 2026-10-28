@@ -25138,6 +25138,8 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
       ? fetchAll
         ? "Repairing all blind Temu orders..."
         : `Repairing blind Temu orders, up to ${limit.toLocaleString()} records...`
+      : payload.historicalBackfill && targetedRefresh
+      ? `Importing ${payload.parentOrderSnList.length.toLocaleString()} missing historical Temu order${payload.parentOrderSnList.length === 1 ? "" : "s"}...`
       : targetedRefresh
       ? `Refreshing ${payload.parentOrderSnList.length.toLocaleString()} Temu order status update${payload.parentOrderSnList.length === 1 ? "" : "s"}...`
       : payload.scheduled
@@ -38636,7 +38638,9 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
     workerTask: shouldRunJobsInline() ? "" : workerTask,
     workerPayload: shouldRunJobsInline() ? {} : workerPayload,
     message: workerPayload.historicalBackfill
-      ? `Temu historical order backfill queued for the last ${lookbackDays} days. Existing orders will be skipped and operational side effects are disabled.`
+      ? parentOrderSnList.length
+        ? `Temu historical order repair queued for ${parentOrderSnList.length.toLocaleString()} specified marketplace orders. Existing orders will be skipped and operational side effects are disabled.`
+        : `Temu historical order backfill queued for the last ${lookbackDays} days. Existing orders will be skipped and operational side effects are disabled.`
       : `${label} queued; ${fetchAll ? 'all matching orders' : `up to ${limit} orders`}.`
   });
   upsertImportJobStore(job);
