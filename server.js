@@ -22034,6 +22034,18 @@ function getWalmartMarketplace() {
 }
 async function runWalmartWorkerJob(job) { return getWalmartMarketplace().run(job); }
 async function checkWalmartOrderSchedule() { return getWalmartMarketplace().schedule(); }
+async function queueWalmartReturnImportJob(options = {}) {
+  const end = new Date(options.endDate || Date.now());
+  const start = new Date(options.startDate);
+  if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start || end - start > 730 * 86400000) {
+    throw new Error("Choose a valid Walmart return date range of at most two years.");
+  }
+  return getWalmartMarketplace().queue("returns", {
+    startDate: start.toISOString(),
+    endDate: end.toISOString(),
+    scheduled: options.scheduled === true
+  });
+}
 async function queueWalmartSettlementSyncJob(options = {}) { return getWalmartMarketplace().queue('settlements', { scheduled: options.scheduled === true, scheduleKey: options.scheduleKey || '', lookbackDays: options.lookbackDays || 45 }); }
 async function queueWalmartReadinessJob(actor, payload = {}) {
   return getWalmartMarketplace().queue("match", { ...payload, actor, readiness: true });
@@ -73076,6 +73088,7 @@ module.exports = {
   drainChannelApiLogWrites,
   checkWalmartOrderSchedule,
   runWalmartWorkerJob,
+  queueWalmartReturnImportJob,
   queueWalmartSettlementSyncJob,
   checkTikTokSchedule,
   runTikTokWorkerJob,

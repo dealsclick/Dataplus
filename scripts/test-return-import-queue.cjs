@@ -40,6 +40,9 @@ assert.match(externalWorker, /queueTemuReturnImportJob\(stateDb/);
 assert.match(externalWorker, /await checkScheduledEbayReturnImport\(\)/);
 assert.match(externalWorker, /await checkScheduledTemuReturnImport\(\)/);
 assert.match(server, /queueTemuReturnImportJob,/);
+assert.match(server, /async function queueWalmartReturnImportJob\(options = \{\}\)/);
+assert.match(server, /end - start > 730 \* 86400000/);
+assert.match(server, /queueWalmartReturnImportJob,/);
 assert.match(database, /"channelEbayReturnImportSchedules"/);
 assert.match(database, /"channelTemuReturnImportSchedules"/);
 
