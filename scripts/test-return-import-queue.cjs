@@ -31,4 +31,13 @@ for (const workerName of [
   assert.match(worker, /readChannelJobQueueState\(\)/, `${workerName} uses lightweight channel state`);
 }
 
+const externalWorker = fs.readFileSync(path.join(__dirname, 'dataplus-worker.js'), 'utf8');
+assert.match(externalWorker, /async function checkScheduledEbayReturnImport\(/);
+assert.match(externalWorker, /queueEbayReturnImportJob\(stateDb/);
+assert.match(externalWorker, /async function checkScheduledTemuReturnImport\(/);
+assert.match(externalWorker, /queueTemuReturnImportJob\(stateDb/);
+assert.match(externalWorker, /await checkScheduledEbayReturnImport\(\)/);
+assert.match(externalWorker, /await checkScheduledTemuReturnImport\(\)/);
+assert.match(server, /queueTemuReturnImportJob,/);
+
 console.log('PASS return imports queue and run without loading operational order state');

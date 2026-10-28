@@ -36,11 +36,14 @@ async function run(mode, hasExisting, limit = 10, options = {}) {
 }
 (async()=>{
   const dbSource=fs.readFileSync(require('node:path').join(__dirname,'../db.js'),'utf8');
-  const lookupContext={getPool:()=>({query:async()=>({rows:[{order_id:'a'},{order_id:'b'}]})}),initRelationalSchema:async()=>{},readOrderByKey:()=>{throw new Error('Intake must not hydrate existing orders');}};
+  let lookupRows=[{order_id:'a',canonical:false},{order_id:'b',canonical:false}];
+  const lookupContext={getPool:()=>({query:async()=>({rows:lookupRows})}),initRelationalSchema:async()=>{},buildOrderIdentity:()=>({channelKey:'temu',tenantId:'organization-default',companyId:'linq-usa'}),readOrderByKey:async id=>({id})};
   vm.createContext(lookupContext);
   vm.runInContext(dbSource.slice(dbSource.indexOf('async function readChannelOrderForReturn('),dbSource.indexOf('async function acquireReturnWriteLock(')),lookupContext);
   assert.equal(await lookupContext.readChannelOrderForReturn('Temu',{orderId:'one',existsOnly:true}),true);
   await assert.rejects(lookupContext.readChannelOrderForReturn('Temu',{orderId:'one',requireUnique:true}),/Multiple local orders/);
+  lookupRows=[{order_id:'canonical',canonical:true},{order_id:'duplicate',canonical:false}];
+  assert.equal((await lookupContext.readChannelOrderForReturn('Temu',{orderId:'one',requireUnique:true})).id,'canonical');
   assert.equal(orderMode({}), 'intake');assert.equal(orderMode({repairBlind:true}),'enrichment');
   assert.throws(()=>orderMode({mode:'bad'}));
   let r=await run('intake',true);assert.equal(r.calls.length,1);assert.equal(r.saved.length,0);

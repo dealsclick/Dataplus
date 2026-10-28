@@ -1047,6 +1047,10 @@ const DEFAULT_CHANNEL_SETTINGS = {
   ebayReturnSyncEnabled: false,
   ebayReturnSyncLookbackDays: 90,
   ebayReturnSyncLimit: 1000,
+  ebayReturnSyncScheduleEnabled: true,
+  ebayReturnSyncScheduleType: "interval",
+  ebayReturnSyncScheduleTimes: "03:00,15:00",
+  ebayReturnSyncScheduleEveryHours: 2,
   temuEndpoint: "https://openapi-b-us.temu.com/openapi/router",
   temuAuthorizationUrl: "https://seller.temu.com/open-platform/client-manage/authorization",
   temuAppKey: "",
@@ -1069,6 +1073,11 @@ const DEFAULT_CHANNEL_SETTINGS = {
   temuFulfillmentSyncEnabled: false,
   temuCancellationNotificationEnabled: false,
   temuReturnSyncEnabled: false,
+  temuReturnSyncLookbackDays: 30,
+  temuReturnSyncScheduleEnabled: true,
+  temuReturnSyncScheduleType: "interval",
+  temuReturnSyncScheduleTimes: "03:00,15:00",
+  temuReturnSyncScheduleEveryHours: 2,
   temuRefundSyncEnabled: false,
   temuWebhookEnabled: false,
   temuWebhookEndpoint: "",
@@ -5077,10 +5086,10 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultReplenishableQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "minimumPrice", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayCatalogSyncScheduleEveryHours", "ebayLaunchStatusMaxAgeHours", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuMinimumPrice", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "tiktokOrderScheduleHours", "tiktokOrderLookbackDays", "tiktokReturnScheduleHours", "tiktokReturnLookbackDays", "tiktokSettlementScheduleHours", "tiktokSettlementLookbackDays", "tiktokLiveScheduleHours", "tiktokLiveLookbackDays", "tiktokMessageScheduleHours", "tiktokAnalyticsScheduleHours", "tiktokAnalyticsLookbackDays", "tiktokInventorySafetyQty", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate", "walmartInventoryScheduleHours"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultReplenishableQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "minimumPrice", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayCatalogSyncScheduleEveryHours", "ebayLaunchStatusMaxAgeHours", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "ebayReturnSyncScheduleEveryHours", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuMinimumPrice", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "temuReturnSyncLookbackDays", "temuReturnSyncScheduleEveryHours", "tiktokOrderScheduleHours", "tiktokOrderLookbackDays", "tiktokReturnScheduleHours", "tiktokReturnLookbackDays", "tiktokSettlementScheduleHours", "tiktokSettlementLookbackDays", "tiktokLiveScheduleHours", "tiktokLiveLookbackDays", "tiktokMessageScheduleHours", "tiktokAnalyticsScheduleHours", "tiktokAnalyticsLookbackDays", "tiktokInventorySafetyQty", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate", "walmartInventoryScheduleHours"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "createMissingOrderSkusFromSource", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayRequireFreshStatusBeforeLaunch", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "tiktokOrdersEnabled", "tiktokOrderScheduleEnabled", "tiktokReturnsEnabled", "tiktokReturnScheduleEnabled", "tiktokSettlementImportEnabled", "tiktokSettlementScheduleEnabled", "tiktokCatalogEnabled", "tiktokLiveAnalyticsEnabled", "tiktokLiveScheduleEnabled", "tiktokLiveOrderAttributionEnabled", "tiktokLaunchEnabled", "tiktokInventoryEnabled", "tiktokPriceEnabled", "tiktokFulfillmentEnabled", "tiktokLabelPurchaseEnabled", "tiktokMessagesEnabled", "tiktokMessageScheduleEnabled", "tiktokWebhooksEnabled", "tiktokAnalyticsEnabled", "tiktokAnalyticsScheduleEnabled", "tiktokAffiliateEnabled", "tiktokPromotionsEnabled", "tiktokCustomerEngagementEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifySettlementImportEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled", "walmartInventoryScheduleEnabled", "walmartSettlementImportEnabled"]) {
+  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "createMissingOrderSkusFromSource", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayRequireFreshStatusBeforeLaunch", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "ebayReturnSyncScheduleEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuReturnSyncScheduleEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "tiktokOrdersEnabled", "tiktokOrderScheduleEnabled", "tiktokReturnsEnabled", "tiktokReturnScheduleEnabled", "tiktokSettlementImportEnabled", "tiktokSettlementScheduleEnabled", "tiktokCatalogEnabled", "tiktokLiveAnalyticsEnabled", "tiktokLiveScheduleEnabled", "tiktokLiveOrderAttributionEnabled", "tiktokLaunchEnabled", "tiktokInventoryEnabled", "tiktokPriceEnabled", "tiktokFulfillmentEnabled", "tiktokLabelPurchaseEnabled", "tiktokMessagesEnabled", "tiktokMessageScheduleEnabled", "tiktokWebhooksEnabled", "tiktokAnalyticsEnabled", "tiktokAnalyticsScheduleEnabled", "tiktokAffiliateEnabled", "tiktokPromotionsEnabled", "tiktokCustomerEngagementEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifySettlementImportEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled", "walmartInventoryScheduleEnabled", "walmartSettlementImportEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   settings.replenishableFeedMaxAgeHours = Math.max(0, Number(settings.replenishableFeedMaxAgeHours || 0));
@@ -5105,6 +5114,9 @@ function normalizeChannel(channel = {}) {
   settings.ebayOrderImportLimit = Math.max(1, Math.min(5000, Number(settings.ebayOrderImportLimit || 250) || 250));
   settings.ebayReturnSyncLookbackDays = Math.max(1, Math.min(548, Number(settings.ebayReturnSyncLookbackDays || 90) || 90));
   settings.ebayReturnSyncLimit = Math.max(1, Math.min(10000, Number(settings.ebayReturnSyncLimit || 1000) || 1000));
+  settings.ebayReturnSyncScheduleType = String(settings.ebayReturnSyncScheduleType || "interval").toLowerCase() === "times" ? "times" : "interval";
+  settings.ebayReturnSyncScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.ebayReturnSyncScheduleEveryHours || 2) || 2));
+  settings.ebayReturnSyncScheduleTimes = normalizeChannelScheduleTimes(settings.ebayReturnSyncScheduleTimes || DEFAULT_CHANNEL_SETTINGS.ebayReturnSyncScheduleTimes);
   settings.ebayListingLaunchLimit = Math.max(1, Math.min(5000, Number(settings.ebayListingLaunchLimit || 500) || 500));
   settings.ebayOrderImportScheduleType = String(settings.ebayOrderImportScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
   settings.ebayOrderImportScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.ebayOrderImportScheduleEveryHours || 12) || 12));
@@ -5112,6 +5124,10 @@ function normalizeChannel(channel = {}) {
   settings.temuOrderImportScheduleType = String(settings.temuOrderImportScheduleType || "times").toLowerCase() === "interval" ? "interval" : "times";
   settings.temuOrderImportScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.temuOrderImportScheduleEveryHours || 12) || 12));
   settings.temuOrderImportScheduleTimes = normalizeChannelScheduleTimes(settings.temuOrderImportScheduleTimes || DEFAULT_CHANNEL_SETTINGS.temuOrderImportScheduleTimes);
+  settings.temuReturnSyncLookbackDays = Math.max(1, Math.min(365, Number(settings.temuReturnSyncLookbackDays || 30) || 30));
+  settings.temuReturnSyncScheduleType = String(settings.temuReturnSyncScheduleType || "interval").toLowerCase() === "times" ? "times" : "interval";
+  settings.temuReturnSyncScheduleEveryHours = Math.max(1, Math.min(24, Number(settings.temuReturnSyncScheduleEveryHours || 2) || 2));
+  settings.temuReturnSyncScheduleTimes = normalizeChannelScheduleTimes(settings.temuReturnSyncScheduleTimes || DEFAULT_CHANNEL_SETTINGS.temuReturnSyncScheduleTimes);
   for (const prefix of ['temuOrderStatus', 'temuOrderEnrichment']) {
     settings[prefix + 'ScheduleEnabled'] = settings[prefix + 'ScheduleEnabled'] === true || settings[prefix + 'ScheduleEnabled'] === 'true';
     settings[prefix + 'ScheduleType'] = 'interval';
@@ -24866,21 +24882,29 @@ async function readChannelJobQueueState() {
   });
 }
 
-async function queueTemuReturnImportJob(db, body = {}) {
+async function queueTemuReturnImportJob(db, body = {}, options = {}) {
   const channel = requireEnabledChannel(db, "Temu");
-  if (!channel.settings?.temuReturnSyncEnabled) throw new Error("Enable Temu return sync in Channel Settings before importing returns.");
+  if (!channel.settings?.temuReturnSyncEnabled && !options.ignoreDisabled) throw new Error("Enable Temu return sync in Channel Settings before importing returns.");
   const active = await findActiveImportJobByWorkerTask(db, "temu-return-import");
   if (active) return { duplicate: true, job: active };
   const since = String(body.since || `${new Date().getFullYear()}-01-01`);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(since) || !Number.isFinite(Date.parse(since)) || Date.parse(since) > Date.now()) throw new Error("Enter a valid past start date.");
+  const until = Number(body.until || Date.now());
+  if (!Number.isFinite(until) || until < Date.parse(since)) throw new Error("Enter a valid return import end date.");
+  const operation = options.operation || "Temu return import";
   const job = createImportJob(db, {
-    section: "Operations", category: "Returns", operation: "Temu return import", direction: "import",
-    status: "queued", phase: "queued", workerTask: "temu-return-import", workerPayload: { since, until: Date.now() },
+    section: "Operations", category: "Returns", operation, direction: "import",
+    status: "queued", phase: "queued", workerTask: "temu-return-import", workerPayload: {
+      since,
+      until,
+      scheduled: options.scheduled === true,
+      scheduleKey: options.scheduleKey || ""
+    },
     fileName: "temu-returns-import-results.csv", message: `Temu return import queued from ${since}.`
   });
   upsertImportJobStore(job);
   await postgres.upsertOperationJob(job);
-  appendChannelApiLog({ channel: "Temu", transport: "Job", method: "QUEUE", path: "temu-returns", operation: "Temu return import", statusCode: 202, ok: true, jobId: job.id, message: job.message });
+  appendChannelApiLog({ channel: "Temu", transport: "Job", method: "QUEUE", path: "temu-returns", operation: options.scheduled ? "Scheduled Temu return import queued" : "Temu return import", statusCode: 202, ok: true, jobId: job.id, message: job.message });
   return { duplicate: false, job };
 }
 
@@ -73117,6 +73141,7 @@ module.exports = {
   runShopifySettlementSyncWorkerJob,
   runTemuSettlementReportImportWorkerJob,
   queueEbayReturnImportJob,
+  queueTemuReturnImportJob,
   queueEbayCatalogSyncJob,
   queueEbayPriceInventorySyncJob,
   queueEbayListingLaunchJob,

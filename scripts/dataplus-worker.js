@@ -112,8 +112,10 @@ let lastScheduleCheckAt = 0;
 let lastSkuMapScheduleCheckAt = 0;
 let lastOrderImportScheduleCheckAt = 0;
 let lastEbayOrderImportScheduleCheckAt = 0;
+let lastEbayReturnImportScheduleCheckAt = 0;
 let lastEbayCatalogSyncScheduleCheckAt = 0;
 let lastTemuOrderImportScheduleCheckAt = 0;
+let lastTemuReturnImportScheduleCheckAt = 0;
 let lastEbayPriceInventoryScheduleCheckAt = 0;
 let lastSettlementScheduleCheckAt = 0;
 let lastSupplierReminderScheduleCheckAt = 0;
@@ -932,6 +934,58 @@ async function checkScheduledEbayOrderImport(force = false) {
   }
 }
 
+async function checkScheduledEbayReturnImport(force = false) {
+  const nowMs = Date.now();
+  if (!force && nowMs - lastEbayReturnImportScheduleCheckAt < 60000) return false;
+  lastEbayReturnImportScheduleCheckAt = nowMs;
+  const docs = await readSchedulerState(["channelEbayReturnImportSchedules"]);
+  const stateDb = schedulerDb(docs);
+  const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === "ebay");
+  const settings = channel?.settings || {};
+  if (!channel || settings.channelEnabled === false || !settings.ebayReturnSyncEnabled || settings.ebayReturnSyncScheduleEnabled === false) return false;
+  const now = new Date(nowMs);
+  const dueSlot = dueScheduleSlot(settings, "ebayReturnSyncSchedule", now);
+  if (!dueSlot) return false;
+  const today = localDateKey(now);
+  const scheduleId = `${channel.id || "ebay"}:returns:${today}:${dueSlot}`;
+  const scheduleState = docs.channelEbayReturnImportSchedules && typeof docs.channelEbayReturnImportSchedules === "object" ? docs.channelEbayReturnImportSchedules : {};
+  const previous = scheduleState[scheduleId] || {};
+  if (previous.lastRunDate === today) return false;
+  try {
+    const result = await dataplus.queueEbayReturnImportJob(stateDb, {
+      lookbackDays: settings.ebayReturnSyncLookbackDays || 90,
+      limit: settings.ebayReturnSyncLimit || 1000
+    }, { scheduled: true, scheduleKey: scheduleId, operation: "Scheduled eBay return reconciliation" });
+    if (result.duplicate) return false;
+    scheduleState[scheduleId] = {
+      ...previous,
+      channelId: channel.id || "",
+      channelName: channel.name || "eBay",
+      time: dueSlot,
+      lastRunDate: today,
+      lastRunAt: now.toISOString(),
+      lastJobId: result.job?.id || "",
+      lastError: ""
+    };
+    await postgres.writeStateDocuments({ channelEbayReturnImportSchedules: scheduleState });
+    console.log(`[${WORKER_ID}] queued scheduled eBay return reconciliation for ${dueSlot} (${result.job?.id || "unknown"})`);
+    return true;
+  } catch (error) {
+    scheduleState[scheduleId] = {
+      ...previous,
+      channelId: channel.id || "",
+      channelName: channel.name || "eBay",
+      time: dueSlot,
+      lastAttemptedAt: now.toISOString(),
+      lastError: error.message || "Unable to reconcile eBay returns."
+    };
+    await postgres.writeStateDocuments({ channelEbayReturnImportSchedules: scheduleState });
+    dataplus.appendChannelApiLog({ channel: "eBay", transport: "Scheduler", method: "IMPORT", path: "ebay-returns", operation: "Scheduled eBay return reconciliation", statusCode: 502, ok: false, message: error.message || "Unable to reconcile eBay returns." });
+    console.error(`[${WORKER_ID}] scheduled eBay return reconciliation failed:`, error.message || error);
+    return false;
+  }
+}
+
 async function checkScheduledEbayCatalogSync(force = false) {
   const nowMs = Date.now();
   if (!force && nowMs - lastEbayCatalogSyncScheduleCheckAt < 60000) return false;
@@ -1038,6 +1092,62 @@ async function checkScheduledTemuOrderImport(force = false) {
     }
   }
   return false;
+}
+
+async function checkScheduledTemuReturnImport(force = false) {
+  const nowMs = Date.now();
+  if (!force && nowMs - lastTemuReturnImportScheduleCheckAt < 60000) return false;
+  lastTemuReturnImportScheduleCheckAt = nowMs;
+  const docs = await readSchedulerState(["channelTemuReturnImportSchedules"]);
+  const stateDb = schedulerDb(docs);
+  const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === "temu");
+  const settings = channel?.settings || {};
+  if (!channel || settings.channelEnabled === false || !settings.temuReturnSyncEnabled || settings.temuReturnSyncScheduleEnabled === false) return false;
+  const now = new Date(nowMs);
+  const dueSlot = dueScheduleSlot(settings, "temuReturnSyncSchedule", now);
+  if (!dueSlot) return false;
+  const today = localDateKey(now);
+  const scheduleId = `${channel.id || "temu"}:returns:${today}:${dueSlot}`;
+  const scheduleState = docs.channelTemuReturnImportSchedules && typeof docs.channelTemuReturnImportSchedules === "object" ? docs.channelTemuReturnImportSchedules : {};
+  const previous = scheduleState[scheduleId] || {};
+  if (previous.lastRunDate === today) return false;
+  const lookbackDays = Math.max(1, Math.min(365, Number(settings.temuReturnSyncLookbackDays || 30) || 30));
+  const since = new Date(nowMs - lookbackDays * 86400000).toISOString().slice(0, 10);
+  try {
+    const result = await dataplus.queueTemuReturnImportJob(stateDb, { since, until: nowMs }, {
+      scheduled: true,
+      scheduleKey: scheduleId,
+      operation: "Scheduled Temu return reconciliation"
+    });
+    if (result.duplicate) return false;
+    scheduleState[scheduleId] = {
+      ...previous,
+      channelId: channel.id || "",
+      channelName: channel.name || "Temu",
+      time: dueSlot,
+      lookbackDays,
+      lastRunDate: today,
+      lastRunAt: now.toISOString(),
+      lastJobId: result.job?.id || "",
+      lastError: ""
+    };
+    await postgres.writeStateDocuments({ channelTemuReturnImportSchedules: scheduleState });
+    console.log(`[${WORKER_ID}] queued scheduled Temu return reconciliation for ${dueSlot} (${result.job?.id || "unknown"})`);
+    return true;
+  } catch (error) {
+    scheduleState[scheduleId] = {
+      ...previous,
+      channelId: channel.id || "",
+      channelName: channel.name || "Temu",
+      time: dueSlot,
+      lastAttemptedAt: now.toISOString(),
+      lastError: error.message || "Unable to reconcile Temu returns."
+    };
+    await postgres.writeStateDocuments({ channelTemuReturnImportSchedules: scheduleState });
+    dataplus.appendChannelApiLog({ channel: "Temu", transport: "Scheduler", method: "IMPORT", path: "temu-returns", operation: "Scheduled Temu return reconciliation", statusCode: 502, ok: false, message: error.message || "Unable to reconcile Temu returns." });
+    console.error(`[${WORKER_ID}] scheduled Temu return reconciliation failed:`, error.message || error);
+    return false;
+  }
 }
 
 async function checkScheduledEbayPriceInventorySync(force = false) {
@@ -2460,8 +2570,14 @@ async function tick() {
       await checkScheduledSupplierReminders();
     }
     if (['all', 'orders-shopify'].includes(WORKER_LANE)) await checkScheduledShopifyOrderImport();
-    if (['all', 'orders-ebay'].includes(WORKER_LANE)) await checkScheduledEbayOrderImport();
-    if (['all', 'orders-temu'].includes(WORKER_LANE)) await checkScheduledTemuOrderImport();
+    if (['all', 'orders-ebay'].includes(WORKER_LANE)) {
+      await checkScheduledEbayOrderImport();
+      await checkScheduledEbayReturnImport();
+    }
+    if (['all', 'orders-temu'].includes(WORKER_LANE)) {
+      await checkScheduledTemuOrderImport();
+      await checkScheduledTemuReturnImport();
+    }
     if (['all', 'orders-tiktok'].includes(WORKER_LANE)) await dataplus.checkTikTokSchedule().catch(error => console.error(error.message));
     job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS, lane: WORKER_LANE });
   }

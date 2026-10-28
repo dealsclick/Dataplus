@@ -493,6 +493,10 @@ type ChannelSettings = {
   ebayReturnSyncEnabled?: boolean
   ebayReturnSyncLookbackDays?: number
   ebayReturnSyncLimit?: number
+  ebayReturnSyncScheduleEnabled?: boolean
+  ebayReturnSyncScheduleType?: string
+  ebayReturnSyncScheduleTimes?: string
+  ebayReturnSyncScheduleEveryHours?: number
   temuEndpoint?: string
   temuAuthorizationUrl?: string
   temuAppKey?: string
@@ -516,6 +520,11 @@ type ChannelSettings = {
   temuFulfillmentSyncEnabled?: boolean
   temuCancellationNotificationEnabled?: boolean
   temuReturnSyncEnabled?: boolean
+  temuReturnSyncLookbackDays?: number
+  temuReturnSyncScheduleEnabled?: boolean
+  temuReturnSyncScheduleType?: string
+  temuReturnSyncScheduleTimes?: string
+  temuReturnSyncScheduleEveryHours?: number
   temuRefundSyncEnabled?: boolean
   temuWebhookEnabled?: boolean
   temuWebhookEndpoint?: string

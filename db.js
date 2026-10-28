@@ -11103,22 +11103,38 @@ async function readChannelOrderForReturn(source, reference = {}) {
     marketplaceOrderId: reference.orderId
   });
   const result = await client.query(`
-    select o.order_id from order_records o
+    select o.order_id,
+      (
+        o.reportable = true
+        and lower(coalesce(o.status, '')) not in ('deleted', 'void', 'voided')
+        and lower(coalesce(o.raw->>'duplicateOrderRecord', 'false')) <> 'true'
+        and coalesce(o.raw->>'duplicateOfOrderId', '') = ''
+        and lower(coalesce(o.raw->>'excludedFromAnalytics', 'false')) <> 'true'
+      ) as canonical
+    from order_records o
     where o.tenant_id=$5 and o.company_id=$6 and o.channel_key=$1 and (
       ($2 <> '' and (o.channel_order_id = lower(btrim($2)) or lower(o.raw->'external'->>'orderId') = lower(btrim($2)) or lower(o.raw->'external'->>'legacyOrderId') = lower(btrim($2))))
       or ($3 <> '' and exists (select 1 from order_line_items l where l.order_id = o.order_id
         and (l.raw->>'transactionId' = $3 or l.raw->>'legacyTransactionId' = $3)
         and ($4 = '' or l.raw->>'itemId' = $4 or l.raw->>'legacyItemId' = $4)))
-    ) limit 2
+    )
+    order by canonical desc, o.created_at, o.order_id
+    limit 2
   `, [identity.channelKey, String(reference.orderId || ''), String(reference.transactionId || ''), String(reference.itemId || ''), identity.tenantId, identity.companyId]);
   if (reference.existsOnly) return result.rows.length > 0;
-  if (reference.requireUnique && result.rows.length > 1) {
+  const canonicalRows = result.rows.filter((row) => row.canonical === true);
+  const match = canonicalRows.length === 1
+    ? canonicalRows[0]
+    : result.rows.length === 1
+      ? result.rows[0]
+      : null;
+  if (reference.requireUnique && !match && result.rows.length > 1) {
     const error = new Error('Multiple local orders match this marketplace order; review legacy split orders before updating them.');
     error.code = 'AMBIGUOUS_MARKETPLACE_ORDER';
     error.matchCount = result.rows.length;
     throw error;
   }
-  return result.rows.length === 1 ? readOrderByKey(result.rows[0].order_id) : null;
+  return match ? readOrderByKey(match.order_id) : null;
 }
 
 async function refreshVendorExactSupplierLinks(vendorKeys = []) {

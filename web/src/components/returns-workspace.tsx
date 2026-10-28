@@ -95,7 +95,7 @@ export function ReturnsWorkspace({ warehouses, busy, refreshKey = 0, onUpdated, 
 }) {
   const [records, setRecords] = useState<Row[]>([])
   const [loading, setLoading] = useState(true)
-  const [queue, setQueue] = useState<Queue>("new")
+  const [queue, setQueue] = useState<Queue>("all")
   const [query, setQuery] = useState("")
   const [channel, setChannel] = useState("all")
   const [page, setPage] = useState(1)
