@@ -127,7 +127,7 @@ const accountingHandler = createAccountingHandler({
   enrichOrder: order => enrichOrderDetail(order), parseBody, sendJson, sendCsv, can: userCan
 });
 const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt } = require("./lib/return-workflow");
-const { nextOrderReturnNumber, normalizeOrderBasedReturnNumbers, returnNumberBase, returnSlugBase, returnsWithPublicSlugs } = require("./lib/return-identifiers");
+const { normalizeSequentialReturnNumbers, returnSlugBase, returnsWithPublicSlugs } = require("./lib/return-identifiers");
 const { veeqoShipmentServiceSelections } = require("./lib/veeqo-shipping-options");
 const { addVeeqoCustomsFields, normalizeVeeqoAddressCountry, productCountryOfOrigin } = require("./lib/veeqo-customs");
 const { findFreshVeeqoRate, isStaleVeeqoRateError, veeqoRateExpiresAt, veeqoRateNeedsRefresh } = require("./lib/veeqo-rate-freshness");
@@ -4758,7 +4758,7 @@ function normalizeDb(db) {
     changed = true;
   }
   {
-    const normalizedReturnNumbers = normalizeOrderBasedReturnNumbers(db.returns || []);
+    const normalizedReturnNumbers = normalizeSequentialReturnNumbers(db.returns || []);
     db.returns = normalizedReturnNumbers.records;
     if (normalizedReturnNumbers.changed) changed = true;
     const nextReturnSequence = Math.max(0, ...db.returns.map((item) => Number(String(item.returnNumber || "").match(/^RET-(\d+)$/)?.[1] || 0))) + 1;
@@ -15631,10 +15631,6 @@ function nextReturnNumber(db) {
   db.sequence = db.sequence || {};
   db.sequence.return = Number(db.sequence.return || 0) + 1;
   return `RET-${String(db.sequence.return).padStart(5, "0")}`;
-}
-
-function nextReturnNumberForOrder(db, order = {}) {
-  return nextOrderReturnNumber(db.returns || [], order) || nextReturnNumber(db);
 }
 
 function nextOrderNumber(db) {
@@ -43983,7 +43979,7 @@ function upsertEbayReturnRecord(db = {}, returnRecord = {}, detailRecord = null)
   const record = {
     ...(existing || {}),
     id: existing?.id || crypto.randomUUID(),
-    returnNumber: existing?.returnNumber || nextReturnNumberForOrder(db, order || combined),
+    returnNumber: existing?.returnNumber || nextReturnNumber(db),
     orderId: order?.id || existing?.orderId || "",
     orderNumber: order?.orderNumber || existing?.orderNumber || ebayReturnOrderId(combined),
     source: "eBay",
@@ -60884,7 +60880,7 @@ async function handleApi(req, res) {
     const policyFields = returnPolicyFields(body, returnAmount, readSystemSettingsStore(db.systemSettings || {}));
     const record = {
       id: crypto.randomUUID(),
-      returnNumber: await postgres.nextOrderReturnNumberAtomic(returnNumberBase(order)) || nextReturnNumberForOrder(db, order),
+      returnNumber: await postgres.nextReturnNumberAtomic() || nextReturnNumber(db),
       orderId: order.id,
       orderNumber: order.orderNumber,
       source: order.source,
@@ -61081,7 +61077,14 @@ async function handleApi(req, res) {
     const state = await readDbFast({ skipInventory: true });
     state.returns = await postgres.readStateField("returns") || [];
     const key = decodeURIComponent(String(parts[2] || "")).trim().toLowerCase();
-    const record = returnsWithPublicSlugs(state.returns || []).find((entry) => [entry.id, entry.returnNumber, entry.returnSlug, entry.channelReturnId].some((value) => String(value || "").trim().toLowerCase() === key));
+    const record = returnsWithPublicSlugs(state.returns || []).find((entry) => [
+      entry.id,
+      entry.returnNumber,
+      entry.returnSlug,
+      entry.channelReturnId,
+      entry.legacyReturnNumber,
+      ...(Array.isArray(entry.previousReturnNumbers) ? entry.previousReturnNumbers : [])
+    ].some((value) => String(value || "").trim().toLowerCase() === key));
     if (!record) return notFound(res);
     const order = record.orderId ? await postgres.readOrderByKey(String(record.orderId)) : null;
     return sendJson(res, 200, { return: record, order, warehouses: state.warehouses || [] });
@@ -72817,7 +72820,7 @@ async function handleApi(req, res) {
     const policyFields = returnPolicyFields(body, returnAmount, readSystemSettingsStore(db.systemSettings || {}));
     const record = {
       id: crypto.randomUUID(),
-      returnNumber: nextReturnNumberForOrder(db, order),
+      returnNumber: nextReturnNumber(db),
       orderId: order.id,
       orderNumber: order.orderNumber,
       source: order.source,

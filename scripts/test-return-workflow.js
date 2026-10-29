@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { ebayReturnEnvelope, returnNeedsAttention, reconcileOrderReturns, validateReturnReceipt } = require('../lib/return-workflow');
 const { normalizeSourceOrderCompletion } = require('../lib/source-order-completion');
 const { collectPages } = require('../lib/shopify-return-import');
-const { nextOrderReturnNumber, normalizeOrderBasedReturnNumbers, returnNumberBase, returnsWithPublicSlugs } = require('../lib/return-identifiers');
+const { normalizeSequentialReturnNumbers, returnsWithPublicSlugs } = require('../lib/return-identifiers');
 
 test('eBay detail keeps header, actual refund, specific item and deduplicated return tracking', () => {
   const data = ebayReturnEnvelope({}, {
@@ -51,14 +51,6 @@ test('Shopify pagination fetches all pages and rejects repeated cursors', async 
   await assert.rejects(collectPages(async () => ({ nodes: [], pageInfo: { hasNextPage: true, endCursor: 'same' } })), /advance/);
 });
 
-test('RMA numbers follow the original order and increment per order', () => {
-  const order = { orderNumber: '#DC8479' };
-  assert.equal(returnNumberBase(order), 'RET-DC8479');
-  assert.equal(nextOrderReturnNumber([], order), 'RET-DC8479');
-  assert.equal(nextOrderReturnNumber([{ returnNumber: 'RET-DC8479' }], order), 'RET-DC8479-2');
-  assert.equal(nextOrderReturnNumber([{ returnNumber: 'RET-DC8479' }, { returnNumber: 'RET-DC8479-2' }], order), 'RET-DC8479-3');
-});
-
 test('duplicate legacy RMA numbers receive stable readable slugs', () => {
   const rows = returnsWithPublicSlugs([
     { id: 'newer', returnNumber: 'RET-00052', createdAt: '2026-09-29T12:00:00Z' },
@@ -68,25 +60,26 @@ test('duplicate legacy RMA numbers receive stable readable slugs', () => {
   assert.equal(rows[1].returnSlug, 'ret-00052-2');
 });
 
-test('legacy duplicate RMA numbers migrate to their original order numbers', () => {
-  const result = normalizeOrderBasedReturnNumbers([
+test('all return IDs are resequenced globally in chronological order', () => {
+  const result = normalizeSequentialReturnNumbers([
     { id: 'one', returnNumber: 'RET-00052', orderNumber: '47776', createdAt: '2026-09-29T12:00:00Z' },
     { id: 'two', returnNumber: 'RET-00052', orderNumber: '47924', createdAt: '2026-09-28T12:00:00Z' },
     { id: 'three', returnNumber: 'RET-00053', orderNumber: '47924', createdAt: '2026-09-29T12:00:00Z' }
   ], '2026-09-29T20:00:00Z');
   assert.equal(result.changed, 3);
-  assert.deepEqual(result.records.map((row) => row.returnNumber), ['RET-47776', 'RET-47924', 'RET-47924-2']);
+  assert.deepEqual(result.records.map((row) => row.returnNumber), ['RET-00002', 'RET-00001', 'RET-00003']);
   assert.equal(result.records[0].legacyReturnNumber, 'RET-00052');
+  assert.deepEqual(result.records[0].previousReturnNumbers, ['RET-00052']);
 });
 
 test('marketplace return references are retained while DataPlus assigns unique IDs', () => {
-  const result = normalizeOrderBasedReturnNumbers([
+  const result = normalizeSequentialReturnNumbers([
     { id: 'temu', returnNumber: 'PA-987', channelReturnId: 'PA-987', orderNumber: '55577', createdAt: '2026-10-01T12:00:00Z' },
     { id: 'shopify', returnNumber: '#1004-R1', channelReturnId: 'gid://shopify/Return/4', createdAt: '2026-10-02T12:00:00Z' },
     { id: 'local', returnNumber: 'RET-55578', orderNumber: '55578', createdAt: '2026-10-03T12:00:00Z' }
   ], '2026-10-29T12:00:00Z');
-  assert.equal(result.changed, 2);
-  assert.deepEqual(result.records.map((row) => row.returnNumber), ['RET-55577', 'RET-00001', 'RET-55578']);
+  assert.equal(result.changed, 3);
+  assert.deepEqual(result.records.map((row) => row.returnNumber), ['RET-00001', 'RET-00002', 'RET-00003']);
   assert.equal(result.records[0].channelReturnId, 'PA-987');
   assert.equal(result.records[0].legacyReturnNumber, 'PA-987');
 });

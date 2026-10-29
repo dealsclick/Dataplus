@@ -13,7 +13,7 @@ const { JOB_AUTOMATED_SQL, JOB_CHANNEL_KEY_SQL, JOB_CHANNEL_LABEL_SQL, JOB_TRIGG
 const { compactOrderForStorage, shipmentTrackingRecords, shipmentFinancialRecords, orderShippingRevenueRecord } = require("./lib/order-payload-retention");
 const { parseSearchTerms } = require("./lib/multi-search");
 const { recordDatabaseQuery } = require("./lib/performance-context");
-const { normalizeOrderBasedReturnNumbers, returnNumberBase } = require("./lib/return-identifiers");
+const { normalizeSequentialReturnNumbers } = require("./lib/return-identifiers");
 const {
   LEGACY_COMPANY_ID,
   LEGACY_COMPANY_NUMBER,
@@ -171,8 +171,9 @@ async function ensureReturnWorkspaceSchema(client) {
   try {
     await client.query("select pg_advisory_xact_lock(hashtext('dataplus-return-identity-migration'))");
     const identityIndex = await client.query("select to_regclass('public.entity_documents_returns_number_uidx') as index_name");
+    const migrationState = await client.query("select data->>'version' as version from state_documents where doc_key = 'return-identity-migration'");
     let updates = [];
-    if (!identityIndex.rows[0]?.index_name) {
+    if (migrationState.rows[0]?.version !== 'global-sequential-v1') {
       const stored = await client.query(`
         select entity_id, data
         from entity_documents
@@ -181,18 +182,76 @@ async function ensureReturnWorkspaceSchema(client) {
         for update
       `);
       const original = stored.rows.map((row) => row.data);
-      const normalized = normalizeOrderBasedReturnNumbers(original);
+      const normalized = normalizeSequentialReturnNumbers(original);
       updates = normalized.records.flatMap((data, index) => data === original[index]
         ? []
-        : [{ entity_id: stored.rows[index].entity_id, data }]);
+        : [{ entity_id: stored.rows[index].entity_id, previous: original[index], data }]);
+      if (identityIndex.rows[0]?.index_name && updates.length) {
+        await client.query(`
+          update entity_documents
+          set data = jsonb_set(data, '{returnNumber}', to_jsonb('RET-MIG-' || md5(entity_id)), true)
+          where collection = 'returns' and entity_id = any($1::text[])
+        `, [updates.map((row) => row.entity_id)]);
+      }
       for (let offset = 0; offset < updates.length; offset += 250) {
         await client.query(`
           update entity_documents target
           set data = source.data
           from jsonb_to_recordset($1::jsonb) as source(entity_id text, data jsonb)
           where target.collection = 'returns' and target.entity_id = source.entity_id
-        `, [JSON.stringify(updates.slice(offset, offset + 250))]);
+        `, [JSON.stringify(updates.slice(offset, offset + 250).map(({ entity_id, data }) => ({ entity_id, data })))]);
       }
+      if (updates.length) {
+        const numberByKey = new Map();
+        for (const row of updates) {
+          for (const key of [row.previous.id, row.previous.returnNumber, row.previous.channelReturnId]) {
+            if (key) numberByKey.set(String(key).toLowerCase(), row.data.returnNumber);
+          }
+        }
+        const orderRows = await client.query(`
+          select order_id, raw
+          from order_records
+          where jsonb_typeof(raw->'returns') = 'array' and jsonb_array_length(raw->'returns') > 0
+          for update
+        `);
+        const changedOrders = [];
+        for (const row of orderRows.rows) {
+          let changed = false;
+          const returns = row.raw.returns.map((summary) => {
+            const replacement = [summary.id, summary.channelReturnId, summary.returnNumber]
+              .map((value) => numberByKey.get(String(value || '').toLowerCase()))
+              .find(Boolean);
+            if (!replacement || replacement === summary.returnNumber) return summary;
+            changed = true;
+            return { ...summary, returnNumber: replacement };
+          });
+          if (changed) changedOrders.push({ order_id: row.order_id, raw: { ...row.raw, returns } });
+        }
+        for (let offset = 0; offset < changedOrders.length; offset += 250) {
+          await client.query(`
+            update order_records target
+            set raw = source.raw
+            from jsonb_to_recordset($1::jsonb) as source(order_id text, raw jsonb)
+            where target.order_id = source.order_id
+          `, [JSON.stringify(changedOrders.slice(offset, offset + 250))]);
+        }
+      }
+      const highestSequence = Math.max(0, ...normalized.records.map((record) => Number(String(record.returnNumber || '').match(/^RET-(\d+)$/i)?.[1] || 0)));
+      await client.query(`
+        insert into state_documents (doc_key, data, updated_at)
+        values ('sequence', jsonb_build_object('return', $1::int), now())
+        on conflict (doc_key) do update set
+          data = jsonb_set(coalesce(state_documents.data, '{}'::jsonb), '{return}', to_jsonb(greatest(
+            case when state_documents.data->>'return' ~ '^[0-9]+$' then (state_documents.data->>'return')::int else 0 end,
+            $1::int
+          )), true),
+          updated_at = now()
+      `, [highestSequence]);
+      await client.query(`
+        insert into state_documents (doc_key, data, updated_at)
+        values ('return-identity-migration', '{"version":"global-sequential-v1"}'::jsonb, now())
+        on conflict (doc_key) do update set data = excluded.data, updated_at = now()
+      `);
     }
     await client.query(`
       create unique index if not exists entity_documents_returns_number_uidx
@@ -11417,28 +11476,7 @@ async function readImportedReturn(source = "", channelReturnId = "") {
   return result.rows[0]?.data || null;
 }
 
-async function allocateImportedReturnNumber(client, record = {}) {
-  const base = returnNumberBase(record);
-  if (base) {
-    const sequenceKey = `return-sequence:${base.toLowerCase()}`;
-    await client.query("select pg_advisory_xact_lock(hashtext($1))", [sequenceKey]);
-    const saved = await client.query("select data from state_documents where doc_key = $1", [sequenceKey]);
-    const existing = await client.query(`
-      select upper(data->>'returnNumber') as return_number
-      from entity_documents
-      where collection = 'returns'
-        and (upper(data->>'returnNumber') = $1 or upper(data->>'returnNumber') ~ ('^' || $1 || '-[0-9]+$'))
-    `, [base]);
-    const used = new Set(existing.rows.map((row) => String(row.return_number || "")));
-    let sequence = Math.max(1, Number(saved.rows[0]?.data?.last || 0) + 1);
-    while (used.has(sequence === 1 ? base : `${base}-${sequence}`)) sequence += 1;
-    await client.query(`
-      insert into state_documents (doc_key, data, updated_at)
-      values ($1, jsonb_build_object('last', $2::int), now())
-      on conflict (doc_key) do update set data = excluded.data, updated_at = now()
-    `, [sequenceKey, sequence]);
-    return sequence === 1 ? base : `${base}-${sequence}`;
-  }
+async function allocateImportedReturnNumber(client) {
   await client.query("select pg_advisory_xact_lock(hashtext('dataplus-return-number'))");
   const result = await client.query(`
     select greatest(
@@ -11484,7 +11522,7 @@ async function upsertImportedReturn(record) {
         return old?.receivedQty !== undefined ? { ...line, receivedQty: old.receivedQty } : line;
       });
     } else {
-      record.returnNumber = await allocateImportedReturnNumber(client, record);
+      record.returnNumber = await allocateImportedReturnNumber(client);
     }
     record.channelReturnReference = record.channelReturnReference || record.channelReturnId || "";
     await client.query(`insert into entity_documents (collection, entity_id, position, data, updated_at)
@@ -12985,41 +13023,6 @@ async function nextWarehouseSkuAtomic() {
     `, [nextValue]);
     await client.query("commit");
     return `DPS${nextValue}`;
-  } catch (error) {
-    await client.query("rollback").catch(() => {});
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
-async function nextOrderReturnNumberAtomic(baseValue = "") {
-  const base = String(baseValue || "").trim().toUpperCase();
-  if (!base) return null;
-  const pool = getPool();
-  if (!pool) return null;
-  const client = await pool.connect();
-  const sequenceKey = `return-sequence:${base.toLowerCase()}`;
-  try {
-    await client.query("begin");
-    await client.query("select pg_advisory_xact_lock(hashtext($1))", [sequenceKey]);
-    const saved = await client.query("select data from state_documents where doc_key = $1", [sequenceKey]);
-    const existing = await client.query(`
-      select data->>'returnNumber' as return_number
-      from entity_documents
-      where collection = 'returns'
-        and (upper(data->>'returnNumber') = $1 or upper(data->>'returnNumber') ~ ('^' || $1 || '-[0-9]+$'))
-    `, [base]);
-    let nextValue = Math.max(1, Number(saved.rows[0]?.data?.last || 0) + 1);
-    const used = new Set(existing.rows.map((row) => String(row.return_number || "").toUpperCase()));
-    while (used.has(nextValue === 1 ? base : `${base}-${nextValue}`)) nextValue += 1;
-    await client.query(`
-      insert into state_documents (doc_key, data, updated_at)
-      values ($1, jsonb_build_object('last', $2::int), now())
-      on conflict (doc_key) do update set data = excluded.data, updated_at = now()
-    `, [sequenceKey, nextValue]);
-    await client.query("commit");
-    return nextValue === 1 ? base : `${base}-${nextValue}`;
   } catch (error) {
     await client.query("rollback").catch(() => {});
     throw error;
@@ -18853,7 +18856,6 @@ module.exports = {
   previewDuplicateInternalOrderNumberRepair,
   applyDuplicateInternalOrderNumberRepair,
   nextWarehouseSkuAtomic,
-  nextOrderReturnNumberAtomic,
   readOrderCustomerSummary,
   readProductByKey,
   withStoredPriceFloors,
