@@ -61191,9 +61191,6 @@ async function handleApi(req, res) {
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
     const db = await readDbFast({ skipInventory: true });
-    // readDbFast intentionally excludes the large returns collection; load it
-    // explicitly before appending so a local return cannot replace source returns.
-    db.returns = await postgres.readStateField("returns") || [];
     const warehouseValue = String(
       body.warehouseId ||
       body.warehouse?.id ||
@@ -61263,8 +61260,6 @@ async function handleApi(req, res) {
       resolvedBy: "",
       restockedAt: ""
     };
-    db.returns = Array.isArray(db.returns) ? db.returns : [];
-    db.returns.unshift(record);
     order.returnWarehouseId = warehouse.id;
     order.returnWarehouseName = warehouse.name;
     order.updatedAt = new Date().toISOString();
@@ -61274,7 +61269,7 @@ async function handleApi(req, res) {
       message: `${record.returnNumber} created for ${warehouse.name}.${record.reason ? ` ${record.reason}` : ""}${attachments.length ? ` ${attachments.length} attachment${attachments.length === 1 ? "" : "s"} saved.` : ""}`,
       user: body.user || "Luis"
     });
-    await postgres.writeStateDocuments({ returns: db.returns });
+    await postgres.saveReturn(record);
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
@@ -61368,8 +61363,7 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "pdf" && postgres.isPostgresEnabled()) {
     const state = await readDbFast({ skipInventory: true });
-    state.returns = await postgres.readStateField("returns") || [];
-    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
     const order = await postgres.readOrderByKey(String(record.orderId || ""));
     if (!order) return sendJson(res, 404, { error: "The order linked to this return was not found." });
@@ -61384,8 +61378,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "print" && postgres.isPostgresEnabled()) {
     if (!userCan(authUser, "orders.returns", "view")) return sendJson(res, 403, { error: "Returns view permission is required." });
     const state = await readDbFast({ skipInventory: true });
-    state.returns = await postgres.readStateField("returns") || [];
-    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
     const order = await postgres.readOrderByKey(String(record.orderId || ""));
     if (!order) return sendJson(res, 404, { error: "The order linked to this return was not found." });
@@ -61424,16 +61417,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "returns" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
     if (!userCan(authUser, "orders.returns", "view")) return sendJson(res, 403, { error: "Returns view permission is required." });
     const state = await readDbFast({ skipInventory: true });
-    state.returns = await postgres.readStateField("returns") || [];
-    const key = decodeURIComponent(String(parts[2] || "")).trim().toLowerCase();
-    const record = returnsWithPublicSlugs(state.returns || []).find((entry) => [
-      entry.id,
-      entry.returnNumber,
-      entry.returnSlug,
-      entry.channelReturnId,
-      entry.legacyReturnNumber,
-      ...(Array.isArray(entry.previousReturnNumbers) ? entry.previousReturnNumbers : [])
-    ].some((value) => String(value || "").trim().toLowerCase() === key));
+    const record = await postgres.readReturnByKey(decodeURIComponent(String(parts[2] || "")));
     if (!record) return notFound(res);
     const order = record.orderId ? await postgres.readOrderByKey(String(record.orderId)) : null;
     return sendJson(res, 200, { return: record, order, warehouses: state.warehouses || [] });
@@ -61442,10 +61426,9 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "rates" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const state = await readDbFast({ skipInventory: true });
-    state.returns = await postgres.readStateField("returns") || [];
-    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
-    if ((state.returns || []).filter((entry) => String(entry.returnNumber || "").trim().toLowerCase() === String(record.returnNumber || "").trim().toLowerCase()).length > 1) return sendJson(res, 409, { error: "This RMA number is duplicated. Repair the RMA identifiers before buying a label." });
+    if (await postgres.countReturnsByNumber(record.returnNumber, record.id)) return sendJson(res, 409, { error: "This RMA number is duplicated. Repair the RMA identifiers before buying a label." });
     const order = await postgres.readOrderByKey(String(record.orderId || ""));
     if (!order) return sendJson(res, 404, { error: "The order linked to this return was not found." });
     if (normalizeCountryCode(order.address?.country || "US") !== "US") return sendJson(res, 409, { error: "International return labels require customs documents and must be reviewed before purchase. Record customer-provided tracking or create the label in the carrier portal." });
@@ -61458,7 +61441,7 @@ async function handleApi(req, res) {
       record.returnShippingQuotes = [quote, ...(Array.isArray(record.returnShippingQuotes) ? record.returnShippingQuotes : [])].slice(0, 10);
       record.returnLabelStatus = result.rates.length ? "quoted" : "quote_needed";
       record.updatedAt = new Date().toISOString();
-      await postgres.writeStateDocuments({ returns: state.returns });
+      await postgres.saveReturn(record);
       return sendJson(res, 200, { ...result, quote, addressReview: context.addresses, message: result.rates.length ? "Return-label options loaded." : "No return-label options were returned." });
     } catch (error) {
       return sendJson(res, 502, { error: `Return-label quote failed: ${error.message || "Unknown error"}` });
@@ -61468,10 +61451,9 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "labels" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const state = await readDbFast({ skipInventory: true });
-    state.returns = await postgres.readStateField("returns") || [];
-    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
-    if ((state.returns || []).filter((entry) => String(entry.returnNumber || "").trim().toLowerCase() === String(record.returnNumber || "").trim().toLowerCase()).length > 1) return sendJson(res, 409, { error: "This RMA number is duplicated. Repair the RMA identifiers before buying a label." });
+    if (await postgres.countReturnsByNumber(record.returnNumber, record.id)) return sendJson(res, 409, { error: "This RMA number is duplicated. Repair the RMA identifiers before buying a label." });
     if (record.returnLabel?.document?.url && String(record.returnLabel?.voidStatus || "").toLowerCase() !== "voided") return sendJson(res, 409, { error: "A return label has already been purchased for this RMA." });
     const quote = (record.returnShippingQuotes || []).find((entry) => String(entry.id || "") === String(body.quoteId || "")) || record.returnShippingQuotes?.[0];
     const quoteExpiresAt = new Date(String(quote?.expiresAt || quote?.createdAt || 0)).getTime() + (quote?.expiresAt ? 0 : 15 * 60 * 1000);
@@ -61504,7 +61486,7 @@ async function handleApi(req, res) {
       if (!order.shippingCostAdjustments.some((entry) => String(entry.reference || "") === adjustmentReference)) order.shippingCostAdjustments.push({ id: crypto.randomUUID(), type: "surcharge", amount: Number(result.shipment.shippingCost || 0), reference: adjustmentReference, reason: `${record.returnNumber} prepaid return label`, source: "veeqo_return", recordedAt: new Date().toISOString(), recordedBy: record.returnLabel.purchasedBy });
       addOrderTimeline(order, { type: "return_label", title: "Return label purchased", message: `${record.returnNumber} ${result.shipment.carrierName} ${result.shipment.service} label purchased for $${Number(result.shipment.shippingCost || 0).toFixed(2)}.`, user: record.returnLabel.purchasedBy });
       order.updatedAt = new Date().toISOString();
-      await postgres.writeStateDocuments({ returns: state.returns });
+      await postgres.saveReturn(record);
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
       return sendJson(res, 200, { return: record, document: result.document, shipment: result.shipment, message: "Return label purchased and attached to the RMA." });
@@ -61517,8 +61499,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "void" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const state = await readDbFast({ skipInventory: true });
-    state.returns = await postgres.readStateField("returns") || [];
-    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
     const label = record.returnLabel || {};
     if (!label.document?.url) return sendJson(res, 409, { error: "This RMA does not have a purchased return label." });
@@ -61541,7 +61522,7 @@ async function handleApi(req, res) {
       record.updatedAt = now;
       addOrderTimeline(order, { type: "return_label", title: "Return label voided", message: `${record.returnNumber} label was voided through Veeqo. The original charge remains until its refund is confirmed.`, user: label.voidedBy });
       order.updatedAt = now;
-      await postgres.writeStateDocuments({ returns: state.returns });
+      await postgres.saveReturn(record);
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
       appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "DELETE", path: apiPath, operation: "Void return label", statusCode: 204, ok: true, entityType: "return", entityId: record.id, message: `${record.returnNumber} return label voided.` });
@@ -61550,7 +61531,7 @@ async function handleApi(req, res) {
       label.voidStatus = "failed";
       label.voidError = error.message || "Unknown Veeqo error.";
       record.updatedAt = new Date().toISOString();
-      await postgres.writeStateDocuments({ returns: state.returns }).catch(() => {});
+      await postgres.saveReturn(record).catch(() => {});
       appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "DELETE", path: apiPath, operation: "Void return label failed", statusCode: 502, ok: false, entityType: "return", entityId: record.id, message: label.voidError });
       return sendJson(res, 502, { error: `Return-label void failed: ${label.voidError}` });
     }
@@ -61559,8 +61540,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "refund" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const state = await readDbFast({ skipInventory: true });
-    state.returns = await postgres.readStateField("returns") || [];
-    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
     const label = record.returnLabel || {};
     if (String(label.voidStatus || "").toLowerCase() !== "voided") return sendJson(res, 409, { error: "Void the return label before recording its refund." });
@@ -61582,7 +61562,7 @@ async function handleApi(req, res) {
     addOrderTimeline(order, { type: "return_label", title: "Return label refund confirmed", message: `$${amount.toFixed(2)} credit recorded for ${record.returnNumber}. Reference ${reference}.`, user: actor });
     record.updatedAt = now;
     order.updatedAt = now;
-    await postgres.writeStateDocuments({ returns: state.returns });
+    await postgres.saveReturn(record);
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
     return sendJson(res, 200, { return: record, message: "Return-label refund recorded and applied to order profit reporting." });
@@ -61590,8 +61570,7 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "refresh" && postgres.isPostgresEnabled()) {
     const state = await readDbFast({ skipInventory: true });
-    state.returns = await postgres.readStateField("returns") || [];
-    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
     const label = record.returnLabel || {};
     if (!label.remoteShipmentId) return sendJson(res, 409, { error: "This return label has no remote shipment ID to refresh." });
@@ -61614,7 +61593,7 @@ async function handleApi(req, res) {
       if (trackingNumber && !record.returnTracking.some((entry) => String(entry.trackingNumber || "") === trackingNumber)) record.returnTracking.unshift({ id: crypto.randomUUID(), carrier, trackingNumber, trackingUrl, status: remoteStatus, source: "veeqo", createdAt: label.lastRefreshedAt, createdBy: "Veeqo" });
       record.returnLabelStatus = trackingNumber ? "in_transit" : record.returnLabelStatus;
       record.updatedAt = label.lastRefreshedAt;
-      await postgres.writeStateDocuments({ returns: state.returns });
+      await postgres.saveReturn(record);
       appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "GET", path: apiPath, operation: "Refresh return shipment", statusCode: 200, ok: true, entityType: "return", entityId: record.id, message: trackingNumber ? `Tracking ${trackingNumber} refreshed.` : "Return shipment refreshed; tracking is not available yet." });
       return sendJson(res, 200, { return: record, message: trackingNumber ? `Return tracking ${trackingNumber} refreshed.` : "Return shipment refreshed; tracking is not available yet." });
     } catch (error) {
@@ -61626,8 +61605,7 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "tracking" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const state = await readDbFast({ skipInventory: true });
-    state.returns = await postgres.readStateField("returns") || [];
-    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
     const trackingNumber = String(body.trackingNumber || "").trim().slice(0, 120);
     const carrier = String(body.carrier || "Other").trim().slice(0, 80);
@@ -61647,15 +61625,14 @@ async function handleApi(req, res) {
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
     }
-    await postgres.writeStateDocuments({ returns: state.returns });
+    await postgres.saveReturn(record);
     return sendJson(res, 200, { return: record, tracking, message: "Customer return tracking saved." });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "send-customer" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const state = await readDbFast({ skipInventory: true });
-    state.returns = await postgres.readStateField("returns") || [];
-    const record = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
     const order = await postgres.readOrderByKey(String(record.orderId || ""));
     if (!order) return sendJson(res, 404, { error: "The order linked to this return was not found." });
@@ -61686,22 +61663,21 @@ async function handleApi(req, res) {
       order.customerNotifications.unshift({ id: crypto.randomUUID(), template: "return-approved", status: "sent", recipient, subject, messageId: delivery.messageId || "", createdAt: now, createdBy: actor, returnId: record.id });
       addOrderTimeline(order, { type: "return", title: "RMA sent to customer", message: `${record.returnNumber} sent to ${recipient} with ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}.`, user: actor });
       order.updatedAt = now;
-      await postgres.writeStateDocuments({ returns: state.returns });
+      await postgres.saveReturn(record);
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
       return sendJson(res, 200, { return: record, message: `RMA sent to ${recipient}.` });
     } catch (error) {
       record.customerDelivery = { status: "failed", recipient, subject, failedAt: new Date().toISOString(), error: error.message || "Unknown email error." };
       record.updatedAt = record.customerDelivery.failedAt;
-      await postgres.writeStateDocuments({ returns: state.returns }).catch(() => {});
+      await postgres.saveReturn(record).catch(() => {});
       return sendJson(res, 502, { error: `RMA email failed: ${error.message || "Unknown error"}` });
     }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "sync-shopify" && postgres.isPostgresEnabled()) {
     const state = await readDbFast({ skipInventory: true });
-    state.returns = await postgres.readStateField("returns") || [];
-    const returnRecord = (state.returns || []).find((entry) => String(entry.id || "") === parts[2]);
+    const returnRecord = await postgres.readReturnByKey(parts[2]);
     if (!returnRecord) return notFound(res);
     const order = await postgres.readOrderByKey(String(returnRecord.orderId || ""));
     if (!order) return sendJson(res, 404, { error: "The order linked to this return was not found." });
@@ -61714,13 +61690,13 @@ async function handleApi(req, res) {
       returnRecord.channelSync = { status: "sent", channel: "Shopify", returnId: shopifyReturn.id || "", updatedAt: new Date().toISOString(), message: "Return sent to Shopify." };
       order.updatedAt = new Date().toISOString();
       addOrderTimeline(order, { type: "channel_sync", title: "Return sent to Shopify", message: `${returnRecord.returnNumber || "Return"} was sent to Shopify.`, user: "Luis" });
-      await postgres.writeStateDocuments({ returns: state.returns });
+      await postgres.saveReturn(returnRecord);
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
       return sendJson(res, 200, { order, return: returnRecord, shopifyReturn, message: "Return sent to Shopify." });
     } catch (error) {
       returnRecord.channelSync = { status: "failed", channel: "Shopify", updatedAt: new Date().toISOString(), message: error.message || "Shopify return sync failed." };
-      await postgres.writeStateDocuments({ returns: state.returns });
+      await postgres.saveReturn(returnRecord);
       return sendJson(res, 502, { error: `Shopify return sync failed: ${error.message || "Unknown error"}` });
     }
   }
@@ -62136,9 +62112,10 @@ async function handleApi(req, res) {
     if (!userCan(authUser, "orders.returns", "view")) return sendJson(res, 403, { error: "Returns view permission is required." });
     const query = String(url.searchParams.get("q") || "").trim();
     if (!query || query.length > 300) return sendJson(res, 400, { error: "Enter a return, order or tracking reference (up to 300 characters)." });
-    const records = postgres.isPostgresEnabled() ? await postgres.readStateField("returns") || [] : (await readDb()).returns || [];
-    const matches = findReturnReceipts(records, query);
-    return sendJson(res, 200, { returns: matches.slice(0, 50), total: matches.length });
+    const matches = postgres.isPostgresEnabled()
+      ? await postgres.findReturnsForReceiving(query, { limit: 50, trackingCandidates: trackingLookupCandidates(query) })
+      : findReturnReceipts((await readDb()).returns || [], query).slice(0, 50);
+    return sendJson(res, 200, { returns: matches, total: matches.length });
   }
 
   if (url.pathname === "/api/fulfillment/outbound-audits" && postgres.isPostgresEnabled()) {
@@ -62321,10 +62298,9 @@ async function handleApi(req, res) {
       ? await postgres.readOrdersByTrackingCandidates(candidates, { limit: 20 }) : [];
     let returnMatches = [];
     if (canViewReturns && scope !== "orders") {
-      const records = await postgres.readStateField("returns") || [];
       const byId = new Map();
       for (const candidate of candidates) {
-        for (const record of findReturnReceipts(records, candidate)) byId.set(String(record.id || record.returnNumber), record);
+        for (const record of await postgres.findReturnsForReceiving(candidate, { limit: 20, trackingCandidates: [candidate] })) byId.set(String(record.id || record.returnNumber), record);
       }
       returnMatches = returnsWithPublicSlugs([...byId.values()]).slice(0, 20);
     }
@@ -62361,11 +62337,10 @@ async function handleApi(req, res) {
     if (!releaseReturnLock) return sendJson(res, 409, { error: "Another return update is being saved. Retry shortly." });
     try {
       const db = await readDbFast({ skipInventory: true });
-      db.returns = await postgres.readStateField("returns") || [];
       db.inventoryLedger = await postgres.readStateField("inventoryLedger") || [];
       db.purchaseRequirements = await postgres.readStateField("purchaseRequirements") || [];
       db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 });
-      const record = (db.returns || []).find((row) => String(row.id || "") === String(parts[2]));
+      const record = await postgres.readReturnByKey(parts[2]);
       if (!record) return notFound(res);
       const settings = orderRuntimeSettings(db);
       if (settings.returnsPrioritizeOpenOrderAllocation !== true) return sendJson(res, 400, { error: "Return-to-order allocation is disabled in System Settings." });
@@ -62412,7 +62387,8 @@ async function handleApi(req, res) {
       };
       record.updatedAt = new Date().toISOString();
       if (touchedProducts.length) { await postgres.upsertProductsFromState(touchedProducts); await postgres.upsertInventoryLevelsFromProducts(touchedProducts); }
-      await postgres.writeStateDocuments({ returns: db.returns || [], inventoryLedger: db.inventoryLedger || [], purchaseRequirements: db.purchaseRequirements || [] });
+      await postgres.saveReturn(record);
+      await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [], purchaseRequirements: db.purchaseRequirements || [] });
       clearOrderApiCache();
       return sendJson(res, 200, { return: record, allocation: record.allocationReview });
     } finally { await releaseReturnLock(); }
@@ -62426,8 +62402,7 @@ async function handleApi(req, res) {
     const releaseReturnLock = await postgres.acquireReturnWriteLock();
     if (!releaseReturnLock) return sendJson(res, 409, { error: "Another return update is being saved. Retry shortly." });
     try {
-      const returns = await postgres.readStateField("returns") || [];
-      const record = returns.find((row) => String(row.id || "") === String(parts[2]));
+      const record = await postgres.readReturnByKey(parts[2]);
       if (!record) return notFound(res);
       const actor = currentAuthUser(req)?.name || currentAuthUser(req)?.username || "Manager";
       const now = new Date().toISOString();
@@ -62441,7 +62416,7 @@ async function handleApi(req, res) {
       record.approvedBy = action === "approve" ? actor : record.approvedBy || "";
       record.managerReviewReason = note || record.managerReviewReason || "";
       record.updatedAt = now;
-      await postgres.writeStateDocuments({ returns });
+      await postgres.saveReturn(record);
       const order = record.orderId ? await postgres.readOrderByKey(String(record.orderId)) : null;
       if (order) {
         addOrderTimeline(order, { type: "return_approval", title: action === "approve" ? "Return approved by manager" : action === "reject" ? "Return rejected by manager" : "Return revision requested", message: `${record.returnNumber || "Return"}${note ? `: ${note}` : "."}`, user: actor });
@@ -62459,11 +62434,10 @@ async function handleApi(req, res) {
     if (!releaseReturnLock) return sendJson(res, 409, { error: "Another return update is being saved. Retry shortly." });
     try {
     const db = await readDbFast({ skipInventory: true });
-    db.returns = await postgres.readStateField("returns") || [];
     db.inventoryLedger = await postgres.readStateField("inventoryLedger") || [];
     db.purchaseRequirements = await postgres.readStateField("purchaseRequirements") || [];
     db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 });
-    const record = (db.returns || []).find((row) => row.id === parts[2]);
+    const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
     const receiptError = validateReturnReceipt(record, body, db.warehouses || []);
     if (receiptError) return sendJson(res, 400, { error: receiptError });
@@ -62589,7 +62563,10 @@ async function handleApi(req, res) {
     record.resolvedAt = isFinalReturnStatus ? (record.resolvedAt || new Date().toISOString()) : record.resolvedAt || "";
     record.resolvedBy = isFinalReturnStatus ? (record.resolvedBy || actingUser) : record.resolvedBy || "";
     if (order) {
-      const resolvedReturns = (db.returns || []).filter((item) => (item.orderId === order.id || item.orderNumber === order.orderNumber) && ["resolved", "done"].includes(String(item.status || "").toLowerCase()));
+      const orderReturns = await postgres.readOrderReturns(order);
+      const resolvedReturns = orderReturns
+        .map((item) => String(item.id || "") === String(record.id || "") ? record : item)
+        .filter((item) => ["resolved", "done"].includes(String(item.status || "").toLowerCase()));
       const refundRequiredAmount = resolvedReturns.reduce((sum, item) => sum + Math.max(0, Number(item.amount || 0) - Number(item.returnFee || 0)), 0);
       order.refundRequired = refundRequiredAmount > Number(order.refundAmount || 0);
       order.refundPendingAmount = Math.max(0, refundRequiredAmount - Number(order.refundAmount || 0));
@@ -62607,9 +62584,11 @@ async function handleApi(req, res) {
     }
     record.updatedAt = new Date().toISOString();
     if (body.receiptOnly) record.receiptHistory = [...(record.receiptHistory || []), { id: crypto.randomUUID(), at: record.updatedAt, user: actingUser, warehouseId: record.warehouseId, binLocation: record.binLocation, condition: record.condition, disposition: record.disposition, items: record.items.map(line => ({ sku: line.sku, receivedQty: line.receivedQty })) }];
-    await postgres.writeStateDocuments({ returns: db.returns || [], inventoryLedger: db.inventoryLedger || [] });
+    await postgres.saveReturn(record);
+    await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
     if (order) {
-      reconcileOrderReturns(order, db.returns);
+      const orderReturns = await postgres.readOrderReturns(order);
+      reconcileOrderReturns(order, orderReturns);
       normalizeSourceOrderCompletion(order);
       await postgres.saveOrder(order);
     }

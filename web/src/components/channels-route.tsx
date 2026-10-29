@@ -20,10 +20,10 @@ import { cn } from "@/lib/utils"
 import { CompanyManualChannels } from "./manual-channels"
 import { EbayOperations } from "./ebay-operations"
 import { api, dateLabel, numberLabel } from "../lib/client-api"
+import { ContextActions, Detail, Field, PageHeader, ToggleField } from "./app-ui"
 import {
-  ActionTile, ChannelLogsPanel, ContextActions, Detail, Field, PageHeader, PriceModeSelect,
-  ToggleField,
-} from "../App"
+  ActionTile, ChannelLogsPanel, PriceModeSelect,
+} from "./legacy-workspaces"
 import type {
   ChannelConnection, ImportJob, ShopifyAuthCheck, ShopifyWarehouseMapping, WarehouseRoutingRule,
 } from "../App"

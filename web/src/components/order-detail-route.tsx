@@ -23,19 +23,17 @@ import { OrderTransactions } from "./order-transactions"
 import { OrderNotesPanel } from "./order-notes-panel"
 import { EbayLiveMark, TikTokLiveMark, ebayLiveEventIds, isEbayLiveOrder, isTikTokLiveOrder, tiktokLiveContentIds, tiktokLiveCreators } from "./ebay-live-mark"
 import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
+import { Detail, Field, HistoryBackButton, PageHeader, ToggleField } from "./app-ui"
 import {
   channelOrderNumberFor,
   channelOrderUrlFor,
   CustomerNotificationPanel,
-  Detail,
   detectTrackingCarrier,
   enabledCarrierNames,
   enabledCarrierServices,
-  Field,
   fulfillmentPackageDefaults,
   FulfillmentStagePanel,
   getOrderRoutingState,
-  HistoryBackButton,
   LinkedPurchaseOrdersTable,
   OrderActionsMenu,
   OrderActivityTimeline,
@@ -49,7 +47,6 @@ import {
   orderAttentionItems,
   orderFulfillmentRateReview,
   orderHasBlockingException,
-  orderHref,
   OrderItemsProfitLoss,
   OrderLineActionPanel,
   OrderOperationsPanel,
@@ -57,8 +54,6 @@ import {
   OrderReturnSyncPanel,
   OrderReturnsPanel,
   orderStateLabel,
-  orderUrlKey,
-  PageHeader,
   ReturnLabelPanel,
   rmaHref,
   shipmentDisplayValue,
@@ -66,12 +61,12 @@ import {
   ShippingLabelReadinessPanel,
   ShopifyDeliveryQuotePanel,
   ShopifyPaymentCapturePanel,
-  ToggleField,
   trackingUrlForShipment,
   UniversalShippingLabelDialog,
   useFulfillmentCarriers,
   walmartOrderIdentifiers,
-} from "../App"
+} from "./legacy-workspaces"
+import { orderHref, orderUrlKey } from "../App"
 
 export { OrderDetailWorkspace, RmaDetailPage }
 

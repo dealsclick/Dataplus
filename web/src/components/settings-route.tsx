@@ -25,13 +25,15 @@ import { UserCompanyAccess } from "./user-company-access"
 import { SuperuserActivity } from "./superuser-activity"
 import { CarrierProviderSettings } from "./carrier-provider-settings"
 import { api, dateLabel, numberLabel } from "../lib/client-api"
+import { Detail, Field, PageHeader, ToggleField } from "./app-ui"
 import {
-  Detail, Field, PageHeader, permissionActionLabel, ReleaseHistorySettings, ToggleField,
-  userCan, VendorFeedScheduleManager,
+  permissionActionLabel, userCan,
 } from "../App"
+import { ReleaseHistorySettings, VendorFeedScheduleManager } from "./legacy-workspaces"
+import type { SupplierIndexStatus } from "./legacy-workspaces"
 import type {
   AuthPermission, AuthPermissionArea, AuthPermissionAuditEvent, AuthPermissionMatrix,
-  AuthPermissionTemplate, AuthUser, ImportJob, LiteState, SupplierIndexStatus,
+  AuthPermissionTemplate, AuthUser, ImportJob, LiteState,
   SystemSettings, WorkerStatus,
 } from "../App"
 function SettingsPage({

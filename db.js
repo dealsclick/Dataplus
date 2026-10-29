@@ -13,7 +13,7 @@ const { JOB_AUTOMATED_SQL, JOB_CHANNEL_KEY_SQL, JOB_CHANNEL_LABEL_SQL, JOB_TRIGG
 const { compactOrderForStorage, shipmentTrackingRecords, shipmentFinancialRecords, orderShippingRevenueRecord } = require("./lib/order-payload-retention");
 const { parseSearchTerms } = require("./lib/multi-search");
 const { recordDatabaseQuery } = require("./lib/performance-context");
-const { normalizeSequentialReturnNumbers } = require("./lib/return-identifiers");
+const { normalizeSequentialReturnNumbers, returnSlugBase } = require("./lib/return-identifiers");
 const {
   LEGACY_COMPANY_ID,
   LEGACY_COMPANY_NUMBER,
@@ -268,6 +268,23 @@ async function ensureReturnWorkspaceSchema(client) {
         where collection = 'returns' and nullif(data->>'orderId', '') is not null;
       create index if not exists entity_documents_returns_updated_idx
         on entity_documents (updated_at desc, entity_id desc)
+        where collection = 'returns';
+      create index if not exists entity_documents_returns_status_idx
+        on entity_documents (lower(coalesce(nullif(data->>'status', ''), nullif(data->>'returnStatus', ''), '')))
+        where collection = 'returns';
+      create index if not exists entity_documents_returns_channel_idx
+        on entity_documents (lower(coalesce(nullif(data->>'channelSource', ''), nullif(data->>'salesChannel', ''), nullif(data->>'source', ''), '')))
+        where collection = 'returns';
+      create index if not exists entity_documents_returns_tracking_idx
+        on entity_documents (lower(coalesce(
+          nullif(data->>'trackingNumber', ''),
+          nullif(data->'returnLabel'->>'trackingNumber', ''),
+          nullif(data->'returnLabel'->'shipment'->>'trackingNumber', ''),
+          ''
+        )))
+        where collection = 'returns';
+      create index if not exists entity_documents_returns_data_gin_idx
+        on entity_documents using gin (data jsonb_path_ops)
         where collection = 'returns';
     `);
     await client.query("commit");
@@ -12007,6 +12024,106 @@ async function readImportedReturn(source = "", channelReturnId = "") {
   return result.rows[0]?.data || null;
 }
 
+async function readReturnByKey(reference = "") {
+  const client = getPool();
+  const key = nullableString(reference);
+  if (!client || !key) return null;
+  await initRelationalSchema();
+  const result = await client.query(`
+    select data
+    from entity_documents
+    where collection = 'returns' and (
+      entity_id = $1
+      or data->>'id' = $1
+      or lower(data->>'returnNumber') = lower($1)
+      or lower(data->>'channelReturnId') = lower($1)
+      or lower(data->>'legacyReturnNumber') = lower($1)
+      or exists (
+        select 1 from jsonb_array_elements_text(
+          case when jsonb_typeof(data->'previousReturnNumbers') = 'array'
+            then data->'previousReturnNumbers' else '[]'::jsonb end
+        ) previous(value)
+        where lower(previous.value) = lower($1)
+      )
+    )
+    order by updated_at desc
+    limit 1
+  `, [key]);
+  const record = result.rows[0]?.data || null;
+  return record ? { ...record, returnSlug: returnSlugBase(record) } : null;
+}
+
+async function countReturnsByNumber(returnNumber = "", excludeId = "") {
+  const client = getPool();
+  const key = nullableString(returnNumber);
+  if (!client || !key) return 0;
+  await initRelationalSchema();
+  const result = await client.query(`
+    select count(*)::int as count
+    from entity_documents
+    where collection = 'returns'
+      and lower(data->>'returnNumber') = lower($1)
+      and ($2 = '' or entity_id <> $2)
+  `, [key, nullableString(excludeId) || ""]);
+  return Number(result.rows[0]?.count || 0);
+}
+
+async function saveReturn(record = {}) {
+  const client = getPool();
+  const id = nullableString(record.id);
+  if (!client || !id) throw new Error("Return id is required.");
+  await initRelationalSchema();
+  const saved = { ...record };
+  delete saved.returnSlug;
+  await client.query(`
+    insert into entity_documents (collection, entity_id, position, data, updated_at)
+    values ('returns', $1, 0, $2::jsonb, now())
+    on conflict (collection, entity_id) do update set
+      data = excluded.data,
+      updated_at = now()
+  `, [id, JSON.stringify(saved)]);
+  invalidateReturnsWorkspaceSummary();
+  return { ...saved, returnSlug: returnSlugBase(saved) };
+}
+
+async function findReturnsForReceiving(query = "", options = {}) {
+  const client = getPool();
+  const key = nullableString(query)?.toLowerCase();
+  if (!client || !key) return [];
+  await initRelationalSchema();
+  const limit = Math.max(1, Math.min(100, Number(options.limit || 50)));
+  const candidates = [...new Set((Array.isArray(options.trackingCandidates) ? options.trackingCandidates : [])
+    .map((value) => nullableString(value)?.toLowerCase()).filter(Boolean))];
+  const result = await client.query(`
+    select data
+    from entity_documents
+    where collection = 'returns' and (
+      entity_id = $1
+      or lower(coalesce(data->>'id', '')) = $1
+      or lower(coalesce(data->>'returnNumber', '')) = $1
+      or lower(coalesce(data->>'channelReturnId', '')) = $1
+      or lower(coalesce(data->>'orderId', '')) = $1
+      or lower(coalesce(data->>'orderNumber', '')) = $1
+      or lower(coalesce(data->>'channelOrderId', '')) = $1
+      or lower(coalesce(data->>'trackingNumber', '')) = any($2::text[])
+      or lower(coalesce(data->'returnLabel'->>'trackingNumber', '')) = any($2::text[])
+      or exists (
+        select 1
+        from jsonb_array_elements(case when jsonb_typeof(data->'returnTracking') = 'array' then data->'returnTracking' else '[]'::jsonb end) tracking
+        where lower(coalesce(tracking->>'trackingNumber', tracking->>'tracking', tracking->>'trackingNo', tracking->>'trackingCode', '')) = any($2::text[])
+      )
+      or exists (
+        select 1
+        from jsonb_array_elements(case when jsonb_typeof(data->'returnLabelHistory') = 'array' then data->'returnLabelHistory' else '[]'::jsonb end) tracking
+        where lower(coalesce(tracking->>'trackingNumber', tracking->>'tracking', tracking->>'trackingNo', tracking->>'trackingCode', '')) = any($2::text[])
+      )
+    )
+    order by updated_at desc, entity_id desc
+    limit $3
+  `, [key, candidates.length ? candidates : [key], limit]);
+  return result.rows.map((row) => ({ ...row.data, returnSlug: returnSlugBase(row.data) }));
+}
+
 async function allocateImportedReturnNumber(client) {
   await client.query("select pg_advisory_xact_lock(hashtext('dataplus-return-number'))");
   const result = await client.query(`
@@ -19422,6 +19539,10 @@ module.exports = {
   readOrdersByMarketplaceKey,
   listDuplicateOrderRecords,
   readImportedReturn,
+  readReturnByKey,
+  countReturnsByNumber,
+  saveReturn,
+  findReturnsForReceiving,
   upsertImportedReturn,
   acquireReturnWriteLock,
   nextReturnNumberAtomic,

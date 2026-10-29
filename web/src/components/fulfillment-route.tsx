@@ -38,7 +38,8 @@ import { matchesSearch, normalizePastedSearch } from "../lib/multi-search"
 import { BulkSearchActions } from "./bulk-search-csv-button"
 import { TrackingCameraLookup } from "./tracking-camera-lookup"
 import { OutboundAuditWorkspace } from "./outbound-audit-workspace"
-import { Detail, Field, PageHeader, sortShippingRatesForDisplay, ToggleField } from "../App"
+import { Detail, Field, PageHeader, ToggleField } from "./app-ui"
+import { sortShippingRatesForDisplay } from "./legacy-workspaces"
 import type { ImportJob, ProductItem } from "../App"
 
 type FulfillmentCarrierService = { id: string; name: string; enabled: boolean }

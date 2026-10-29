@@ -29,18 +29,21 @@ import { BulkSearchActions } from "./bulk-search-csv-button"
 import { readWorkspaceCache, writeWorkspaceCache } from "../lib/workspace-cache"
 import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
 import { normalizePastedSearch, parseSearchTerms } from "../lib/multi-search"
+import { channelFilterLabel, marketplaceChannelKey } from "../lib/catalog-channel-utils"
+import type { MarketplaceChannelKey } from "../lib/catalog-channel-utils"
 import { cn } from "@/lib/utils"
+import { ContextActions, Field, MetricCard, PageHeader, ToggleField } from "./app-ui"
 import {
   AttributesPage, AttributeGroupsPage, CategoriesWorkspace, CategoryReviewPage, CatalogChannelMarks,
   catalogCategoryLeaf, catalogCellText, CatalogResourcePage, CatalogSupplierCoverage, catalogWorkspaceTabFromPath,
-  catalogWorkspaceTabs, channelFilterLabel, ContextActions, Field, ImportReviewPage,
-  InventorySourceCell, InventoryWorkspace, launchWalmartExisting, marketplaceChannelKey, MetricCard,
-  normalizeUnifiedCatalogFilters, PageHeader, ProductDetailSheet, SkuChangesPage,
-  ToggleField, unifiedCatalogSourceFilters, unifiedCatalogUsesManagedRecords, VendorMappingsPage,
-} from "../App"
+  catalogWorkspaceTabs, ImportReviewPage,
+  InventorySourceCell, InventoryWorkspace, ProductDetailSheet, SkuChangesPage, VendorMappingsPage,
+} from "./legacy-workspaces"
+import type { CatalogWorkspaceTab } from "./legacy-workspaces"
+import { launchWalmartExisting, normalizeUnifiedCatalogFilters, unifiedCatalogSourceFilters, unifiedCatalogUsesManagedRecords } from "../App"
 import type {
-  CatalogItem, CatalogResponse, CatalogWorkspaceTab, ChannelConnection, EbayListingBlockerReport,
-  EbaySyncWarningReport, ImportJob, MarketplaceChannelKey, ProductItem,
+  CatalogItem, CatalogResponse, ChannelConnection, EbayListingBlockerReport,
+  EbaySyncWarningReport, ImportJob, ProductItem,
 } from "../App"
 
 const WalmartChannel = lazy(() => import("./walmart-channel").then((module) => ({ default: module.WalmartChannel })))

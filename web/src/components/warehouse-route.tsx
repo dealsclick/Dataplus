@@ -29,7 +29,8 @@ import { OutboundAuditWorkspace } from "./outbound-audit-workspace"
 import { VendorCreateDialog } from "./vendor-create-dialog"
 import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
 import { compressEvidenceImage, startFastBarcodeScanner } from "../lib/fast-barcode-scanner"
-import { Detail, Field, PageHeader, ProductDetailSheet } from "../App"
+import { Detail, Field, PageHeader } from "./app-ui"
+import { ProductDetailSheet } from "./legacy-workspaces"
 import type { CatalogItem, ImportJob, LiteState, SystemSettings, Vendor } from "../App"
 type WarehouseRegisterRecord = {
   id?: string

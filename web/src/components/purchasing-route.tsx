@@ -34,12 +34,13 @@ import { readWorkspaceCache, writeWorkspaceCache } from "../lib/workspace-cache"
 import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
 import { matchesSearch, normalizePastedSearch } from "../lib/multi-search"
 import { BulkSearchActions } from "./bulk-search-csv-button"
+import { ContextActions, Detail, Field, PageHeader } from "./app-ui"
 import {
-  CatalogImage, ContextActions, Detail, detectTrackingCarrier, detectedTrackingUpdate,
-  enabledCarrierNames, enabledCarrierServices, Field, PageHeader,
+  CatalogImage, detectTrackingCarrier, detectedTrackingUpdate,
+  enabledCarrierNames, enabledCarrierServices,
   purchaseOrderChannelReferenceUrl, purchaseOrderCtechNumber, purchaseOrderSalesChannel,
   purchaseOrderSupplierReference, useFulfillmentCarriers,
-} from "../App"
+} from "./legacy-workspaces"
 import type { QuickProductResult } from "../App"
 
 type PooledSupplierGroup = {
