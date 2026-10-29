@@ -1694,6 +1694,7 @@ const orderDateRangeOptions = [
   { value: "lastQuarter", label: "Last quarter" },
   { value: "ytd", label: "Year to date" },
   { value: "lastYear", label: "Last year" },
+  { value: "allTime", label: "All time" },
   { value: "exact", label: "Exact date" },
   { value: "custom", label: "Custom range" },
 ] as const
@@ -1733,6 +1734,7 @@ function orderDateRangeBounds(range: string, exactDate = "", customDateTo = "") 
   if (range === "lastQuarter") return { from: localDateKey(startOfLastQuarter), to: localDateKey(endOfLastQuarter), label: "last quarter" }
   if (range === "ytd") return { from: localDateKey(startOfYear), to: "", label: "year to date" }
   if (range === "lastYear") return { from: localDateKey(previousYearStart), to: localDateKey(previousYearEnd), label: "last year" }
+  if (range === "allTime") return { from: "", to: "", label: "all time" }
   return { from: localDateKey(daysAgo(7)), to: "", label: "last 7 days" }
 }
 
@@ -10926,7 +10928,7 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
   const initial = mobileReturns || window.location.pathname.startsWith("/returns") ? "returns" : window.location.pathname.startsWith("/drafts") ? "drafts" : "orders"
   const orderWorkspace = window.location.pathname === "/orders/all" ? "all" : "open"
   const [tab, setTab] = useState(initial)
-  const [data, setData] = useState<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; metrics?: Record<string, unknown>; scope?: string; dateFrom?: string; limit?: number }>({})
+  const [data, setData] = useState<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; metrics?: Record<string, unknown>; scope?: string; dateFrom?: string; limit?: number; total?: number; page?: number; pageSize?: number; totalPages?: number }>({})
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [query, setQuery] = useState("")
@@ -10941,17 +10943,34 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
   const [appliedOrderDateTo, setAppliedOrderDateTo] = useState("")
   const [dateRangeOpen, setDateRangeOpen] = useState(false)
   const [orderFilterOpen, setOrderFilterOpen] = useState(false)
-  const [orderFilterField, setOrderFilterField] = useState("status")
+  const [orderAdvancedFilterOpen, setOrderAdvancedFilterOpen] = useState(false)
+  const [orderFilterField, setOrderFilterField] = useState("fulfillment")
+  const [orderAdvancedFilterField, setOrderAdvancedFilterField] = useState("fulfillment")
   const [sharedOrderViews, setSharedOrderViews] = useState<Array<Record<string, unknown>>>([])
+  const [activeOrderViewId, setActiveOrderViewId] = useState("")
   const [saveOrderViewOpen, setSaveOrderViewOpen] = useState(false)
   const [savedOrderViewName, setSavedOrderViewName] = useState("")
+  const [orderExportOpen, setOrderExportOpen] = useState(false)
+  const [orderExportMode, setOrderExportMode] = useState("summary")
+  const [orderExportScope, setOrderExportScope] = useState("filtered")
+  const [orderExportBusy, setOrderExportBusy] = useState(false)
   const [paymentFilter, setPaymentFilter] = useState("all")
+  const [shippingFilter, setShippingFilter] = useState("all")
   const [fulfillmentFilter, setFulfillmentFilter] = useState("all")
   const [deliveryFilter, setDeliveryFilter] = useState("all")
   const [poFilter, setPoFilter] = useState("all")
   const [supplierFilter, setSupplierFilter] = useState("all")
+  const [brandFilter, setBrandFilter] = useState("all")
   const [carrierFilter, setCarrierFilter] = useState("all")
   const [countryFilter, setCountryFilter] = useState("all")
+  const [stateFilter, setStateFilter] = useState("all")
+  const [warehouseFilter, setWarehouseFilter] = useState("all")
+  const [labelFilter, setLabelFilter] = useState("all")
+  const [returnFilter, setReturnFilter] = useState("all")
+  const [exceptionFilter, setExceptionFilter] = useState("all")
+  const [outcomeFilter, setOutcomeFilter] = useState("all")
+  const [totalMinFilter, setTotalMinFilter] = useState("")
+  const [totalMaxFilter, setTotalMaxFilter] = useState("")
   const [visibleAllColumns, setVisibleAllColumns] = useState<Set<string>>(() => {
     try {
       const stored = JSON.parse(window.localStorage.getItem("dataplus:all-orders-columns") || "[]") as string[]
@@ -10986,6 +11005,45 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
   const [quoteForm, setQuoteForm] = useState({ buyer: "", buyerEmail: "", phone: "", source: "Manual", note: "", sku: "", title: "", qty: "1", price: "", line1: "", line2: "", city: "", state: "", postalCode: "", country: "US" })
   const [returnForm, setReturnForm] = useState({ orderId: "", warehouseId: "", reason: "Customer return", condition: "Unknown", note: "" })
 
+  function currentOrderListFilters() {
+    const activeRange = orderDateRangeBounds(appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo)
+    const hasSearch = query.trim().length >= 2
+    return {
+      q: query.trim(),
+      status,
+      source,
+      payment: paymentFilter,
+      shipping: shippingFilter,
+      fulfillment: fulfillmentFilter,
+      delivery: deliveryFilter,
+      po: poFilter,
+      supplier: supplierFilter,
+      brand: brandFilter,
+      carrier: carrierFilter,
+      country: countryFilter,
+      state: stateFilter,
+      warehouse: warehouseFilter,
+      label: labelFilter,
+      returnStatus: returnFilter,
+      exception: exceptionFilter,
+      outcome: outcomeFilter,
+      totalMin: totalMinFilter,
+      totalMax: totalMaxFilter,
+      dateFrom: hasSearch ? "" : activeRange.from,
+      dateTo: hasSearch ? "" : activeRange.to,
+      sort,
+    }
+  }
+
+  function appendOrderListFilters(params: URLSearchParams) {
+    const filters = currentOrderListFilters()
+    Object.entries(filters).forEach(([key, value]) => {
+      const normalized = String(value || "").trim()
+      if (normalized && normalized !== "all") params.set(key, normalized)
+    })
+    if (!filters.q && appliedOrderDateRange === "allTime") params.set("allDates", "1")
+  }
+
   async function load() {
     const requestId = ++orderRequestRef.current
     try {
@@ -11014,7 +11072,11 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
       const ordersPath = new URLSearchParams({ summary: "1", limit: "5000", recentDays: "7", includeOpenWork: orderWorkspace === "open" ? "1" : "0" })
       if (orderWorkspace === "open") ordersPath.set("openWorkOnly", "1")
       const serverSearch = query.trim()
-      if (serverSearch.length >= 2) {
+      if (orderWorkspace === "all") {
+        ordersPath.set("page", String(page))
+        ordersPath.set("pageSize", "100")
+        appendOrderListFilters(ordersPath)
+      } else if (serverSearch.length >= 2) {
         ordersPath.set("q", serverSearch)
         ordersPath.set("limit", "10000")
       } else if (activeRange.from) {
@@ -11025,7 +11087,7 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
       if (cached) setData(cached)
       setLoading(!cached)
       const [orders, state] = await Promise.all([
-        api<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; metrics?: Record<string, unknown>; scope?: string; q?: string; dateFrom?: string; limit?: number }>(`/api/orders?${ordersPath.toString()}`),
+        api<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; metrics?: Record<string, unknown>; scope?: string; q?: string; dateFrom?: string; limit?: number; total?: number; page?: number; pageSize?: number; totalPages?: number }>(`/api/orders?${ordersPath.toString()}`),
         api<LiteState>("/api/orders/references"),
       ])
       if (requestId !== orderRequestRef.current) return
@@ -11042,7 +11104,7 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
     catch (error) { if (requestId === orderRequestRef.current) toast.error(error instanceof Error ? error.message : "Unable to load operations data.") }
     finally { if (requestId === orderRequestRef.current) setLoading(false) }
   }
-  useEffect(() => { void load() }, [tab, appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo, orderWorkspace])
+  useEffect(() => { void load() }, [tab, appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo, orderWorkspace, page, sort, status, source, paymentFilter, shippingFilter, fulfillmentFilter, deliveryFilter, poFilter, supplierFilter, brandFilter, carrierFilter, countryFilter, stateFilter, warehouseFilter, labelFilter, returnFilter, exceptionFilter, outcomeFilter, totalMinFilter, totalMaxFilter])
   useEffect(() => {
     if (!returnOpen || returnOrderDetail || returnOrderSearch.trim().length < 2) {
       if (!returnOrderDetail) setReturnOrderResults([])
@@ -11081,7 +11143,7 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
       .catch(() => { if (active) setSharedOrderViews([]) })
     return () => { active = false }
   }, [tab, orderWorkspace])
-  useEffect(() => { setPage(1); setSelectedIds(new Set()) }, [tab, queue, status, source, appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo, query, sort, paymentFilter, fulfillmentFilter, deliveryFilter, poFilter, supplierFilter, carrierFilter, countryFilter])
+  useEffect(() => { setPage(1); setSelectedIds(new Set()) }, [tab, queue, status, source, appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo, query, sort, paymentFilter, shippingFilter, fulfillmentFilter, deliveryFilter, poFilter, supplierFilter, brandFilter, carrierFilter, countryFilter, stateFilter, warehouseFilter, labelFilter, returnFilter, exceptionFilter, outcomeFilter, totalMinFilter, totalMaxFilter])
   useEffect(() => {
     window.localStorage.setItem("dataplus:all-orders-columns", JSON.stringify([...visibleAllColumns]))
   }, [visibleAllColumns])
@@ -11119,25 +11181,25 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
     if (queued.length) toast.success(`${queued.map((entry) => entry.channel === "ebay" ? "eBay" : entry.channel[0].toUpperCase() + entry.channel.slice(1)).join(", ")} return sync queued. Follow progress in Jobs.`)
     if (failed.length) toast.error(`${failed.map((entry) => `${entry.channel}: ${entry.message}`).join(" ")}`)
   }
-  function exportVisibleOrders() {
-    const columns = ["Internal order", "Channel order", "Order date", "Customer", "Channel", "Total", "Payment", "Fulfillment", "Items"]
-    const csv = [columns, ...filtered.map((row) => [
-      String(row.orderNumber || row.internalOrderNumber || ""),
-      String(row.marketplaceOrderId || row.channelOrderNumber || row.externalOrderId || ""),
-      orderDateFor(row),
-      String(row.buyer || row.customerName || row.customerEmail || ""),
-      String(row.channelSource || row.salesChannel || row.source || ""),
-      Number(row.total || 0).toFixed(2),
-      String(row.financialStatus || row.paymentStatus || ""),
-      String(row.fulfillmentStatus || row.fulfillmentStage || row.status || ""),
-      String((Array.isArray(row.items) ? row.items : []).reduce((total, item) => total + Number((item as Record<string, unknown>).qty || 0), 0)),
-    ].map((value) => `"${value.replaceAll('"', '""')}"`).join(","))].join("\n")
-    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }))
-    const link = document.createElement("a")
-    link.href = url
-    link.download = `dataplus-${orderWorkspace}-orders-${localDateKey(new Date())}.csv`
-    link.click()
-    URL.revokeObjectURL(url)
+  async function queueOrderExport() {
+    setOrderExportBusy(true)
+    try {
+      const result = await api<{ job?: { id?: string }; message?: string }>("/api/orders/export", {
+        method: "POST",
+        body: JSON.stringify({
+          mode: orderExportMode,
+          scope: orderExportScope,
+          orderIds: orderExportScope === "selected" ? [...selectedIds] : [],
+          filters: currentOrderListFilters(),
+        }),
+      })
+      setOrderExportOpen(false)
+      toast.success(result.message || "Order export queued. Download it from Jobs when it is ready.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to queue the order export.")
+    } finally {
+      setOrderExportBusy(false)
+    }
   }
   async function openInternalNumberResequence() {
     setResequenceOpen(true)
@@ -11362,8 +11424,8 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
     : queueDefinitions
   const actionRequiredCount = orderRows.filter((row) => actionQueueIds.has(queueFor(row))).length
   const rows = tab === "orders" ? orderRows : tab === "drafts" ? data.orderDrafts || [] : data.returns || []
-  const sourceValues = [...new Set([...rows.map(orderChannelFilterValue).filter(Boolean), ...(tab === "orders" ? [EBAY_LIVE_FILTER_VALUE, TIKTOK_LIVE_FILTER_VALUE] : [])])].sort((left, right) => orderChannelFilterLabel(left).localeCompare(orderChannelFilterLabel(right)))
-  const statusValues = [...new Set(rows.map((row) => String(row.status || row.returnStatus || "")).filter(Boolean))].sort()
+  const sourceValues = [...new Set([...rows.map(orderChannelFilterValue).filter(Boolean), ...(tab === "orders" ? ["Shopify", "eBay", "Temu", "TikTok Shop", "Walmart", "Manual", EBAY_LIVE_FILTER_VALUE, TIKTOK_LIVE_FILTER_VALUE] : [])])].sort((left, right) => orderChannelFilterLabel(left).localeCompare(orderChannelFilterLabel(right)))
+  const statusValues = [...new Set([...rows.map((row) => String(row.status || row.returnStatus || "")).filter(Boolean), ...(tab === "orders" ? ["new", "pending", "processing", "hold", "completed", "canceled", "cancelled", "refunded"] : [])])].sort((left, right) => left.localeCompare(right))
   const searchTerm = query.trim().toLowerCase()
   const searchTerms = parseSearchTerms(query)
   const orderDateFor = (row: Record<string, unknown>) => String(row.orderDate || row.orderedAt || row.purchaseDate || row.purchasedAt || row.createdAt || row.updatedAt || "")
@@ -11375,12 +11437,33 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
   const orderHasPo = (row: Record<string, unknown>) => (Array.isArray(row.purchaseOrderIds) && row.purchaseOrderIds.length > 0) || (Array.isArray(row.purchaseOrderNumbers) && row.purchaseOrderNumbers.length > 0) || (Array.isArray(row.fulfillmentRoutes) && (row.fulfillmentRoutes as Array<Record<string, unknown>>).some((route) => Boolean(route.purchaseOrderId)))
   const deliveryStateFor = (row: Record<string, unknown>) => String(row.deliveryStatus || row.trackingStatus || (Array.isArray(row.shipments) && row.shipments[0] ? (row.shipments[0] as Record<string, unknown>).status || "" : "") || "no_tracking").toLowerCase()
   const supplierFor = (row: Record<string, unknown>) => String(row.supplier || row.vendor || (Array.isArray(row.items) && row.items[0] ? (row.items[0] as Record<string, unknown>).supplier || (row.items[0] as Record<string, unknown>).vendor || "" : ""))
+  const brandFor = (row: Record<string, unknown>) => String(row.brand || (Array.isArray(row.items) && row.items[0] ? (row.items[0] as Record<string, unknown>).brand || "" : ""))
   const shipmentFor = (row: Record<string, unknown>) => Array.isArray(row.shipments) && row.shipments[0] ? row.shipments[0] as Record<string, unknown> : {}
   const carrierFor = (row: Record<string, unknown>) => String(shipmentFor(row).carrier || shipmentFor(row).carrierName || row.carrier || "")
   const countryFor = (row: Record<string, unknown>) => String((row.shippingAddress as Record<string, unknown> | undefined)?.country || (row.shippingAddress as Record<string, unknown> | undefined)?.countryCode || row.shippingCountry || "")
+  const stateFor = (row: Record<string, unknown>) => String((row.shippingAddress as Record<string, unknown> | undefined)?.state || (row.shippingAddress as Record<string, unknown> | undefined)?.province || "")
+  const warehouseFor = (row: Record<string, unknown>) => String(row.fulfillmentWarehouseName || row.fulfillmentWarehouseId || (Array.isArray(row.fulfillmentRoutes) && row.fulfillmentRoutes[0] ? (row.fulfillmentRoutes[0] as Record<string, unknown>).warehouseName || (row.fulfillmentRoutes[0] as Record<string, unknown>).warehouseId || "" : ""))
+  const activeShipmentsFor = (row: Record<string, unknown>) => (Array.isArray(row.shipments) ? row.shipments as Array<Record<string, unknown>> : []).filter((shipment) => !["canceled", "cancelled", "void", "voided", "superseded"].includes(String(shipment.status || "").toLowerCase()))
+  const labelStateFor = (row: Record<string, unknown>) => {
+    const shipments = activeShipmentsFor(row)
+    if (shipments.some((shipment) => shipment.labelPrintedAt || shipment.labelLastPrintedAt || Number(shipment.labelPrintCount || 0) > 0)) return "printed"
+    if (shipments.some((shipment) => shipment.labelPurchaseId || shipment.labelProvider || shipment.labelSource || (Array.isArray(shipment.documents) && shipment.documents.length > 0))) return "purchased"
+    return "no_label"
+  }
+  const shippingStateFor = (row: Record<string, unknown>) => {
+    const statuses = [row.deliveryStatus, row.trackingStatus, row.fulfillmentStatus, row.fulfillmentStage, row.status, ...activeShipmentsFor(row).flatMap((shipment) => [shipment.status, shipment.trackingStatus, shipment.carrierStatus])].map((value) => String(value || "").toLowerCase())
+    if (row.deliveredAt || statuses.some((value) => value.includes("deliver"))) return "delivered"
+    if (statuses.some((value) => value.includes("partial"))) return "partially_shipped"
+    if (row.shippedAt || row.shipDate || statuses.some((value) => value.includes("ship") || value.includes("transit"))) return "shipped"
+    const label = labelStateFor(row)
+    return label === "printed" ? "label_printed" : label === "purchased" ? "label_purchased" : "unshipped"
+  }
   const supplierValues = [...new Set(rows.map(supplierFor).filter(Boolean))].sort()
+  const brandValues = [...new Set(rows.map(brandFor).filter(Boolean))].sort()
   const carrierValues = [...new Set(rows.map(carrierFor).filter(Boolean))].sort()
   const countryValues = [...new Set(rows.map(countryFor).filter(Boolean))].sort()
+  const stateValues = [...new Set(rows.map(stateFor).filter(Boolean))].sort()
+  const warehouseValues = [...new Set(rows.map(warehouseFor).filter(Boolean))].sort()
   const setDatePreset = (nextRange: string) => {
     const bounds = orderDateRangeBounds(nextRange)
     setOrderDateRange(nextRange)
@@ -11403,51 +11486,81 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
     { id: "status", label: "Order status" },
     { id: "source", label: "Channel" },
     { id: "payment", label: "Payment" },
+    { id: "shipping", label: "Shipping status" },
     { id: "fulfillment", label: "Fulfillment" },
     { id: "delivery", label: "Delivery" },
+    { id: "label", label: "Shipping label" },
+    { id: "return", label: "Return status" },
+    { id: "outcome", label: "Cancellation / refund" },
+    { id: "exception", label: "Exceptions" },
     { id: "po", label: "Purchase order" },
     { id: "supplier", label: "Supplier" },
+    { id: "brand", label: "Brand" },
     { id: "carrier", label: "Carrier" },
     { id: "country", label: "Destination country" },
+    { id: "state", label: "Destination state" },
+    { id: "warehouse", label: "Warehouse" },
+    { id: "total", label: "Order total" },
   ]
   const activeOrderFilters = [
     status !== "all" && { label: "Status", value: status, clear: () => setStatus("all") },
     source !== "all" && { label: "Channel", value: orderChannelFilterLabel(source), clear: () => setSource("all") },
     paymentFilter !== "all" && { label: "Payment", value: paymentFilter, clear: () => setPaymentFilter("all") },
+    shippingFilter !== "all" && { label: "Shipping", value: shippingFilter.replaceAll("_", " "), clear: () => setShippingFilter("all") },
     fulfillmentFilter !== "all" && { label: "Fulfillment", value: fulfillmentFilter, clear: () => setFulfillmentFilter("all") },
     deliveryFilter !== "all" && { label: "Delivery", value: deliveryFilter.replaceAll("_", " "), clear: () => setDeliveryFilter("all") },
+    labelFilter !== "all" && { label: "Label", value: labelFilter.replaceAll("_", " "), clear: () => setLabelFilter("all") },
+    returnFilter !== "all" && { label: "Return", value: returnFilter.replaceAll("_", " "), clear: () => setReturnFilter("all") },
+    outcomeFilter !== "all" && { label: "Outcome", value: outcomeFilter, clear: () => setOutcomeFilter("all") },
+    exceptionFilter !== "all" && { label: "Exceptions", value: exceptionFilter.replaceAll("_", " "), clear: () => setExceptionFilter("all") },
     poFilter !== "all" && { label: "PO", value: poFilter === "linked" ? "Linked" : "No PO" , clear: () => setPoFilter("all") },
     supplierFilter !== "all" && { label: "Supplier", value: supplierFilter, clear: () => setSupplierFilter("all") },
+    brandFilter !== "all" && { label: "Brand", value: brandFilter, clear: () => setBrandFilter("all") },
     carrierFilter !== "all" && { label: "Carrier", value: carrierFilter, clear: () => setCarrierFilter("all") },
     countryFilter !== "all" && { label: "Country", value: countryFilter, clear: () => setCountryFilter("all") },
+    stateFilter !== "all" && { label: "State", value: stateFilter, clear: () => setStateFilter("all") },
+    warehouseFilter !== "all" && { label: "Warehouse", value: warehouseFilter, clear: () => setWarehouseFilter("all") },
+    totalMinFilter && { label: "Minimum", value: moneyLabel(Number(totalMinFilter)), clear: () => setTotalMinFilter("") },
+    totalMaxFilter && { label: "Maximum", value: moneyLabel(Number(totalMaxFilter)), clear: () => setTotalMaxFilter("") },
   ].filter(Boolean) as Array<{ label: string; value: string; clear: () => void }>
   const clearAllOrderFilters = () => {
     setStatus("all")
     setSource("all")
     setPaymentFilter("all")
+    setShippingFilter("all")
     setFulfillmentFilter("all")
     setDeliveryFilter("all")
+    setLabelFilter("all")
+    setReturnFilter("all")
+    setOutcomeFilter("all")
+    setExceptionFilter("all")
     setPoFilter("all")
     setSupplierFilter("all")
+    setBrandFilter("all")
     setCarrierFilter("all")
     setCountryFilter("all")
+    setStateFilter("all")
+    setWarehouseFilter("all")
+    setTotalMinFilter("")
+    setTotalMaxFilter("")
   }
   const applySharedOrderView = (view: Record<string, unknown>) => {
     const filters = (view.filters || {}) as Record<string, string>
     const range = (view.dateRange || {}) as Record<string, string>
     setQuery(String(filters.query || ""))
-    setStatus(String(filters.status || "all")); setSource(String(filters.source || "all")); setPaymentFilter(String(filters.payment || "all")); setFulfillmentFilter(String(filters.fulfillment || "all")); setDeliveryFilter(String(filters.delivery || "all")); setPoFilter(String(filters.po || "all")); setSupplierFilter(String(filters.supplier || "all")); setCarrierFilter(String(filters.carrier || "all")); setCountryFilter(String(filters.country || "all"))
+    setStatus(String(filters.status || "all")); setSource(String(filters.source || "all")); setPaymentFilter(String(filters.payment || "all")); setShippingFilter(String(filters.shipping || "all")); setFulfillmentFilter(String(filters.fulfillment || "all")); setDeliveryFilter(String(filters.delivery || "all")); setLabelFilter(String(filters.label || "all")); setReturnFilter(String(filters.returnStatus || "all")); setOutcomeFilter(String(filters.outcome || "all")); setExceptionFilter(String(filters.exception || "all")); setPoFilter(String(filters.po || "all")); setSupplierFilter(String(filters.supplier || "all")); setBrandFilter(String(filters.brand || "all")); setCarrierFilter(String(filters.carrier || "all")); setCountryFilter(String(filters.country || "all")); setStateFilter(String(filters.state || "all")); setWarehouseFilter(String(filters.warehouse || "all")); setTotalMinFilter(String(filters.totalMin || "")); setTotalMaxFilter(String(filters.totalMax || ""))
     const rangeName = String(range.range || "last7"); const from = String(range.from || ""); const to = String(range.to || "")
     setOrderDateRange(rangeName); setOrderDate(from); setOrderDateTo(to); setAppliedOrderDateRange(rangeName); setAppliedOrderDate(from); setAppliedOrderDateTo(to)
     setSort(String(view.sort || "created-desc")); setVisibleAllColumns(new Set(Array.isArray(view.columns) && view.columns.length ? view.columns.map(String) : allOrderColumnOptions.map(([id]) => id)))
+    setActiveOrderViewId(String(view.id || ""))
     toast.success(`Applied shared view: ${String(view.name || "Orders")}.`)
   }
   const saveSharedOrderView = async () => {
     const name = savedOrderViewName.trim()
     if (!name) { toast.error("Enter a name for the shared view."); return }
     try {
-      const result = await api<{ view?: Record<string, unknown>; views?: Array<Record<string, unknown>> }>("/api/orders/views", { method: "POST", body: JSON.stringify({ name, filters: { query, status, source, payment: paymentFilter, fulfillment: fulfillmentFilter, delivery: deliveryFilter, po: poFilter, supplier: supplierFilter, carrier: carrierFilter, country: countryFilter }, dateRange: { range: appliedOrderDateRange, from: appliedOrderDate, to: appliedOrderDateTo }, sort, columns: [...visibleAllColumns] }) })
-      setSharedOrderViews(result.views || []); setSavedOrderViewName(""); setSaveOrderViewOpen(false); toast.success(`Shared view ${name} saved.`)
+      const result = await api<{ view?: Record<string, unknown>; views?: Array<Record<string, unknown>> }>("/api/orders/views", { method: "POST", body: JSON.stringify({ name, filters: { query, status, source, payment: paymentFilter, shipping: shippingFilter, fulfillment: fulfillmentFilter, delivery: deliveryFilter, label: labelFilter, returnStatus: returnFilter, outcome: outcomeFilter, exception: exceptionFilter, po: poFilter, supplier: supplierFilter, brand: brandFilter, carrier: carrierFilter, country: countryFilter, state: stateFilter, warehouse: warehouseFilter, totalMin: totalMinFilter, totalMax: totalMaxFilter }, dateRange: { range: appliedOrderDateRange, from: appliedOrderDate, to: appliedOrderDateTo }, sort, columns: [...visibleAllColumns] }) })
+      setSharedOrderViews(result.views || []); setActiveOrderViewId(String(result.view?.id || "")); setSavedOrderViewName(""); setSaveOrderViewOpen(false); toast.success(`Shared view ${name} saved and activated.`)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save the shared view.") }
   }
   const removeSharedOrderView = async () => {
@@ -11456,7 +11569,7 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
     if (!name) return
     const view = sharedOrderViews.find((entry) => String(entry.name || "").toLowerCase() === name)
     if (!view) { toast.error("No shared view matched that name."); return }
-    try { const result = await api<{ views?: Array<Record<string, unknown>> }>(`/api/orders/views/${encodeURIComponent(String(view.id || ""))}`, { method: "DELETE" }); setSharedOrderViews(result.views || []); toast.success(`Shared view ${String(view.name)} removed.`) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to remove the shared view.") }
+    try { const result = await api<{ views?: Array<Record<string, unknown>> }>(`/api/orders/views/${encodeURIComponent(String(view.id || ""))}`, { method: "DELETE" }); setSharedOrderViews(result.views || []); if (activeOrderViewId === String(view.id || "")) setActiveOrderViewId(""); toast.success(`Shared view ${String(view.name)} removed.`) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to remove the shared view.") }
   }
   const dateRangeMatches = (row: Record<string, unknown>) => {
     if (tab !== "orders") return true
@@ -11471,33 +11584,57 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
   const filtered = useMemo(() => rows
     .filter((row) => !searchTerm || matchesSearch(row, query, orderListSearchText(row)))
     .filter((row) => tab !== "orders" || (orderWorkspace === "open" ? actionQueueIds.has(queueFor(row)) && (queue === "all" || queueFor(row) === queue) : queue === "all" || queueFor(row) === queue))
-    .filter((row) => status === "all" || String(row.status || row.returnStatus || "") === status)
-    .filter((row) => source === "all" || orderChannelFilterValue(row) === source)
-    .filter((row) => orderWorkspace !== "all" || paymentFilter === "all" || String(row.financialStatus || row.paymentStatus || "unpaid").toLowerCase() === paymentFilter)
+    .filter((row) => status === "all" || String(row.status || row.returnStatus || "").toLowerCase() === status.toLowerCase())
+    .filter((row) => source === "all" || orderChannelFilterValue(row).toLowerCase() === source.toLowerCase())
+    .filter((row) => orderWorkspace !== "all" || paymentFilter === "all" || String(row.financialStatus || row.paymentStatus || "unpaid").toLowerCase().replace(/\s+/g, "_") === paymentFilter)
+    .filter((row) => orderWorkspace !== "all" || shippingFilter === "all" || shippingStateFor(row) === shippingFilter)
     .filter((row) => orderWorkspace !== "all" || fulfillmentFilter === "all" || String(row.fulfillmentStatus || row.fulfillmentStage || row.status || "").toLowerCase().includes(fulfillmentFilter))
     .filter((row) => orderWorkspace !== "all" || deliveryFilter === "all" || deliveryStateFor(row).includes(deliveryFilter))
+    .filter((row) => orderWorkspace !== "all" || labelFilter === "all" || labelStateFor(row) === labelFilter)
+    .filter((row) => orderWorkspace !== "all" || returnFilter === "all" || (returnFilter === "has_return" ? Boolean(row.returnId || row.returnNumber || row.returnRequestedAt || (Array.isArray(row.returns) && row.returns.length)) : returnFilter === "no_return" ? !row.returnId && !row.returnNumber && !row.returnRequestedAt && !(Array.isArray(row.returns) && row.returns.length) : returnFilter === "received" ? Boolean(row.returnReceivedAt) : Boolean(row.returnRequestedAt || row.returnId || row.returnNumber) && !row.returnReceivedAt))
+    .filter((row) => orderWorkspace !== "all" || outcomeFilter === "all" || (outcomeFilter === "canceled" ? ["canceled", "cancelled", "void", "voided"].includes(String(row.status || "").toLowerCase()) || Boolean(row.cancelledAt || row.canceledAt) : outcomeFilter === "refunded" ? String(row.status || "").toLowerCase().includes("refund") || Boolean(row.refundedAt) || Number(row.refundAmount || 0) > 0 : !["canceled", "cancelled", "void", "voided", "refunded", "refund"].includes(String(row.status || "").toLowerCase()) && !row.cancelledAt && !row.canceledAt))
+    .filter((row) => orderWorkspace !== "all" || exceptionFilter === "all" || (exceptionFilter === "has_exception" ? Array.isArray(row.workflowExceptions) && row.workflowExceptions.length > 0 : !Array.isArray(row.workflowExceptions) || row.workflowExceptions.length === 0))
     .filter((row) => orderWorkspace !== "all" || poFilter === "all" || (poFilter === "linked" ? orderHasPo(row) : !orderHasPo(row)))
-    .filter((row) => orderWorkspace !== "all" || supplierFilter === "all" || supplierFor(row) === supplierFilter)
+    .filter((row) => orderWorkspace !== "all" || supplierFilter === "all" || [supplierFor(row), ...(Array.isArray(row.items) ? (row.items as Array<Record<string, unknown>>).map((item) => String(item.supplier || item.vendor || item.vendorName || "")) : [])].some((value) => value.toLowerCase() === supplierFilter.toLowerCase()))
+    .filter((row) => orderWorkspace !== "all" || brandFilter === "all" || [brandFor(row), ...(Array.isArray(row.items) ? (row.items as Array<Record<string, unknown>>).map((item) => String(item.brand || item.brandName || "")) : [])].some((value) => value.toLowerCase() === brandFilter.toLowerCase()))
     .filter((row) => orderWorkspace !== "all" || carrierFilter === "all" || carrierFor(row) === carrierFilter)
     .filter((row) => orderWorkspace !== "all" || countryFilter === "all" || countryFor(row) === countryFilter)
+    .filter((row) => orderWorkspace !== "all" || stateFilter === "all" || stateFor(row).toLowerCase() === stateFilter.toLowerCase())
+    .filter((row) => orderWorkspace !== "all" || warehouseFilter === "all" || warehouseFor(row).toLowerCase() === warehouseFilter.toLowerCase())
+    .filter((row) => orderWorkspace !== "all" || !totalMinFilter || Number(row.total || 0) >= Number(totalMinFilter))
+    .filter((row) => orderWorkspace !== "all" || !totalMaxFilter || Number(row.total || 0) <= Number(totalMaxFilter))
     .filter(dateRangeMatches)
     .sort((left, right) => {
       const leftValue = sort.startsWith("total") ? Number(left.total || left.refundAmount || 0) : sort.startsWith("customer") ? String(left.buyer || left.customerName || "") : new Date(orderDateFor(left) || 0).getTime()
       const rightValue = sort.startsWith("total") ? Number(right.total || right.refundAmount || 0) : sort.startsWith("customer") ? String(right.buyer || right.customerName || "") : new Date(orderDateFor(right) || 0).getTime()
       const result = typeof leftValue === "number" && typeof rightValue === "number" ? leftValue - rightValue : String(leftValue).localeCompare(String(rightValue))
       return sort.endsWith("asc") ? result : -result
-    }), [rows, searchTerm, tab, queue, status, source, activeDateRange.from, activeDateRange.to, sort, orderWorkspace, paymentFilter, fulfillmentFilter, deliveryFilter, poFilter, supplierFilter, carrierFilter, countryFilter])
+    }), [rows, searchTerm, tab, queue, status, source, activeDateRange.from, activeDateRange.to, sort, orderWorkspace, paymentFilter, shippingFilter, fulfillmentFilter, deliveryFilter, labelFilter, returnFilter, outcomeFilter, exceptionFilter, poFilter, supplierFilter, brandFilter, carrierFilter, countryFilter, stateFilter, warehouseFilter, totalMinFilter, totalMaxFilter])
   const pageSize = 100
-  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize))
+  const filteredTotal = orderWorkspace === "all" ? Number(data.total ?? filtered.length) : filtered.length
+  const pageCount = orderWorkspace === "all" ? Math.max(1, Number(data.totalPages || Math.ceil(filteredTotal / pageSize))) : Math.max(1, Math.ceil(filtered.length / pageSize))
   const currentPage = Math.min(page, pageCount)
-  const visibleRows = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize)
+  const visibleRows = orderWorkspace === "all" ? filtered : filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize)
   const selectedVisible = visibleRows.filter((row) => selectedIds.has(String(row.id || "")))
   const current: Record<string, unknown> = detail || selected || {}
   const currentShipments = Array.isArray(current.shipments) ? current.shipments as Array<Record<string, unknown>> : []
   const currentPayments = Array.isArray(current.payments) ? current.payments as Array<Record<string, unknown>> : []
 
   return <div className="grid gap-5">
-    <PageHeader eyebrow="Operations" title={tab === "orders" ? orderWorkspace === "open" ? "Open Orders" : "All Orders" : tab === "drafts" ? "Drafts & Quotes" : "Returns"} description={tab === "drafts" ? "Build a priced customer proposal, revise it freely, then convert the accepted quote into an operational order." : tab === "returns" ? "Track the return from request through receiving, inspection, disposition, and any required refund." : orderWorkspace === "open" ? "A live work queue for paid orders that still need a decision, purchasing, or fulfillment action." : "Search, filter, export, and investigate every order. This view defaults to the last seven days."} action={<div className="flex flex-wrap gap-2">{tab === "orders" && orderWorkspace === "all" && <Button size="sm" variant="outline" disabled={loading || !filtered.length} onClick={exportVisibleOrders}><FileDown className="size-4" /> Export</Button>}{tab === "orders" && <Button size="sm" variant="outline" disabled={busy || loading || !hasOrderChannel} title={!hasOrderChannel ? "No Shopify channel is connected to this company" : undefined} onClick={() => void importShopifyOrders()}><Store className="size-4" /> Import Shopify orders</Button>}{tab === "orders" && <Button size="sm" variant="outline" disabled={busy || loading || !historicalBackfillChannels.length} onClick={() => { setHistoricalBackfillConfirmed(false); setHistoricalBackfillOpen(true) }}><History className="size-4" /> Historical import</Button>}{tab === "orders" && <Button size="sm" variant="outline" disabled={busy || loading} onClick={() => void openInternalNumberResequence()}><ArrowUpDown className="size-4" /> Resequence IDs</Button>}{tab === "drafts" && <Button size="sm" disabled={busy} onClick={() => void createQuote()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <FileText className="size-4" />} Create quote</Button>}{tab === "returns" && <Button size="sm" disabled={busy || !warehouses.length} onClick={() => { setReturnOrderSearch(""); setReturnOrderResults([]); setReturnOrderDetail(null); setReturnForm((current) => ({ ...current, orderId: "", warehouseId: String(warehouses[0]?.id || "") })); setReturnOpen(true) }}><RotateCcw className="size-4" /> Create return</Button>}<Button size="sm" variant="outline" disabled={tab !== "returns" && loading} onClick={() => { if (tab === "returns") setReturnsRefreshKey((current) => current + 1); else void load() }}>{tab !== "returns" && loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>} />
+    <PageHeader
+      eyebrow="Operations"
+      title={tab === "orders" ? orderWorkspace === "open" ? "Open Orders" : "All Orders" : tab === "drafts" ? "Drafts & Quotes" : "Returns"}
+      description={tab === "drafts" ? "Build a priced customer proposal, revise it freely, then convert the accepted quote into an operational order." : tab === "returns" ? "Track the return from request through receiving, inspection, disposition, and any required refund." : orderWorkspace === "open" ? "A live work queue for paid orders that still need a decision, purchasing, or fulfillment action." : "Search, filter, save live views, and export every matching order. This view defaults to the last seven days."}
+      action={<div className="flex flex-wrap gap-2">
+        {tab === "orders" && orderWorkspace === "all" && <Button size="sm" variant="outline" disabled={loading || filteredTotal === 0} onClick={() => { setOrderExportScope(selectedIds.size ? "selected" : "filtered"); setOrderExportOpen(true) }}><FileDown className="size-4" /> Export</Button>}
+        {tab === "orders" && <Button size="sm" variant="outline" disabled={busy || loading || !hasOrderChannel} title={!hasOrderChannel ? "No Shopify channel is connected to this company" : undefined} onClick={() => void importShopifyOrders()}><Store className="size-4" /> Import Shopify orders</Button>}
+        {tab === "orders" && <Button size="sm" variant="outline" disabled={busy || loading || !historicalBackfillChannels.length} onClick={() => { setHistoricalBackfillConfirmed(false); setHistoricalBackfillOpen(true) }}><History className="size-4" /> Historical import</Button>}
+        {tab === "orders" && <Button size="sm" variant="outline" disabled={busy || loading} onClick={() => void openInternalNumberResequence()}><ArrowUpDown className="size-4" /> Resequence IDs</Button>}
+        {tab === "drafts" && <Button size="sm" disabled={busy} onClick={() => void createQuote()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <FileText className="size-4" />} Create quote</Button>}
+        {tab === "returns" && <Button size="sm" disabled={busy || !warehouses.length} onClick={() => { setReturnOrderSearch(""); setReturnOrderResults([]); setReturnOrderDetail(null); setReturnForm((current) => ({ ...current, orderId: "", warehouseId: String(warehouses[0]?.id || "") })); setReturnOpen(true) }}><RotateCcw className="size-4" /> Create return</Button>}
+        <Button size="sm" variant="outline" disabled={tab !== "returns" && loading} onClick={() => { if (tab === "returns") setReturnsRefreshKey((current) => current + 1); else void load() }}>{tab !== "returns" && loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button>
+      </div>}
+    />
     <div className="flex flex-wrap gap-1 rounded-md border bg-card p-1">
       <Button size="sm" variant={tab === "orders" && orderWorkspace === "open" ? "secondary" : "ghost"} asChild><a href="/orders">Open Orders <Badge variant="outline" className="ml-1.5">{numberLabel(actionRequiredCount)}</Badge></a></Button>
       <Button size="sm" variant={tab === "orders" && orderWorkspace === "all" ? "secondary" : "ghost"} asChild><a href="/orders/all">All Orders <Badge variant="outline" className="ml-1.5">{numberLabel(Number(orderMetrics.ytdCount || 0))}</Badge></a></Button>
@@ -11509,9 +11646,9 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
     {tab === "returns" && <ReturnsWorkspace warehouses={warehouses} busy={busy} refreshKey={returnsRefreshKey} onUpdated={load} onTotalChange={setReturnTotal} onSync={importChannelReturns} onTransactions={setTransactionReturn} />}
     {tab === "orders" && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <MetricCard label={orderWorkspace === "open" ? "Action required" : "Orders (7 days)"} value={numberLabel(orderWorkspace === "open" ? actionRequiredCount : Number(orderMetrics.last7DaysCount || 0))} icon={orderWorkspace === "open" ? AlertTriangle : ShoppingBag} />
-      <MetricCard label={orderWorkspace === "open" ? "Ready to ship" : "Items ordered"} value={numberLabel(orderWorkspace === "open" ? counts["ready-ship"] : orderRows.reduce((total, row) => total + (Array.isArray(row.items) ? row.items.reduce((sum, item) => sum + Number((item as Record<string, unknown>).qty || 0), 0) : 0), 0))} icon={Truck} />
+      <MetricCard label={orderWorkspace === "open" ? "Ready to ship" : "Matching orders"} value={numberLabel(orderWorkspace === "open" ? counts["ready-ship"] : filteredTotal)} icon={Truck} />
       <MetricCard label={orderWorkspace === "open" ? "Waiting for PO" : "YTD orders"} value={numberLabel(orderWorkspace === "open" ? counts["waiting-po"] : Number(orderMetrics.ytdCount || 0))} icon={Archive} />
-      <MetricCard label={orderWorkspace === "open" ? "Needs attention" : "Orders fulfilled"} value={numberLabel(orderWorkspace === "open" ? counts.exceptions + counts.review : counts.done)} icon={orderWorkspace === "open" ? AlertCircle : ListChecks} />
+      <MetricCard label={orderWorkspace === "open" ? "Needs attention" : "Rows on this page"} value={numberLabel(orderWorkspace === "open" ? counts.exceptions + counts.review : orderRows.length)} icon={orderWorkspace === "open" ? AlertCircle : ListChecks} />
     </div>}
     {tab === "orders" && orderWorkspace === "open" && <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{visibleQueueDefinitions.map(([id, label, description]) => <Button key={id} size="sm" variant={queue === id ? "secondary" : "ghost"} className="shrink-0" title={description} onClick={() => setQueue(id)}>{id === "all" ? "All open" : label}<Badge variant="outline" className="ml-1.5">{numberLabel(id === "all" ? actionRequiredCount : counts[id])}</Badge></Button>)}</div>}
     {tab !== "returns" && <Card>
@@ -11525,6 +11662,31 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
             <Select value={sort} onValueChange={setSort}><SelectTrigger className="h-8 w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="created-desc">Newest order date</SelectItem><SelectItem value="created-asc">Oldest order date</SelectItem><SelectItem value="total-desc">Highest total</SelectItem><SelectItem value="total-asc">Lowest total</SelectItem><SelectItem value="customer-asc">Customer A-Z</SelectItem></SelectContent></Select>
             <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><ListChecks className="size-4" /> Columns</Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="min-w-56"><DropdownMenuLabel>Visible columns</DropdownMenuLabel><DropdownMenuSeparator />{allOrderColumnOptions.map(([id, label]) => <DropdownMenuCheckboxItem key={id} checked={visibleAllColumns.has(id)} onCheckedChange={(checked) => setVisibleAllColumns((current) => { const next = new Set(current); if (checked) next.add(id); else next.delete(id); return next })}>{label}</DropdownMenuCheckboxItem>)}<DropdownMenuSeparator /><DropdownMenuItem onSelect={() => setVisibleAllColumns(new Set(allOrderColumnOptions.map(([id]) => id)))}>Reset columns</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
           </div>
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-[repeat(4,minmax(150px,1fr))_auto]">
+            <Select value={status} onValueChange={setStatus}><SelectTrigger><SelectValue placeholder="All order statuses" /></SelectTrigger><SelectContent><SelectItem value="all">All order statuses</SelectItem>{statusValues.map((value) => <SelectItem key={value} value={value}>{value.replaceAll("_", " ")}</SelectItem>)}</SelectContent></Select>
+            <Select value={source} onValueChange={setSource}><SelectTrigger><SelectValue placeholder="All channels" /></SelectTrigger><SelectContent><SelectItem value="all">All channels</SelectItem>{sourceValues.map((value) => <SelectItem key={value} value={value}>{orderChannelFilterLabel(value)}</SelectItem>)}</SelectContent></Select>
+            <Select value={paymentFilter} onValueChange={setPaymentFilter}><SelectTrigger><SelectValue placeholder="Any payment status" /></SelectTrigger><SelectContent><SelectItem value="all">Any payment status</SelectItem><SelectItem value="paid">Paid</SelectItem><SelectItem value="partially_paid">Partially paid</SelectItem><SelectItem value="unpaid">Unpaid</SelectItem><SelectItem value="pending">Pending</SelectItem><SelectItem value="refunded">Refunded</SelectItem></SelectContent></Select>
+            <Select value={shippingFilter} onValueChange={setShippingFilter}><SelectTrigger><SelectValue placeholder="Any shipping status" /></SelectTrigger><SelectContent><SelectItem value="all">Any shipping status</SelectItem><SelectItem value="unshipped">Unshipped</SelectItem><SelectItem value="label_purchased">Label purchased</SelectItem><SelectItem value="label_printed">Label printed</SelectItem><SelectItem value="partially_shipped">Partially shipped</SelectItem><SelectItem value="shipped">Shipped</SelectItem><SelectItem value="delivered">Delivered</SelectItem></SelectContent></Select>
+            <Popover open={orderAdvancedFilterOpen} onOpenChange={setOrderAdvancedFilterOpen}><PopoverTrigger asChild><Button size="sm" variant="outline"><SlidersHorizontal className="size-4" /> More filters</Button></PopoverTrigger><PopoverContent align="end" className="w-[min(26rem,calc(100vw-2rem))]"><div className="grid gap-3"><div><p className="text-sm font-semibold">More order filters</p><p className="text-xs text-muted-foreground">Combine filters to narrow the live result set.</p></div><Select value={orderAdvancedFilterField} onValueChange={setOrderAdvancedFilterField}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{orderFilterDefinitions.filter((definition) => !["status", "source", "payment", "shipping"].includes(definition.id)).map((definition) => <SelectItem key={definition.id} value={definition.id}>{definition.label}</SelectItem>)}</SelectContent></Select>
+              {orderAdvancedFilterField === "fulfillment" && <Select value={fulfillmentFilter} onValueChange={setFulfillmentFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any fulfillment status</SelectItem><SelectItem value="unfulfilled">Unfulfilled</SelectItem><SelectItem value="fulfilled">Fulfilled</SelectItem><SelectItem value="partial">Partially fulfilled</SelectItem></SelectContent></Select>}
+              {orderAdvancedFilterField === "delivery" && <Select value={deliveryFilter} onValueChange={setDeliveryFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any delivery status</SelectItem><SelectItem value="delivered">Delivered</SelectItem><SelectItem value="in_transit">In transit</SelectItem><SelectItem value="shipped">Shipped</SelectItem><SelectItem value="no_tracking">No tracking</SelectItem></SelectContent></Select>}
+              {orderAdvancedFilterField === "label" && <Select value={labelFilter} onValueChange={setLabelFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any label status</SelectItem><SelectItem value="no_label">No label</SelectItem><SelectItem value="purchased">Purchased, not printed</SelectItem><SelectItem value="printed">Printed</SelectItem></SelectContent></Select>}
+              {orderAdvancedFilterField === "return" && <Select value={returnFilter} onValueChange={setReturnFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any return status</SelectItem><SelectItem value="has_return">Has return</SelectItem><SelectItem value="no_return">No return</SelectItem><SelectItem value="requested">Requested</SelectItem><SelectItem value="received">Received</SelectItem></SelectContent></Select>}
+              {orderAdvancedFilterField === "outcome" && <Select value={outcomeFilter} onValueChange={setOutcomeFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any outcome</SelectItem><SelectItem value="active">Active / not canceled</SelectItem><SelectItem value="canceled">Canceled or voided</SelectItem><SelectItem value="refunded">Refunded</SelectItem></SelectContent></Select>}
+              {orderAdvancedFilterField === "exception" && <Select value={exceptionFilter} onValueChange={setExceptionFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any exception state</SelectItem><SelectItem value="has_exception">Has exception</SelectItem><SelectItem value="no_exception">No exception</SelectItem></SelectContent></Select>}
+              {orderAdvancedFilterField === "po" && <Select value={poFilter} onValueChange={setPoFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">Any PO state</SelectItem><SelectItem value="linked">PO linked</SelectItem><SelectItem value="unlinked">No PO linked</SelectItem></SelectContent></Select>}
+              {orderAdvancedFilterField === "supplier" && <Input value={supplierFilter === "all" ? "" : supplierFilter} onChange={(event) => setSupplierFilter(event.target.value || "all")} list="all-orders-suppliers" placeholder="Exact supplier name" />}
+              {orderAdvancedFilterField === "brand" && <Input value={brandFilter === "all" ? "" : brandFilter} onChange={(event) => setBrandFilter(event.target.value || "all")} list="all-orders-brands" placeholder="Exact brand name" />}
+              {orderAdvancedFilterField === "carrier" && <Input value={carrierFilter === "all" ? "" : carrierFilter} onChange={(event) => setCarrierFilter(event.target.value || "all")} list="all-orders-carriers" placeholder="Exact carrier name" />}
+              {orderAdvancedFilterField === "country" && <Input value={countryFilter === "all" ? "" : countryFilter} onChange={(event) => setCountryFilter(event.target.value || "all")} list="all-orders-countries" placeholder="Country code or name" />}
+              {orderAdvancedFilterField === "state" && <Input value={stateFilter === "all" ? "" : stateFilter} onChange={(event) => setStateFilter(event.target.value || "all")} list="all-orders-states" placeholder="State or province" />}
+              {orderAdvancedFilterField === "warehouse" && <Input value={warehouseFilter === "all" ? "" : warehouseFilter} onChange={(event) => setWarehouseFilter(event.target.value || "all")} list="all-orders-warehouses" placeholder="Warehouse name or ID" />}
+              {orderAdvancedFilterField === "total" && <div className="grid grid-cols-2 gap-2"><Input type="number" min="0" step="0.01" value={totalMinFilter} onChange={(event) => setTotalMinFilter(event.target.value)} placeholder="Minimum" /><Input type="number" min="0" step="0.01" value={totalMaxFilter} onChange={(event) => setTotalMaxFilter(event.target.value)} placeholder="Maximum" /></div>}
+              <div className="flex justify-end"><Button size="sm" onClick={() => setOrderAdvancedFilterOpen(false)}>Done</Button></div>
+            </div></PopoverContent></Popover>
+          </div>
+          <datalist id="all-orders-suppliers">{supplierValues.map((value) => <option key={value} value={value} />)}</datalist><datalist id="all-orders-brands">{brandValues.map((value) => <option key={value} value={value} />)}</datalist><datalist id="all-orders-carriers">{carrierValues.map((value) => <option key={value} value={value} />)}</datalist><datalist id="all-orders-countries">{countryValues.map((value) => <option key={value} value={value} />)}</datalist><datalist id="all-orders-states">{stateValues.map((value) => <option key={value} value={value} />)}</datalist><datalist id="all-orders-warehouses">{warehouseValues.map((value) => <option key={value} value={value} />)}</datalist>
+          {activeOrderViewId && <div className="flex items-center gap-2 text-xs text-muted-foreground"><Badge variant="secondary">Active view</Badge><span>{String(sharedOrderViews.find((view) => String(view.id || "") === activeOrderViewId)?.name || "Saved order view")}</span></div>}
           {activeOrderFilters.length > 0 && <div className="flex flex-wrap items-center gap-2">{activeOrderFilters.map((filter) => <Button key={filter.label} size="sm" variant="secondary" className="h-7 gap-1 px-2 text-xs" onClick={filter.clear}>{filter.label}: {filter.value}<X className="size-3" /></Button>)}<Button size="sm" variant="ghost" className="h-7" onClick={clearAllOrderFilters}>Clear filters</Button></div>}
         </div> : <div className="grid gap-2 xl:grid-cols-[minmax(300px,1fr)_170px_170px_170px]">
           <div className="flex min-w-0 flex-wrap gap-2"><div className="relative min-w-64 flex-1"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} onPaste={(event) => normalizePastedSearch(event, query, setQuery)} placeholder="Search or paste orders, SKUs, tracking..." /></div><BulkSearchActions onApply={setQuery} /></div>
@@ -11532,7 +11694,7 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
           <Select value={source} onValueChange={setSource}><SelectTrigger><SelectValue placeholder="All channels" /></SelectTrigger><SelectContent><SelectItem value="all">All channels</SelectItem>{sourceValues.map((value) => <SelectItem key={value} value={value}>{orderChannelFilterLabel(value)}</SelectItem>)}</SelectContent></Select>
           <Select value={sort} onValueChange={setSort}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="created-desc">Newest order date</SelectItem><SelectItem value="created-asc">Oldest order date</SelectItem><SelectItem value="total-desc">Highest total</SelectItem><SelectItem value="total-asc">Lowest total</SelectItem><SelectItem value="customer-asc">Customer A-Z</SelectItem></SelectContent></Select>
         </div>}
-        <CardDescription>{tab === "orders" && searchTerms.length > 1 ? `Showing exact matches for ${numberLabel(searchTerms.length)} pasted identifiers. ` : tab === "orders" && searchTerm.length >= 2 ? "Search checks all orders by internal order, channel order number, customer, address, SKU, and tracking. " : tab === "orders" && orderWorkspace === "all" ? `Showing ${activeDateRange.label}. ` : tab === "orders" ? "Showing all actionable work regardless of age. " : ""}{numberLabel(visibleRows.length)} of {numberLabel(filtered.length)} filtered records shown, page {numberLabel(currentPage)} of {numberLabel(pageCount)}.</CardDescription>
+        <CardDescription>{tab === "orders" && searchTerms.length > 1 ? `Showing exact matches for ${numberLabel(searchTerms.length)} pasted identifiers. ` : tab === "orders" && searchTerm.length >= 2 ? "Search checks all orders by internal order, channel order number, customer, address, SKU, and tracking. " : tab === "orders" && orderWorkspace === "all" ? `Showing ${activeDateRange.label}. ` : tab === "orders" ? "Showing all actionable work regardless of age. " : ""}{numberLabel(visibleRows.length)} of {numberLabel(filteredTotal)} filtered records shown, page {numberLabel(currentPage)} of {numberLabel(pageCount)}.</CardDescription>
       </CardHeader>
       {selectedVisible.length > 0 && <div className="flex flex-wrap items-center gap-2 border-b bg-muted/30 px-4 py-2"><span className="text-sm font-medium">{selectedVisible.length} selected</span><Button size="sm" disabled={busy} onClick={() => void createSupplierPos(selectedVisible.map((row) => String(row.id)))}>Create supplier POs</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "approve")}>Approve</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "hold")}>Put on hold</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "done")}>Mark done</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => setSelectedIds(new Set())}>Clear</Button></div>}
       <CardContent className="p-0">
@@ -11589,7 +11751,8 @@ function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } =
         </>}
       </CardContent>
     </Card>}
-    <Dialog open={saveOrderViewOpen} onOpenChange={setSaveOrderViewOpen}><DialogContent><DialogHeader><DialogTitle>Save shared order view</DialogTitle><DialogDescription>This saves the current filters, applied date range, sort, and visible columns for everyone with Orders access.</DialogDescription></DialogHeader><Field label="View name"><Input value={savedOrderViewName} onChange={(event) => setSavedOrderViewName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveSharedOrderView() }} placeholder="Example: Paid orders awaiting shipment" autoFocus /></Field><DialogFooter><Button variant="outline" onClick={() => setSaveOrderViewOpen(false)}>Cancel</Button><Button onClick={() => void saveSharedOrderView()}>Save shared view</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={orderExportOpen} onOpenChange={setOrderExportOpen}><DialogContent className="sm:max-w-xl"><DialogHeader><DialogTitle>Export orders</DialogTitle><DialogDescription>The export runs in the background against the active filters. Large date ranges continue even if you leave this page.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="Export format"><RadioGroup value={orderExportMode} onValueChange={setOrderExportMode} className="grid gap-2 sm:grid-cols-2"><Label className="flex cursor-pointer items-start gap-3 rounded-md border p-3"><RadioGroupItem value="summary" className="mt-0.5" /><span><span className="block text-sm font-medium">Order summary</span><span className="block text-xs text-muted-foreground">One row per order with customer, financial, shipping, tracking, return, and cancellation details.</span></span></Label><Label className="flex cursor-pointer items-start gap-3 rounded-md border p-3"><RadioGroupItem value="lines" className="mt-0.5" /><span><span className="block text-sm font-medium">Orders with line items</span><span className="block text-xs text-muted-foreground">One row per item with SKU, title, brand, supplier, quantity, cost, refund, and cancellation fields.</span></span></Label></RadioGroup></Field><Field label="Export scope"><RadioGroup value={orderExportScope} onValueChange={setOrderExportScope} className="grid gap-2 sm:grid-cols-2"><Label className="flex cursor-pointer items-start gap-3 rounded-md border p-3"><RadioGroupItem value="filtered" className="mt-0.5" /><span><span className="block text-sm font-medium">All matching orders</span><span className="block text-xs text-muted-foreground">{numberLabel(filteredTotal)} orders match the current search, date range, and filters.</span></span></Label><Label className={`flex items-start gap-3 rounded-md border p-3 ${selectedIds.size ? "cursor-pointer" : "cursor-not-allowed opacity-50"}`}><RadioGroupItem value="selected" disabled={!selectedIds.size} className="mt-0.5" /><span><span className="block text-sm font-medium">Selected orders</span><span className="block text-xs text-muted-foreground">{numberLabel(selectedIds.size)} currently selected orders.</span></span></Label></RadioGroup></Field><Alert><FileDown className="size-4" /><AlertTitle>Download from Jobs</AlertTitle><AlertDescription>The completed CSV is retained as a job artifact and can be downloaded without rerunning the filters.</AlertDescription></Alert></div><DialogFooter><Button variant="outline" disabled={orderExportBusy} onClick={() => setOrderExportOpen(false)}>Cancel</Button><Button disabled={orderExportBusy || (orderExportScope === "selected" && !selectedIds.size) || filteredTotal === 0} onClick={() => void queueOrderExport()}>{orderExportBusy ? <Loader2 className="size-4 animate-spin" /> : <FileDown className="size-4" />} Queue export</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={saveOrderViewOpen} onOpenChange={setSaveOrderViewOpen}><DialogContent><DialogHeader><DialogTitle>Save shared order view</DialogTitle><DialogDescription>This saves the current filters, applied date range, sort, and visible columns as a live view. Reopening it always runs against current orders.</DialogDescription></DialogHeader><Field label="View name"><Input value={savedOrderViewName} onChange={(event) => setSavedOrderViewName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveSharedOrderView() }} placeholder="Example: Paid orders awaiting shipment" autoFocus /></Field><DialogFooter><Button variant="outline" onClick={() => setSaveOrderViewOpen(false)}>Cancel</Button><Button onClick={() => void saveSharedOrderView()}>Save and activate</Button></DialogFooter></DialogContent></Dialog>
     <Sheet open={Boolean(selected)} onOpenChange={(open) => !open && setSelected(null)}><SheetContent className="w-full overflow-y-auto sm:max-w-2xl"><SheetHeader><SheetTitle>{String(current.orderNumber || current.id || "Order")}</SheetTitle><SheetDescription>Quick operational view. Open the full order for fulfillment, labels, payments, and channel controls.</SheetDescription></SheetHeader>{!detail ? <div className="grid gap-2 py-6"><Skeleton className="h-20" /><Skeleton className="h-20" /></div> : <div className="grid gap-5 py-5"><div className="flex flex-wrap gap-2"><Button size="sm" asChild><a href={`/orders/${encodeURIComponent(String(current.id || current.orderNumber || ""))}`}>Open full order</a></Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction([String(current.id || "")], "hold")}>Put on hold</Button></div><div className="grid gap-3 sm:grid-cols-2"><Detail label="Status" value={String(current.status || "New")} /><Detail label="Allocation" value={String(current.allocationStatus || "Not allocated")} /><Detail label="Total" value={moneyLabel(Number(current.total || 0))} /><Detail label="Source" value={String(current.source || "-")} /></div><Tabs defaultValue="shipments"><TabsList><TabsTrigger value="shipments">Shipments ({currentShipments.length})</TabsTrigger><TabsTrigger value="payments">Payments ({currentPayments.length})</TabsTrigger><TabsTrigger value="items">Items</TabsTrigger></TabsList><TabsContent value="shipments" className="grid gap-2 pt-3">{currentShipments.map((shipment) => <Card key={String(shipment.id)}><CardContent className="p-3 text-sm"><p className="font-medium">{String(shipment.reference || shipment.warehouseName || "Shipment")}</p><p className="text-muted-foreground">{String(shipment.status || "allocated")} / {String(shipment.trackingNumber || "No tracking")}</p></CardContent></Card>)}{!currentShipments.length && <p className="text-sm text-muted-foreground">No shipments have been created.</p>}</TabsContent><TabsContent value="payments" className="grid gap-2 pt-3">{currentPayments.map((payment) => <Card key={String(payment.id)}><CardContent className="flex justify-between p-3 text-sm"><span>{String(payment.provider || "Payment")}</span><span>{moneyLabel(Number(payment.amount || 0))}</span></CardContent></Card>)}{!currentPayments.length && <p className="text-sm text-muted-foreground">No payment events recorded.</p>}</TabsContent><TabsContent value="items" className="grid gap-2 pt-3">{(Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((item, index) => <div key={`${String(item.sku)}-${index}`} className="rounded-md border p-3 text-sm"><p className="font-medium">{String(item.title || item.sku || "Item")}</p><p className="text-muted-foreground">{String(item.sku || "-")} / Qty {numberLabel(Number(item.qty || 0))}</p></div>)}</TabsContent></Tabs></div>}<SheetFooter><Button variant="outline" onClick={() => setSelected(null)}>Close</Button></SheetFooter></SheetContent></Sheet>
     <Dialog open={Boolean(transactionReturn)} onOpenChange={(open) => !open && setTransactionReturn(null)}><DialogContent className="max-h-[90dvh] w-[calc(100%-2rem)] sm:max-w-3xl overflow-y-auto"><DialogHeader><DialogTitle className="break-all pr-8">{String(transactionReturn?.returnNumber || transactionReturn?.channelReturnId || "Return")}</DialogTitle><DialogDescription>Return details and channel-reported amounts</DialogDescription></DialogHeader>{transactionReturn && <OrderReturnDetails key={String(transactionReturn.id)} record={transactionReturn} trackingUrl={trackingUrlForShipment} defaultTab="transactions" />}</DialogContent></Dialog>
     <Dialog open={historicalBackfillOpen} onOpenChange={(open) => { setHistoricalBackfillOpen(open); if (!open) setHistoricalBackfillConfirmed(false) }}><DialogContent className="max-h-[90dvh] w-[calc(100%-2rem)] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle>Historical order import</DialogTitle><DialogDescription>Run one channel at a time. This creates missing reporting records without allocating inventory, creating purchase demand, buying labels, or changing normal channel checkpoints.</DialogDescription></DialogHeader><div className="grid gap-4"><Alert><ShieldCheck className="size-4" /><AlertTitle>Operational isolation is enabled</AlertTitle><AlertDescription>Existing DataPlus orders are skipped. Completed and canceled history stays outside operational queues. Any order still open at the channel is held for review.</AlertDescription></Alert><div className="grid gap-4 sm:grid-cols-3"><Field label="Channel"><Select value={historicalBackfillChannel} onValueChange={(channel) => { setHistoricalBackfillChannel(channel); setHistoricalBackfillConfirmed(false) }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["temu", "shopify", "ebay", "walmart"].filter((channel) => historicalBackfillChannels.includes(channel)).map((channel) => <SelectItem key={channel} value={channel}>{channel === "ebay" ? "eBay" : channel[0].toUpperCase() + channel.slice(1)}</SelectItem>)}</SelectContent></Select></Field><Field label="From"><Input type="date" max={historicalBackfillEnd} value={historicalBackfillStart} onChange={(event) => { setHistoricalBackfillStart(event.target.value); setHistoricalBackfillConfirmed(false) }} /></Field><Field label="Through"><Input type="date" min={historicalBackfillStart} max={localDateKey(new Date())} value={historicalBackfillEnd} onChange={(event) => { setHistoricalBackfillEnd(event.target.value); setHistoricalBackfillConfirmed(false) }} /></Field></div>{historicalBackfillChannel === "walmart" && <p className="text-xs text-muted-foreground">Walmart accepts at most 180 days per job. Run the first and second YTD segments separately.</p>}<label className="flex items-start gap-3 rounded-md border p-3 text-sm"><Checkbox checked={historicalBackfillConfirmed} onCheckedChange={(checked) => setHistoricalBackfillConfirmed(checked === true)} /><span>I reviewed the channel and date range. I understand this may be a long-running job and will monitor it in Jobs.</span></label></div><DialogFooter><Button variant="outline" disabled={busy} onClick={() => setHistoricalBackfillOpen(false)}>Cancel</Button><Button disabled={busy || !historicalBackfillConfirmed || !historicalBackfillChannel || !historicalBackfillStart || !historicalBackfillEnd} onClick={() => void queueHistoricalBackfill()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} Queue historical import</Button></DialogFooter></DialogContent></Dialog>

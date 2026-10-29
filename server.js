@@ -91,6 +91,7 @@ const companyOperationsHandler = createCompanyOperationsHandler({
 const { importProgress } = require("./lib/import-progress");
 const { reviewOrder, reviewReturn } = require("./lib/order-data-review");
 const { parseSearchTerms } = require("./lib/multi-search");
+const { orderExportHeaders, orderExportRows } = require("./lib/order-export");
 const { boundedCurlContent, boundedHttpContent, boundedJsonSubprocess } = require("./lib/bounded-http");
 const { appendNdjsonRowSync, pruneNdjsonFile } = require("./lib/bounded-ndjson");
 const { createAccountingStore } = require("./lib/accounting-store");
@@ -20172,6 +20173,181 @@ async function queueBackgroundExport(db, attrs = {}, buildExport) {
     message: attrs.message || "Export queued. The file will be available in Jobs when it is ready.",
     details: attrs.details || ""
   });
+  return job;
+}
+
+const ORDER_EXPORT_BATCH_SIZE = 1000;
+const ORDER_EXPORT_MAX_OUTPUT_ROWS = 1000000;
+
+function orderListOptionsFromInput(input = {}) {
+  const value = (key, ...aliases) => {
+    const keys = [key, ...aliases];
+    for (const candidate of keys) {
+      const found = typeof input?.get === "function" ? input.get(candidate) : input?.[candidate];
+      if (found !== null && found !== undefined && String(found).trim() !== "") return String(found).trim();
+    }
+    return "";
+  };
+  const orderIds = Array.isArray(input.orderIds)
+    ? [...new Set(input.orderIds.map((entry) => String(entry || "").trim()).filter(Boolean))].slice(0, 50000)
+    : [];
+  return {
+    q: value("q", "query", "search"),
+    status: value("status"),
+    source: value("source", "channel"),
+    payment: value("payment"),
+    shipping: value("shipping"),
+    fulfillment: value("fulfillment"),
+    delivery: value("delivery"),
+    po: value("po"),
+    supplier: value("supplier"),
+    brand: value("brand"),
+    carrier: value("carrier"),
+    country: value("country"),
+    state: value("state"),
+    warehouse: value("warehouse"),
+    label: value("label"),
+    returnStatus: value("returnStatus", "return"),
+    exception: value("exception"),
+    outcome: value("outcome"),
+    totalMin: value("totalMin"),
+    totalMax: value("totalMax"),
+    dateFrom: value("dateFrom", "from"),
+    dateTo: value("dateTo", "to"),
+    sort: value("sort") || "created-desc",
+    orderIds
+  };
+}
+
+async function writeOrderExportCsvRows(writer, rows = []) {
+  if (!rows.length) return;
+  const chunk = `${rows.map((row) => row.map((value) => escapeCsv(value ?? "")).join(",")).join("\n")}\n`;
+  if (writer.write(chunk)) return;
+  await new Promise((resolve, reject) => {
+    const onDrain = () => { writer.off("error", onError); resolve(); };
+    const onError = (error) => { writer.off("drain", onDrain); reject(error); };
+    writer.once("drain", onDrain);
+    writer.once("error", onError);
+  });
+}
+
+async function runOrderExportWorkerJob(job = {}) {
+  if (!postgres.isPostgresEnabled()) throw new Error("Order exports require PostgreSQL.");
+  const payload = job.workerPayload || {};
+  const mode = String(payload.mode || "summary").toLowerCase() === "lines" ? "lines" : "summary";
+  const filters = orderListOptionsFromInput(payload.filters || {});
+  const filename = safeImportFileName(job.fileName || `orders-${mode}-${new Date().toISOString().slice(0, 10)}.csv`, "orders-export.csv");
+  const exportDir = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(job.id || crypto.randomUUID(), "order-export"));
+  const filePath = path.join(exportDir, filename);
+  fs.mkdirSync(exportDir, { recursive: true });
+  let current = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: "exporting_orders",
+    startedAt: job.startedAt || new Date().toISOString(),
+    processedRows: 0,
+    changed: 0,
+    progressPercent: 0,
+    message: `Building ${mode === "lines" ? "order and line item" : "order summary"} export in ${ORDER_EXPORT_BATCH_SIZE.toLocaleString()}-order pages.`
+  });
+  const writer = fs.createWriteStream(filePath, { encoding: "utf8", flags: "w" });
+  const writerFinished = new Promise((resolve, reject) => {
+    writer.once("finish", resolve);
+    writer.once("close", resolve);
+    writer.once("error", reject);
+  });
+  writerFinished.catch(() => {});
+  let page = 1;
+  let totalOrders = 0;
+  let processedOrders = 0;
+  let outputRows = 0;
+  try {
+    await writeOrderExportCsvRows(writer, [orderExportHeaders(mode)]);
+    while (page === 1 || processedOrders < totalOrders) {
+      const saved = await postgres.readOperationJob(current.id);
+      if (!saved || ["stopped", "canceled", "cancelled"].includes(String(saved.status || "").toLowerCase())) throw new Error("Order export stopped.");
+      const result = await postgres.listOrders({
+        ...filters,
+        summary: true,
+        paginated: true,
+        page,
+        limit: ORDER_EXPORT_BATCH_SIZE,
+        includeOpenWork: false
+      });
+      const orders = Array.isArray(result?.orders) ? result.orders : [];
+      if (page === 1) totalOrders = Number(result?.total || 0);
+      if (!orders.length) break;
+      const rows = orders.flatMap((order) => orderExportRows(order, mode));
+      outputRows += rows.length;
+      if (outputRows > ORDER_EXPORT_MAX_OUTPUT_ROWS) throw new Error(`This export exceeds ${ORDER_EXPORT_MAX_OUTPUT_ROWS.toLocaleString()} CSV rows. Narrow the filters and queue separate files.`);
+      await writeOrderExportCsvRows(writer, rows);
+      processedOrders += orders.length;
+      current = await persistWorkerImportJob(current, {
+        totalRows: totalOrders,
+        processedRows: processedOrders,
+        changed: outputRows,
+        progressPercent: totalOrders ? Math.min(99, Math.round((processedOrders / totalOrders) * 100)) : 99,
+        message: `${processedOrders.toLocaleString()} of ${totalOrders.toLocaleString()} orders read; ${outputRows.toLocaleString()} CSV rows written.`
+      });
+      page += 1;
+    }
+    writer.end();
+    await writerFinished;
+  } catch (error) {
+    writer.destroy();
+    await writerFinished.catch(() => {});
+    if (fs.existsSync(filePath)) fs.rmSync(filePath, { force: true });
+    throw error;
+  }
+  current = await persistWorkerImportJob(current, {
+    status: "success",
+    phase: "complete",
+    fileName: filename,
+    originalFileName: filename,
+    originalFilePath: filePath,
+    totalRows: totalOrders,
+    processedRows: processedOrders,
+    changed: outputRows,
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    finishedAt: new Date().toISOString(),
+    message: `${filename} is ready with ${outputRows.toLocaleString()} row${outputRows === 1 ? "" : "s"}.`,
+    details: `${processedOrders.toLocaleString()} matching order${processedOrders === 1 ? "" : "s"} exported in ${ORDER_EXPORT_BATCH_SIZE.toLocaleString()}-order database pages.`
+  });
+  await postgres.upsertOperationArtifact(current, "original");
+  attachExportManifestFile(current, exportManifestPayload(current, { filename, count: outputRows }, {
+    exportType: "orders",
+    mode,
+    filters,
+    productCount: processedOrders
+  }));
+  await postgres.upsertOperationJob(current);
+  return current;
+}
+
+async function queueOrderExportJob(db = {}, input = {}, actor = "") {
+  const mode = String(input.mode || "summary").toLowerCase() === "lines" ? "lines" : "summary";
+  const filters = orderListOptionsFromInput(input.filters || {});
+  if (String(input.scope || "filtered").toLowerCase() === "selected") {
+    filters.orderIds = Array.isArray(input.orderIds) ? [...new Set(input.orderIds.map((entry) => String(entry || "").trim()).filter(Boolean))].slice(0, 50000) : [];
+    if (!filters.orderIds.length) throw new Error("Select at least one order before exporting selected orders.");
+  }
+  const dateSuffix = filters.dateFrom || filters.dateTo ? `${filters.dateFrom || "start"}-to-${filters.dateTo || "today"}` : "all-dates";
+  const filename = safeImportFileName(`orders-${mode}-${dateSuffix}.csv`, "orders-export.csv");
+  const job = await queueBackgroundExport(db, {
+    section: "Orders",
+    category: "Order export",
+    operation: `${mode === "lines" ? "Order line item" : "Order summary"} export`,
+    fileName: filename,
+    workerTask: shouldRunJobsInline() ? "" : "order-export",
+    workerPayload: { mode, filters, requestedBy: actor, dynamicTotal: true },
+    exportManifest: { exportType: "orders", mode, filters },
+    message: "Order export queued. The CSV will be available in Jobs when it is ready."
+  });
+  if (!job.duplicateOfActiveJob && shouldRunJobsInline()) {
+    setTimeout(() => runOrderExportWorkerJob(job).catch(async (error) => {
+      await persistWorkerImportJob(job, { status: "failed", phase: "failed", message: error.message || "Order export failed.", errors: [error.message || "Order export failed."], finishedAt: new Date().toISOString() });
+    }), 100);
+  }
   return job;
 }
 
@@ -57241,6 +57417,26 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { views: next, message: "Shared order view removed." });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/orders/export") {
+    if (!userCan(authUser, "orders", "view")) return sendJson(res, 403, { error: "Orders view permission is required." });
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 409, { error: "Order exports require PostgreSQL." });
+    try {
+      const body = await parseBody(req);
+      const db = normalizeDb(await readDbFast({ skipInventory: true }));
+      const actor = String(authUser?.name || authUser?.displayName || authUser?.email || "DataPlus user");
+      const job = await queueOrderExportJob(db, body || {}, actor);
+      if (!job.duplicateOfActiveJob) upsertImportJobStore(job);
+      return sendJson(res, job.duplicateOfActiveJob ? 200 : 202, {
+        queued: true,
+        duplicate: Boolean(job.duplicateOfActiveJob),
+        job: normalizeImportJob(job),
+        message: job.message
+      });
+    } catch (error) {
+      return sendJson(res, 400, { error: error.message || "Unable to queue the order export." });
+    }
+  }
+
   if (req.method === "GET" && url.pathname === "/api/customers") {
     if (!userCan(authUser, "orders", "view")) return sendJson(res, 403, { error: "Orders view permission is required." });
     const q = String(url.searchParams.get("q") || "").trim().toLowerCase();
@@ -57387,14 +57583,21 @@ async function handleApi(req, res) {
       const summary = url.searchParams.get("summary") === "1" || String(url.searchParams.get("summary")).toLowerCase() === "true";
       const defaultLimit = summary ? 5000 : 5000;
       const limit = Math.max(1, Math.min(20000, Number(url.searchParams.get("limit") || defaultLimit)));
+      const paginated = url.searchParams.has("page") || url.searchParams.has("pageSize");
+      const page = Math.max(1, Number(url.searchParams.get("page") || 1) || 1);
+      const pageSize = Math.max(1, Math.min(500, Number(url.searchParams.get("pageSize") || limit) || limit));
       const recentDays = Math.max(1, Math.min(366, Number(url.searchParams.get("recentDays") || 7)));
       const includeOpenWork = url.searchParams.get("includeOpenWork") !== "0";
       const q = String(url.searchParams.get("q") || url.searchParams.get("query") || url.searchParams.get("search") || "").trim();
       const openWorkOnly = summary && !q && url.searchParams.get("openWorkOnly") === "1";
+      const allDates = url.searchParams.get("allDates") === "1";
       const dateFrom = url.searchParams.get("dateFrom")
-        || (summary && !q ? new Date(Date.now() - recentDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10) : "");
+        || (summary && !q && !allDates ? new Date(Date.now() - recentDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10) : "");
+      const dateTo = url.searchParams.get("dateTo") || "";
+      const listFilters = orderListOptionsFromInput(url.searchParams);
       const scope = q ? "search" : openWorkOnly ? "open-work" : summary && dateFrom ? `recent-${recentDays}-days-plus-open-work` : "requested";
-      const cacheKey = `dataplus:orders:v11:${summary ? "summary" : "full"}:${limit}:${dateFrom || "all"}:${openWorkOnly ? "open-only" : includeOpenWork ? "open" : "date"}:${q.toLowerCase() || "none"}`;
+      const cacheSignature = crypto.createHash("sha1").update(JSON.stringify({ summary, limit, paginated, page, pageSize, dateFrom, dateTo, openWorkOnly, includeOpenWork, allDates, ...listFilters })).digest("hex");
+      const cacheKey = `dataplus:orders:v12:${cacheSignature}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       let pending = pendingOrderApiLoads.get(cacheKey);
@@ -57402,15 +57605,20 @@ async function handleApi(req, res) {
         const cacheGeneration = orderApiCacheGeneration;
         pending = (async () => {
           try {
-            const [orders, metrics, orderDrafts, returns, customers] = await Promise.all([
-              postgres.listOrders({ limit, summary, dateFrom, includeOpenWork, openWorkOnly, q }),
+            const [orderResult, metrics, orderDrafts, returns, customers] = await Promise.all([
+              postgres.listOrders({ ...listFilters, limit: paginated ? pageSize : limit, summary, paginated, page, dateFrom, dateTo, includeOpenWork, openWorkOnly, q }),
               postgres.readOrderListMetrics(),
               postgres.readStateField("orderDrafts"),
               postgres.readStateField("returns"),
               summary ? Promise.resolve([]) : postgres.readStateField("customers")
             ]);
+            const orders = paginated ? (orderResult?.orders || []) : (orderResult || []);
             const payload = {
-              orders: orders || [],
+              orders,
+              total: paginated ? Number(orderResult?.total || 0) : orders.length,
+              page: paginated ? Number(orderResult?.page || page) : 1,
+              pageSize: paginated ? Number(orderResult?.pageSize || pageSize) : orders.length,
+              totalPages: paginated ? Number(orderResult?.totalPages || 1) : 1,
               metrics: metrics || {},
               orderDrafts: orderDrafts || [],
               returns: returnsWithPublicSlugs(returns || []),
@@ -57420,9 +57628,10 @@ async function handleApi(req, res) {
               scope,
               q,
               dateFrom,
+              dateTo,
               includeOpenWork,
               openWorkOnly,
-              limit,
+              limit: paginated ? pageSize : limit,
               storage: "postgres"
             };
             if (cacheGeneration === orderApiCacheGeneration) {
@@ -74301,6 +74510,7 @@ module.exports = {
   runFulfillmentLabelPurchaseWorkerJob,
   runShippingDisputeQuoteWorkerJob,
   runShippingReportExportWorkerJob,
+  runOrderExportWorkerJob,
   shippingReportPurchaseWorkflow,
   shippingReportLabelProvider,
   queueScheduledFulfillmentRateRefreshJob,

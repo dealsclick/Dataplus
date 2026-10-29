@@ -65,6 +65,7 @@ const SUPPORTED_TASKS = [
   "fulfillment-label-purchase",
   "shipping-dispute-quotes",
   "shipping-report-export",
+  "order-export",
   "mapped-product-export",
   "category-export",
   "source-catalog-import",
@@ -2502,6 +2503,7 @@ async function runJob(job) {
   if (task === "fulfillment-label-purchase") return dataplus.runFulfillmentLabelPurchaseWorkerJob(job);
   if (task === "shipping-dispute-quotes") return dataplus.runShippingDisputeQuoteWorkerJob(job);
   if (task === "shipping-report-export") return dataplus.runShippingReportExportWorkerJob(job);
+  if (task === "order-export") return dataplus.runOrderExportWorkerJob(job);
   if (task === "mapped-product-export") return runMappedProductExportJob(job);
   if (task === "category-export") return runCategoryExportJob(job);
   if (task === "source-catalog-import") return runSourceCatalogImportJob(job);

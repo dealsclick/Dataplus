@@ -9133,6 +9133,7 @@ function orderLineRowToSummary(row = {}) {
   return {
     id: row.line_id,
     lineId: row.line_id,
+    lineIndex: row.line_index,
     sku: row.sku || "",
     mappedSku: row.mapped_sku || "",
     originalSku: row.original_sku || "",
@@ -9143,7 +9144,13 @@ function orderLineRowToSummary(row = {}) {
     status: row.line_status || "",
     fulfillmentStatus: row.line_fulfillment_status || "",
     fulfilledQty: row.line_fulfilled_qty,
-    remainingQty: row.line_remaining_qty
+    remainingQty: row.line_remaining_qty,
+    brand: row.line_brand || "",
+    supplier: row.line_supplier || "",
+    cancelledQty: row.line_cancelled_qty,
+    cancelledAt: row.line_cancelled_at || "",
+    refundedQty: row.line_refunded_qty,
+    refundedAt: row.line_refunded_at || ""
   };
 }
 
@@ -9262,17 +9269,27 @@ function orderRowToSummary(row = {}, lines = []) {
     returnRequestedAt: row.return_requested_at || '',
     returnReceivedAt: row.return_received_at || '',
     refundAmount: Number(row.refund_amount || 0),
+    customerShippingCollected: Number(row.customer_shipping_collected || 0),
     duplicateOrderRecord: row.duplicate_order_record === true,
     items: lines.length ? lines.map(orderLineRowToSummary) : (Array.isArray(raw.items) ? raw.items.map((item) => ({
       id: item.id,
       sku: item.sku,
+      mappedSku: item.mappedSku,
+      originalSku: item.originalSku || item.mappedFromSku,
       title: item.title,
       qty: item.qty,
       price: item.price,
+      cost: item.cost || item.unitCost,
+      brand: item.brand || item.brandName,
+      supplier: item.supplier || item.vendor || item.vendorName,
       status: item.status,
       fulfillmentStatus: item.fulfillmentStatus,
       fulfilledQty: item.fulfilledQty ?? item.fulfilledQuantity ?? item.qtyFulfilled,
-      remainingQty: item.remainingQty ?? item.remainingQuantity ?? item.unfulfilledQuantity
+      remainingQty: item.remainingQty ?? item.remainingQuantity ?? item.unfulfilledQuantity,
+      cancelledQty: item.cancelledQty ?? item.canceledQty ?? item.cancelledQuantity ?? item.canceledQuantity,
+      cancelledAt: item.cancelledAt || item.canceledAt || item.cancelDate,
+      refundedQty: item.refundedQty ?? item.refundQty ?? item.refundedQuantity ?? item.refundQuantity,
+      refundedAt: item.refundedAt || item.refundDate
     })) : [])
   };
 }
@@ -10008,6 +10025,171 @@ async function listOrders(options = {}) {
     params.push(status.toLowerCase());
     where.push("lower(coalesce(status, '')) = $" + params.length);
   }
+  const source = nullableString(options.source || options.channel);
+  if (source && source !== "all") {
+    params.push(source.toLowerCase());
+    if (source.toLowerCase() === "ebay_live") {
+      where.push(`(
+        lower(coalesce(raw->>'salesOrigin', raw->'external'->>'salesOrigin', '')) = $${params.length}
+        or lower(coalesce(raw->>'isEbayLive', 'false')) = 'true'
+        or lower(coalesce(raw->'ebayLive'->>'isLive', 'false')) = 'true'
+      )`);
+    } else if (source.toLowerCase() === "tiktok_live") {
+      where.push(`(
+        lower(coalesce(raw->>'salesOrigin', raw->'external'->>'salesOrigin', '')) = $${params.length}
+        or lower(coalesce(raw->>'isTikTokLive', 'false')) = 'true'
+        or lower(coalesce(raw->'tiktokLive'->>'isLive', 'false')) = 'true'
+      )`);
+    } else {
+      where.push(`lower(coalesce(nullif(source, ''), nullif(channel_source, ''), raw->>'salesChannel', '')) = $${params.length}`);
+    }
+  }
+  const payment = nullableString(options.payment);
+  if (payment && payment !== "all") {
+    params.push(payment.toLowerCase());
+    where.push(`(case
+      when lower(coalesce(status, '')) in ('refunded', 'refund') or lower(coalesce(raw->>'financialStatus', raw->>'paymentStatus', '')) like '%refund%' then 'refunded'
+      when lower(coalesce(raw->>'financialStatus', raw->>'paymentStatus', '')) like '%partial%' or (coalesce(paid_amount, 0) > 0 and coalesce(paid_amount, 0) < coalesce(total, 0)) then 'partially_paid'
+      when coalesce(paid_amount, 0) >= coalesce(total, 0) and (coalesce(total, 0) > 0 or coalesce(paid_amount, 0) > 0) then 'paid'
+      when lower(coalesce(raw->>'financialStatus', raw->>'paymentStatus', '')) like '%pending%' then 'pending'
+      else 'unpaid'
+    end) = $${params.length}`);
+  }
+  const fulfillment = nullableString(options.fulfillment);
+  if (fulfillment && fulfillment !== "all") {
+    params.push(`%${fulfillment.toLowerCase()}%`);
+    where.push(`lower(coalesce(raw->>'fulfillmentStatus', raw->>'fulfillmentStage', raw->'external'->>'fulfillmentStatus', status, '')) like $${params.length}`);
+  }
+  const shippingStatusExpression = `(case
+    when coalesce(nullif(raw->>'deliveredAt', ''), '') <> ''
+      or lower(coalesce(raw->>'deliveryStatus', raw->>'trackingStatus', '')) like '%deliver%'
+      or exists (select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end) shipment where lower(coalesce(shipment->>'status', shipment->>'trackingStatus', shipment->>'carrierStatus', '')) like '%deliver%') then 'delivered'
+    when lower(coalesce(raw->>'fulfillmentStatus', raw->>'fulfillmentStage', '')) like '%partial%' then 'partially_shipped'
+    when coalesce(nullif(raw->>'shippedAt', ''), nullif(raw->>'shipDate', ''), '') <> ''
+      or lower(coalesce(status, raw->>'fulfillmentStatus', raw->>'fulfillmentStage', '')) in ('shipped', 'fulfilled', 'completed', 'complete', 'done')
+      or exists (select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end) shipment where lower(coalesce(shipment->>'status', shipment->>'trackingStatus', shipment->>'carrierStatus', '')) ~ '(ship|transit)') then 'shipped'
+    when exists (select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end) shipment where coalesce(nullif(shipment->>'labelPrintedAt', ''), nullif(shipment->>'labelLastPrintedAt', ''), '') <> '' or coalesce(nullif(shipment->>'labelPrintCount', ''), '0') <> '0') then 'label_printed'
+    when exists (select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end) shipment where coalesce(nullif(shipment->>'labelPurchaseId', ''), nullif(shipment->>'labelProvider', ''), nullif(shipment->>'labelSource', ''), '') <> '' or jsonb_array_length(case when jsonb_typeof(shipment->'documents') = 'array' then shipment->'documents' else '[]'::jsonb end) > 0) then 'label_purchased'
+    else 'unshipped'
+  end)`;
+  const shipping = nullableString(options.shipping);
+  if (shipping && shipping !== "all") {
+    params.push(shipping.toLowerCase());
+    where.push(`${shippingStatusExpression} = $${params.length}`);
+  }
+  const delivery = nullableString(options.delivery);
+  if (delivery && delivery !== "all") {
+    if (delivery.toLowerCase() === "no_tracking") {
+      where.push(`coalesce(nullif(tracking_number, ''), nullif(raw->>'trackingNumber', ''), '') = ''
+        and not exists (select 1 from order_shipment_tracking tracking where tracking.order_id = order_records.order_id and nullif(trim(tracking.tracking_number), '') is not null)`);
+    } else {
+      params.push(`%${delivery.toLowerCase()}%`);
+      where.push(`(
+        lower(coalesce(raw->>'deliveryStatus', raw->>'trackingStatus', '')) like $${params.length}
+        or exists (select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end) shipment where lower(coalesce(shipment->>'trackingStatus', shipment->>'carrierStatus', shipment->>'status', '')) like $${params.length})
+      )`);
+    }
+  }
+  const purchaseOrderState = nullableString(options.po);
+  if (purchaseOrderState && purchaseOrderState !== "all") {
+    const poPredicate = `(
+      jsonb_array_length(case when jsonb_typeof(raw->'purchaseOrderIds') = 'array' then raw->'purchaseOrderIds' else '[]'::jsonb end) > 0
+      or jsonb_array_length(case when jsonb_typeof(raw->'purchaseOrderNumbers') = 'array' then raw->'purchaseOrderNumbers' else '[]'::jsonb end) > 0
+      or exists (select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'fulfillmentRoutes') = 'array' then raw->'fulfillmentRoutes' else '[]'::jsonb end) route where coalesce(nullif(route->>'purchaseOrderId', ''), nullif(route->>'purchaseOrderNumber', ''), '') <> '')
+    )`;
+    where.push(purchaseOrderState.toLowerCase() === "linked" ? poPredicate : `not ${poPredicate}`);
+  }
+  const supplier = nullableString(options.supplier);
+  if (supplier && supplier !== "all") {
+    params.push(supplier.toLowerCase());
+    where.push(`exists (
+      select 1
+      from order_line_items filter_line
+      left join products filter_product on lower(filter_product.sku) = lower(coalesce(nullif(filter_line.mapped_sku, ''), filter_line.sku))
+      left join product_aliases filter_alias on filter_alias.active = true and lower(filter_alias.alias_sku) = lower(coalesce(nullif(filter_line.mapped_sku, ''), filter_line.sku))
+      left join products filter_alias_product on filter_alias_product.product_id = filter_alias.product_id
+      where filter_line.order_id = order_records.order_id
+        and lower(coalesce(nullif(filter_line.raw->>'supplier', ''), nullif(filter_line.raw->>'vendor', ''), nullif(filter_line.raw->>'vendorName', ''), nullif(filter_product.supplier, ''), nullif(filter_alias_product.supplier, ''), '')) = $${params.length}
+    )`);
+  }
+  const brand = nullableString(options.brand);
+  if (brand && brand !== "all") {
+    params.push(brand.toLowerCase());
+    where.push(`exists (
+      select 1
+      from order_line_items filter_line
+      left join products filter_product on lower(filter_product.sku) = lower(coalesce(nullif(filter_line.mapped_sku, ''), filter_line.sku))
+      left join product_aliases filter_alias on filter_alias.active = true and lower(filter_alias.alias_sku) = lower(coalesce(nullif(filter_line.mapped_sku, ''), filter_line.sku))
+      left join products filter_alias_product on filter_alias_product.product_id = filter_alias.product_id
+      where filter_line.order_id = order_records.order_id
+        and lower(coalesce(nullif(filter_line.raw->>'brand', ''), nullif(filter_line.raw->>'brandName', ''), nullif(filter_product.brand, ''), nullif(filter_alias_product.brand, ''), '')) = $${params.length}
+    )`);
+  }
+  const carrier = nullableString(options.carrier);
+  if (carrier && carrier !== "all") {
+    params.push(carrier.toLowerCase());
+    where.push(`(
+      lower(coalesce(raw->>'carrier', raw->>'shippingCarrier', '')) = $${params.length}
+      or exists (select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end) shipment where lower(coalesce(shipment->>'carrier', shipment->>'carrierName', '')) = $${params.length})
+      or exists (select 1 from order_shipment_tracking tracking where tracking.order_id = order_records.order_id and lower(coalesce(tracking.provider, '')) = $${params.length})
+    )`);
+  }
+  for (const [optionKey, addressKeys] of [["country", ["countryCode", "country"]], ["state", ["state", "province"]]]) {
+    const value = nullableString(options[optionKey]);
+    if (value && value !== "all") {
+      params.push(value.toLowerCase());
+      where.push(`(${addressKeys.map((key) => `lower(coalesce(raw->'shippingAddress'->>'${key}', raw->'address'->>'${key}', '')) = $${params.length}`).join(" or ")})`);
+    }
+  }
+  const warehouse = nullableString(options.warehouse);
+  if (warehouse && warehouse !== "all") {
+    params.push(warehouse.toLowerCase());
+    where.push(`(
+      lower(coalesce(raw->>'fulfillmentWarehouseName', '')) = $${params.length}
+      or lower(coalesce(raw->>'fulfillmentWarehouseId', '')) = $${params.length}
+      or exists (select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'fulfillmentRoutes') = 'array' then raw->'fulfillmentRoutes' else '[]'::jsonb end) route where lower(coalesce(route->>'warehouseName', '')) = $${params.length} or lower(coalesce(route->>'warehouseId', '')) = $${params.length})
+    )`);
+  }
+  const label = nullableString(options.label);
+  if (label && label !== "all") {
+    const printed = `exists (select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end) shipment where coalesce(nullif(shipment->>'labelPrintedAt', ''), nullif(shipment->>'labelLastPrintedAt', ''), '') <> '' or coalesce(nullif(shipment->>'labelPrintCount', ''), '0') <> '0')`;
+    const purchased = `exists (select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end) shipment where coalesce(nullif(shipment->>'labelPurchaseId', ''), nullif(shipment->>'labelProvider', ''), nullif(shipment->>'labelSource', ''), '') <> '' or jsonb_array_length(case when jsonb_typeof(shipment->'documents') = 'array' then shipment->'documents' else '[]'::jsonb end) > 0)`;
+    where.push(label.toLowerCase() === "printed" ? printed : label.toLowerCase() === "purchased" ? `${purchased} and not ${printed}` : `not ${purchased}`);
+  }
+  const returnState = nullableString(options.returnStatus);
+  if (returnState && returnState !== "all") {
+    const hasReturn = `coalesce(nullif(raw->>'returnId', ''), nullif(raw->>'returnNumber', ''), nullif(raw->>'returnRequestedAt', ''), '') <> '' or jsonb_array_length(case when jsonb_typeof(raw->'returns') = 'array' then raw->'returns' else '[]'::jsonb end) > 0`;
+    if (returnState.toLowerCase() === "has_return") where.push(`(${hasReturn})`);
+    else if (returnState.toLowerCase() === "no_return") where.push(`not (${hasReturn})`);
+    else if (returnState.toLowerCase() === "received") where.push(`coalesce(nullif(raw->>'returnReceivedAt', ''), '') <> ''`);
+    else if (returnState.toLowerCase() === "requested") where.push(`coalesce(nullif(raw->>'returnRequestedAt', ''), nullif(raw->>'returnId', ''), nullif(raw->>'returnNumber', ''), '') <> '' and coalesce(nullif(raw->>'returnReceivedAt', ''), '') = ''`);
+  }
+  const exceptionState = nullableString(options.exception);
+  if (exceptionState && exceptionState !== "all") {
+    const hasExceptions = `jsonb_array_length(case when jsonb_typeof(raw->'workflowExceptions') = 'array' then raw->'workflowExceptions' else '[]'::jsonb end) > 0`;
+    where.push(exceptionState.toLowerCase() === "has_exception" ? hasExceptions : `not ${hasExceptions}`);
+  }
+  const outcome = nullableString(options.outcome);
+  if (outcome && outcome !== "all") {
+    if (outcome.toLowerCase() === "canceled") where.push(`(lower(coalesce(status, '')) in ('canceled', 'cancelled', 'void', 'voided') or coalesce(nullif(raw->>'cancelledAt', ''), nullif(raw->>'canceledAt', ''), '') <> '')`);
+    else if (outcome.toLowerCase() === "refunded") where.push(`(lower(coalesce(status, '')) in ('refunded', 'refund') or coalesce(nullif(raw->>'refundedAt', ''), '') <> '' or coalesce(nullif(raw->>'refundAmount', ''), '0') <> '0')`);
+    else if (outcome.toLowerCase() === "active") where.push(`lower(coalesce(status, '')) not in ('canceled', 'cancelled', 'void', 'voided', 'refunded', 'refund') and coalesce(nullif(raw->>'cancelledAt', ''), nullif(raw->>'canceledAt', ''), '') = ''`);
+  }
+  const minimumTotal = nullableNumber(options.totalMin);
+  if (minimumTotal !== null) {
+    params.push(minimumTotal);
+    where.push(`coalesce(total, 0) >= $${params.length}`);
+  }
+  const maximumTotal = nullableNumber(options.totalMax);
+  if (maximumTotal !== null) {
+    params.push(maximumTotal);
+    where.push(`coalesce(total, 0) <= $${params.length}`);
+  }
+  const orderIds = Array.isArray(options.orderIds) ? [...new Set(options.orderIds.map((value) => String(value || "").trim()).filter(Boolean))] : [];
+  if (orderIds.length) {
+    params.push(orderIds);
+    where.push(`order_id = any($${params.length}::text[])`);
+  }
   const sku = nullableString(options.sku);
   if (sku) {
     params.push(sku.toLowerCase());
@@ -10121,10 +10303,14 @@ async function listOrders(options = {}) {
       or (order_date is null and coalesce(created_at, updated_at) < ($${params.length}::date + interval '1 day')))`);
   }
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
-  params.push(limit);
+  const paginated = options.paginated === true || String(options.paginated).toLowerCase() === "true";
+  const page = Math.max(1, Number(options.page || 1) || 1);
+  const offset = paginated ? (page - 1) * limit : 0;
+  const countSelect = paginated ? "count(*) over()::int as filtered_count," : "";
   const orderDateSql = "order_date";
   const orderSelect = summary ? `
     select
+      ${countSelect}
       order_id,
       order_number,
       internal_order_number,
@@ -10156,14 +10342,18 @@ async function listOrders(options = {}) {
       updated_at,
       ${orderDateSql} as order_date,
       case
-        when lower(coalesce(status, '')) in ('refunded', 'refund') then 'Refunded'
-        when coalesce(paid_amount, 0) > 0 or coalesce(total, 0) = 0 then 'Paid'
-        else ''
+        when lower(coalesce(status, '')) in ('refunded', 'refund') or lower(coalesce(summary_raw."financialStatus", summary_raw."paymentStatus", '')) like '%refund%' then 'Refunded'
+        when lower(coalesce(summary_raw."financialStatus", summary_raw."paymentStatus", '')) like '%partial%' or (coalesce(paid_amount, 0) > 0 and coalesce(paid_amount, 0) < coalesce(total, 0)) then 'Partially paid'
+        when coalesce(paid_amount, 0) >= coalesce(total, 0) and (coalesce(total, 0) > 0 or coalesce(paid_amount, 0) > 0) then 'Paid'
+        when lower(coalesce(summary_raw."financialStatus", summary_raw."paymentStatus", '')) like '%pending%' then 'Pending'
+        else 'Unpaid'
       end as financial_status,
       case
-        when lower(coalesce(status, '')) in ('refunded', 'refund') then 'Refunded'
-        when coalesce(paid_amount, 0) > 0 or coalesce(total, 0) = 0 then 'Paid'
-        else ''
+        when lower(coalesce(status, '')) in ('refunded', 'refund') or lower(coalesce(summary_raw."financialStatus", summary_raw."paymentStatus", '')) like '%refund%' then 'Refunded'
+        when lower(coalesce(summary_raw."financialStatus", summary_raw."paymentStatus", '')) like '%partial%' or (coalesce(paid_amount, 0) > 0 and coalesce(paid_amount, 0) < coalesce(total, 0)) then 'Partially paid'
+        when coalesce(paid_amount, 0) >= coalesce(total, 0) and (coalesce(total, 0) > 0 or coalesce(paid_amount, 0) > 0) then 'Paid'
+        when lower(coalesce(summary_raw."financialStatus", summary_raw."paymentStatus", '')) like '%pending%' then 'Pending'
+        else 'Unpaid'
       end as payment_status,
       coalesce(summary_raw."operationalStatus", summary_raw."workflowStatus", '') as operational_status,
       coalesce(summary_raw."workflowStatus", summary_raw."operationalStatus", '') as workflow_status,
@@ -10359,10 +10549,11 @@ async function listOrders(options = {}) {
       coalesce(summary_raw."returnRequestedAt", '') as return_requested_at,
       coalesce(summary_raw."returnReceivedAt", '') as return_received_at,
       coalesce(summary_raw."refundAmount", '0') as refund_amount,
+      coalesce(summary_raw."customerShippingCollected", summary_raw."shippingAmount", summary_raw."shippingPrice", summary_raw."shippingTotal", '0') as customer_shipping_collected,
       lower(coalesce(summary_raw."vergeOfLateShipment", 'false')) = 'true' as verge_of_late_shipment,
       lower(coalesce(summary_raw."duplicateOrderRecord", 'false')) = 'true' as duplicate_order_record
   ` : `
-    select *, ${orderDateSql} as order_date
+    select ${countSelect} *, ${orderDateSql} as order_date
   `;
   const orderFromSql = summary ? `
     from order_records
@@ -10385,6 +10576,8 @@ async function listOrders(options = {}) {
       "fulfillmentStatus" text,
       "fulfillmentStage" text,
       "allocationStatus" text,
+      "financialStatus" text,
+      "paymentStatus" text,
       "purchaseOrderIds" jsonb,
       "purchaseOrderNumbers" jsonb,
       "workflowExceptions" jsonb,
@@ -10428,30 +10621,59 @@ async function listOrders(options = {}) {
       "returnRequestedAt" text,
       "returnReceivedAt" text,
       "refundAmount" text,
+      "customerShippingCollected" text,
+      "shippingAmount" text,
+      "shippingPrice" text,
+      "shippingTotal" text,
       "vergeOfLateShipment" text,
       "duplicateOrderRecord" text
     )
   ` : "from order_records";
+  const sort = String(options.sort || "created-desc").toLowerCase();
+  const orderBySql = sort === "created-asc"
+    ? "order_date asc nulls last, created_at asc, order_number asc"
+    : sort === "total-desc"
+      ? "total desc nulls last, order_date desc nulls last, order_number desc"
+      : sort === "total-asc"
+        ? "total asc nulls last, order_date desc nulls last, order_number desc"
+        : sort === "customer-asc"
+          ? "buyer asc nulls last, order_date desc nulls last, order_number desc"
+          : "order_date desc nulls last, created_at desc, order_number desc";
+  params.push(limit);
+  const limitParameter = params.length;
+  if (paginated) params.push(offset);
   const orders = await client.query(`
     ${orderSelect}
     ${orderFromSql}
     ${whereSql}
-    order by order_date desc nulls last, created_at desc, order_number desc
-    limit $${params.length}
+    order by ${orderBySql}
+    limit $${limitParameter}${paginated ? ` offset $${params.length}` : ""}
   `, params);
   const ids = orders.rows.map((row) => row.order_id).filter(Boolean);
   let lineRows = [];
   if (ids.length) {
     const lines = await client.query(summary ? `
       select
-        line_id, order_id, line_index, sku, mapped_sku, original_sku, title, qty, price, cost,
-        coalesce(raw->>'status', '') as line_status,
-        coalesce(raw->>'fulfillmentStatus', '') as line_fulfillment_status,
-        coalesce(raw->>'fulfilledQty', raw->>'fulfilledQuantity', raw->>'qtyFulfilled') as line_fulfilled_qty,
-        coalesce(raw->>'remainingQty', raw->>'remainingQuantity', raw->>'unfulfilledQuantity') as line_remaining_qty
+        order_line_items.line_id, order_line_items.order_id, order_line_items.line_index, order_line_items.sku,
+        order_line_items.mapped_sku, order_line_items.original_sku, order_line_items.title, order_line_items.qty,
+        order_line_items.price, order_line_items.cost,
+        coalesce(order_line_items.raw->>'status', '') as line_status,
+        coalesce(order_line_items.raw->>'fulfillmentStatus', '') as line_fulfillment_status,
+        coalesce(order_line_items.raw->>'fulfilledQty', order_line_items.raw->>'fulfilledQuantity', order_line_items.raw->>'qtyFulfilled') as line_fulfilled_qty,
+        coalesce(order_line_items.raw->>'remainingQty', order_line_items.raw->>'remainingQuantity', order_line_items.raw->>'unfulfilledQuantity') as line_remaining_qty,
+        coalesce(nullif(order_line_items.raw->>'brand', ''), nullif(order_line_items.raw->>'brandName', ''), nullif(product.brand, ''), nullif(alias_product.brand, ''), '') as line_brand,
+        coalesce(nullif(order_line_items.raw->>'supplier', ''), nullif(order_line_items.raw->>'vendor', ''), nullif(order_line_items.raw->>'vendorName', ''), nullif(product.supplier, ''), nullif(alias_product.supplier, ''), '') as line_supplier,
+        coalesce(order_line_items.raw->>'cancelledQty', order_line_items.raw->>'canceledQty', order_line_items.raw->>'cancelledQuantity', order_line_items.raw->>'canceledQuantity') as line_cancelled_qty,
+        coalesce(order_line_items.raw->>'cancelledAt', order_line_items.raw->>'canceledAt', order_line_items.raw->>'cancelDate', '') as line_cancelled_at,
+        coalesce(order_line_items.raw->>'refundedQty', order_line_items.raw->>'refundQty', order_line_items.raw->>'refundedQuantity', order_line_items.raw->>'refundQuantity') as line_refunded_qty,
+        coalesce(order_line_items.raw->>'refundedAt', order_line_items.raw->>'refundDate', '') as line_refunded_at
       from order_line_items
-      where order_id = any($1::text[])
-      order by order_id, line_index
+      left join products product on lower(product.sku) = lower(coalesce(nullif(order_line_items.mapped_sku, ''), order_line_items.sku))
+      left join product_aliases product_alias on product_alias.active = true
+        and lower(product_alias.alias_sku) = lower(coalesce(nullif(order_line_items.mapped_sku, ''), order_line_items.sku))
+      left join products alias_product on alias_product.product_id = product_alias.product_id
+      where order_line_items.order_id = any($1::text[])
+      order by order_line_items.order_id, order_line_items.line_index
     ` : `
       select *
       from order_line_items
@@ -10465,7 +10687,17 @@ async function listOrders(options = {}) {
     if (!byOrder.has(line.order_id)) byOrder.set(line.order_id, []);
     byOrder.get(line.order_id).push(line);
   }
-  return orders.rows.map((row) => summary ? orderRowToSummary(row, byOrder.get(row.order_id) || []) : orderRowToState(row, byOrder.get(row.order_id) || []));
+  const mapped = orders.rows.map((row) => summary ? orderRowToSummary(row, byOrder.get(row.order_id) || []) : orderRowToState(row, byOrder.get(row.order_id) || []));
+  if (paginated) {
+    return {
+      orders: mapped,
+      total: Number(orders.rows[0]?.filtered_count || 0),
+      page,
+      pageSize: limit,
+      totalPages: Math.max(1, Math.ceil(Number(orders.rows[0]?.filtered_count || 0) / limit))
+    };
+  }
+  return mapped;
 }
 
 async function listOpenMarketplaceOrderStatusCandidates(source, options = {}) {
