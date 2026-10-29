@@ -1,6 +1,6 @@
 import { api } from "./client-api"
 
-export type AppReferenceName = "vendors" | "brands" | "warehouses"
+export type AppReferenceName = "vendors" | "brands" | "warehouses" | "connections" | "systemSettings"
 
 export type AppProjection = {
   changed?: boolean
@@ -22,7 +22,7 @@ export type AppSummary = {
 }
 
 let bootstrapCache: AppProjection | null = null
-const referenceCache = new Map<AppReferenceName, unknown[]>()
+const referenceCache = new Map<AppReferenceName, unknown>()
 const versionCache = new Map<string, string>()
 let bootstrapRequest: Promise<AppProjection> | null = null
 const referenceRequests = new Map<string, Promise<AppProjection>>()
@@ -68,7 +68,7 @@ export async function loadAppReferences(names: AppReferenceName[], force = false
         .then((result) => {
           for (const name of missing) {
             const value = result[name]
-            if (Array.isArray(value)) referenceCache.set(name, value)
+            if (value !== undefined) referenceCache.set(name, value)
           }
           rememberVersions(result.versions)
           return result
@@ -81,11 +81,11 @@ export async function loadAppReferences(names: AppReferenceName[], force = false
   return {
     changed: true,
     versions: Object.fromEntries(requested.map((name) => [name, cachedAppVersion(name)])),
-    ...Object.fromEntries(requested.map((name) => [name, referenceCache.get(name) || []])),
+    ...Object.fromEntries(requested.map((name) => [name, referenceCache.get(name) ?? (name === "systemSettings" ? {} : [])])),
   }
 }
 
-export function updateAppReference(name: AppReferenceName, values: unknown[]) {
+export function updateAppReference(name: AppReferenceName, values: unknown) {
   referenceCache.set(name, values)
 }
 

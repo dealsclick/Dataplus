@@ -1433,7 +1433,7 @@ export function StandaloneProductPage() {
   }, [sku])
   useEffect(() => {
     let cancelled = false
-    loadAppBootstrap()
+    loadAppReferences(["connections"])
       .then((result) => { if (!cancelled) setChannels((result.connections || []) as ChannelConnection[]) })
       .catch(() => { if (!cancelled) setChannels([]) })
     return () => { cancelled = true }

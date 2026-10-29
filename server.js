@@ -6880,6 +6880,15 @@ function publicSystemSettings(settings = {}) {
   return { ...normalized, productDumpResourceProfileDetails: productDumpResourceProfile(normalized), vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), dataSourceFeeds: normalized.dataSourceFeeds.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, authPermissionAreas: AUTH_PERMISSION_AREAS, authPermissionTemplates: normalized.authPermissionTemplates.map(publicAuthPermissionTemplate), authPermissionAuditLog: normalized.authPermissionAuditLog.map(normalizeAuthPermissionAuditEvent), systemUsers: normalized.systemUsers.map(publicSystemUser), smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), veeqoApiKey: "", veeqoApiKeyConfigured: Boolean(normalized.veeqoApiKey || process.env.VEEQO_API_KEY), veeqoClientSecret: "", veeqoClientSecretConfigured: Boolean(normalized.veeqoClientSecret || process.env.VEEQO_CLIENT_SECRET), veeqoAccessToken: "", veeqoAccessTokenConfigured: Boolean(normalized.veeqoAccessToken || process.env.VEEQO_ACCESS_TOKEN), veeqoAuthMode: normalized.veeqoAccessToken || process.env.VEEQO_ACCESS_TOKEN ? "oauth" : normalized.veeqoApiKey || process.env.VEEQO_API_KEY ? "api_key" : "not_connected", wikiApiConfigured: Boolean(process.env.BOOKSTACK_API_TOKEN_ID && process.env.BOOKSTACK_API_TOKEN_SECRET), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
 }
 
+function publicBootstrapSystemSettings(settings = {}) {
+  const publicSettings = publicSystemSettings(settings);
+  delete publicSettings.systemUsers;
+  delete publicSettings.authPermissionTemplates;
+  delete publicSettings.authPermissionAuditLog;
+  delete publicSettings.authPermissionAreas;
+  return publicSettings;
+}
+
 function hashWarehouseAuditAdminPin(pin, salt) {
   return crypto.scryptSync(String(pin || ""), String(salt || ""), 32).toString("hex");
 }
@@ -26940,6 +26949,21 @@ function publicConnection(connection = {}) {
   };
 }
 
+function publicConnectionSummary(connection = {}) {
+  const value = publicConnection(connection);
+  return {
+    id: value.id,
+    name: value.name,
+    connected: value.connected,
+    status: value.status,
+    lastSync: value.lastSync,
+    logoUrl: value.logoUrl || "",
+    externalAccount: value.externalAccount || "",
+    shopifyConfig: value.shopifyConfig || null,
+    settings: { channelEnabled: value.settings?.channelEnabled !== false }
+  };
+}
+
 function publicEbayListing(listing = null) {
   if (!listing || typeof listing !== "object") return null;
   const settings = normalizeEbayProductSettings(listing);
@@ -27467,8 +27491,8 @@ function publicState(db, options = {}) {
 }
 
 const APP_BOOTSTRAP_FIELDS = ["systemSettings", "connections", "connectorState"];
-const APP_REFERENCE_FIELDS = new Set(["vendors", "brands", "warehouses"]);
-const APP_VERSION_FIELDS = [...APP_BOOTSTRAP_FIELDS, ...APP_REFERENCE_FIELDS, "workerHeartbeat"];
+const APP_REFERENCE_FIELDS = new Set(["vendors", "brands", "warehouses", "connections", "systemSettings"]);
+const APP_VERSION_FIELDS = [...new Set([...APP_BOOTSTRAP_FIELDS, ...APP_REFERENCE_FIELDS, "workerHeartbeat"])];
 
 function appProjectionVersion(versions = {}, fields = []) {
   const value = fields.map((field) => `${field}=${versions[field] || "0:0"}`).join("|");
@@ -27479,7 +27503,7 @@ async function readAppProjection(fields = []) {
   if (postgres.isPostgresEnabled()) return postgres.readAppStateProjection(fields);
   const db = normalizeDb(await readDbFast({ skipInventory: true }));
   return {
-    state: Object.fromEntries(fields.map((field) => [field, db[field] ?? (APP_REFERENCE_FIELDS.has(field) ? [] : {})])),
+    state: Object.fromEntries(fields.map((field) => [field, db[field] ?? (["systemSettings", "connectorState", "workerHeartbeat"].includes(field) ? {} : [])])),
     versions: Object.fromEntries(fields.map((field) => [field, "legacy:1"]))
   };
 }
@@ -64360,8 +64384,8 @@ async function handleApi(req, res) {
       changed: url.searchParams.get("version") !== version,
       version,
       versions: projection.versions,
-      connections: state.connections || [],
-      systemSettings: state.systemSettings || {},
+      connections: (state.connections || []).map(publicConnectionSummary),
+      systemSettings: publicBootstrapSystemSettings(projection.state.systemSettings || {}),
       connectorState: state.connectorState || {}
     }, version);
   }
@@ -64371,7 +64395,7 @@ async function handleApi(req, res) {
       .split(",")
       .map((field) => field.trim())
       .filter((field) => APP_REFERENCE_FIELDS.has(field)))];
-    if (!fields.length) return sendJson(res, 400, { error: "Choose at least one reference: vendors, brands, or warehouses." });
+    if (!fields.length) return sendJson(res, 400, { error: "Choose at least one reference: vendors, brands, warehouses, connections, or systemSettings." });
     const projection = await readAppProjection(fields);
     const state = publicAppProjection(projection.state);
     const version = appProjectionVersion(projection.versions, fields);
@@ -64384,7 +64408,9 @@ async function handleApi(req, res) {
           versions: projection.versions,
           ...(fields.includes("vendors") ? { vendors: state.vendors || [] } : {}),
           ...(fields.includes("brands") ? { brands: projection.state.brands || [] } : {}),
-          ...(fields.includes("warehouses") ? { warehouses: projection.state.warehouses || [] } : {})
+          ...(fields.includes("warehouses") ? { warehouses: projection.state.warehouses || [] } : {}),
+          ...(fields.includes("connections") ? { connections: state.connections || [] } : {}),
+          ...(fields.includes("systemSettings") ? { systemSettings: state.systemSettings || {} } : {})
         }, version);
   }
 
@@ -74681,6 +74707,8 @@ module.exports = {
   normalizeChannel,
   publicChannelSettings,
   publicConnection,
+  publicConnectionSummary,
+  publicBootstrapSystemSettings,
   createInventoryFromOrderLine,
   ensureProductsForImportedOrders,
   hydrateOrdersLocalCosts,

@@ -1543,7 +1543,9 @@ function viewFromPath(pathname = "/"): AppView {
 function appReferencesForView(view: AppView, warehouseMobile = false): AppReferenceName[] {
   const references = new Set<AppReferenceName>()
   if (["overview", "jobs", "vendors", "brands", "brand-detail"].includes(view)) references.add("vendors")
+  if (["channels", "catalog", "product-detail"].includes(view)) references.add("connections")
   if (view === "channels" || warehouseMobile) references.add("warehouses")
+  if (view === "settings") references.add("systemSettings")
   return [...references]
 }
 
@@ -2337,6 +2339,8 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     const result = await loadAppReferences(references, force)
     setState((current) => ({
       ...current,
+      ...(references.includes("connections") ? { connections: (result.connections || []) as ChannelConnection[] } : {}),
+      ...(references.includes("systemSettings") ? { systemSettings: (result.systemSettings || {}) as SystemSettings } : {}),
       ...(references.includes("vendors") ? { vendors: (result.vendors || []) as Vendor[] } : {}),
       ...(references.includes("brands") ? { brands: (result.brands || []) as Brand[] } : {}),
       ...(references.includes("warehouses") ? { warehouses: (result.warehouses || []) as Array<Record<string, unknown>> } : {}),
@@ -2362,8 +2366,8 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
       references.forEach((name) => loadedReferencesRef.current.add(name))
       setState((current) => ({
         ...current,
-        connections: (bootstrap.connections || current.connections || []) as ChannelConnection[],
-        systemSettings: (bootstrap.systemSettings || current.systemSettings || {}) as SystemSettings,
+        connections: (references.includes("connections") ? referenceState.connections : bootstrap.connections || current.connections || []) as ChannelConnection[],
+        systemSettings: (references.includes("systemSettings") ? referenceState.systemSettings : bootstrap.systemSettings || current.systemSettings || {}) as SystemSettings,
         ...(references.includes("vendors") ? { vendors: (referenceState.vendors || []) as Vendor[] } : {}),
         ...(references.includes("brands") ? { brands: (referenceState.brands || []) as Brand[] } : {}),
         ...(references.includes("warehouses") ? { warehouses: (referenceState.warehouses || []) as Array<Record<string, unknown>> } : {}),
@@ -2386,16 +2390,16 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
       const result = await loadAppSummary()
       if (result.workerStatus) setWorkerStatus(result.workerStatus as WorkerStatus)
       const versions = result.versions || {}
+      const activeReferences = appReferencesForView(view, warehouseMobile)
+      const staleReferences = activeReferences.filter((name) => loadedReferencesRef.current.has(name) && versions[name] && versions[name] !== cachedAppVersion(name))
       if (["connections", "systemSettings", "connectorState"].some((name) => versions[name] && versions[name] !== cachedAppVersion(name))) {
         const bootstrap = await loadAppBootstrap(true)
         setState((current) => ({
           ...current,
-          connections: (bootstrap.connections || current.connections || []) as ChannelConnection[],
-          systemSettings: (bootstrap.systemSettings || current.systemSettings || {}) as SystemSettings,
+          connections: (activeReferences.includes("connections") ? current.connections : bootstrap.connections || current.connections || []) as ChannelConnection[],
+          systemSettings: (activeReferences.includes("systemSettings") ? current.systemSettings : bootstrap.systemSettings || current.systemSettings || {}) as SystemSettings,
         }))
       }
-      const activeReferences = appReferencesForView(view, warehouseMobile)
-      const staleReferences = activeReferences.filter((name) => loadedReferencesRef.current.has(name) && versions[name] && versions[name] !== cachedAppVersion(name))
       if (staleReferences.length) await loadWorkspaceReferences(view, true)
     } catch {
       // Page-specific data remains usable when the lightweight status poll is unavailable.
