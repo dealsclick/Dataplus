@@ -94,6 +94,18 @@ test("full launch reviews persist a filterable readiness assessment", () => {
   assert.match(uiSource, /Validate eBay readiness/);
 });
 
+test("eBay Promoted Listings uses a guarded two-percent cost-per-sale default", () => {
+  assert.match(serverSource, /ebayPromotedListingsEnabled: false/);
+  assert.match(serverSource, /ebayPromotedListingsRatePercent: 2/);
+  assert.match(serverSource, /variableFeePercent: settings\.ebayPromotedListingsEnabled/);
+  assert.match(serverSource, /fundingModel: "COST_PER_SALE"/);
+  assert.match(serverSource, /bulk_create_ads_by_listing_id/);
+  assert.match(serverSource, /promotionStatus: "failed"/);
+  assert.match(serverSource, /sell\.marketing/);
+  assert.match(channelSource, /Enable eBay ads/);
+  assert.match(channelSource, /Default 2%/);
+});
+
 test("catalog exposes one binary eBay launch-readiness choice", () => {
   assert.match(appSource, /"ebay-validated-ready": "Ready to launch on eBay"/);
   assert.match(appSource, /"ebay-launch-not-ready": "Not ready to launch on eBay"/);

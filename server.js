@@ -286,7 +286,7 @@ const SHOPIFY_PRICE_MARKUP_PERCENT = 28;
 const { freightAllowance, priceIncludingFreight } = require("./lib/shopify-freight-pricing");
 const { sourcePriceFloors, variantPriceFloor } = require("./lib/product-price-floors");
 const { validatePriceMode, resolvePricePolicy, applyPricePolicy } = require("./lib/channel-price-policy");
-const { calculateChannelPrice, normalizeMode: normalizeChannelPricingMode, normalizeRoundingRule: normalizeChannelRoundingRule } = require("./lib/channel-price-formula");
+const { calculateChannelPrice, variableFeeAmount, normalizeMode: normalizeChannelPricingMode, normalizeRoundingRule: normalizeChannelRoundingRule } = require("./lib/channel-price-formula");
 const { EBAY_LAUNCH_READINESS_VERSION, normalizeEbayProductIdentifier, validEbayProductIdentifier } = require("./lib/ebay-launch-readiness");
 const SHOPIFY_MULTIPACK_DISCOUNT_PERCENT = 5;
 const SHOPIFY_DUMP_FIELD_METAFIELDS = {
@@ -986,6 +986,9 @@ const DEFAULT_CHANNEL_SETTINGS = {
   ebayMinMarginPercent: 0,
   ebayMinimumPrice: 0,
   ebayRoundingRule: "none",
+  ebayPromotedListingsEnabled: false,
+  ebayPromotedListingsRatePercent: 2,
+  ebayPromotedListingsCampaignName: "DataPlus Promoted Listings",
   ebayMarketplaceId: "EBAY_US",
   ebayCurrency: "USD",
   ebayMerchantLocationKey: "",
@@ -5121,10 +5124,10 @@ function normalizeChannel(channel = {}) {
     settings.priceMarkupPercent = isShopify ? SHOPIFY_PRICE_MARKUP_PERCENT : DEFAULT_CHANNEL_SETTINGS.priceMarkupPercent;
   }
   settings.pricingRuleVersion = 1;
-  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultReplenishableQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "minimumPrice", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayCatalogSyncScheduleEveryHours", "ebayLaunchStatusMaxAgeHours", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "ebayReturnSyncScheduleEveryHours", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuMinimumPrice", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "temuReturnSyncLookbackDays", "temuReturnSyncScheduleEveryHours", "tiktokOrderScheduleHours", "tiktokOrderLookbackDays", "tiktokReturnScheduleHours", "tiktokReturnLookbackDays", "tiktokSettlementScheduleHours", "tiktokSettlementLookbackDays", "tiktokLiveScheduleHours", "tiktokLiveLookbackDays", "tiktokMessageScheduleHours", "tiktokAnalyticsScheduleHours", "tiktokAnalyticsLookbackDays", "tiktokInventorySafetyQty", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate", "walmartInventoryScheduleHours"]) {
+  for (const field of ["defaultHandlingTimeDays", "defaultSafetyQty", "defaultReplenishableQty", "defaultMaxSellableQty", "priceMarkupPercent", "pricingRuleVersion", "minMarginPercent", "minimumPrice", "ebayPriceMarkupPercent", "ebayMinMarginPercent", "ebayMinimumPrice", "ebayPromotedListingsRatePercent", "ebayMaxImages", "ebayDefaultSafetyQty", "ebayDefaultMaxSellableQty", "ebayMinInventoryForAutoListing", "ebayDefaultDispatchTimeDays", "ebayCatalogSyncLimit", "ebayCatalogSyncScheduleEveryHours", "ebayLaunchStatusMaxAgeHours", "ebayOrderImportLookbackDays", "ebayOrderImportLimit", "ebayOrderImportScheduleEveryHours", "ebayReturnSyncLookbackDays", "ebayReturnSyncLimit", "ebayReturnSyncScheduleEveryHours", "temuOrderPageSize", "temuInventorySafetyQty", "temuPriceMarkupPercent", "temuMinMarginPercent", "temuMinimumPrice", "temuOrderImportLookbackDays", "temuOrderImportLimit", "temuOrderImportScheduleEveryHours", "temuReturnSyncLookbackDays", "temuReturnSyncScheduleEveryHours", "tiktokOrderScheduleHours", "tiktokOrderLookbackDays", "tiktokReturnScheduleHours", "tiktokReturnLookbackDays", "tiktokSettlementScheduleHours", "tiktokSettlementLookbackDays", "tiktokLiveScheduleHours", "tiktokLiveLookbackDays", "tiktokMessageScheduleHours", "tiktokAnalyticsScheduleHours", "tiktokAnalyticsLookbackDays", "tiktokInventorySafetyQty", "ebayPriceInventorySyncScheduleEveryHours", "ebayPriceInventorySyncLimit", "ebayListingLaunchLimit", "whatnotOrderImportLookbackDays", "whatnotOrderImportLimit", "whatnotOrderImportScheduleEveryHours", "whatnotBulkOperationPollSeconds", "shopifyStatusSyncLimit", "shopifyOrderImportLimit", "shopifyOrderImportScheduleEveryHours", "shopifyFreightShippingRate", "walmartInventoryScheduleHours"]) {
     settings[field] = Number(settings[field] || 0);
   }
-  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "createMissingOrderSkusFromSource", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayRequireFreshStatusBeforeLaunch", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "ebayReturnSyncScheduleEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuReturnSyncScheduleEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "tiktokOrdersEnabled", "tiktokOrderScheduleEnabled", "tiktokReturnsEnabled", "tiktokReturnScheduleEnabled", "tiktokSettlementImportEnabled", "tiktokSettlementScheduleEnabled", "tiktokCatalogEnabled", "tiktokLiveAnalyticsEnabled", "tiktokLiveScheduleEnabled", "tiktokLiveOrderAttributionEnabled", "tiktokLaunchEnabled", "tiktokInventoryEnabled", "tiktokPriceEnabled", "tiktokFulfillmentEnabled", "tiktokLabelPurchaseEnabled", "tiktokMessagesEnabled", "tiktokMessageScheduleEnabled", "tiktokWebhooksEnabled", "tiktokAnalyticsEnabled", "tiktokAnalyticsScheduleEnabled", "tiktokAffiliateEnabled", "tiktokPromotionsEnabled", "tiktokCustomerEngagementEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifySettlementImportEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled", "walmartInventoryScheduleEnabled", "walmartSettlementImportEnabled"]) {
+  for (const field of ["channelEnabled", "priceUpdateEnabled", "inventoryUpdateEnabled", "orderDownloadEnabled", "createMissingOrderSkusFromSource", "trackingUpdateEnabled", "cancellationNotificationEnabled", "autoCreateShadow", "shippingRestrictionGateEnabled", "shippingRestrictLtlInventory", "shippingRestrictOversizeInventory", "shippingRestrictMissingMeasurementsInventory", "shippingRestrictLtlLaunch", "shippingRestrictOversizeLaunch", "shippingRestrictMissingMeasurementsLaunch", "ebayAutoPublish", "ebayAutoRelistEnabled", "ebayRequireImage", "ebayRequireProductIdentifier", "ebayBestOfferEnabled", "ebayPromotedListingsEnabled", "ebayInventoryUpdateEnabled", "ebayPriceUpdateEnabled", "ebayTrackingUploadEnabled", "ebaySettlementImportEnabled", "ebayPaidOrdersOnly", "ebayPreventDuplicateParentListings", "ebayDivideInventoryPerListing", "ebayOutOfStockControlEnabled", "ebayCatalogSyncEnabled", "ebayCatalogSyncScheduleEnabled", "ebayRequireFreshStatusBeforeLaunch", "ebayLegacyListingSyncEnabled", "ebayOrderImportEnabled", "ebayOrderImportIncludeCanceled", "ebayOrderImportScheduleEnabled", "ebayReturnSyncEnabled", "ebayReturnSyncScheduleEnabled", "temuProductSyncEnabled", "temuListingSyncEnabled", "temuListingLaunchEnabled", "temuCatalogSyncEnabled", "temuInventorySyncEnabled", "temuPriceSyncEnabled", "temuTrackingUploadEnabled", "temuFulfillmentSyncEnabled", "temuCancellationNotificationEnabled", "temuReturnSyncEnabled", "temuReturnSyncScheduleEnabled", "temuRefundSyncEnabled", "temuWebhookEnabled", "temuWebhookSecretConfigured", "temuOrderImportEnabled", "temuOrderImportIncludeCanceled", "temuOrderImportScheduleEnabled", "tiktokOrdersEnabled", "tiktokOrderScheduleEnabled", "tiktokReturnsEnabled", "tiktokReturnScheduleEnabled", "tiktokSettlementImportEnabled", "tiktokSettlementScheduleEnabled", "tiktokCatalogEnabled", "tiktokLiveAnalyticsEnabled", "tiktokLiveScheduleEnabled", "tiktokLiveOrderAttributionEnabled", "tiktokLaunchEnabled", "tiktokInventoryEnabled", "tiktokPriceEnabled", "tiktokFulfillmentEnabled", "tiktokLabelPurchaseEnabled", "tiktokMessagesEnabled", "tiktokMessageScheduleEnabled", "tiktokWebhooksEnabled", "tiktokAnalyticsEnabled", "tiktokAnalyticsScheduleEnabled", "tiktokAffiliateEnabled", "tiktokPromotionsEnabled", "tiktokCustomerEngagementEnabled", "ebayPriceInventorySyncScheduleEnabled", "ebayWebhookEnabled", "ebayWebhookOrderSyncEnabled", "whatnotProductSyncEnabled", "whatnotListingSyncEnabled", "whatnotInventorySyncEnabled", "whatnotOrderImportEnabled", "whatnotTrackingUploadEnabled", "whatnotShipmentLabelEnabled", "whatnotWebhookEnabled", "whatnotWebhookSecretConfigured", "whatnotOrderImportScheduleEnabled", "whatnotBulkOperationsEnabled", "whatnotTaxonomySyncEnabled", "whatnotAutoPublishListings", "whatnotRequireShippingProfile", "whatnotAutoCreateShippingProfile", "whatnotAssignListingsToLivestream", "whatnotAuctionSuddenDeathEnabled", "shopifySyncStatusEnabled", "shopifyAutoSyncStatus", "shopifyCloseoutsEnabled", "shopifyOrderImportEnabled", "shopifyOrderWebhookEnabled", "shopifyOrderImportIncludeCanceled", "shopifyOrderImportScheduleEnabled", "shopifySettlementImportEnabled", "shopifyCancellationNotificationEnabled", "shopifyFulfillmentSyncEnabled", "shopifyRefundSyncEnabled", "shopifyReturnSyncEnabled", "shopifyPaymentCaptureEnabled", "shopifyOrderAddressSyncEnabled", "shopifyLabelPurchaseEnabled", "shopifyInventoryPushEnabled", "shopifyShippingEligibilityEnabled", "walmartInventoryScheduleEnabled", "walmartSettlementImportEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }
   settings.replenishableFeedMaxAgeHours = Math.max(0, Number(settings.replenishableFeedMaxAgeHours || 0));
@@ -5183,6 +5186,8 @@ function normalizeChannel(channel = {}) {
   settings.ebayPriceMarkupPercent = Math.max(0, Math.min(1000, Number(settings.ebayPriceMarkupPercent || 0) || 0));
   settings.ebayMinMarginPercent = Math.max(0, Math.min(99, Number(settings.ebayMinMarginPercent || 0) || 0));
   settings.ebayMinimumPrice = Math.max(0, Number(settings.ebayMinimumPrice || 0) || 0);
+  settings.ebayPromotedListingsRatePercent = Math.max(2, Math.min(100, Number(settings.ebayPromotedListingsRatePercent ?? 2) || 2));
+  settings.ebayPromotedListingsCampaignName = String(settings.ebayPromotedListingsCampaignName || DEFAULT_CHANNEL_SETTINGS.ebayPromotedListingsCampaignName).trim().slice(0, 80) || DEFAULT_CHANNEL_SETTINGS.ebayPromotedListingsCampaignName;
   settings.ebayDefaultSafetyQty = Math.max(0, Math.floor(Number(settings.ebayDefaultSafetyQty || settings.defaultSafetyQty || 0) || 0));
   settings.ebayDefaultMaxSellableQty = Math.max(0, Math.floor(Number(settings.ebayDefaultMaxSellableQty || settings.defaultMaxSellableQty || 0) || 0));
   settings.ebayMinInventoryForAutoListing = Math.max(0, Math.floor(Number(settings.ebayMinInventoryForAutoListing || 0) || 0));
@@ -25381,7 +25386,8 @@ const EBAY_LISTING_LAUNCH_RESULT_COLUMNS = [
   "sku", "title", "supplier", "lifecycle_action", "marketplace", "dry_run", "unit_cost", "catalog_price",
   "processed_at", "listing_status", "offer_id", "listing_id", "enabled", "restricted", "inventory_source",
   "shipping_class", "shipping_inventory_blocked", "shipping_inventory_block_reason", "price", "gross_profit",
-  "gross_margin_percent", "quantity", "category_id", "store_category", "listing_template", "item_specific_template",
+  "gross_margin_percent", "promoted_listing_rate_percent", "promoted_listing_estimated_fee", "promotion_status", "promotion_campaign_id", "promotion_error",
+  "quantity", "category_id", "store_category", "listing_template", "item_specific_template",
   "dispatch_time_days", "compliance_policies", "identifier", "merchant_location", "payment_policy", "return_policy",
   "fulfillment_policy", "warning", "status", "reason", "missing", "listing_url", "catalog_match", "ebay_product_id",
   "catalog_match_method", "error"
@@ -25606,7 +25612,9 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
           const readiness = await ebayListingReadiness(workDb, item, itemPayload);
           const config = readiness.config || {};
           const calculatedPrice = Number(readiness.price || 0);
-          const grossProfit = calculatedPrice - unitCost;
+          const promotedListingRatePercent = config.promotedListingsEnabled ? Number(config.promotedListingsRatePercent || 2) : 0;
+          const promotedListingEstimatedFee = variableFeeAmount(calculatedPrice, promotedListingRatePercent);
+          const grossProfit = calculatedPrice - unitCost - promotedListingEstimatedFee;
           const grossMarginPercent = calculatedPrice > 0 ? (grossProfit / calculatedPrice) * 100 : 0;
           const resultBase = {
             ...resultContext,
@@ -25622,6 +25630,9 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
             price: readiness.price,
             gross_profit: Number(grossProfit.toFixed(2)),
             gross_margin_percent: Number(grossMarginPercent.toFixed(2)),
+            promoted_listing_rate_percent: promotedListingRatePercent || "",
+            promoted_listing_estimated_fee: promotedListingEstimatedFee || "",
+            promotion_status: config.promotedListingsEnabled ? "pending_listing" : "disabled",
             quantity: readiness.quantity,
             category_id: config.categoryId || "",
             store_category: config.storeCategoryName || config.storeCategoryId || "",
@@ -25671,7 +25682,9 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
             });
             markTouched(item);
             launched += 1;
-            results.push({ ...resultBase, status: result.config?.listingId ? "live" : "offer", offer_id: result.config?.offerId || "", listing_id: result.config?.listingId || "", listing_url: result.config?.listingUrl || "", price: result.config?.price || readiness.price, quantity: result.config?.quantity || readiness.quantity, catalog_match: result.config?.catalogMatch?.status || "", ebay_product_id: result.config?.ePid || "", catalog_match_method: result.config?.catalogMatch?.matchedBy || "" });
+            const promotionWarning = result.config?.promotionStatus === "failed" ? `Promoted Listings: ${result.config?.promotionError || "enrollment failed"}` : "";
+            if (promotionWarning) warningIssues.push(standardImportError({ sku, supplier, field: "promoted_listing", issue: "eBay listing published without promotion", details: promotionWarning }));
+            results.push({ ...resultBase, status: result.config?.listingId ? "live" : "offer", offer_id: result.config?.offerId || "", listing_id: result.config?.listingId || "", listing_url: result.config?.listingUrl || "", price: result.config?.price || readiness.price, quantity: result.config?.quantity || readiness.quantity, catalog_match: result.config?.catalogMatch?.status || "", ebay_product_id: result.config?.ePid || "", catalog_match_method: result.config?.catalogMatch?.matchedBy || "", promotion_status: result.config?.promotionStatus || resultBase.promotion_status, promotion_campaign_id: result.config?.promotionCampaignId || "", promotion_error: result.config?.promotionError || "", warning: [resultBase.warning, promotionWarning].filter(Boolean).join("; ") });
           }
         }
       } catch (error) {
@@ -39011,7 +39024,7 @@ function getEbayConfig(db = {}) {
     clientId: runtime.clientId || process.env.EBAY_CLIENT_ID || "",
     clientSecret: runtime.clientSecret || process.env.EBAY_CLIENT_SECRET || "",
     ruName: runtime.ruName || process.env.EBAY_RUNAME || "",
-    scope: [...new Set(`${runtime.scope || process.env.EBAY_SCOPE || "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account.readonly"} https://api.ebay.com/oauth/api_scope/sell.finances`.split(/\s+/).filter(Boolean))].join(' '),
+    scope: [...new Set(`${runtime.scope || process.env.EBAY_SCOPE || "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account.readonly"} https://api.ebay.com/oauth/api_scope/sell.finances https://api.ebay.com/oauth/api_scope/sell.marketing`.split(/\s+/).filter(Boolean))].join(' '),
     appScope: runtime.appScope || process.env.EBAY_APP_SCOPE || "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.inventory",
     appAccessToken: connectorState.ebayAppAccessToken || runtime.appAccessToken || process.env.EBAY_APP_ACCESS_TOKEN || "",
     appAccessTokenExpiresAt: connectorState.ebayAppAccessTokenExpiresAt || "",
@@ -39089,7 +39102,13 @@ function ebayRawRequest(urlString, options = {}) {
         resolve({
           response: {
             ok: response.statusCode >= 200 && response.statusCode < 300,
-            status: response.statusCode
+            status: response.statusCode,
+            headers: {
+              get(name) {
+                const value = response.headers[String(name || "").toLowerCase()];
+                return Array.isArray(value) ? value.join(", ") : value || "";
+              }
+            }
           },
           data
         });
@@ -39362,6 +39381,91 @@ async function ebayTokenRequest(db, body, options = {}) {
   return data;
 }
 
+const ebayPromotedCampaignCache = new Map();
+
+function ebayPromotedListingsRate(settings = {}) {
+  return Math.max(2, Math.min(100, Number(settings.ebayPromotedListingsRatePercent ?? 2) || 2));
+}
+
+async function ensureEbayPromotedListingsCampaign(db, settings = {}, jobId = "") {
+  const config = getEbayConfig(db);
+  const marketplaceId = String(settings.ebayMarketplaceId || "EBAY_US").trim();
+  const campaignName = String(settings.ebayPromotedListingsCampaignName || DEFAULT_CHANNEL_SETTINGS.ebayPromotedListingsCampaignName).trim().slice(0, 80);
+  const cacheKey = `${config.environment}:${marketplaceId}:${campaignName}`;
+  if (ebayPromotedCampaignCache.has(cacheKey)) return ebayPromotedCampaignCache.get(cacheKey);
+  const campaignPath = `/sell/marketing/v1/ad_campaign/get_campaign_by_name?campaign_name=${encodeURIComponent(campaignName)}`;
+  try {
+    const campaign = await ebayRequest(db, campaignPath, { marketplaceId, operation: "Get Promoted Listings campaign", jobId });
+    if (campaign?.campaignId) {
+      ebayPromotedCampaignCache.set(cacheKey, String(campaign.campaignId));
+      return String(campaign.campaignId);
+    }
+  } catch (error) {
+    if (Number(error.status || 0) !== 404) throw error;
+  }
+  const created = await ebayRequest(db, "/sell/marketing/v1/ad_campaign", {
+    method: "POST",
+    marketplaceId,
+    operation: "Create Promoted Listings campaign",
+    jobId,
+    includeResponse: true,
+    body: {
+      marketplaceId,
+      campaignName,
+      fundingStrategy: {
+        adRateStrategy: "FIXED",
+        bidPercentage: ebayPromotedListingsRate(settings).toFixed(1),
+        fundingModel: "COST_PER_SALE"
+      },
+      startDate: new Date(Date.now() + 5 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, "Z")
+    }
+  });
+  const location = String(created?.response?.headers?.get?.("location") || "");
+  const campaignId = location.match(/\/ad_campaign\/([^/?#]+)/i)?.[1] || created?.data?.campaignId || "";
+  if (!campaignId) throw new Error("eBay created the Promoted Listings campaign but did not return its campaign ID.");
+  ebayPromotedCampaignCache.set(cacheKey, String(campaignId));
+  return String(campaignId);
+}
+
+async function syncEbayPromotedListings(db, listingIds = [], settings = {}, jobId = "") {
+  const ids = [...new Set((Array.isArray(listingIds) ? listingIds : [listingIds]).map((value) => String(value || "").trim()).filter(Boolean))];
+  const ratePercent = ebayPromotedListingsRate(settings);
+  if (settings.ebayPromotedListingsEnabled !== true) return { promotionStatus: "disabled", promotionRatePercent: ratePercent };
+  if (!ids.length) return { promotionStatus: "pending_listing", promotionRatePercent: ratePercent };
+  try {
+    const campaignId = await ensureEbayPromotedListingsCampaign(db, settings, jobId);
+    const response = await ebayRequest(db, `/sell/marketing/v1/ad_campaign/${encodeURIComponent(campaignId)}/bulk_create_ads_by_listing_id`, {
+      method: "POST",
+      marketplaceId: settings.ebayMarketplaceId || "EBAY_US",
+      operation: "Add listings to Promoted Listings campaign",
+      jobId,
+      body: {
+        requests: ids.map((listingId) => ({ listingId, bidPercentage: ratePercent.toFixed(1) }))
+      }
+    });
+    const failures = (Array.isArray(response?.responses) ? response.responses : [])
+      .filter((row) => Array.isArray(row?.errors) && row.errors.length)
+      .flatMap((row) => row.errors.map((error) => error?.message || error?.longMessage || error?.errorId || "Unknown eBay advertising error"))
+      .filter((message) => !/already (exists|associated|included)|duplicate/i.test(String(message || "")));
+    if (failures.length) throw new Error(failures.join("; ").slice(0, 1200));
+    return {
+      promotionStatus: "promoted",
+      promotionRatePercent: ratePercent,
+      promotionCampaignId: campaignId,
+      promotionListingCount: ids.length,
+      promotedAt: new Date().toISOString(),
+      promotionError: ""
+    };
+  } catch (error) {
+    return {
+      promotionStatus: "failed",
+      promotionRatePercent: ratePercent,
+      promotionError: String(error?.message || error).slice(0, 1200),
+      promotionAttemptedAt: new Date().toISOString()
+    };
+  }
+}
+
 function saveEbayAppTokenPayload(db, payload, requestedScope = "") {
   db.connectorState = db.connectorState || {};
   if (payload.access_token) db.connectorState.ebayAppAccessToken = payload.access_token;
@@ -39599,7 +39703,7 @@ async function ebayRequest(db, resourcePath, options = {}) {
     error.method = options.method || "GET";
     throw error;
   }
-  return data;
+  return options.includeResponse === true ? { data, response } : data;
 }
 
 async function ebayPostOrderRequest(db, resourcePath, options = {}) {
@@ -40102,6 +40206,7 @@ function marketplaceSuggestedPrice(item = {}, settings = {}, basis = {}) {
     markupPercent: settings.ebayPriceMarkupPercent ?? settings.priceMarkupPercent,
     minMarginPercent: settings.ebayMinMarginPercent ?? settings.minMarginPercent,
     minimumPrice: settings.ebayMinimumPrice,
+    variableFeePercent: settings.ebayPromotedListingsEnabled ? settings.ebayPromotedListingsRatePercent : 0,
     roundingRule: settings.ebayRoundingRule ?? settings.roundingRule
   });
 }
@@ -40476,6 +40581,10 @@ function ebayListingConfig(db, item, body = {}) {
     maxSellableQty,
     minInventoryForAutoListing,
     requireProductIdentifier: explicitBoolean("requireProductIdentifier", "ebayRequireProductIdentifier", false),
+    promotedListingsEnabled: explicitBoolean("promotedListingsEnabled", "ebayPromotedListingsEnabled", false),
+    promotedListingsRatePercent: Math.max(2, Math.min(100, explicitNumber("promotedListingsRatePercent", "ebayPromotedListingsRatePercent", 2) || 2)),
+    promotedListingsCampaignName: String(explicit("promotedListingsCampaignName", "ebayPromotedListingsCampaignName", DEFAULT_CHANNEL_SETTINGS.ebayPromotedListingsCampaignName)).trim().slice(0, 80),
+    estimatedPromotedListingsFee: variableFeeAmount(price, explicitBoolean("promotedListingsEnabled", "ebayPromotedListingsEnabled", false) ? explicitNumber("promotedListingsRatePercent", "ebayPromotedListingsRatePercent", 2) : 0),
     bestOfferEnabled: explicitBoolean("bestOfferEnabled", "ebayBestOfferEnabled", false),
     bestOfferAutoAcceptPrice: Math.max(0, Number(body.bestOfferAutoAcceptPrice ?? productSettings.ebayBestOfferAutoAcceptPrice ?? saved.bestOfferAutoAcceptPrice ?? 0) || 0),
     bestOfferAutoDeclinePrice: Math.max(0, Number(body.bestOfferAutoDeclinePrice ?? productSettings.ebayBestOfferAutoDeclinePrice ?? saved.bestOfferAutoDeclinePrice ?? 0) || 0),
@@ -42921,7 +43030,7 @@ async function createOrUpdateEbayPurchaseUnits(db, item, body, options, config, 
     const live = plan.variants.filter(row => row.listingId && row.status === 'published');
     const first = live[0] || plan.variants.find(row => row.offerId) || plan.variants[0];
     const now = new Date().toISOString();
-    assignProductEbayListing(item, { ...previous, ...config,
+    assignProductEbayListing(item, { ...previous, ...(item.ebayListing || {}), ...config,
       variationMode: plan.mode, inventoryItemGroupKey: plan.groupKey, variationAspect: plan.aspectName || '', stockAllocation: plan.stockAllocation,
       variants: plan.variants, offerId: first.offerId || '', listingId: first.listingId || '',
       listingUrl: first.listingId ? ebayListingUrl(first.listingId, config.marketplaceId) : '',
@@ -42991,6 +43100,19 @@ async function createOrUpdateEbayPurchaseUnits(db, item, body, options, config, 
         await refreshParent();
       }
     }
+    const promotion = await syncEbayPromotedListings(
+      db,
+      plan.variants.map((row) => row.listingId),
+      {
+        ebayMarketplaceId: config.marketplaceId,
+        ebayPromotedListingsEnabled: config.promotedListingsEnabled,
+        ebayPromotedListingsRatePercent: config.promotedListingsRatePercent,
+        ebayPromotedListingsCampaignName: config.promotedListingsCampaignName
+      },
+      options.jobId || ""
+    );
+    assignProductEbayListing(item, { ...(item.ebayListing || {}), ...promotion });
+    await refreshParent();
     return { config: item.ebayListing, offer: {}, published: options.publish ? { listingId: item.ebayListing.listingId } : null };
   } catch (error) {
     await refreshParent(error);
@@ -43123,6 +43245,15 @@ async function createOrUpdateEbayListing(db, item, body = {}, options = {}) {
       listingId
     })
   };
+  if (!options.purchaseUnitConfig) {
+    const promotion = await syncEbayPromotedListings(db, [listingId], {
+      ebayMarketplaceId: config.marketplaceId,
+      ebayPromotedListingsEnabled: config.promotedListingsEnabled,
+      ebayPromotedListingsRatePercent: config.promotedListingsRatePercent,
+      ebayPromotedListingsCampaignName: config.promotedListingsCampaignName
+    }, options.jobId || "");
+    item.ebayListing = { ...item.ebayListing, ...promotion };
+  }
   item.ebayId = item.ebayListing.listingId || item.ebayId || "";
   item.sources = { ...(item.sources || {}), eBay: item.ebayListing.listingId || item.ebayListing.offerId || item.sku };
   item.updatedAt = now;
