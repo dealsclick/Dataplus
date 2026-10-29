@@ -2208,6 +2208,8 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const [quickFindProducts, setQuickFindProducts] = useState<QuickProductResult[]>([])
   const [quickOperationsResults, setQuickOperationsResults] = useState<QuickOperationResult[]>([])
   const [quickFindSearching, setQuickFindSearching] = useState(false)
+  const quickFindScanRequestRef = useRef(0)
+  const quickFindResolvedScanRef = useRef("")
   const [passwordOpen, setPasswordOpen] = useState(false)
   const [passwordDraft, setPasswordDraft] = useState({ currentPassword: "", password: "", confirm: "" })
   const [passwordSaving, setPasswordSaving] = useState(false)
@@ -2296,6 +2298,11 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   useEffect(() => {
     const query = quickFindQuery.trim()
     if (!quickFindOpen || query.length < 2) { setQuickFindProducts([]); setQuickOperationsResults([]); setQuickFindSearching(false); return }
+    if (quickFindResolvedScanRef.current === query) {
+      quickFindResolvedScanRef.current = ""
+      setQuickFindSearching(false)
+      return
+    }
     const controller = new AbortController()
     const timer = window.setTimeout(() => {
       setQuickFindSearching(true)
@@ -2725,6 +2732,40 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     if (product) return window.location.assign(`/products/${encodeURIComponent(product.sku)}`)
     if (operation) window.location.assign(operation.href)
   }
+  const quickFindScannedBarcode = async (scannedValue: string) => {
+    const barcode = scannedValue.trim()
+    if (!barcode) return
+    const requestId = ++quickFindScanRequestRef.current
+    setQuickFindOpen(false)
+    setQuickFindQuery(barcode)
+    setQuickFindProducts([])
+    setQuickOperationsResults([])
+    setQuickFindSearching(true)
+    try {
+      const result = await api<{ products?: QuickProductResult[] }>(`/api/quick-search/products?q=${encodeURIComponent(barcode)}&limit=12`)
+      if (requestId !== quickFindScanRequestRef.current) return
+      const products = result.products || []
+      const compact = (value: string) => value.replace(/[^a-z0-9]+/gi, "").toLowerCase()
+      const normalizedBarcode = compact(barcode)
+      const exactMatches = products.filter((product) => compact(String(product.barcode || "")) === normalizedBarcode || String(product.matchLabel || "").toLowerCase() === "upc")
+      if (exactMatches.length === 1) {
+        window.location.assign(`/products/${encodeURIComponent(exactMatches[0].sku)}`)
+        return
+      }
+      setQuickFindProducts(exactMatches.length ? exactMatches : products)
+      quickFindResolvedScanRef.current = barcode
+      setQuickFindOpen(true)
+      if (exactMatches.length > 1) toast.info(`${numberLabel(exactMatches.length)} products use UPC ${barcode}. Choose the correct SKU.`)
+      else toast.error(`No exact catalog SKU was found for UPC ${barcode}.`)
+    } catch (error) {
+      if (requestId !== quickFindScanRequestRef.current) return
+      quickFindResolvedScanRef.current = barcode
+      setQuickFindOpen(true)
+      toast.error(error instanceof Error ? error.message : "Unable to search this UPC.")
+    } finally {
+      if (requestId === quickFindScanRequestRef.current) setQuickFindSearching(false)
+    }
+  }
 
   return (
     <TooltipProvider>
@@ -2803,7 +2844,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                       <Input value={quickFindQuery} onFocus={() => setQuickFindOpen(true)} onChange={(event) => { setQuickFindQuery(event.target.value); setQuickFindOpen(true) }} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); openFirstQuickFindResult() } }} className="h-9 bg-background pl-8 pr-16 text-sm" placeholder="Quick find SKU, order, or PO" aria-label="Quick find SKU, order, or PO" />
                       <div className="absolute right-1 top-1 flex items-center gap-0.5">
                         {quickFindSearching ? <span className="grid size-6 place-items-center"><Loader2 className="pointer-events-none size-3.5 animate-spin text-muted-foreground" /></span> : quickFindQuery ? <button type="button" className="grid size-6 place-items-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" title="Clear quick find" aria-label="Clear quick find" onClick={(event) => { event.stopPropagation(); setQuickFindQuery(""); setQuickFindProducts([]); setQuickOperationsResults([]) }}><X className="size-3.5" /></button> : null}
-                        <QuickFindBarcodeScanner onScan={(barcode) => { setQuickFindQuery(barcode); setQuickFindOpen(true) }} />
+                        <QuickFindBarcodeScanner onScan={(barcode) => { void quickFindScannedBarcode(barcode) }} />
                       </div>
                     </div>
                   </PopoverTrigger>
