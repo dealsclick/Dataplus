@@ -18,6 +18,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 import { CompanyManualChannels } from "./manual-channels"
+import { EbayOperations } from "./ebay-operations"
 import { api, dateLabel, numberLabel } from "../lib/client-api"
 import {
   ActionTile, ChannelLogsPanel, ContextActions, Detail, Field, PageHeader, PriceModeSelect,
@@ -236,7 +237,7 @@ function ChannelDetail({
   const temuSetupGuideLabel = temuSetupGuideCompleted ? "Relaunch setup guide" : "Launch setup guide"
   const temuAuthActionLabel = temuCanRunLive ? "Reconnect Temu" : "Connect Temu"
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
-  const allowedChannelTabs = new Set(["overview", "connection", "setup", "actions", "rules", "mappings", "attributes", "variants", "skus", "logs"])
+  const allowedChannelTabs = new Set(["overview", "connection", "operations", "setup", "actions", "rules", "mappings", "attributes", "variants", "skus", "logs"])
   const [activeTab, setActiveTab] = useState(allowedChannelTabs.has(requestedTab || "") ? String(requestedTab) : "overview")
 
   const mappedShopifyLocations = useMemo(() => {
@@ -1104,6 +1105,7 @@ function ChannelDetail({
         <TabsList className="flex flex-wrap">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           {isTemu && <TabsTrigger value="connection">Connection</TabsTrigger>}
+          {isEbay && <TabsTrigger value="operations">Operations</TabsTrigger>}
           <TabsTrigger value="setup">Setup</TabsTrigger>
           <TabsTrigger value="actions">Run</TabsTrigger>
           <TabsTrigger value="rules">Rules</TabsTrigger>
@@ -1196,6 +1198,10 @@ function ChannelDetail({
             </CardContent>
           </Card>
         </TabsContent>
+
+        {isEbay && <TabsContent value="operations" className="grid gap-4">
+          <EbayOperations enabled={channelEnabled} marketplaceId={String(settings.ebayMarketplaceId || "EBAY_US")} />
+        </TabsContent>}
 
         {isTemu && <TabsContent value="connection" className="grid gap-4">
           <Card className={settings.temuAppKey && settings.temuAppSecret ? "border-emerald-300" : "border-amber-300"}>

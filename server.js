@@ -96,6 +96,7 @@ const { createChannelFeeStore } = require("./lib/channel-fee-store");
 const { importTemuSettlementReport } = require("./lib/temu-settlement-report");
 const { createShippingDisputeStore } = require("./lib/shipping-disputes");
 const { createOutboundAuditStore, publicEvidence } = require("./lib/outbound-audit-store");
+const ebayOperations = require("./lib/ebay-operations");
 const upsRating = require("./lib/ups-rating");
 const { createCarrierCredentials } = require("./lib/carrier-credentials");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
@@ -39024,7 +39025,7 @@ function getEbayConfig(db = {}) {
     clientId: runtime.clientId || process.env.EBAY_CLIENT_ID || "",
     clientSecret: runtime.clientSecret || process.env.EBAY_CLIENT_SECRET || "",
     ruName: runtime.ruName || process.env.EBAY_RUNAME || "",
-    scope: [...new Set(`${runtime.scope || process.env.EBAY_SCOPE || "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account.readonly"} https://api.ebay.com/oauth/api_scope/sell.finances https://api.ebay.com/oauth/api_scope/sell.marketing`.split(/\s+/).filter(Boolean))].join(' '),
+    scope: [...new Set(`${runtime.scope || process.env.EBAY_SCOPE || "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.fulfillment https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account.readonly"} https://api.ebay.com/oauth/api_scope/sell.finances https://api.ebay.com/oauth/api_scope/sell.marketing https://api.ebay.com/oauth/api_scope/sell.analytics.readonly https://api.ebay.com/oauth/api_scope/commerce.message`.split(/\s+/).filter(Boolean))].join(' '),
     appScope: runtime.appScope || process.env.EBAY_APP_SCOPE || "https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.inventory",
     appAccessToken: connectorState.ebayAppAccessToken || runtime.appAccessToken || process.env.EBAY_APP_ACCESS_TOKEN || "",
     appAccessTokenExpiresAt: connectorState.ebayAppAccessTokenExpiresAt || "",
@@ -39775,6 +39776,124 @@ async function ebayPostOrderRequest(db, resourcePath, options = {}) {
     throw error;
   }
   return data;
+}
+
+const ebayOperationsCache = new Map();
+
+async function cachedEbayOperations(key, ttlMs, load, force = false) {
+  const cached = ebayOperationsCache.get(key);
+  if (!force && cached && cached.expiresAt > Date.now()) return cached.value;
+  const value = await load();
+  ebayOperationsCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+  return value;
+}
+
+function clearEbayOperationsCache(prefix = "") {
+  if (!prefix) return ebayOperationsCache.clear();
+  for (const key of ebayOperationsCache.keys()) if (key.startsWith(prefix)) ebayOperationsCache.delete(key);
+}
+
+async function ebayLocalOrderMap(db, rows = []) {
+  const orderIds = [...new Set(rows.map((row) => ebayOperations.orderIdFrom(row)).filter(Boolean))];
+  const result = new Map();
+  const limitedIds = orderIds.slice(0, 500);
+  const candidates = postgres.isPostgresEnabled() && limitedIds.length
+    ? await postgres.listOrders({ q: limitedIds.join(","), limit: Math.min(5000, Math.max(500, limitedIds.length * 4)), summary: true })
+    : (db.orders || []);
+  for (const orderId of limitedIds) {
+    const matches = candidates.filter((order) => {
+      const source = String(order.source || order.channelSource || "").trim().toLowerCase();
+      return (!source || source === "ebay") && [order.marketplaceOrderId, order.marketplaceOrderNumber, order.channelOrderNumber]
+        .some((value) => String(value || "").trim() === orderId);
+    });
+    if (matches.length === 1) result.set(orderId, ebayOperations.localOrderReference(matches[0]));
+    else if (matches.length > 1) result.set(orderId, { ambiguous: true, matchCount: matches.length });
+  }
+  return result;
+}
+
+async function ebayOperationModule(name, load, normalize, keys) {
+  try {
+    const payload = await load();
+    const rawRows = ebayOperations.firstArray(payload, keys);
+    return { name, available: true, rows: rawRows.map(normalize), total: Number(payload?.total || payload?.paginationOutput?.totalEntries || rawRows.length) || rawRows.length };
+  } catch (error) {
+    return { name, available: false, rows: [], total: 0, error: error.message || `${name} could not load.` };
+  }
+}
+
+async function ebayOperationsSnapshot(db, options = {}) {
+  requireEnabledChannel(db, "eBay");
+  const range = ebayOperations.dateRange(options.lookbackDays || 90);
+  const limit = Math.max(1, Math.min(200, Number(options.limit || 100) || 100));
+  const postOrderQuery = (extra = {}) => new URLSearchParams({
+    creation_date_range_from: range.from,
+    creation_date_range_to: range.to,
+    limit: String(limit),
+    offset: "0",
+    ...extra
+  }).toString();
+  const modules = await Promise.all([
+    ebayOperationModule("cancellations", () => ebayPostOrderRequest(db, `/post-order/v2/cancellation/search?${postOrderQuery({ sort: "-CREATION_DATE" })}`, { operation: "Review eBay cancellation requests" }), ebayOperations.normalizeCancellation, ["members", "cancellations", "cancellationRequests"]),
+    ebayOperationModule("returns", () => ebayPostOrderRequest(db, `/post-order/v2/return/search?${postOrderQuery({ sort: "-FILING_DATE" })}`, { operation: "Review eBay returns" }), (row) => ebayOperations.normalizePostOrderRow(row, "return"), ["members", "returns", "returnSummaries"]),
+    ebayOperationModule("inquiries", () => ebayPostOrderRequest(db, `/post-order/v2/inquiry/search?${postOrderQuery({ sort: "-CREATION_DATE" })}`, { operation: "Review eBay inquiries" }), (row) => ebayOperations.normalizePostOrderRow(row, "inquiry"), ["members", "inquiries", "inquirySummaries"]),
+    ebayOperationModule("cases", () => ebayPostOrderRequest(db, `/post-order/v2/casemanagement/search?${new URLSearchParams({ case_status_filter: "OPEN", limit: String(limit), offset: "0" })}`, { operation: "Review eBay cases" }), (row) => ebayOperations.normalizePostOrderRow(row, "case"), ["members", "cases", "caseSummaries"]),
+    ebayOperationModule("paymentDisputes", () => ebayRequest(db, `/sell/fulfillment/v1/payment_dispute_summary?${new URLSearchParams({ limit: String(limit), offset: "0" })}`, { operation: "Review eBay payment disputes" }), ebayOperations.normalizePaymentDispute, ["paymentDisputeSummaries", "paymentDisputes", "members"])
+  ]);
+  const allRows = modules.flatMap((module) => module.rows);
+  const localOrders = await ebayLocalOrderMap(db, allRows);
+  for (const row of allRows) row.localOrder = localOrders.get(row.orderId) || null;
+  const config = getEbayConfig(db);
+  return {
+    generatedAt: new Date().toISOString(),
+    range,
+    capabilities: ebayOperations.scopeCapabilities(config.scope),
+    modules: Object.fromEntries(modules.map((module) => [module.name, module]))
+  };
+}
+
+async function ebayPerformanceSnapshot(db, options = {}) {
+  requireEnabledChannel(db, "eBay");
+  const marketplaceId = String(options.marketplaceId || ebayChannelSettings(db).ebayMarketplaceId || "EBAY_US");
+  const range = ebayOperations.dateRange(options.lookbackDays || 30);
+  const compactDate = (value) => value.slice(0, 10).replaceAll("-", "");
+  const load = async (name, request) => {
+    try { return { name, available: true, data: await request() }; }
+    catch (error) { return { name, available: false, data: null, error: error.message || `${name} could not load.` }; }
+  };
+  const modules = await Promise.all([
+    load("traffic", () => ebayRequest(db, `/sell/analytics/v1/traffic_report?${new URLSearchParams({
+      dimension: "DAY",
+      metric: "TOTAL_IMPRESSION_TOTAL,LISTING_VIEWS_TOTAL,CLICK_THROUGH_RATE,TRANSACTION,SALES_CONVERSION_RATE",
+      filter: `marketplace_ids:{${marketplaceId}},date_range:[${compactDate(range.from)}..${compactDate(range.to)}]`
+    })}`, { marketplaceId, operation: "Read eBay traffic analytics" })),
+    load("sellerStandards", () => ebayRequest(db, `/sell/analytics/v1/seller_standards_profile/${marketplaceId === "EBAY_US" ? "PROGRAM_US" : "PROGRAM_GLOBAL"}/CURRENT`, { marketplaceId, operation: "Read eBay seller standards" })),
+    load("serviceMetrics", () => ebayRequest(db, `/sell/analytics/v1/customer_service_metric/ITEM_NOT_AS_DESCRIBED/CURRENT?${new URLSearchParams({ evaluation_marketplace_id: marketplaceId })}`, { marketplaceId, operation: "Read eBay service metrics" }))
+  ]);
+  return { generatedAt: new Date().toISOString(), range, marketplaceId, modules: Object.fromEntries(modules.map((module) => [module.name, module])) };
+}
+
+async function ebayMarketingSnapshot(db, options = {}) {
+  requireEnabledChannel(db, "eBay");
+  const marketplaceId = String(options.marketplaceId || ebayChannelSettings(db).ebayMarketplaceId || "EBAY_US");
+  const settings = ebayChannelSettings(db);
+  try {
+    const eligible = await ebayRequest(db, `/sell/negotiation/v1/find_eligible_items?${new URLSearchParams({ limit: String(Math.max(1, Math.min(200, Number(options.limit || 50) || 50))) })}`, { marketplaceId, operation: "Find eBay offer opportunities" });
+    return {
+      generatedAt: new Date().toISOString(),
+      marketplaceId,
+      available: true,
+      eligibleItems: ebayOperations.firstArray(eligible, ["eligibleItems", "items", "members"]),
+      total: Number(eligible?.total || eligible?.eligibleItems?.length || 0),
+      promotedListings: {
+        enabled: settings.ebayPromotedListingsEnabled === true,
+        ratePercent: Number(settings.ebayPromotedListingsRatePercent || 2),
+        campaignName: String(settings.ebayPromotedListingsCampaignName || DEFAULT_CHANNEL_SETTINGS.ebayPromotedListingsCampaignName)
+      }
+    };
+  } catch (error) {
+    return { generatedAt: new Date().toISOString(), marketplaceId, available: false, eligibleItems: [], total: 0, error: error.message || "eBay marketing opportunities could not load." };
+  }
 }
 
 async function verifyEbaySellerConnection(db) {
@@ -68398,6 +68517,196 @@ async function handleApi(req, res) {
       return sendJson(res, result.duplicate ? 200 : 202, { queued: true, duplicate: result.duplicate, job: normalizeImportJob(result.job), message: result.job.message });
     } catch (error) {
       return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue eBay listing lifecycle action." });
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/ebay/operations") {
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      const lookbackDays = url.searchParams.get("lookbackDays") || "90";
+      const limit = url.searchParams.get("limit") || "100";
+      const snapshot = await cachedEbayOperations(`operations:${lookbackDays}:${limit}`, 2 * 60 * 1000, () => ebayOperationsSnapshot(db, { lookbackDays, limit }), url.searchParams.get("refresh") === "true");
+      return sendJson(res, 200, snapshot);
+    } catch (error) {
+      return sendJson(res, error.statusCode || error.status || 400, { error: error.message || "eBay operations could not load." });
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/ebay/performance") {
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      const lookbackDays = url.searchParams.get("lookbackDays") || "30";
+      const marketplaceId = url.searchParams.get("marketplaceId") || "EBAY_US";
+      return sendJson(res, 200, await cachedEbayOperations(`performance:${marketplaceId}:${lookbackDays}`, 15 * 60 * 1000, () => ebayPerformanceSnapshot(db, { lookbackDays, marketplaceId }), url.searchParams.get("refresh") === "true"));
+    } catch (error) {
+      return sendJson(res, error.statusCode || error.status || 400, { error: error.message || "eBay performance could not load." });
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/ebay/marketing/opportunities") {
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      const limit = url.searchParams.get("limit") || "50";
+      const marketplaceId = url.searchParams.get("marketplaceId") || "EBAY_US";
+      return sendJson(res, 200, await cachedEbayOperations(`marketing:${marketplaceId}:${limit}`, 10 * 60 * 1000, () => ebayMarketingSnapshot(db, { limit, marketplaceId }), url.searchParams.get("refresh") === "true"));
+    } catch (error) {
+      return sendJson(res, error.statusCode || error.status || 400, { error: error.message || "eBay marketing opportunities could not load." });
+    }
+  }
+
+  const ebayCancellationActionMatch = url.pathname.match(/^\/api\/ebay\/cancellations\/([^/]+)\/(approve|reject)$/);
+  if (req.method === "POST" && ebayCancellationActionMatch) {
+    const db = await readDbFast({ skipInventory: true });
+    const body = await parseBody(req);
+    const cancelId = decodeURIComponent(ebayCancellationActionMatch[1]);
+    const action = ebayCancellationActionMatch[2];
+    try {
+      requireEnabledChannel(db, "eBay");
+      if (body.confirm !== true) return sendJson(res, 400, { error: `Confirm the eBay cancellation ${action} action before submitting it.` });
+      const detail = await ebayPostOrderRequest(db, `/post-order/v2/cancellation/${encodeURIComponent(cancelId)}`, { operation: "Review eBay cancellation before action" });
+      const cancellation = ebayOperations.normalizeCancellation(detail);
+      const orderId = cancellation.orderId || String(body.orderId || "").trim();
+      const localOrders = await ebayLocalOrderMap(db, [{ orderId }]);
+      const localOrder = localOrders.get(orderId) || null;
+      if (action === "approve" && localOrder?.shipped) {
+        return sendJson(res, 409, { error: "This DataPlus order has shipment activity. Review tracking and the eBay order before approving cancellation.", cancellation, localOrder });
+      }
+      const payload = action === "reject"
+        ? (localOrder?.trackingNumbers?.[0] ? { trackingNumber: localOrder.trackingNumbers[0] } : {})
+        : undefined;
+      const result = await ebayPostOrderRequest(db, `/post-order/v2/cancellation/${encodeURIComponent(cancelId)}/${action}`, {
+        method: "POST",
+        body: payload,
+        operation: `${action === "approve" ? "Approve" : "Reject"} eBay cancellation`
+      });
+      clearEbayOperationsCache("operations:");
+      return sendJson(res, 200, { ok: true, action, cancellation, localOrder, result });
+    } catch (error) {
+      return sendJson(res, error.statusCode || error.status || 400, { error: error.message || `eBay cancellation could not be ${action}d.` });
+    }
+  }
+
+  const ebayReturnActionMatch = url.pathname.match(/^\/api\/ebay\/returns\/([^/]+)\/mark-received$/);
+  if (req.method === "POST" && ebayReturnActionMatch) {
+    const db = await readDbFast({ skipInventory: true });
+    const body = await parseBody(req);
+    const returnId = decodeURIComponent(ebayReturnActionMatch[1]);
+    try {
+      requireEnabledChannel(db, "eBay");
+      if (body.confirm !== true) return sendJson(res, 400, { error: "Confirm that the returned package was physically received before updating eBay." });
+      const result = await ebayPostOrderRequest(db, `/post-order/v2/return/${encodeURIComponent(returnId)}/mark_as_received`, {
+        method: "POST",
+        operation: "Mark eBay return received"
+      });
+      clearEbayOperationsCache("operations:");
+      return sendJson(res, 200, { ok: true, returnId, result });
+    } catch (error) {
+      return sendJson(res, error.statusCode || error.status || 400, { error: error.message || "The eBay return could not be marked received." });
+    }
+  }
+
+  const ebayDisputeActionMatch = url.pathname.match(/^\/api\/ebay\/payment-disputes\/([^/]+)\/(accept|contest)$/);
+  if (req.method === "POST" && ebayDisputeActionMatch) {
+    const db = await readDbFast({ skipInventory: true });
+    const body = await parseBody(req);
+    const disputeId = decodeURIComponent(ebayDisputeActionMatch[1]);
+    const action = ebayDisputeActionMatch[2];
+    try {
+      requireEnabledChannel(db, "eBay");
+      if (body.confirm !== true) return sendJson(res, 400, { error: `Confirm the payment dispute ${action} action before submitting it.` });
+      const result = await ebayRequest(db, `/sell/fulfillment/v1/payment_dispute/${encodeURIComponent(disputeId)}/${action}`, {
+        method: "POST",
+        body: action === "contest" ? (body.contest || {}) : undefined,
+        operation: `${action === "accept" ? "Accept" : "Contest"} eBay payment dispute`
+      });
+      clearEbayOperationsCache("operations:");
+      return sendJson(res, 200, { ok: true, disputeId, action, result });
+    } catch (error) {
+      return sendJson(res, error.statusCode || error.status || 400, { error: error.message || `The eBay payment dispute could not be ${action}ed.` });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/ebay/marketing/offers") {
+    const db = await readDbFast({ skipInventory: true });
+    const body = await parseBody(req);
+    try {
+      requireEnabledChannel(db, "eBay");
+      if (body.confirm !== true) return sendJson(res, 400, { error: "Confirm the eBay buyer offer before sending it." });
+      if (!Array.isArray(body.offeredItems) || !body.offeredItems.length) return sendJson(res, 400, { error: "Select at least one eligible eBay listing and enter an offer price." });
+      const result = await ebayRequest(db, "/sell/negotiation/v1/send_offer_to_interested_buyers", {
+        method: "POST",
+        body: {
+          allowCounterOffer: body.allowCounterOffer === true,
+          message: String(body.message || "").trim().slice(0, 1000),
+          offeredItems: body.offeredItems
+        },
+        operation: "Send eBay offers to interested buyers"
+      });
+      return sendJson(res, 200, { ok: true, result });
+    } catch (error) {
+      return sendJson(res, error.statusCode || error.status || 400, { error: error.message || "The eBay offer could not be sent." });
+    }
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/ebay/messages") {
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      requireEnabledChannel(db, "eBay");
+      const requestedLimit = Math.max(1, Math.min(200, Number(url.searchParams.get("limit") || 100) || 100));
+      let conversations = [];
+      let total = 0;
+      for (let offset = 0; offset < requestedLimit; offset += 10) {
+        const params = new URLSearchParams({ conversation_type: "FROM_MEMBERS", limit: String(Math.min(10, requestedLimit - offset)), offset: String(offset) });
+        const payload = await ebayRequest(db, `/commerce/message/v1/conversation?${params}`, { operation: "Read eBay buyer conversations" });
+        const page = ebayOperations.firstArray(payload, ["conversations", "members"]);
+        total = Number(payload?.total || total || page.length);
+        conversations.push(...page.map(ebayOperations.normalizeConversation));
+        if (page.length < 10 || (total > 0 && conversations.length >= total)) break;
+      }
+      const query = String(url.searchParams.get("q") || "").trim().toLowerCase();
+      if (query) conversations = conversations.filter((row) => JSON.stringify(row).toLowerCase().includes(query));
+      if (url.searchParams.get("unread") === "true") conversations = conversations.filter((row) => row.unreadCount > 0);
+      return sendJson(res, 200, { source: "ebay", conversations, total: total || conversations.length });
+    } catch (error) {
+      return sendJson(res, error.statusCode || error.status || 400, { error: error.message || "eBay messages could not load." });
+    }
+  }
+
+  const ebayMessageMatch = url.pathname.match(/^\/api\/ebay\/messages\/([^/]+)(?:\/(read|send))?$/);
+  if (ebayMessageMatch) {
+    const db = await readDbFast({ skipInventory: true });
+    const conversationId = decodeURIComponent(ebayMessageMatch[1]);
+    const action = ebayMessageMatch[2] || "detail";
+    try {
+      requireEnabledChannel(db, "eBay");
+      if (req.method === "GET" && action === "detail") {
+        const payload = await ebayRequest(db, `/commerce/message/v1/conversation/${encodeURIComponent(conversationId)}?conversation_type=FROM_MEMBERS`, { operation: "Read eBay buyer conversation" });
+        const conversation = ebayOperations.normalizeConversation(payload?.conversation || payload);
+        const messages = ebayOperations.firstArray(payload, ["messages", "members"]).map(ebayOperations.normalizeMessage);
+        return sendJson(res, 200, { source: "ebay", conversation: { ...conversation, canSendMessage: true }, messages });
+      }
+      if (req.method === "POST" && action === "read") {
+        const result = await ebayRequest(db, "/commerce/message/v1/update_conversation", {
+          method: "POST",
+          body: { conversationId, conversationType: "FROM_MEMBERS", read: true },
+          operation: "Mark eBay conversation read"
+        });
+        return sendJson(res, 200, { ok: true, result });
+      }
+      if (req.method === "POST" && action === "send") {
+        const body = await parseBody(req);
+        const messageText = String(body.content || body.messageText || "").trim();
+        if (!messageText) return sendJson(res, 400, { error: "Enter a reply before sending it." });
+        const result = await ebayRequest(db, "/commerce/message/v1/send_message", {
+          method: "POST",
+          body: { conversationId, conversationType: "FROM_MEMBERS", messageText: messageText.slice(0, 2000) },
+          operation: "Reply to eBay buyer"
+        });
+        return sendJson(res, 200, { ok: true, result });
+      }
+      return sendJson(res, 405, { error: "Unsupported eBay message action." });
+    } catch (error) {
+      return sendJson(res, error.statusCode || error.status || 400, { error: error.message || "The eBay conversation action failed." });
     }
   }
 

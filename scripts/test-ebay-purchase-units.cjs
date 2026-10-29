@@ -82,6 +82,7 @@ Object.assign(context, {
     child.ebayListing = { ...child.ebayListing, ...options.purchaseUnitConfig, offerId: child.sku, status: child.ebayListing.listingId ? 'published' : 'offer' };
   },
   ebayRequest: async (_, route, options) => { calls.push({ route, options }); return { listingId: 'live-group' }; },
+  syncEbayPromotedListings: async () => ({ promotionStatus: 'promoted', promotionCampaignId: 'campaign-test', promotionError: '' }),
   productIsMasterInactive: item => item.active === false,
   productChannelInactive: (item, channel) => item.channelSellingStatus?.[channel]?.inactive === true,
   ebayInventoryApiSkuMissing: errors => errors.some(row => row.errorId === 25604),

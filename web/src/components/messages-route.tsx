@@ -23,7 +23,7 @@ async function api(path: string, body?: Json) {
 }
 
 function decodeContent(value: unknown) {
-  if (value && typeof value === "object") return String((value as Json).content || (value as Json).text || "")
+  if (value && typeof value === "object") return String((value as Json).content || (value as Json).text || (value as Json).messageText || "")
   const raw = String(value ?? "").trim()
   if (!raw) return ""
   try {
@@ -42,20 +42,20 @@ function timestamp(value: unknown) {
 
 function conversationName(row: Json) {
   const buyer = (Array.isArray(row.participants) ? row.participants : []).find((participant: Json) => String(participant.role || "").toUpperCase() === "BUYER")
-  return String(buyer?.nickname || row.buyer?.nickname || row.buyer?.name || row.buyer_name || row.participant?.name || row.user_name || row.buyer_user_id || "TikTok customer")
+  return String(row.otherPartyUsername || buyer?.nickname || row.buyer?.nickname || row.buyer?.name || row.buyer_name || row.participant?.name || row.user_name || row.buyer_user_id || "Marketplace customer")
 }
 
 function conversationLastMessage(row: Json) {
-  return decodeContent(row.latest_message?.content || row.last_message?.content || row.lastMessage?.content || row.latest_message || row.last_message || row.lastMessage) || "No message preview"
+  return decodeContent(row.latest_message?.content || row.latestMessage?.messageText || row.latestMessage?.messageBody || row.latestMessage?.content || row.last_message?.content || row.lastMessage?.content || row.latest_message || row.latestMessage || row.last_message || row.lastMessage) || row.subject || "No message preview"
 }
 
 function messageSender(row: Json) {
-  const role = String(row.sender_role || row.sender?.role || row.sender_type || "").toUpperCase()
+  const role = String(row.senderRole || row.sender_role || row.sender?.role || row.sender_type || "").toUpperCase()
   return role.includes("CUSTOMER_SERVICE") || role.includes("SELLER") || role.includes("AGENT")
 }
 
 export function MessagesRoute() {
-  const [source, setSource] = useState("tiktok")
+  const [source, setSource] = useState(new URLSearchParams(window.location.search).get("source") === "ebay" ? "ebay" : "tiktok")
   const [filter, setFilter] = useState("all")
   const [query, setQuery] = useState("")
   const [rows, setRows] = useState<Json[]>([])
@@ -65,6 +65,8 @@ export function MessagesRoute() {
   const [threadLoading, setThreadLoading] = useState(false)
   const [sending, setSending] = useState(false)
   const [reply, setReply] = useState("")
+  const sourceBase = source === "ebay" ? "/api/ebay/messages" : "/api/tiktok/messages"
+  const sourceLabel = source === "ebay" ? "eBay" : "TikTok Shop"
 
   const loadList = async (quiet = false) => {
     if (!quiet) setLoading(true)
@@ -72,7 +74,7 @@ export function MessagesRoute() {
       const params = new URLSearchParams({ limit: "200" })
       if (query.trim()) params.set("q", query.trim())
       if (filter === "unread") params.set("unread", "true")
-      const data = await api(`/api/tiktok/messages?${params}`)
+      const data = await api(`${sourceBase}?${params}`)
       setRows(Array.isArray(data.conversations) ? data.conversations : [])
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Messages could not load.")
@@ -85,10 +87,10 @@ export function MessagesRoute() {
     setSelectedId(conversationId)
     setThreadLoading(true)
     try {
-      const data = await api(`/api/tiktok/messages/${encodeURIComponent(conversationId)}?refresh=${refresh ? "true" : "false"}`)
+      const data = await api(`${sourceBase}/${encodeURIComponent(conversationId)}?refresh=${refresh ? "true" : "false"}`)
       setDetail(data)
       if (Number(data.conversation?.unread_count ?? data.conversation?.unreadCount ?? 0) > 0) {
-        await api(`/api/tiktok/messages/${encodeURIComponent(conversationId)}/read`, {})
+        await api(`${sourceBase}/${encodeURIComponent(conversationId)}/read`, {})
         setRows(current => current.map(row => String(row.conversationId) === conversationId ? { ...row, unread_count: 0, unreadCount: 0 } : row))
       }
     } catch (error) {
@@ -98,7 +100,12 @@ export function MessagesRoute() {
     }
   }
 
-  useEffect(() => { void loadList() }, [source, filter])
+  useEffect(() => {
+    setSelectedId("")
+    setDetail(null)
+    setRows([])
+    void loadList()
+  }, [source, filter])
 
   const messages = useMemo(() => Array.isArray(detail?.messages) ? detail.messages : [], [detail])
   const canSend = detail?.conversation?.can_send_message !== false && detail?.conversation?.canSendMessage !== false
@@ -108,7 +115,7 @@ export function MessagesRoute() {
     if (!content || !selectedId) return
     setSending(true)
     try {
-      await api(`/api/tiktok/messages/${encodeURIComponent(selectedId)}/send`, { content })
+      await api(`${sourceBase}/${encodeURIComponent(selectedId)}/send`, { content })
       setReply("")
       await loadThread(selectedId, true)
       await loadList(true)
@@ -132,13 +139,13 @@ export function MessagesRoute() {
   return <div className="flex min-h-0 flex-1 flex-col gap-4 p-4 lg:p-6">
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div><h1 className="text-xl font-semibold">Messages</h1><p className="text-sm text-muted-foreground">Customer service inbox</p></div>
-      <div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" onClick={() => void sync()}><RefreshCw className="size-4" /> Sync TikTok</Button><Button variant="outline" size="icon" aria-label="Refresh messages" onClick={() => void loadList()}><RefreshCw className="size-4" /></Button></div>
+      <div className="flex flex-wrap gap-2">{source === "tiktok" && <Button variant="outline" size="sm" onClick={() => void sync()}><RefreshCw className="size-4" /> Sync TikTok</Button>}<Button variant="outline" size="icon" aria-label="Refresh messages" onClick={() => void loadList()}><RefreshCw className="size-4" /></Button></div>
     </div>
 
     <div className="grid min-h-[620px] flex-1 overflow-hidden rounded-md border bg-background lg:grid-cols-[22rem_minmax(0,1fr)]">
       <section className={cn("min-h-0 border-r", selectedId && "hidden lg:block")}>
         <div className="grid gap-2 border-b p-3">
-          <div className="grid grid-cols-2 gap-2"><Select value={source} onValueChange={setSource}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="tiktok">TikTok Shop</SelectItem></SelectContent></Select><Select value={filter} onValueChange={setFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All messages</SelectItem><SelectItem value="unread">Unread</SelectItem></SelectContent></Select></div>
+          <div className="grid grid-cols-2 gap-2"><Select value={source} onValueChange={setSource}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="tiktok">TikTok Shop</SelectItem><SelectItem value="ebay">eBay</SelectItem></SelectContent></Select><Select value={filter} onValueChange={setFilter}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All messages</SelectItem><SelectItem value="unread">Unread</SelectItem></SelectContent></Select></div>
           <form className="relative" onSubmit={event => { event.preventDefault(); void loadList() }}><Search className="pointer-events-none absolute left-3 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search conversations" /></form>
         </div>
         <ScrollArea className="h-[calc(100%-7.25rem)]">
@@ -148,22 +155,22 @@ export function MessagesRoute() {
             return <button key={id} type="button" className={cn("grid w-full gap-1 border-b px-3 py-3 text-left hover:bg-muted/50", selectedId === id && "bg-muted")} onClick={() => void loadThread(id)}>
               <span className="flex min-w-0 items-center justify-between gap-2"><span className="truncate text-sm font-medium">{conversationName(row)}</span>{unread > 0 && <Badge>{unread}</Badge>}</span>
               <span className="truncate text-xs text-muted-foreground">{conversationLastMessage(row)}</span>
-              <span className="text-[11px] text-muted-foreground">TikTok Shop {row.latest_message?.create_time || row.update_time || row.updatedAt ? `· ${timestamp(row.latest_message?.create_time || row.update_time || row.updatedAt)}` : ""}</span>
+              <span className="text-[11px] text-muted-foreground">{sourceLabel} {row.latest_message?.create_time || row.latestMessage?.creationDate || row.update_time || row.updatedAt ? `· ${timestamp(row.latest_message?.create_time || row.latestMessage?.creationDate || row.update_time || row.updatedAt)}` : ""}</span>
             </button>
-          }) : <div className="grid h-48 place-items-center px-6 text-center text-sm text-muted-foreground">No TikTok conversations match this view.</div>}
+          }) : <div className="grid h-48 place-items-center px-6 text-center text-sm text-muted-foreground">No {sourceLabel} conversations match this view.</div>}
         </ScrollArea>
       </section>
 
       <section className={cn("min-h-0", !selectedId && "hidden lg:grid lg:place-items-center")}>
         {!selectedId ? <div className="text-center text-muted-foreground"><MessageSquare className="mx-auto mb-3 size-8" /><p className="text-sm">Select a conversation</p></div> : <div className="flex h-full min-h-0 flex-col">
-          <div className="flex items-center gap-3 border-b px-3 py-3"><Button className="lg:hidden" variant="ghost" size="icon" aria-label="Back to conversations" onClick={() => { setSelectedId(""); setDetail(null) }}><ArrowLeft className="size-4" /></Button><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold">{conversationName(detail?.conversation || {})}</p><p className="truncate text-xs text-muted-foreground">TikTok Shop · {selectedId}</p></div><Badge variant="outline"><CheckCheck className="mr-1 size-3" /> Read</Badge></div>
+          <div className="flex items-center gap-3 border-b px-3 py-3"><Button className="lg:hidden" variant="ghost" size="icon" aria-label="Back to conversations" onClick={() => { setSelectedId(""); setDetail(null) }}><ArrowLeft className="size-4" /></Button><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold">{conversationName(detail?.conversation || {})}</p><p className="truncate text-xs text-muted-foreground">{sourceLabel} · {selectedId}</p></div><Badge variant="outline"><CheckCheck className="mr-1 size-3" /> Read</Badge></div>
           <ScrollArea className="min-h-0 flex-1 p-4">
             {threadLoading ? <div className="grid h-48 place-items-center"><Loader2 className="size-5 animate-spin" /></div> : <div className="mx-auto grid max-w-4xl gap-3">{messages.map((row: Json, index: number) => {
               const own = messageSender(row)
-              return <div key={String(row.id || row.message_id || index)} className={cn("grid max-w-[85%] gap-1 rounded-md border px-3 py-2 text-sm", own ? "ml-auto bg-primary text-primary-foreground" : "mr-auto bg-muted/50")}><p className="whitespace-pre-wrap break-words">{decodeContent(row.content) || `[${String(row.type || "message").toLowerCase()}]`}</p><span className={cn("text-[10px]", own ? "text-primary-foreground/70" : "text-muted-foreground")}>{timestamp(row.create_time || row.created_at)}</span></div>
+              return <div key={String(row.id || row.message_id || index)} className={cn("grid max-w-[85%] gap-1 rounded-md border px-3 py-2 text-sm", own ? "ml-auto bg-primary text-primary-foreground" : "mr-auto bg-muted/50")}><p className="whitespace-pre-wrap break-words">{decodeContent(row.content || row.messageText) || `[${String(row.type || "message").toLowerCase()}]`}</p><span className={cn("text-[10px]", own ? "text-primary-foreground/70" : "text-muted-foreground")}>{timestamp(row.create_time || row.created_at || row.createdAt)}</span></div>
             })}{!messages.length && <div className="py-16 text-center text-sm text-muted-foreground">No message history returned.</div>}</div>}
           </ScrollArea>
-          <div className="border-t p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"><div className="mx-auto flex max-w-4xl items-end gap-2"><Textarea className="min-h-20 resize-none" maxLength={2000} disabled={!canSend} value={reply} onChange={event => setReply(event.target.value)} placeholder={canSend ? "Reply to customer" : "TikTok has closed replies for this conversation"} /><Button size="icon" aria-label="Send reply" disabled={sending || !reply.trim() || !canSend} onClick={() => void send()}>{sending ? <Loader2 className="size-4 animate-spin" /> : <SendHorizontal className="size-4" />}</Button></div></div>
+          <div className="border-t p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"><div className="mx-auto flex max-w-4xl items-end gap-2"><Textarea className="min-h-20 resize-none" maxLength={2000} disabled={!canSend} value={reply} onChange={event => setReply(event.target.value)} placeholder={canSend ? "Reply to customer" : `${sourceLabel} has closed replies for this conversation`} /><Button size="icon" aria-label="Send reply" disabled={sending || !reply.trim() || !canSend} onClick={() => void send()}>{sending ? <Loader2 className="size-4 animate-spin" /> : <SendHorizontal className="size-4" />}</Button></div></div>
         </div>}
       </section>
     </div>
