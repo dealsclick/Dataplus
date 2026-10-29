@@ -22238,15 +22238,24 @@ function ebayListingLifecycleLabel(action = "launch") {
   }[normalizeEbayListingLifecycleAction(action)] || "eBay listing launch";
 }
 
-function ebayLiveStatusSyncIsFresh(job = null, maxAgeHours = 6) {
-  if (!job || !["success", "warning"].includes(String(job.status || "").toLowerCase())) return false;
-  const feedComplete = job.ebayActiveListingFeedComplete === true
-    || job.activeListingFeedComplete === true
-    || /GetMyeBaySelling completed/i.test(String(job.details || ""));
-  if (!feedComplete) return false;
-  const completedAt = Date.parse(job.finishedAt || job.updatedAt || job.endedAt || "");
+function ebayLiveStatusSyncState(job = null, maxAgeHours = 6) {
+  const succeeded = Boolean(job && ["success", "warning"].includes(String(job.status || "").toLowerCase()));
+  const feedComplete = job?.ebayActiveListingFeedComplete === true
+    || job?.activeListingFeedComplete === true
+    || /GetMyeBaySelling completed/i.test(String(job?.details || ""));
+  const completedAt = Date.parse(job?.finishedAt || job?.updatedAt || job?.endedAt || "");
   const maximumAgeMs = Math.max(1, Math.min(24, Number(maxAgeHours || 6) || 6)) * 60 * 60 * 1000;
-  return Number.isFinite(completedAt) && Date.now() - completedAt <= maximumAgeMs;
+  const complete = succeeded && feedComplete;
+  return {
+    complete,
+    fresh: complete && Number.isFinite(completedAt) && Date.now() - completedAt <= maximumAgeMs,
+    completedAt: Number.isFinite(completedAt) ? new Date(completedAt).toISOString() : "",
+    maxAgeHours: maximumAgeMs / (60 * 60 * 1000)
+  };
+}
+
+function ebayLiveStatusSyncIsFresh(job = null, maxAgeHours = 6) {
+  return ebayLiveStatusSyncState(job, maxAgeHours).fresh;
 }
 
 async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
@@ -25405,9 +25414,13 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
   const startedAt = job.startedAt || new Date().toISOString();
   if (payload.prerequisiteJobId && postgres.isPostgresEnabled()) {
     const prerequisite = await postgres.readOperationJob(payload.prerequisiteJobId);
-    if (!ebayLiveStatusSyncIsFresh(prerequisite, 24)) {
+    const prerequisiteState = ebayLiveStatusSyncState(prerequisite, 24);
+    if (!prerequisiteState.fresh) {
       const prerequisiteLabel = prerequisite?.jobNumber ? `Job #${prerequisite.jobNumber}` : "The pre-launch eBay status sync";
-      const message = `${prerequisiteLabel} did not produce a complete GetMyeBaySelling active-listing feed. No listings were launched; retrying this launch will automatically request a new status sync.`;
+      const reason = prerequisiteState.complete
+        ? `completed its GetMyeBaySelling feed, but that verification is older than ${prerequisiteState.maxAgeHours} hours`
+        : "did not produce a complete GetMyeBaySelling active-listing feed";
+      const message = `${prerequisiteLabel} ${reason}. No listings were launched; retrying this launch will automatically request a new status sync.`;
       job = await persistWorkerImportJob(job, {
         status: "failed",
         phase: "prelaunch_status_sync_failed",
@@ -43849,7 +43862,7 @@ async function importEbayReturns(db, options = {}) {
   const enabled = requireEnabledChannel(db, "eBay");
   if (!enabled.settings?.ebayReturnSyncEnabled) throw new Error("Enable eBay return sync in Channel Settings before importing returns.");
   if (postgres.isPostgresEnabled()) {
-    db.returns = await postgres.readStateField("returns") || [];
+    db.returns = [];
     db.orders = [];
   }
   db.connectorState = { ...(db.connectorState || {}), ...mergedConnectorState(db) };
@@ -43902,12 +43915,16 @@ async function importEbayReturns(db, options = {}) {
         }
         if (postgres.isPostgresEnabled()) {
           const envelope = ebayReturnEnvelope(summary, detail || {});
-          const matched = await postgres.readChannelOrderForReturn("eBay", {
-            orderId: ebayReturnOrderId(envelope),
-            transactionId: envelope.item?.transactionId,
-            itemId: envelope.item?.itemId
-          });
+          const [matched, existingReturn] = await Promise.all([
+            postgres.readChannelOrderForReturn("eBay", {
+              orderId: ebayReturnOrderId(envelope),
+              transactionId: envelope.item?.transactionId,
+              itemId: envelope.item?.itemId
+            }),
+            postgres.readImportedReturn("eBay", returnId)
+          ]);
           db.orders = matched ? [matched] : [];
+          db.returns = existingReturn ? [existingReturn] : [];
         }
         const result = upsertEbayReturnRecord(db, summary, detail);
         if (postgres.isPostgresEnabled() && result.returnRecord) {
@@ -62909,6 +62926,24 @@ async function handleApi(req, res) {
     if (/^inactive-inventory-/.test(previous.workerTask)) delete nextPayload.inactiveInventoryCursor;
     if (previous.workerTask === 'status-inventory') delete nextPayload.cursor;
     if (previous.originalFilePath && !nextPayload.originalFilePath) nextPayload.originalFilePath = previous.originalFilePath;
+    if (previous.workerTask === "ebay-listing-launch") {
+      delete nextPayload.prerequisiteJobId;
+      delete nextPayload.prerequisiteJobNumber;
+      const retryDb = normalizeDb(await readChannelJobQueueState());
+      const queued = await queueEbayListingLaunchJob(retryDb, nextPayload, { operation: previous.operation });
+      if (!queued.duplicate) {
+        queued.job.retryOfJobId = previous.id;
+        queued.job.details = `Retry of job ${previous.id}.`;
+        queued.job.updatedAt = now;
+        await postgres.upsertOperationJob(queued.job);
+      }
+      return sendJson(res, 202, {
+        queued: true,
+        duplicate: queued.duplicate === true,
+        job: clientImportJob(queued.job),
+        message: queued.job.message
+      });
+    }
     const job = normalizeImportJob({
       ...previous,
       id: crypto.randomUUID(),

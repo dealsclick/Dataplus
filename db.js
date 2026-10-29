@@ -11340,6 +11340,24 @@ async function acquireReturnWriteLock() {
   return async () => { try { await client.query("select pg_advisory_unlock(hashtext('dataplus-returns'))"); } finally { client.release(); } };
 }
 
+async function readImportedReturn(source = "", channelReturnId = "") {
+  const client = getPool();
+  const normalizedSource = nullableString(source);
+  const normalizedReturnId = nullableString(channelReturnId);
+  if (!client || !normalizedSource || !normalizedReturnId) return null;
+  await initRelationalSchema();
+  const result = await client.query(`
+    select data
+    from entity_documents
+    where collection = 'returns'
+      and lower(data->>'source') = lower($1)
+      and data->>'channelReturnId' = $2
+    order by updated_at desc
+    limit 1
+  `, [normalizedSource, normalizedReturnId]);
+  return result.rows[0]?.data || null;
+}
+
 async function upsertImportedReturn(record) {
   const pool = getPool();
   if (!pool) return record;
@@ -18700,6 +18718,7 @@ module.exports = {
   readChannelOrderForReturn,
   readOrdersByMarketplaceKey,
   listDuplicateOrderRecords,
+  readImportedReturn,
   upsertImportedReturn,
   acquireReturnWriteLock,
   nextReturnNumberAtomic,

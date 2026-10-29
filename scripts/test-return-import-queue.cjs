@@ -18,6 +18,7 @@ const routes = server.slice(
   server.indexOf('if (req.method === "POST" && url.pathname === "/api/ebay/price-inventory/sync" && postgres.isPostgresEnabled())')
 );
 assert.equal((routes.match(/await readChannelJobQueueState\(\)/g) || []).length, 3);
+const database = fs.readFileSync(path.join(__dirname, '../db.js'), 'utf8');
 
 for (const workerName of [
   'runTemuReturnImportWorkerJob',
@@ -31,8 +32,15 @@ for (const workerName of [
   assert.match(worker, /readChannelJobQueueState\(\)/, `${workerName} uses lightweight channel state`);
 }
 
+const ebayReturnImportStart = server.indexOf('async function importEbayReturns(');
+const ebayReturnImportEnd = server.indexOf('\nfunction parseList(', ebayReturnImportStart);
+const ebayReturnImport = server.slice(ebayReturnImportStart, ebayReturnImportEnd);
+assert.doesNotMatch(ebayReturnImport, /readStateField\("returns"\)/);
+assert.match(ebayReturnImport, /postgres\.readImportedReturn\("eBay", returnId\)/);
+assert.match(database, /async function readImportedReturn\(/);
+assert.match(database, /readImportedReturn,/);
+
 const externalWorker = fs.readFileSync(path.join(__dirname, 'dataplus-worker.js'), 'utf8');
-const database = fs.readFileSync(path.join(__dirname, '../db.js'), 'utf8');
 assert.match(externalWorker, /async function checkScheduledEbayReturnImport\(/);
 assert.match(externalWorker, /queueEbayReturnImportJob\(stateDb/);
 assert.match(externalWorker, /async function checkScheduledTemuReturnImport\(/);

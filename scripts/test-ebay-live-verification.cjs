@@ -6,6 +6,9 @@ const vm = require("node:vm");
 const serverSource = fs.readFileSync(require.resolve("../server"), "utf8");
 const dbSource = fs.readFileSync(require.resolve("../db"), "utf8");
 const appSource = fs.readFileSync(require.resolve("../web/src/App.tsx"), "utf8");
+const channelSource = fs.readFileSync(require.resolve("../web/src/components/channels-route.tsx"), "utf8");
+const catalogSource = fs.readFileSync(require.resolve("../web/src/components/catalog-route.tsx"), "utf8");
+const uiSource = `${appSource}\n${channelSource}\n${catalogSource}`;
 const workerSource = fs.readFileSync(require.resolve("./dataplus-worker"), "utf8");
 const helperStart = serverSource.indexOf("function ebayListingIsVerifiedLive(");
 const helperEnd = serverSource.indexOf("\nfunction catalogProductEbayReadinessStatus(", helperStart);
@@ -37,8 +40,8 @@ test("catalog sync exposes GetMyeBaySelling progress and guarded reconciliation"
   assert.match(serverSource, /no stored live statuses were demoted/);
   assert.match(dbSource, /reconcileEbayActiveListings/);
   assert.match(dbSource, /liveVerifiedAt/);
-  assert.match(appSource, /eBay listing needs verification/);
-  assert.match(appSource, /Last verified live/);
+  assert.match(uiSource, /eBay listing needs verification/);
+  assert.match(uiSource, /Last verified live/);
 });
 
 test("offers and live-status sync is scheduled and deduplicated", () => {
@@ -50,9 +53,9 @@ test("offers and live-status sync is scheduled and deduplicated", () => {
   assert.match(serverSource, /module\.exports = \{[\s\S]*queueEbayCatalogSyncJob,/);
   assert.match(workerSource, /channelEbayCatalogSyncSchedules/);
   assert.match(dbSource, /"channelEbayCatalogSyncSchedules"/);
-  assert.match(appSource, /Automatic schedule/);
-  assert.match(appSource, /eBay offers and live-status sync/);
-  assert.match(appSource, /Run offer\/status sync now/);
+  assert.match(uiSource, /Automatic schedule/);
+  assert.match(uiSource, /eBay offers and live-status sync/);
+  assert.match(uiSource, /Run offer\/status sync now/);
 });
 
 test("live launches automatically wait for a fresh complete active-listing feed", () => {
@@ -63,7 +66,14 @@ test("live launches automatically wait for a fresh complete active-listing feed"
   assert.match(serverSource, /did not produce a complete GetMyeBaySelling active-listing feed/);
   assert.match(dbSource, /readLatestOperationJobByWorkerTask/);
   assert.match(dbSource, /from operations_jobs prerequisite/);
-  assert.match(appSource, /Require fresh status before launch/);
+  assert.match(uiSource, /Require fresh status before launch/);
+});
+
+test("retrying an eBay launch requests a fresh prerequisite instead of cloning the old sync", () => {
+  assert.match(serverSource, /previous\.workerTask === "ebay-listing-launch"/);
+  assert.match(serverSource, /delete nextPayload\.prerequisiteJobId/);
+  assert.match(serverSource, /queueEbayListingLaunchJob\(retryDb, nextPayload/);
+  assert.match(serverSource, /completed its GetMyeBaySelling feed, but that verification is older than/);
 });
 
 test("every worker schedule checkpoint is registered for persistence", () => {
@@ -80,8 +90,8 @@ test("full launch reviews persist a filterable readiness assessment", () => {
   assert.match(serverSource, /source: "eBay full launch validator"/);
   assert.match(serverSource, /expiresAt:/);
   assert.match(dbSource, /ebay-validated-ready/);
-  assert.match(appSource, /Ready to launch on eBay/);
-  assert.match(appSource, /Validate eBay readiness/);
+  assert.match(uiSource, /Ready to launch on eBay/);
+  assert.match(uiSource, /Validate eBay readiness/);
 });
 
 test("catalog exposes one binary eBay launch-readiness choice", () => {
@@ -95,8 +105,8 @@ test("eBay readiness jobs use preflight terminology and automatic imports use th
   assert.match(serverSource, /review: "eBay launch preflight"/);
   assert.match(serverSource, /background: body\.background === true \|\| options\.background === true/);
   assert.match(workerSource, /operation: "Post-import eBay launch preflight", background: true/);
-  assert.match(appSource, /Run eBay launch preflight/);
-  assert.match(appSource, /if \(isEbayLaunchPreflight\(job\)\) return "eBay launch preflight"/);
+  assert.match(uiSource, /Run eBay launch preflight/);
+  assert.match(uiSource, /if \(isEbayLaunchPreflight\(job\)\) return "eBay launch preflight"/);
   assert.match(dbSource, /preflight\|readiness/);
   assert.match(dbSource, /%listing review%/);
 });
