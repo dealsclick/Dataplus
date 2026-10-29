@@ -1832,6 +1832,17 @@ function jobStatusTone(status?: string) {
   return "secondary"
 }
 
+function jobStatusLabel(status?: string) {
+  const value = String(status || "").toLowerCase()
+  if (["success", "done", "ok", "completed"].includes(value)) return "Completed"
+  if (value === "queued") return "Waiting"
+  if (value === "running") return "Running"
+  if (value === "warning") return "Needs review"
+  if (value === "failed") return "Failed"
+  if (value === "stopped") return "Stopped"
+  return value ? value.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) : "Unknown"
+}
+
 function jobProgress(job: ImportJob) {
   const status = String(job.status || "").toLowerCase()
   const active = ["queued", "running"].includes(status)
@@ -3788,7 +3799,7 @@ function JobsPage({
                           <p className="break-words text-sm">{jobOperationLabel(job)}</p>
                           <JobContextBadges job={job} />
                         </div>
-                        <Badge variant={jobStatusTone(job.status)}>{job.status || "unknown"}</Badge>
+                        <Badge variant={jobStatusTone(job.status)}>{jobStatusLabel(job.status)}</Badge>
                       </div>
                       <p className="break-words text-xs text-muted-foreground">{job.message || job.fileName || "No job message recorded."}</p>
                       <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
@@ -3822,7 +3833,7 @@ function JobsPage({
                   <TableBody>
                     {visibleJobs.map((job) => (
                       <TableRow key={job.id} className="cursor-pointer" onClick={() => onSelectJob(job)}>
-                        <TableCell><HoverCard><HoverCardTrigger asChild><Badge variant={jobStatusTone(job.status)}>{job.status || "done"}</Badge></HoverCardTrigger><HoverCardContent className="w-72"><p className="font-medium">{String(job.status || "done").replace(/_/g, " ")}</p><p className="mt-1 text-xs text-muted-foreground">{job.message || job.details || "No additional status detail was recorded."}</p></HoverCardContent></HoverCard></TableCell>
+                        <TableCell><HoverCard><HoverCardTrigger asChild><Badge variant={jobStatusTone(job.status)}>{jobStatusLabel(job.status)}</Badge></HoverCardTrigger><HoverCardContent className="w-72"><p className="font-medium">{jobStatusLabel(job.status)}</p><p className="mt-1 text-xs text-muted-foreground">{job.message || job.details || "No additional status detail was recorded."}</p></HoverCardContent></HoverCard></TableCell>
                         <TableCell className="max-w-[360px]">
                           <div className="flex min-w-0 items-center gap-2">
                             <p className="truncate font-medium">{jobOperationLabel(job)}</p>
@@ -3848,7 +3859,7 @@ function JobsPage({
                               <Copy className="size-3" />
                             </Button>
                           </div>
-                          <p className="truncate text-xs text-muted-foreground">{job.fileName || job.message || "-"}</p>
+                          <p className="truncate text-xs text-muted-foreground">{job.message || job.fileName || "No status update recorded."}</p>
                         </TableCell>
                         <TableCell className="text-sm text-muted-foreground">{jobCategory(job)}</TableCell>
                         <TableCell><Badge variant={jobRunType(job) === "automated" ? "info" : "outline"} className="whitespace-nowrap">{jobRunType(job) === "automated" ? <CalendarDays className="size-3" /> : <Play className="size-3" />}{jobRunType(job) === "automated" ? "Automated" : "Manual"}</Badge></TableCell>
@@ -3902,6 +3913,9 @@ function JobsPage({
 }
 
 function JobActionMenu({ job, onStop, onRetry, onOpenFull }: { job: ImportJob; onStop: (job: ImportJob) => void; onRetry: (job: ImportJob) => void; onOpenFull: (job: ImportJob) => void }) {
+  const artifacts = job.artifacts || []
+  const hasPrimaryFile = Boolean(job.originalFileName || artifacts.some((artifact) => String(artifact.kind || "") === "original"))
+  const hasErrors = Boolean(job.errorFileName || job.errors?.length || artifacts.some((artifact) => String(artifact.kind || "") === "errors"))
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -3920,20 +3934,20 @@ function JobActionMenu({ job, onStop, onRetry, onOpenFull }: { job: ImportJob; o
           <Square className="size-4" />
           Stop job
         </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onClick={() => window.open(`/api/import-jobs/${encodeURIComponent(job.id)}/original?inline=1`, "_blank")}>
+        {(hasPrimaryFile || hasErrors) ? <DropdownMenuSeparator /> : null}
+        {hasPrimaryFile ? <DropdownMenuItem onClick={() => window.open(`/api/import-jobs/${encodeURIComponent(job.id)}/original?inline=1`, "_blank")}>
           <FileDown className="size-4" />
-          Original file
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => window.open(`/api/import-jobs/${encodeURIComponent(job.id)}/errors.csv?inline=1`, "_blank")}>
-          <FileDown className="size-4" />
-          Errors CSV
-        </DropdownMenuItem>
+          {jobPrimaryFileActionLabel(job)}
+        </DropdownMenuItem> : null}
+        {hasErrors ? <DropdownMenuItem onClick={() => window.open(`/api/import-jobs/${encodeURIComponent(job.id)}/errors.csv?inline=1`, "_blank")}>
+          <FileWarning className="size-4" />
+          Download errors
+        </DropdownMenuItem> : null}
         {(job.artifacts || []).some((artifact) => !["original", "errors", "manifest"].includes(String(artifact.kind || ""))) && <>
           <DropdownMenuSeparator />
           {(job.artifacts || []).map((artifact, index) => ({ artifact, index })).filter(({ artifact }) => !["original", "errors", "manifest"].includes(String(artifact.kind || ""))).map(({ artifact, index }) => <DropdownMenuItem key={`${artifact.kind}-${artifact.fileName}-${index}`} onClick={() => window.open(`/api/import-jobs/${encodeURIComponent(job.id)}/artifacts/${index}`, "_blank")}>
             <FileDown className="size-4" />
-            {artifact.kind === "shopify-created-skus" ? "Created Shopify SKUs" : artifact.kind === "shopify-skipped-skus" ? "Skipped Shopify SKUs" : artifact.kind === "shopify-api-errors" ? "Shopify API errors" : artifact.fileName || "Job artifact"}
+            {jobArtifactTitle(artifact.kind, artifact.fileName)}
           </DropdownMenuItem>)}
         </>}
       </DropdownMenuContent>
@@ -3947,7 +3961,7 @@ function JobDetailPage({ job, onRetry, onStop, onUpdate }: { job?: ImportJob; on
       <PageHeader
         eyebrow="Operations / Job"
         title={job?.operation || "Job detail"}
-        description={job ? `${jobReference(job)} · Internal ID ${job.id}` : "Loading job details..."}
+        description={job ? `${jobReference(job)} · ${jobChannelLabel(job)} · ${jobStatusLabel(job.status)}` : "Loading job details..."}
         action={<HistoryBackButton fallback="/jobs" label="Back to Jobs" size="default" />}
       />
       <JobDetail job={job} onRetry={onRetry} onStop={onStop} onUpdate={onUpdate} fullPage />
@@ -3959,25 +3973,145 @@ function jobReference(job: ImportJob) {
   return job.jobNumber ? `JOB-${job.jobNumber}` : `Job ${job.id.slice(0, 8)}`
 }
 
+function normalizedJobDirection(job: ImportJob) {
+  return String(job.direction || job.type || "").trim().toLowerCase()
+}
+
+function isExportJob(job: ImportJob) {
+  return normalizedJobDirection(job) === "export" || /\bexport\b/i.test(String(job.operation || ""))
+}
+
+function isImportJob(job: ImportJob) {
+  return normalizedJobDirection(job) === "import"
+}
+
+function jobPrimaryFileTitle(job: ImportJob) {
+  if (isExportJob(job)) return "Exported report"
+  if (isImportJob(job)) return "Uploaded source file"
+  if (/result|review|outcome|report/i.test(String(job.originalFileName || job.fileName || ""))) return "Job result"
+  return "Job file"
+}
+
+function jobPrimaryFileDescription(job: ImportJob) {
+  if (isExportJob(job)) return "Generated by this job and ready to download."
+  if (isImportJob(job)) return "The source file used to start this job."
+  return "The primary file saved with this job."
+}
+
+function jobPrimaryFileActionLabel(job: ImportJob) {
+  if (isExportJob(job)) return "Download report"
+  if (isImportJob(job)) return "Download source file"
+  return "Download job file"
+}
+
+function jobArtifactTitle(kind?: string, fileName?: string) {
+  const labels: Record<string, string> = {
+    approved: "Approved records",
+    mapped: "Matched records",
+    review: "Records needing review",
+    skipped: "Skipped records",
+    summary: "Reconciliation summary",
+    "shipping-eligibility-results": "Shipping eligibility results",
+    "shopify-created-skus": "Created Shopify SKUs",
+    "shopify-skipped-skus": "Skipped Shopify SKUs",
+    "shopify-api-errors": "Shopify API errors",
+  }
+  const key = String(kind || "").trim().toLowerCase()
+  if (labels[key]) return labels[key]
+  if (key) return key.replace(/[-_]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
+  return fileName ? "Generated file" : "Job result"
+}
+
+function jobFileSizeLabel(byteSize?: number) {
+  const bytes = Number(byteSize || 0)
+  if (!bytes) return ""
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`
+}
+
+function jobArtifactMetadata(artifact?: NonNullable<ImportJob["artifacts"]>[number]) {
+  if (!artifact) return ""
+  const parts: string[] = []
+  if (artifact.rowCount != null) parts.push(`${numberLabel(artifact.rowCount)} row${Number(artifact.rowCount) === 1 ? "" : "s"}`)
+  const size = jobFileSizeLabel(artifact.byteSize)
+  if (size) parts.push(size)
+  return parts.join(" · ")
+}
+
+function jobTypeLabel(job: ImportJob) {
+  const value = normalizedJobDirection(job) || "sync"
+  return value.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function jobCurrentFileLabel(job: ImportJob) {
+  const status = String(job.status || "").toLowerCase()
+  if (isActiveJob(job)) return "File being processed"
+  if (status === "failed") return "File at failure"
+  if (isExportJob(job)) return "Generated file"
+  if (isImportJob(job)) return "Imported file"
+  return "Job file"
+}
+
 function JobArtifactDownloads({ job }: { job: ImportJob }) {
   const artifacts = job.artifacts || []
   const customArtifacts = artifacts.map((artifact, index) => ({ artifact, index })).filter(({ artifact }) => !["original", "errors", "manifest"].includes(String(artifact.kind || "")))
   const download = (path: string) => window.open(path, "_blank", "noreferrer")
   const hasOriginal = Boolean(job.originalFileName || artifacts.some((artifact) => String(artifact.kind || "") === "original"))
   const hasErrors = Boolean(job.errorFileName || job.errors?.length || artifacts.some((artifact) => String(artifact.kind || "") === "errors"))
-  const originalLabel = /result|review|outcome/i.test(String(job.originalFileName || job.fileName || ""))
-    ? "Result CSV"
-    : "Original input"
+  const originalArtifact = artifacts.find((artifact) => String(artifact.kind || "") === "original")
+  const errorArtifact = artifacts.find((artifact) => String(artifact.kind || "") === "errors")
+  const primaryFileName = originalArtifact?.fileName || job.originalFileName || job.fileName || "Saved job file"
+  const errorFileName = errorArtifact?.fileName || job.errorFileName || "errors.csv"
   const availableCount = Number(hasOriginal) + Number(hasErrors) + customArtifacts.length
+  const downloads = [
+    ...(hasOriginal ? [{
+      key: "primary",
+      title: jobPrimaryFileTitle(job),
+      description: jobPrimaryFileDescription(job),
+      fileName: primaryFileName,
+      metadata: jobArtifactMetadata(originalArtifact),
+      href: `/api/import-jobs/${encodeURIComponent(job.id)}/original?inline=1`,
+      kind: isImportJob(job) ? "source" : "result",
+    }] : []),
+    ...(hasErrors ? [{
+      key: "errors",
+      title: "Errors to review",
+      description: "Records or messages that need operator attention.",
+      fileName: errorFileName,
+      metadata: jobArtifactMetadata(errorArtifact) || (job.errors?.length ? `${numberLabel(job.errors.length)} issue${job.errors.length === 1 ? "" : "s"}` : ""),
+      href: `/api/import-jobs/${encodeURIComponent(job.id)}/errors.csv?inline=1`,
+      kind: "errors",
+    }] : []),
+    ...customArtifacts.map(({ artifact, index }) => ({
+      key: `${artifact.kind}-${artifact.fileName}-${index}`,
+      title: jobArtifactTitle(artifact.kind, artifact.fileName),
+      description: "Generated by this job.",
+      fileName: artifact.fileName || "Saved result",
+      metadata: jobArtifactMetadata(artifact),
+      href: `/api/import-jobs/${encodeURIComponent(job.id)}/artifacts/${index}`,
+      kind: "result",
+    })),
+  ]
   return (
-    <div className="rounded-md border bg-muted/20 p-3">
-      <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">Files and results</p><p className="text-xs text-muted-foreground">Download the source, error report, and outcome CSVs generated by this run.</p></div><Badge variant="outline">{numberLabel(availableCount)} available</Badge></div>
-      <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-        {hasOriginal ? <Button size="sm" variant="outline" className="justify-start" onClick={() => download(`/api/import-jobs/${encodeURIComponent(job.id)}/original?inline=1`)}><FileDown className="size-4" /> {originalLabel}</Button> : null}
-        {hasErrors ? <Button size="sm" variant="outline" className="justify-start" onClick={() => download(`/api/import-jobs/${encodeURIComponent(job.id)}/errors.csv?inline=1`)}><FileWarning className="size-4" /> Errors CSV</Button> : null}
-        {customArtifacts.map(({ artifact, index }) => <Button key={`${artifact.kind}-${artifact.fileName}-${index}`} size="sm" variant="outline" className="justify-start" onClick={() => download(`/api/import-jobs/${encodeURIComponent(job.id)}/artifacts/${index}`)}><FileDown className="size-4" /> <span className="truncate">{artifact.kind === "shopify-created-skus" ? "Created Shopify SKUs" : artifact.kind === "shopify-skipped-skus" ? "Skipped Shopify SKUs" : artifact.kind === "shopify-api-errors" ? "Shopify API errors" : artifact.fileName || "Job artifact"}{artifact.rowCount ? ` (${numberLabel(artifact.rowCount)})` : ""}</span></Button>)}
-      </div>
-    </div>
+    <section className="grid gap-3" aria-label="Job downloads">
+      <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">Downloads</p><p className="text-xs text-muted-foreground">Files are labeled by their purpose in this job.</p></div><Badge variant="outline">{numberLabel(availableCount)} available</Badge></div>
+      {downloads.length ? <div className="overflow-hidden rounded-md border">
+        {downloads.map((item) => (
+          <div key={item.key} className="flex min-w-0 items-center gap-3 border-b p-3 last:border-b-0">
+            <div className="grid size-9 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
+              {item.kind === "errors" ? <FileWarning className="size-4" /> : item.kind === "source" ? <FileUp className="size-4" /> : <FileText className="size-4" />}
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium">{item.title}</p>
+              <p className="truncate text-xs text-muted-foreground" title={item.fileName}>{item.fileName}</p>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">{item.description}{item.metadata ? ` · ${item.metadata}` : ""}</p>
+            </div>
+            <Button size="icon" variant="ghost" className="shrink-0" title={`Download ${item.title}`} aria-label={`Download ${item.title}`} onClick={() => download(item.href)}><FileDown className="size-4" /></Button>
+          </div>
+        ))}
+      </div> : <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">This job did not create or retain a downloadable file.</div>}
+    </section>
   )
 }
 
@@ -3993,7 +4127,7 @@ function JobIssueSummary({ job }: { job: ImportJob }) {
       <ul className="mt-2 grid gap-1 text-xs">
         {issues.slice(0, 8).map((issue, index) => <li key={`${issue}-${index}`} className="break-words">{issue}</li>)}
       </ul>
-      {issues.length > 8 ? <p className="mt-2 text-xs">Download the Errors CSV for the remaining {numberLabel(issues.length - 8)} issue{issues.length - 8 === 1 ? "" : "s"}.</p> : null}
+      {issues.length > 8 ? <p className="mt-2 text-xs">Download the error report for the remaining {numberLabel(issues.length - 8)} issue{issues.length - 8 === 1 ? "" : "s"}.</p> : null}
     </div>
   )
 }
@@ -4117,7 +4251,7 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
             </div>
             <div className="mt-2"><JobContextBadges job={job} /></div>
           </div>
-          <Badge variant={jobStatusTone(job.status)}>{job.status || "done"}</Badge>
+          <Badge variant={jobStatusTone(job.status)}>{jobStatusLabel(job.status)}</Badge>
         </div>
       </CardHeader>
       <CardContent className="grid gap-4 text-sm">
@@ -4146,20 +4280,17 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
         {job.importProgress ? <ImportProgressSummary value={job.importProgress} /> : <Progress value={jobProgress(job)} />}
         <div className="grid grid-cols-2 gap-2">
           <Detail label="Category" value={jobCategory(job)} />
-          <Detail label="Type" value={job.direction || job.type || "sync"} />
+          <Detail label="Type" value={jobTypeLabel(job)} />
           <Detail label="Channel" value={jobChannelLabel(job)} />
           <Detail label="Run type" value={jobRunType(job) === "automated" ? "Automated" : "Manual"} />
           {jobImportMode(job) ? <Detail label="Import mode" value={jobImportMode(job)} /> : null}
           <Detail label="Started" value={dateLabel(job.startedAt || job.createdAt)} />
           <Detail label="Finished" value={dateLabel(job.finishedAt)} />
-          <Detail label="Rows" value={numberLabel(job.totalRows)} />
+          <Detail label="Total records" value={numberLabel(job.totalRows)} />
           <Detail label="Processed" value={numberLabel(job.processedRows)} />
-          <Detail label="Changed" value={numberLabel(job.changed)} />
-          <Detail label="Missing" value={numberLabel(job.missingCount)} />
+          <Detail label={isExportJob(job) ? "Output rows" : "Changed"} value={numberLabel(job.changed)} />
+          <Detail label="Missing / failed" value={numberLabel(job.missingCount)} />
           <Detail label="Stage" value={String(job.phase || "pending").replace(/_/g, " ")} />
-          <Detail label="Throughput" value={job.rowsPerSecond ? `${job.rowsPerSecond.toFixed(1)} rows/sec` : "Measuring"} />
-          <Detail label="Worker memory" value={job.processRssMb ? `${numberLabel(job.processRssMb)} MB RSS` : "Not reported"} />
-          <Detail label="Retry source" value={job.retryOfJobId ? `Job ${job.retryOfJobId.slice(0, 8)}` : "Original run"} />
         </div>
         {jobImportModeDescription(job) ? (
           <div className="rounded-md border border-primary/20 bg-primary/5 p-3">
@@ -4167,47 +4298,60 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
             <p className="mt-1 text-muted-foreground">{jobImportModeDescription(job)}</p>
           </div>
         ) : null}
-        {job.currentFile && <div className="rounded-md border bg-muted/20 p-3"><p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Current file</p><p className="mt-1 break-all font-mono text-xs">{job.currentFile}</p></div>}
         {job.message && (
           <div className="rounded-md border bg-muted/45 p-3">
-            <p className="font-medium">Status message</p>
+            <p className="font-medium">Latest update</p>
             <p className="mt-1 text-muted-foreground">{job.message}</p>
           </div>
         )}
         {job.details && (
           <div className="rounded-md border bg-muted/45 p-3">
-            <p className="font-medium">Details</p>
+            <p className="font-medium">Run summary</p>
             <p className="mt-1 line-clamp-6 text-muted-foreground">{job.details}</p>
           </div>
         )}
+        <JobArtifactDownloads job={job} />
         <JobIssueSummary job={job} />
         <JobChannelActivity job={job} />
-        <JobArtifactDownloads job={job} />
-        <div className="overflow-hidden rounded-md border bg-zinc-950 text-zinc-100">
-          <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
-            <p className="text-xs font-medium">Worker output</p>
-            <span className="text-[11px] text-zinc-400">Latest {Math.min(400, job.workerOutput?.length || 0)} lines</span>
+        <Collapsible>
+          <div className="overflow-hidden rounded-md border">
+            <CollapsibleTrigger asChild>
+              <Button variant="ghost" className="h-auto w-full justify-between rounded-none px-3 py-3 text-left">
+                <span><span className="block font-medium">Technical details</span><span className="block text-xs font-normal text-muted-foreground">Internal IDs, worker state, filenames, and diagnostic output.</span></span>
+                <ChevronDown className="size-4 shrink-0" />
+              </Button>
+            </CollapsibleTrigger>
+            <CollapsibleContent className="border-t bg-muted/15 p-3">
+              <div className="grid grid-cols-2 gap-2">
+                <Detail label="Internal job ID" value={job.id} />
+                <Detail label="Worker" value={job.workerId || job.workerTask || "Not assigned"} />
+                {job.currentFile ? <Detail label={jobCurrentFileLabel(job)} value={job.currentFile} /> : null}
+                <Detail label="Throughput" value={job.rowsPerSecond ? `${job.rowsPerSecond.toFixed(1)} rows/sec` : "Not reported"} />
+                <Detail label="Worker memory" value={job.processRssMb ? `${numberLabel(job.processRssMb)} MB RSS` : "Not reported"} />
+                <Detail label="Retry source" value={job.retryOfJobId ? `Job ${job.retryOfJobId.slice(0, 8)}` : "Original run"} />
+              </div>
+              <div className="mt-3 overflow-hidden rounded-md bg-zinc-950 text-zinc-100">
+                <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
+                  <p className="text-xs font-medium">Worker output</p>
+                  <span className="text-[11px] text-zinc-400">Latest {Math.min(400, job.workerOutput?.length || 0)} lines</span>
+                </div>
+                <div className="max-h-64 overflow-auto p-3 font-mono text-[11px] leading-5">
+                  {job.workerOutput?.length ? job.workerOutput.map((entry, index) => (
+                    <p key={`${entry.timestamp || ""}-${index}`} className={entry.stream === "stderr" ? "text-amber-300" : "text-zinc-200"}>
+                      <span className="mr-2 text-zinc-500">{entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : "--:--:--"}</span>
+                      {entry.line}
+                    </p>
+                  )) : <p className="text-zinc-400">No worker output was captured for this job.</p>}
+                </div>
+              </div>
+            </CollapsibleContent>
           </div>
-          <div className="max-h-64 overflow-auto p-3 font-mono text-[11px] leading-5">
-            {job.workerOutput?.length ? job.workerOutput.map((entry, index) => (
-              <p key={`${entry.timestamp || ""}-${index}`} className={entry.stream === "stderr" ? "text-amber-300" : "text-zinc-200"}>
-                <span className="mr-2 text-zinc-500">{entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString() : "--:--:--"}</span>
-                {entry.line}
-              </p>
-            )) : <p className="text-zinc-400">No worker output has been captured for this job yet.</p>}
-          </div>
-        </div>
+        </Collapsible>
         <div className="rounded-md border bg-muted/20 p-3">
           <div className="flex items-center justify-between gap-3"><p className="font-medium">Operator notes</p>{job.notesUpdatedAt ? <span className="text-xs text-muted-foreground">{job.notesUpdatedBy || "Operator"} · {dateLabel(job.notesUpdatedAt)}</span> : null}</div>
           <Textarea className="mt-2 min-h-24" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Explain what this job does, its purpose, assumptions, or follow-up instructions." />
           <div className="mt-2 flex justify-end"><Button size="sm" variant="outline" onClick={() => void saveNotes()} disabled={savingNotes}>{savingNotes ? "Saving..." : "Save notes"}</Button></div>
         </div>
-        {!!job.errors?.length && (
-          <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3">
-            <p className="font-medium text-destructive">Error preview</p>
-            <p className="mt-1 line-clamp-5 text-muted-foreground">{job.errors[0]}</p>
-          </div>
-        )}
       </CardContent>
     </Card>
   )
