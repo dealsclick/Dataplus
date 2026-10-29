@@ -4095,10 +4095,10 @@ function JobArtifactDownloads({ job }: { job: ImportJob }) {
   ]
   return (
     <section className="grid gap-3" aria-label="Job downloads">
-      <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">Downloads</p><p className="text-xs text-muted-foreground">Files are labeled by their purpose in this job.</p></div><Badge variant="outline">{numberLabel(availableCount)} available</Badge></div>
+      <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><p className="font-medium">Downloads</p><p className="text-xs text-muted-foreground">Files are labeled by their purpose in this job.</p></div><Badge variant="outline" className="shrink-0">{numberLabel(availableCount)} available</Badge></div>
       {downloads.length ? <div className="overflow-hidden rounded-md border">
         {downloads.map((item) => (
-          <div key={item.key} className="flex min-w-0 items-center gap-3 border-b p-3 last:border-b-0">
+          <div key={item.key} className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 border-b p-3 last:border-b-0">
             <div className="grid size-9 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
               {item.kind === "errors" ? <FileWarning className="size-4" /> : item.kind === "source" ? <FileUp className="size-4" /> : <FileText className="size-4" />}
             </div>
@@ -4228,7 +4228,7 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
   }
 
   return (
-    <Card className={fullPage ? "" : "xl:sticky xl:top-20"}>
+    <Card className={`min-w-0 ${fullPage ? "" : "xl:sticky xl:top-20"}`}>
       <CardHeader>
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -4254,7 +4254,7 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
           <Badge variant={jobStatusTone(job.status)}>{jobStatusLabel(job.status)}</Badge>
         </div>
       </CardHeader>
-      <CardContent className="grid gap-4 text-sm">
+      <CardContent className="grid min-w-0 gap-4 text-sm">
         {isWalmartFeedStatusCheck(job) ? (
           <div className="rounded-md border border-blue-300 bg-blue-50 p-3 text-blue-950 dark:border-blue-900/70 dark:bg-blue-950/30 dark:text-blue-100">
             <p className="font-medium">Status check only</p>
@@ -4316,8 +4316,8 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
         <Collapsible>
           <div className="overflow-hidden rounded-md border">
             <CollapsibleTrigger asChild>
-              <Button variant="ghost" className="h-auto w-full justify-between rounded-none px-3 py-3 text-left">
-                <span><span className="block font-medium">Technical details</span><span className="block text-xs font-normal text-muted-foreground">Internal IDs, worker state, filenames, and diagnostic output.</span></span>
+              <Button variant="ghost" className="h-auto w-full justify-between rounded-none px-3 py-3 text-left whitespace-normal">
+                <span className="min-w-0 flex-1"><span className="block font-medium">Technical details</span><span className="block break-words text-xs font-normal text-muted-foreground">Internal IDs, worker state, filenames, and diagnostic output.</span></span>
                 <ChevronDown className="size-4 shrink-0" />
               </Button>
             </CollapsibleTrigger>
@@ -4348,9 +4348,9 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
           </div>
         </Collapsible>
         <div className="rounded-md border bg-muted/20 p-3">
-          <div className="flex items-center justify-between gap-3"><p className="font-medium">Operator notes</p>{job.notesUpdatedAt ? <span className="text-xs text-muted-foreground">{job.notesUpdatedBy || "Operator"} · {dateLabel(job.notesUpdatedAt)}</span> : null}</div>
+          <div className="flex flex-wrap items-center justify-between gap-3"><p className="font-medium">Operator notes</p>{job.notesUpdatedAt ? <span className="text-xs text-muted-foreground">{job.notesUpdatedBy || "Operator"} · {dateLabel(job.notesUpdatedAt)}</span> : null}</div>
           <Textarea className="mt-2 min-h-24" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Explain what this job does, its purpose, assumptions, or follow-up instructions." />
-          <div className="mt-2 flex justify-end"><Button size="sm" variant="outline" onClick={() => void saveNotes()} disabled={savingNotes}>{savingNotes ? "Saving..." : "Save notes"}</Button></div>
+          <div className="mt-2 flex justify-end"><Button size="sm" variant="outline" className="w-full sm:w-auto" onClick={() => void saveNotes()} disabled={savingNotes}>{savingNotes ? "Saving..." : "Save notes"}</Button></div>
         </div>
       </CardContent>
     </Card>
