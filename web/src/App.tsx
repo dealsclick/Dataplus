@@ -4,6 +4,7 @@ import { CompanyMenuItems, CompanySwitcher } from "./components/company-switcher
 import { SystemBrandMark } from "./components/system-brand-mark"
 import { NotificationCapture, NotificationCenter } from "./components/notification-center"
 import { MentionCenter } from "./components/mention-center"
+import { QuickFindBarcodeScanner } from "./components/quick-find-barcode-scanner"
 import { CategoryMappingOverview, MappingIndicator } from "./components/category-mapping-overview"
 import { CategoryMappingWorkspace } from "./components/category-mapping-workspace"
 import { ChannelCategoryPicker } from "./components/channel-category-picker"
@@ -2799,8 +2800,11 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                   <PopoverTrigger asChild>
                     <div className="relative min-w-0 flex-1 sm:w-56 sm:flex-none lg:w-72">
                       <Search className="pointer-events-none absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
-                      <Input value={quickFindQuery} onFocus={() => setQuickFindOpen(true)} onChange={(event) => { setQuickFindQuery(event.target.value); setQuickFindOpen(true) }} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); openFirstQuickFindResult() } }} className="h-9 bg-background pl-8 pr-8 text-sm" placeholder="Quick find SKU, order, or PO" aria-label="Quick find SKU, order, or PO" />
-                      {quickFindSearching ? <Loader2 className="pointer-events-none absolute right-2.5 top-2.5 size-4 animate-spin text-muted-foreground" /> : quickFindQuery ? <button type="button" className="absolute right-1.5 top-1.5 grid size-6 place-items-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" title="Clear quick find" onClick={(event) => { event.stopPropagation(); setQuickFindQuery(""); setQuickFindProducts([]); setQuickOperationsResults([]) }}><X className="size-3.5" /></button> : null}
+                      <Input value={quickFindQuery} onFocus={() => setQuickFindOpen(true)} onChange={(event) => { setQuickFindQuery(event.target.value); setQuickFindOpen(true) }} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); openFirstQuickFindResult() } }} className="h-9 bg-background pl-8 pr-16 text-sm" placeholder="Quick find SKU, order, or PO" aria-label="Quick find SKU, order, or PO" />
+                      <div className="absolute right-1 top-1 flex items-center gap-0.5">
+                        {quickFindSearching ? <span className="grid size-6 place-items-center"><Loader2 className="pointer-events-none size-3.5 animate-spin text-muted-foreground" /></span> : quickFindQuery ? <button type="button" className="grid size-6 place-items-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground" title="Clear quick find" aria-label="Clear quick find" onClick={(event) => { event.stopPropagation(); setQuickFindQuery(""); setQuickFindProducts([]); setQuickOperationsResults([]) }}><X className="size-3.5" /></button> : null}
+                        <QuickFindBarcodeScanner onScan={(barcode) => { setQuickFindQuery(barcode); setQuickFindOpen(true) }} />
+                      </div>
                     </div>
                   </PopoverTrigger>
                   <PopoverContent align="end" onOpenAutoFocus={(event) => event.preventDefault()} className="w-[min(34rem,calc(100vw-1rem))] p-0">
