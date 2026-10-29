@@ -14,6 +14,7 @@ const zlib = require("zlib");
 const nodemailer = require("nodemailer");
 const { PDFParse } = require("pdf-parse");
 const { groupReleases, loadReleaseHistory, readDeploymentStatus } = require("./lib/release-history");
+const ebayOAuthState = require("./lib/ebay-oauth-state");
 const ftp = require("basic-ftp");
 const { XMLParser, XMLBuilder } = require("fast-xml-parser");
 const postgres = require("./db");
@@ -39257,9 +39258,7 @@ async function ebayTradingRequest(db, callName, requestXml, options = {}) {
 const EBAY_OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 
 function normalizeEbayOAuthReturnTo(value) {
-  const path = String(value || "").trim();
-  if (!path || !path.startsWith("/") || path.startsWith("//") || path.includes("\\")) return "/channels";
-  return path;
+  return ebayOAuthState.normalizeReturnTo(value);
 }
 
 function isEbayOAuthCallbackRequest(req) {
@@ -39294,6 +39293,17 @@ function validateEbayOAuthState(connectorState = {}, suppliedState) {
   return normalizeEbayOAuthReturnTo(connectorState.ebayOauthReturnTo);
 }
 
+function ebayOAuthSessionToken(req) {
+  const token = cookieValue(req, "dataplus_session");
+  const session = token ? readAuthSessions()[authSessionStorageKey(token)] : null;
+  if (!session || !Number.isFinite(Date.parse(session.expiresAt || "")) || Date.parse(session.expiresAt) <= Date.now()) {
+    const error = new Error("Sign in to DataPlus again before connecting eBay.");
+    error.statusCode = 401;
+    throw error;
+  }
+  return token;
+}
+
 function ebayConsentUrl(db, options = {}) {
   const config = getEbayConfig(db);
   const missing = missingEbayConfig(config, { requireToken: false });
@@ -39301,12 +39311,16 @@ function ebayConsentUrl(db, options = {}) {
     throw new Error(`eBay credentials missing: ${missing.join(", ")}. Add them in Channels > eBay > Setup, then try again.`);
   }
   db.connectorState = db.connectorState || {};
-  const stateToken = crypto.randomBytes(18).toString("hex");
   const returnTo = normalizeEbayOAuthReturnTo(options.returnTo);
-  db.connectorState.ebayOauthState = stateToken;
-  db.connectorState.ebayOauthStateExpiresAt = new Date(Date.now() + EBAY_OAUTH_STATE_TTL_MS).toISOString();
-  db.connectorState.ebayOauthReturnTo = returnTo;
-  db.connectorState.ebayOauthStartedAt = new Date().toISOString();
+  const stateToken = options.sessionToken
+    ? ebayOAuthState.createState({ ...config, sessionToken: options.sessionToken, returnTo })
+    : crypto.randomBytes(18).toString("hex");
+  if (!options.sessionToken) {
+    db.connectorState.ebayOauthState = stateToken;
+    db.connectorState.ebayOauthStateExpiresAt = new Date(Date.now() + EBAY_OAUTH_STATE_TTL_MS).toISOString();
+    db.connectorState.ebayOauthReturnTo = returnTo;
+    db.connectorState.ebayOauthStartedAt = new Date().toISOString();
+  }
   const url = new URL(config.authBase);
   url.searchParams.set("client_id", config.clientId);
   url.searchParams.set("redirect_uri", config.ruName);
@@ -39319,6 +39333,7 @@ function ebayConsentUrl(db, options = {}) {
 
 async function beginEbayAuthorization(db, options = {}) {
   const authUrl = ebayConsentUrl(db, options);
+  if (options.sessionToken) return authUrl;
   const pendingState = {
     ebayOauthState: db.connectorState?.ebayOauthState,
     ebayOauthStateExpiresAt: db.connectorState?.ebayOauthStateExpiresAt,
@@ -73500,7 +73515,8 @@ async function handleEbayStart(req, res) {
       : await readDb({ skipInventory: false });
     const authUrl = await beginEbayAuthorization(db, {
       returnTo: url.searchParams.get("returnTo"),
-      forceLogin: true
+      forceLogin: true,
+      sessionToken: ebayOAuthSessionToken(req)
     });
     res.writeHead(302, { Location: authUrl });
     res.end();
@@ -73572,7 +73588,14 @@ async function handleEbayCallback(req, res) {
 
   let returnTo = "/channels";
   try {
-    returnTo = validateEbayOAuthState(db.connectorState, stateToken);
+    returnTo = String(stateToken || "").startsWith("v2.")
+      ? ebayOAuthState.validateState({
+        ...getEbayConfig(db),
+        sessionToken: ebayOAuthSessionToken(req),
+        state: stateToken,
+        ttlMs: EBAY_OAUTH_STATE_TTL_MS
+      })
+      : validateEbayOAuthState(db.connectorState, stateToken);
   } catch (stateError) {
     return sendHtml(res, 400, ebayAuthorizationResultHtml({ message: stateError.message, returnTo }));
   }
