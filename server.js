@@ -27493,9 +27493,10 @@ function publicState(db, options = {}) {
 const APP_BOOTSTRAP_FIELDS = ["systemSettings", "connections", "connectorState"];
 const APP_REFERENCE_FIELDS = new Set(["vendors", "brands", "warehouses", "connections", "systemSettings"]);
 const APP_VERSION_FIELDS = [...new Set([...APP_BOOTSTRAP_FIELDS, ...APP_REFERENCE_FIELDS, "workerHeartbeat"])];
+const APP_PROJECTION_SCHEMA_VERSION = 2;
 
 function appProjectionVersion(versions = {}, fields = []) {
-  const value = fields.map((field) => `${field}=${versions[field] || "0:0"}`).join("|");
+  const value = [`schema=${APP_PROJECTION_SCHEMA_VERSION}`, ...fields.map((field) => `${field}=${versions[field] || "0:0"}`)].join("|");
   return crypto.createHash("sha1").update(value).digest("hex").slice(0, 16);
 }
 
