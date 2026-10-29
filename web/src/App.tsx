@@ -1542,11 +1542,23 @@ function viewFromPath(pathname = "/"): AppView {
 
 function appReferencesForView(view: AppView, warehouseMobile = false): AppReferenceName[] {
   const references = new Set<AppReferenceName>()
-  if (["overview", "jobs", "vendors", "brands", "brand-detail"].includes(view)) references.add("vendors")
-  if (["channels", "catalog", "product-detail"].includes(view)) references.add("connections")
+  if (["overview", "jobs", "brands", "brand-detail"].includes(view)) references.add("vendors")
+  if (view === "vendors") references.add("vendorDetails")
+  if (["channels", "catalog", "product-detail", "jobs"].includes(view)) references.add("connections")
   if (view === "channels" || warehouseMobile) references.add("warehouses")
   if (view === "settings") references.add("systemSettings")
   return [...references]
+}
+
+function vendorReferenceSummary(vendor: Vendor): Vendor {
+  return {
+    id: vendor.id,
+    name: vendor.name,
+    code: vendor.code || "",
+    status: vendor.status || "active",
+    type: vendor.type || "",
+    retirement: vendor.retirement || null,
+  }
 }
 
 function currentAppLocation() {
@@ -2341,7 +2353,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
       ...current,
       ...(references.includes("connections") ? { connections: (result.connections || []) as ChannelConnection[] } : {}),
       ...(references.includes("systemSettings") ? { systemSettings: (result.systemSettings || {}) as SystemSettings } : {}),
-      ...(references.includes("vendors") ? { vendors: (result.vendors || []) as Vendor[] } : {}),
+      ...(references.includes("vendorDetails") ? { vendors: (result.vendorDetails || []) as Vendor[] } : references.includes("vendors") ? { vendors: (result.vendors || []) as Vendor[] } : {}),
       ...(references.includes("brands") ? { brands: (result.brands || []) as Brand[] } : {}),
       ...(references.includes("warehouses") ? { warehouses: (result.warehouses || []) as Array<Record<string, unknown>> } : {}),
     }))
@@ -2368,7 +2380,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
         ...current,
         connections: (references.includes("connections") ? referenceState.connections : bootstrap.connections || current.connections || []) as ChannelConnection[],
         systemSettings: (references.includes("systemSettings") ? referenceState.systemSettings : bootstrap.systemSettings || current.systemSettings || {}) as SystemSettings,
-        ...(references.includes("vendors") ? { vendors: (referenceState.vendors || []) as Vendor[] } : {}),
+        ...(references.includes("vendorDetails") ? { vendors: (referenceState.vendorDetails || []) as Vendor[] } : references.includes("vendors") ? { vendors: (referenceState.vendors || []) as Vendor[] } : {}),
         ...(references.includes("brands") ? { brands: (referenceState.brands || []) as Brand[] } : {}),
         ...(references.includes("warehouses") ? { warehouses: (referenceState.warehouses || []) as Array<Record<string, unknown>> } : {}),
       }))
@@ -2513,7 +2525,8 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
       })
       setState((current) => {
         const vendors = (current.vendors || []).map((vendor) => vendor.id === vendorId ? result.vendor : vendor)
-        updateAppReference("vendors", vendors)
+        updateAppReference("vendorDetails", vendors)
+        updateAppReference("vendors", vendors.map(vendorReferenceSummary))
         return { ...current, vendors }
       })
       toast.success(result.catalogRefreshJob
@@ -3060,7 +3073,8 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                     onSaveVendor={saveVendor}
                     onVendorCreated={(vendor) => setState((current) => {
                       const vendors = [vendor, ...(current.vendors || []).filter((row) => row.id !== vendor.id)]
-                      updateAppReference("vendors", vendors)
+                      updateAppReference("vendorDetails", vendors)
+                      updateAppReference("vendors", vendors.map(vendorReferenceSummary))
                       return { ...current, vendors }
                     })}
                   />

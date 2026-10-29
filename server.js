@@ -27491,9 +27491,21 @@ function publicState(db, options = {}) {
 }
 
 const APP_BOOTSTRAP_FIELDS = ["systemSettings", "connections", "connectorState"];
-const APP_REFERENCE_FIELDS = new Set(["vendors", "brands", "warehouses", "connections", "systemSettings"]);
-const APP_VERSION_FIELDS = [...new Set([...APP_BOOTSTRAP_FIELDS, ...APP_REFERENCE_FIELDS, "workerHeartbeat"])];
-const APP_PROJECTION_SCHEMA_VERSION = 2;
+const APP_REFERENCE_SOURCE_FIELDS = {
+  vendors: "vendors",
+  vendorDetails: "vendors",
+  brands: "brands",
+  warehouses: "warehouses",
+  connections: "connections",
+  systemSettings: "systemSettings"
+};
+const APP_REFERENCE_FIELDS = new Set(Object.keys(APP_REFERENCE_SOURCE_FIELDS));
+const APP_VERSION_FIELDS = [...new Set([
+  ...APP_BOOTSTRAP_FIELDS,
+  ...Object.values(APP_REFERENCE_SOURCE_FIELDS),
+  "workerHeartbeat"
+])];
+const APP_PROJECTION_SCHEMA_VERSION = 3;
 
 function appProjectionVersion(versions = {}, fields = []) {
   const value = [`schema=${APP_PROJECTION_SCHEMA_VERSION}`, ...fields.map((field) => `${field}=${versions[field] || "0:0"}`)].join("|");
@@ -27517,6 +27529,33 @@ function publicAppProjection(state = {}) {
     purchaseOrders: [],
     importJobs: []
   }, { lite: true });
+}
+
+function publicVendorReferenceSummary(vendor = {}) {
+  return {
+    id: vendor.id,
+    name: vendor.name,
+    code: vendor.code || "",
+    status: vendor.status || "active",
+    type: vendor.type || "",
+    retirement: vendor.retirement?.retiredAt ? {
+      retiredAt: vendor.retirement.retiredAt,
+      reason: vendor.retirement.reason || "",
+      actor: vendor.retirement.actor || "",
+      jobId: vendor.retirement.jobId || ""
+    } : null
+  };
+}
+
+function appReferenceVersions(fields = [], versions = {}) {
+  return Object.fromEntries(fields.map((field) => [field, versions[APP_REFERENCE_SOURCE_FIELDS[field] || field] || "0:0"]));
+}
+
+function publicAppVersions(versions = {}) {
+  return {
+    ...versions,
+    vendorDetails: versions.vendors || "0:0"
+  };
 }
 
 function sendVersionedProjection(req, res, payload, version) {
@@ -64396,18 +64435,21 @@ async function handleApi(req, res) {
       .split(",")
       .map((field) => field.trim())
       .filter((field) => APP_REFERENCE_FIELDS.has(field)))];
-    if (!fields.length) return sendJson(res, 400, { error: "Choose at least one reference: vendors, brands, warehouses, connections, or systemSettings." });
-    const projection = await readAppProjection(fields);
+    if (!fields.length) return sendJson(res, 400, { error: "Choose at least one reference: vendors, vendorDetails, brands, warehouses, connections, or systemSettings." });
+    const sourceFields = [...new Set(fields.map((field) => APP_REFERENCE_SOURCE_FIELDS[field]))];
+    const projection = await readAppProjection(sourceFields);
     const state = publicAppProjection(projection.state);
-    const version = appProjectionVersion(projection.versions, fields);
+    const versions = appReferenceVersions(fields, projection.versions);
+    const version = appProjectionVersion(versions, fields);
     const unchanged = url.searchParams.get("version") === version;
     return sendVersionedProjection(req, res, unchanged
-      ? { changed: false, version, versions: projection.versions }
+      ? { changed: false, version, versions }
       : {
           changed: true,
           version,
-          versions: projection.versions,
-          ...(fields.includes("vendors") ? { vendors: state.vendors || [] } : {}),
+          versions,
+          ...(fields.includes("vendors") ? { vendors: (state.vendors || []).map(publicVendorReferenceSummary) } : {}),
+          ...(fields.includes("vendorDetails") ? { vendorDetails: state.vendors || [] } : {}),
           ...(fields.includes("brands") ? { brands: projection.state.brands || [] } : {}),
           ...(fields.includes("warehouses") ? { warehouses: projection.state.warehouses || [] } : {}),
           ...(fields.includes("connections") ? { connections: state.connections || [] } : {}),
@@ -64427,7 +64469,7 @@ async function handleApi(req, res) {
     const version = appProjectionVersion(versions, APP_VERSION_FIELDS);
     return sendVersionedProjection(req, res, {
       version,
-      versions,
+      versions: publicAppVersions(versions),
       workerStatus,
       summary: summaryState.__summaryOverride || null
     }, version);
@@ -74709,6 +74751,7 @@ module.exports = {
   publicChannelSettings,
   publicConnection,
   publicConnectionSummary,
+  publicVendorReferenceSummary,
   publicBootstrapSystemSettings,
   createInventoryFromOrderLine,
   ensureProductsForImportedOrders,

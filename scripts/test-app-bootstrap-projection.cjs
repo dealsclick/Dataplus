@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 
-const { publicBootstrapSystemSettings, publicConnectionSummary } = require("../server");
+const { publicBootstrapSystemSettings, publicConnectionSummary, publicVendorReferenceSummary } = require("../server");
 
 const settings = publicBootstrapSystemSettings({
   systemUsers: [{ id: "user-1", name: "Test user" }],
@@ -34,4 +34,25 @@ assert.deepEqual(connection.settings, { channelEnabled: true });
 assert.equal(Object.hasOwn(connection, "logoDataUrl"), false);
 assert.equal(JSON.stringify(connection).includes("must-not-leave-the-server"), false);
 
-console.log("App bootstrap excludes workspace-only settings and channel configuration.");
+const vendor = publicVendorReferenceSummary({
+  id: "vendor-1",
+  name: "Example Supplier",
+  code: "EX",
+  status: "active",
+  type: "Distributor",
+  supplierLocations: [{ id: "location-1", name: "Large nested record" }],
+  pricingRules: { markup: 25 },
+  submissionSettings: { apiSecret: "must-stay-server-side" },
+});
+
+assert.deepEqual(vendor, {
+  id: "vendor-1",
+  name: "Example Supplier",
+  code: "EX",
+  status: "active",
+  type: "Distributor",
+  retirement: null,
+});
+assert.equal(JSON.stringify(vendor).includes("must-stay-server-side"), false);
+
+console.log("App bootstrap and compact references exclude workspace-only configuration.");

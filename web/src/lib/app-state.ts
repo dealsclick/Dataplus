@@ -1,6 +1,6 @@
 import { api } from "./client-api"
 
-export type AppReferenceName = "vendors" | "brands" | "warehouses" | "connections" | "systemSettings"
+export type AppReferenceName = "vendors" | "vendorDetails" | "brands" | "warehouses" | "connections" | "systemSettings"
 
 export type AppProjection = {
   changed?: boolean
@@ -8,6 +8,7 @@ export type AppProjection = {
   versions?: Record<string, string>
   connections?: unknown[]
   vendors?: unknown[]
+  vendorDetails?: unknown[]
   brands?: unknown[]
   warehouses?: unknown[]
   systemSettings?: Record<string, unknown>
