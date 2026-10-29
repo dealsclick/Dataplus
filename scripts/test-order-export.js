@@ -4,6 +4,7 @@ const {
   orderExportRows,
   orderLabelStatus,
   orderReturnStatus,
+  orderStatus,
   orderShippingStatus
 } = require("../lib/order-export");
 
@@ -51,6 +52,8 @@ const order = {
 assert.equal(orderLabelStatus(order), "Label printed");
 assert.equal(orderShippingStatus(order), "Shipped");
 assert.equal(orderReturnStatus(order), "Requested");
+assert.equal(orderStatus("cancelled"), "Canceled");
+assert.equal(orderStatus("canceled"), "Canceled");
 
 const summaryHeaders = orderExportHeaders("summary");
 const summaryRows = orderExportRows(order, "summary");
@@ -58,6 +61,7 @@ assert.equal(summaryRows.length, 1);
 assert.equal(summaryRows[0].length, summaryHeaders.length);
 assert.equal(summaryRows[0][summaryHeaders.indexOf("Internal order number")], "55577");
 assert.equal(summaryRows[0][summaryHeaders.indexOf("Label status")], "Label printed");
+assert.equal(orderExportRows({ ...order, status: "cancelled" }, "summary")[0][summaryHeaders.indexOf("Order status")], "Canceled");
 
 const lineHeaders = orderExportHeaders("lines");
 const lineRows = orderExportRows(order, "lines");

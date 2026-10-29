@@ -3131,6 +3131,13 @@ function nullableString(value) {
   return text || null;
 }
 
+function filterOptionValues(value) {
+  const values = Array.isArray(value) ? value : String(value ?? "").split(",");
+  return [...new Set(values
+    .map((entry) => String(entry || "").trim().toLowerCase())
+    .filter((entry) => entry && entry !== "all"))];
+}
+
 function splitFilterValues(value) {
   return String(value ?? "")
     .split("|")
@@ -10018,47 +10025,52 @@ async function listOrders(options = {}) {
   await initRelationalSchema();
   const limit = Math.max(1, Math.min(50000, Number(options.limit || 5000)));
   const summary = options.summary === true || String(options.summary).toLowerCase() === "true";
-  const status = nullableString(options.status);
+  const statuses = filterOptionValues(options.status).map((value) => value === "cancelled" ? "canceled" : value);
   const params = [];
   const where = [];
-  if (status && status !== "all") {
-    params.push(status.toLowerCase());
-    where.push("lower(coalesce(status, '')) = $" + params.length);
+  if (statuses.length) {
+    params.push(statuses);
+    where.push(`(case when lower(coalesce(status, '')) = 'cancelled' then 'canceled' else lower(coalesce(status, '')) end) = any($${params.length}::text[])`);
   }
-  const source = nullableString(options.source || options.channel);
-  if (source && source !== "all") {
-    params.push(source.toLowerCase());
-    if (source.toLowerCase() === "ebay_live") {
-      where.push(`(
-        lower(coalesce(raw->>'salesOrigin', raw->'external'->>'salesOrigin', '')) = $${params.length}
+  const sources = filterOptionValues(options.source || options.channel);
+  if (sources.length) {
+    const sourcePredicates = [];
+    const ordinarySources = sources.filter((value) => !["ebay_live", "tiktok_live"].includes(value));
+    if (ordinarySources.length) {
+      params.push(ordinarySources);
+      sourcePredicates.push(`lower(coalesce(nullif(source, ''), nullif(channel_source, ''), raw->>'salesChannel', '')) = any($${params.length}::text[])`);
+    }
+    if (sources.includes("ebay_live")) {
+      sourcePredicates.push(`(
+        lower(coalesce(raw->>'salesOrigin', raw->'external'->>'salesOrigin', '')) = 'ebay_live'
         or lower(coalesce(raw->>'isEbayLive', 'false')) = 'true'
         or lower(coalesce(raw->'ebayLive'->>'isLive', 'false')) = 'true'
       )`);
-    } else if (source.toLowerCase() === "tiktok_live") {
-      where.push(`(
-        lower(coalesce(raw->>'salesOrigin', raw->'external'->>'salesOrigin', '')) = $${params.length}
+    }
+    if (sources.includes("tiktok_live")) {
+      sourcePredicates.push(`(
+        lower(coalesce(raw->>'salesOrigin', raw->'external'->>'salesOrigin', '')) = 'tiktok_live'
         or lower(coalesce(raw->>'isTikTokLive', 'false')) = 'true'
         or lower(coalesce(raw->'tiktokLive'->>'isLive', 'false')) = 'true'
       )`);
-    } else {
-      where.push(`lower(coalesce(nullif(source, ''), nullif(channel_source, ''), raw->>'salesChannel', '')) = $${params.length}`);
     }
+    where.push(`(${sourcePredicates.join(" or ")})`);
   }
-  const payment = nullableString(options.payment);
-  if (payment && payment !== "all") {
-    params.push(payment.toLowerCase());
+  const payments = filterOptionValues(options.payment);
+  if (payments.length) {
+    params.push(payments);
     where.push(`(case
       when lower(coalesce(status, '')) in ('refunded', 'refund') or lower(coalesce(raw->>'financialStatus', raw->>'paymentStatus', '')) like '%refund%' then 'refunded'
       when lower(coalesce(raw->>'financialStatus', raw->>'paymentStatus', '')) like '%partial%' or (coalesce(paid_amount, 0) > 0 and coalesce(paid_amount, 0) < coalesce(total, 0)) then 'partially_paid'
       when coalesce(paid_amount, 0) >= coalesce(total, 0) and (coalesce(total, 0) > 0 or coalesce(paid_amount, 0) > 0) then 'paid'
       when lower(coalesce(raw->>'financialStatus', raw->>'paymentStatus', '')) like '%pending%' then 'pending'
       else 'unpaid'
-    end) = $${params.length}`);
+    end) = any($${params.length}::text[])`);
   }
-  const fulfillment = nullableString(options.fulfillment);
-  if (fulfillment && fulfillment !== "all") {
-    params.push(`%${fulfillment.toLowerCase()}%`);
-    where.push(`lower(coalesce(raw->>'fulfillmentStatus', raw->>'fulfillmentStage', raw->'external'->>'fulfillmentStatus', status, '')) like $${params.length}`);
+  const fulfillments = filterOptionValues(options.fulfillment);
+  if (fulfillments.length) {
+    params.push(fulfillments);
+    where.push(`exists (select 1 from unnest($${params.length}::text[]) selected(value) where lower(coalesce(raw->>'fulfillmentStatus', raw->>'fulfillmentStage', raw->'external'->>'fulfillmentStatus', status, '')) like ('%' || selected.value || '%'))`);
   }
   const shippingStatusExpression = `(case
     when coalesce(nullif(raw->>'deliveredAt', ''), '') <> ''
@@ -10072,32 +10084,34 @@ async function listOrders(options = {}) {
     when exists (select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end) shipment where coalesce(nullif(shipment->>'labelPurchaseId', ''), nullif(shipment->>'labelProvider', ''), nullif(shipment->>'labelSource', ''), '') <> '' or jsonb_array_length(case when jsonb_typeof(shipment->'documents') = 'array' then shipment->'documents' else '[]'::jsonb end) > 0) then 'label_purchased'
     else 'unshipped'
   end)`;
-  const shipping = nullableString(options.shipping);
-  if (shipping && shipping !== "all") {
-    params.push(shipping.toLowerCase());
-    where.push(`${shippingStatusExpression} = $${params.length}`);
+  const shippingStatuses = filterOptionValues(options.shipping);
+  if (shippingStatuses.length) {
+    params.push(shippingStatuses);
+    where.push(`${shippingStatusExpression} = any($${params.length}::text[])`);
   }
-  const delivery = nullableString(options.delivery);
-  if (delivery && delivery !== "all") {
-    if (delivery.toLowerCase() === "no_tracking") {
-      where.push(`coalesce(nullif(tracking_number, ''), nullif(raw->>'trackingNumber', ''), '') = ''
-        and not exists (select 1 from order_shipment_tracking tracking where tracking.order_id = order_records.order_id and nullif(trim(tracking.tracking_number), '') is not null)`);
-    } else {
-      params.push(`%${delivery.toLowerCase()}%`);
-      where.push(`(
-        lower(coalesce(raw->>'deliveryStatus', raw->>'trackingStatus', '')) like $${params.length}
-        or exists (select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end) shipment where lower(coalesce(shipment->>'trackingStatus', shipment->>'carrierStatus', shipment->>'status', '')) like $${params.length})
+  const deliveryStatuses = filterOptionValues(options.delivery);
+  if (deliveryStatuses.length) {
+    const deliveryPredicates = [];
+    if (deliveryStatuses.includes("no_tracking")) deliveryPredicates.push(`(coalesce(nullif(tracking_number, ''), nullif(raw->>'trackingNumber', ''), '') = ''
+      and not exists (select 1 from order_shipment_tracking tracking where tracking.order_id = order_records.order_id and nullif(trim(tracking.tracking_number), '') is not null))`);
+    const trackedDeliveryStatuses = deliveryStatuses.filter((value) => value !== "no_tracking");
+    if (trackedDeliveryStatuses.length) {
+      params.push(trackedDeliveryStatuses);
+      deliveryPredicates.push(`exists (select 1 from unnest($${params.length}::text[]) selected(value) where
+        regexp_replace(lower(coalesce(raw->>'deliveryStatus', raw->>'trackingStatus', '')), '[^a-z0-9]+', '_', 'g') like ('%' || selected.value || '%')
+        or exists (select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end) shipment where regexp_replace(lower(coalesce(shipment->>'trackingStatus', shipment->>'carrierStatus', shipment->>'status', '')), '[^a-z0-9]+', '_', 'g') like ('%' || selected.value || '%'))
       )`);
     }
+    where.push(`(${deliveryPredicates.join(" or ")})`);
   }
-  const purchaseOrderState = nullableString(options.po);
-  if (purchaseOrderState && purchaseOrderState !== "all") {
+  const purchaseOrderStates = filterOptionValues(options.po);
+  if (purchaseOrderStates.length) {
     const poPredicate = `(
       jsonb_array_length(case when jsonb_typeof(raw->'purchaseOrderIds') = 'array' then raw->'purchaseOrderIds' else '[]'::jsonb end) > 0
       or jsonb_array_length(case when jsonb_typeof(raw->'purchaseOrderNumbers') = 'array' then raw->'purchaseOrderNumbers' else '[]'::jsonb end) > 0
       or exists (select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'fulfillmentRoutes') = 'array' then raw->'fulfillmentRoutes' else '[]'::jsonb end) route where coalesce(nullif(route->>'purchaseOrderId', ''), nullif(route->>'purchaseOrderNumber', ''), '') <> '')
     )`;
-    where.push(purchaseOrderState.toLowerCase() === "linked" ? poPredicate : `not ${poPredicate}`);
+    if (purchaseOrderStates.length === 1) where.push(purchaseOrderStates[0] === "linked" ? poPredicate : `not ${poPredicate}`);
   }
   const supplier = nullableString(options.supplier);
   if (supplier && supplier !== "all") {
@@ -10150,30 +10164,38 @@ async function listOrders(options = {}) {
       or exists (select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'fulfillmentRoutes') = 'array' then raw->'fulfillmentRoutes' else '[]'::jsonb end) route where lower(coalesce(route->>'warehouseName', '')) = $${params.length} or lower(coalesce(route->>'warehouseId', '')) = $${params.length})
     )`);
   }
-  const label = nullableString(options.label);
-  if (label && label !== "all") {
+  const labels = filterOptionValues(options.label);
+  if (labels.length) {
     const printed = `exists (select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end) shipment where coalesce(nullif(shipment->>'labelPrintedAt', ''), nullif(shipment->>'labelLastPrintedAt', ''), '') <> '' or coalesce(nullif(shipment->>'labelPrintCount', ''), '0') <> '0')`;
     const purchased = `exists (select 1 from jsonb_array_elements(case when jsonb_typeof(raw->'shipments') = 'array' then raw->'shipments' else '[]'::jsonb end) shipment where coalesce(nullif(shipment->>'labelPurchaseId', ''), nullif(shipment->>'labelProvider', ''), nullif(shipment->>'labelSource', ''), '') <> '' or jsonb_array_length(case when jsonb_typeof(shipment->'documents') = 'array' then shipment->'documents' else '[]'::jsonb end) > 0)`;
-    where.push(label.toLowerCase() === "printed" ? printed : label.toLowerCase() === "purchased" ? `${purchased} and not ${printed}` : `not ${purchased}`);
+    const labelPredicates = [];
+    if (labels.includes("printed")) labelPredicates.push(`(${printed})`);
+    if (labels.includes("purchased")) labelPredicates.push(`(${purchased} and not ${printed})`);
+    if (labels.includes("no_label")) labelPredicates.push(`(not ${purchased})`);
+    if (labelPredicates.length) where.push(`(${labelPredicates.join(" or ")})`);
   }
-  const returnState = nullableString(options.returnStatus);
-  if (returnState && returnState !== "all") {
+  const returnStates = filterOptionValues(options.returnStatus);
+  if (returnStates.length) {
     const hasReturn = `coalesce(nullif(raw->>'returnId', ''), nullif(raw->>'returnNumber', ''), nullif(raw->>'returnRequestedAt', ''), '') <> '' or jsonb_array_length(case when jsonb_typeof(raw->'returns') = 'array' then raw->'returns' else '[]'::jsonb end) > 0`;
-    if (returnState.toLowerCase() === "has_return") where.push(`(${hasReturn})`);
-    else if (returnState.toLowerCase() === "no_return") where.push(`not (${hasReturn})`);
-    else if (returnState.toLowerCase() === "received") where.push(`coalesce(nullif(raw->>'returnReceivedAt', ''), '') <> ''`);
-    else if (returnState.toLowerCase() === "requested") where.push(`coalesce(nullif(raw->>'returnRequestedAt', ''), nullif(raw->>'returnId', ''), nullif(raw->>'returnNumber', ''), '') <> '' and coalesce(nullif(raw->>'returnReceivedAt', ''), '') = ''`);
+    const returnPredicates = [];
+    if (returnStates.includes("has_return")) returnPredicates.push(`(${hasReturn})`);
+    if (returnStates.includes("no_return")) returnPredicates.push(`(not (${hasReturn}))`);
+    if (returnStates.includes("received")) returnPredicates.push(`(coalesce(nullif(raw->>'returnReceivedAt', ''), '') <> '')`);
+    if (returnStates.includes("requested")) returnPredicates.push(`(coalesce(nullif(raw->>'returnRequestedAt', ''), nullif(raw->>'returnId', ''), nullif(raw->>'returnNumber', ''), '') <> '' and coalesce(nullif(raw->>'returnReceivedAt', ''), '') = '')`);
+    if (returnPredicates.length) where.push(`(${returnPredicates.join(" or ")})`);
   }
-  const exceptionState = nullableString(options.exception);
-  if (exceptionState && exceptionState !== "all") {
+  const exceptionStates = filterOptionValues(options.exception);
+  if (exceptionStates.length === 1) {
     const hasExceptions = `jsonb_array_length(case when jsonb_typeof(raw->'workflowExceptions') = 'array' then raw->'workflowExceptions' else '[]'::jsonb end) > 0`;
-    where.push(exceptionState.toLowerCase() === "has_exception" ? hasExceptions : `not ${hasExceptions}`);
+    where.push(exceptionStates[0] === "has_exception" ? hasExceptions : `not ${hasExceptions}`);
   }
-  const outcome = nullableString(options.outcome);
-  if (outcome && outcome !== "all") {
-    if (outcome.toLowerCase() === "canceled") where.push(`(lower(coalesce(status, '')) in ('canceled', 'cancelled', 'void', 'voided') or coalesce(nullif(raw->>'cancelledAt', ''), nullif(raw->>'canceledAt', ''), '') <> '')`);
-    else if (outcome.toLowerCase() === "refunded") where.push(`(lower(coalesce(status, '')) in ('refunded', 'refund') or coalesce(nullif(raw->>'refundedAt', ''), '') <> '' or coalesce(nullif(raw->>'refundAmount', ''), '0') <> '0')`);
-    else if (outcome.toLowerCase() === "active") where.push(`lower(coalesce(status, '')) not in ('canceled', 'cancelled', 'void', 'voided', 'refunded', 'refund') and coalesce(nullif(raw->>'cancelledAt', ''), nullif(raw->>'canceledAt', ''), '') = ''`);
+  const outcomes = filterOptionValues(options.outcome);
+  if (outcomes.length) {
+    const outcomePredicates = [];
+    if (outcomes.includes("canceled")) outcomePredicates.push(`(lower(coalesce(status, '')) in ('canceled', 'cancelled', 'void', 'voided') or coalesce(nullif(raw->>'cancelledAt', ''), nullif(raw->>'canceledAt', ''), '') <> '')`);
+    if (outcomes.includes("refunded")) outcomePredicates.push(`(lower(coalesce(status, '')) in ('refunded', 'refund') or coalesce(nullif(raw->>'refundedAt', ''), '') <> '' or coalesce(nullif(raw->>'refundAmount', ''), '0') <> '0')`);
+    if (outcomes.includes("active")) outcomePredicates.push(`(lower(coalesce(status, '')) not in ('canceled', 'cancelled', 'void', 'voided', 'refunded', 'refund') and coalesce(nullif(raw->>'cancelledAt', ''), nullif(raw->>'canceledAt', ''), '') = '')`);
+    if (outcomePredicates.length) where.push(`(${outcomePredicates.join(" or ")})`);
   }
   const minimumTotal = nullableNumber(options.totalMin);
   if (minimumTotal !== null) {
