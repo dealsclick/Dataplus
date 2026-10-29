@@ -13,6 +13,7 @@ const { JOB_AUTOMATED_SQL, JOB_CHANNEL_KEY_SQL, JOB_CHANNEL_LABEL_SQL, JOB_TRIGG
 const { compactOrderForStorage, shipmentTrackingRecords, shipmentFinancialRecords, orderShippingRevenueRecord } = require("./lib/order-payload-retention");
 const { parseSearchTerms } = require("./lib/multi-search");
 const { recordDatabaseQuery } = require("./lib/performance-context");
+const { normalizeOrderBasedReturnNumbers, returnNumberBase } = require("./lib/return-identifiers");
 const {
   LEGACY_COMPANY_ID,
   LEGACY_COMPANY_NUMBER,
@@ -24,6 +25,7 @@ const {
 let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
+let returnsWorkspaceSummaryCache = null;
 const RELATIONAL_SCHEMA_VERSION = "2026-10-27-outbound-evidence-v1";
 
 function getDatabaseUrl() {
@@ -160,6 +162,60 @@ async function ensureProductShadowSkuSchema(client) {
   `);
 }
 
+function invalidateReturnsWorkspaceSummary() {
+  returnsWorkspaceSummaryCache = null;
+}
+
+async function ensureReturnWorkspaceSchema(client) {
+  await client.query("begin");
+  try {
+    await client.query("select pg_advisory_xact_lock(hashtext('dataplus-return-identity-migration'))");
+    const identityIndex = await client.query("select to_regclass('public.entity_documents_returns_number_uidx') as index_name");
+    let updates = [];
+    if (!identityIndex.rows[0]?.index_name) {
+      const stored = await client.query(`
+        select entity_id, data
+        from entity_documents
+        where collection = 'returns'
+        order by coalesce(data->>'createdAt', data->>'updatedAt', ''), entity_id
+        for update
+      `);
+      const original = stored.rows.map((row) => row.data);
+      const normalized = normalizeOrderBasedReturnNumbers(original);
+      updates = normalized.records.flatMap((data, index) => data === original[index]
+        ? []
+        : [{ entity_id: stored.rows[index].entity_id, data }]);
+      for (let offset = 0; offset < updates.length; offset += 250) {
+        await client.query(`
+          update entity_documents target
+          set data = source.data
+          from jsonb_to_recordset($1::jsonb) as source(entity_id text, data jsonb)
+          where target.collection = 'returns' and target.entity_id = source.entity_id
+        `, [JSON.stringify(updates.slice(offset, offset + 250))]);
+      }
+    }
+    await client.query(`
+      create unique index if not exists entity_documents_returns_number_uidx
+        on entity_documents (lower(data->>'returnNumber'))
+        where collection = 'returns' and nullif(btrim(data->>'returnNumber'), '') is not null;
+      create index if not exists entity_documents_returns_channel_reference_idx
+        on entity_documents (lower(coalesce(data->>'source', '')), (data->>'channelReturnId'))
+        where collection = 'returns' and nullif(data->>'channelReturnId', '') is not null;
+      create index if not exists entity_documents_returns_order_number_idx
+        on entity_documents (lower(data->>'orderNumber'))
+        where collection = 'returns' and nullif(data->>'orderNumber', '') is not null;
+      create index if not exists entity_documents_returns_updated_idx
+        on entity_documents (updated_at desc, entity_id desc)
+        where collection = 'returns';
+    `);
+    await client.query("commit");
+    if (updates.length) invalidateReturnsWorkspaceSummary();
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  }
+}
+
 async function initRelationalSchema() {
   const dbPool = getPool();
   if (!dbPool) return false;
@@ -181,6 +237,7 @@ async function initRelationalSchema() {
         );
         if (schemaVersion.rows[0]?.current === true) {
           await ensureProductShadowSkuSchema(client);
+          await ensureReturnWorkspaceSchema(client);
           relationalSchemaReady = true;
           return true;
         }
@@ -2282,6 +2339,7 @@ async function initRelationalSchema() {
       [RELATIONAL_SCHEMA_VERSION]
     );
       await require('./lib/status-inventory-schema').installStatusInventoryTriggers(client);
+      await ensureReturnWorkspaceSchema(client);
       relationalSchemaReady = true;
       return true;
     } finally {
@@ -4821,6 +4879,7 @@ async function writeStateDocuments(state = {}) {
       await flushEntityRows();
     }
     await client.query("commit");
+    if (entityCollections.has("returns")) invalidateReturnsWorkspaceSummary();
   } catch (error) {
     await client.query("rollback");
     throw error;
@@ -11358,9 +11417,53 @@ async function readImportedReturn(source = "", channelReturnId = "") {
   return result.rows[0]?.data || null;
 }
 
+async function allocateImportedReturnNumber(client, record = {}) {
+  const base = returnNumberBase(record);
+  if (base) {
+    const sequenceKey = `return-sequence:${base.toLowerCase()}`;
+    await client.query("select pg_advisory_xact_lock(hashtext($1))", [sequenceKey]);
+    const saved = await client.query("select data from state_documents where doc_key = $1", [sequenceKey]);
+    const existing = await client.query(`
+      select upper(data->>'returnNumber') as return_number
+      from entity_documents
+      where collection = 'returns'
+        and (upper(data->>'returnNumber') = $1 or upper(data->>'returnNumber') ~ ('^' || $1 || '-[0-9]+$'))
+    `, [base]);
+    const used = new Set(existing.rows.map((row) => String(row.return_number || "")));
+    let sequence = Math.max(1, Number(saved.rows[0]?.data?.last || 0) + 1);
+    while (used.has(sequence === 1 ? base : `${base}-${sequence}`)) sequence += 1;
+    await client.query(`
+      insert into state_documents (doc_key, data, updated_at)
+      values ($1, jsonb_build_object('last', $2::int), now())
+      on conflict (doc_key) do update set data = excluded.data, updated_at = now()
+    `, [sequenceKey, sequence]);
+    return sequence === 1 ? base : `${base}-${sequence}`;
+  }
+  await client.query("select pg_advisory_xact_lock(hashtext('dataplus-return-number'))");
+  const result = await client.query(`
+    select greatest(
+      coalesce((select max((substring(data->>'returnNumber' from '^RET-([0-9]+)$'))::int)
+        from entity_documents
+        where collection = 'returns' and data->>'returnNumber' ~ '^RET-[0-9]+$'), 0),
+      coalesce((select case when data->>'return' ~ '^[0-9]+$' then (data->>'return')::int else 0 end
+        from state_documents where doc_key = 'sequence'), 0)
+    ) + 1 as next_value
+  `);
+  const nextValue = Math.max(1, Number(result.rows[0]?.next_value || 1));
+  await client.query(`
+    insert into state_documents (doc_key, data, updated_at)
+    values ('sequence', jsonb_build_object('return', $1::int), now())
+    on conflict (doc_key) do update set
+      data = jsonb_set(coalesce(state_documents.data, '{}'::jsonb), '{return}', to_jsonb($1::int), true),
+      updated_at = now()
+  `, [nextValue]);
+  return `RET-${String(nextValue).padStart(5, "0")}`;
+}
+
 async function upsertImportedReturn(record) {
   const pool = getPool();
   if (!pool) return record;
+  await initRelationalSchema();
   const client = await pool.connect();
   try {
     await client.query('begin');
@@ -11380,10 +11483,14 @@ async function upsertImportedReturn(record) {
         const old = (prior.items || []).find((row) => line.channelLineId ? row.channelLineId === line.channelLineId : line.transactionId ? row.transactionId === line.transactionId && row.itemId === line.itemId : row.sku === line.sku);
         return old?.receivedQty !== undefined ? { ...line, receivedQty: old.receivedQty } : line;
       });
+    } else {
+      record.returnNumber = await allocateImportedReturnNumber(client, record);
     }
+    record.channelReturnReference = record.channelReturnReference || record.channelReturnId || "";
     await client.query(`insert into entity_documents (collection, entity_id, position, data, updated_at)
       values ('returns', $1, 0, $2::jsonb, now()) on conflict (collection, entity_id) do update set data=excluded.data, updated_at=now()`, [record.id, JSON.stringify(record)]);
     await client.query('commit');
+    invalidateReturnsWorkspaceSummary();
     return record;
   } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
 }
@@ -11437,6 +11544,55 @@ async function readOrderReturns(order = {}) {
   return result.rows.map(row => row.data);
 }
 
+const RETURNS_WORKSPACE_SOURCE_CTE = `
+  with source as (
+    select entity_id, data, updated_at,
+      lower(coalesce(nullif(data->>'status', ''), nullif(data->>'returnStatus', ''), '')) as status_value,
+      lower(coalesce(data->>'receivingStatus', '')) as receiving_value,
+      lower(coalesce(data->>'inspectionStatus', '')) as inspection_value,
+      lower(coalesce(data->'channelSync'->>'status', data->>'channelStatus', '')) as sync_value,
+      coalesce(nullif(data->>'channelSource', ''), nullif(data->>'salesChannel', ''), nullif(data->>'source', ''), 'Local') as channel_value
+    from entity_documents
+    where collection = 'returns'
+  ), classified as (
+    select *, case
+      when status_value = any(array['done','closed','complete','completed','refunded','restocked','canceled','cancelled']::text[])
+        or (coalesce(data->>'restockedAt', '') <> '' and (receiving_value = any(array['done','closed']::text[]) or status_value = any(array['done','closed']::text[])))
+        then 'complete'
+      when lower(coalesce(data->>'refundAmountUnverified', 'false')) = 'true'
+        or concat_ws(' ', status_value, inspection_value, sync_value) ~ '(failed|rejected|error|needs_review|needs_revision)'
+        or coalesce(nullif(data->>'orderId', ''), nullif(data->>'orderNumber', ''), '') = ''
+        or coalesce(nullif(data->>'warehouseId', ''), nullif(data->>'warehouseName', ''), '') = ''
+        then 'needs_revision'
+      when status_value = any(array['','new','requested','authorized','pending']::text[])
+        and coalesce(data->>'receivedAt', '') = '' and receiving_value = ''
+        then 'new'
+      else 'in_process'
+    end as return_queue
+    from source
+  )
+`;
+
+async function readReturnsWorkspaceSummary(client) {
+  if (returnsWorkspaceSummaryCache?.expiresAt > Date.now()) return returnsWorkspaceSummaryCache.value;
+  const result = await client.query(`${RETURNS_WORKSPACE_SOURCE_CTE}
+    select return_queue, channel_value, count(*)::int as count
+    from classified
+    group by return_queue, channel_value
+  `);
+  const counts = { all: 0, new: 0, in_process: 0, needs_revision: 0, complete: 0 };
+  const channels = new Set();
+  for (const row of result.rows) {
+    const count = Number(row.count || 0);
+    counts.all += count;
+    if (Object.prototype.hasOwnProperty.call(counts, row.return_queue)) counts[row.return_queue] += count;
+    if (row.channel_value) channels.add(String(row.channel_value));
+  }
+  const value = { counts, channels: [...channels].sort((left, right) => left.localeCompare(right)) };
+  returnsWorkspaceSummaryCache = { expiresAt: Date.now() + 15000, value };
+  return value;
+}
+
 async function listReturnsWorkspace(options = {}) {
   const client = getPool();
   const pageSize = Math.max(1, Math.min(100, Number(options.pageSize || options.limit || 25)));
@@ -11462,67 +11618,35 @@ async function listReturnsWorkspace(options = {}) {
     conditions.push(`lower(channel_value) = $${values.length}`);
   }
   if (query) {
-    values.push(`%${query}%`);
-    conditions.push(`lower(data::text) like $${values.length}`);
+    values.push(query);
+    conditions.push(`strpos(lower(concat_ws(' ',
+      data->>'returnNumber', data->>'channelReturnId', data->>'channelReturnReference',
+      data->>'orderNumber', data->>'channelOrderId', data->>'customerName', data->>'buyer',
+      data->>'customerEmail', data->>'buyerEmail', data->>'trackingNumber', data->>'reason',
+      data->>'sku', data->'items'::text, data->'returnTracking'::text
+    )), $${values.length}) > 0`);
   }
   const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
-  const sourceCte = `
-    with source as (
-      select entity_id, data, updated_at,
-        lower(coalesce(nullif(data->>'status', ''), nullif(data->>'returnStatus', ''), '')) as status_value,
-        lower(coalesce(data->>'receivingStatus', '')) as receiving_value,
-        lower(coalesce(data->>'inspectionStatus', '')) as inspection_value,
-        lower(coalesce(data->'channelSync'->>'status', data->>'channelStatus', '')) as sync_value,
-        coalesce(nullif(data->>'channelSource', ''), nullif(data->>'salesChannel', ''), nullif(data->>'source', ''), 'Local') as channel_value
-      from entity_documents
-      where collection = 'returns'
-    ), classified as (
-      select *, case
-        when status_value = any(array['done','closed','complete','completed','refunded','restocked','canceled','cancelled']::text[])
-          or (coalesce(data->>'restockedAt', '') <> '' and (receiving_value = any(array['done','closed']::text[]) or status_value = any(array['done','closed']::text[])))
-          then 'complete'
-        when lower(coalesce(data->>'refundAmountUnverified', 'false')) = 'true'
-          or concat_ws(' ', status_value, inspection_value, sync_value) ~ '(failed|rejected|error|needs_review|needs_revision)'
-          or coalesce(nullif(data->>'orderId', ''), nullif(data->>'orderNumber', ''), '') = ''
-          or coalesce(nullif(data->>'warehouseId', ''), nullif(data->>'warehouseName', ''), '') = ''
-          then 'needs_revision'
-        when status_value = any(array['','new','requested','authorized','pending']::text[])
-          and coalesce(data->>'receivedAt', '') = '' and receiving_value = ''
-          then 'new'
-        else 'in_process'
-      end as return_queue
-      from source
-    )
-  `;
   const offset = (page - 1) * pageSize;
-  const [pageResult, totalResult, summaryResult] = await Promise.all([
-    client.query(`${sourceCte}
-      select data, return_queue, channel_value
+  const [pageResult, summary] = await Promise.all([
+    client.query(`${RETURNS_WORKSPACE_SOURCE_CTE}
+      select data, return_queue, channel_value, count(*) over()::int as filtered_total
       from classified ${where}
       order by updated_at desc, entity_id desc
       limit $${values.length + 1} offset $${values.length + 2}
     `, [...values, pageSize, offset]),
-    client.query(`${sourceCte} select count(*)::int as total from classified ${where}`, values),
-    client.query(`${sourceCte}
-      select return_queue, channel_value, count(*)::int as count
-      from classified
-      group by return_queue, channel_value
-    `)
+    readReturnsWorkspaceSummary(client)
   ]);
-  const counts = { all: 0, new: 0, in_process: 0, needs_revision: 0, complete: 0 };
-  const channels = new Set();
-  for (const row of summaryResult.rows) {
-    const count = Number(row.count || 0);
-    counts.all += count;
-    if (Object.prototype.hasOwnProperty.call(counts, row.return_queue)) counts[row.return_queue] += count;
-    if (row.channel_value) channels.add(String(row.channel_value));
+  let total = Number(pageResult.rows[0]?.filtered_total || 0);
+  if (!pageResult.rows.length && page > 1) {
+    const fallback = await client.query(`${RETURNS_WORKSPACE_SOURCE_CTE} select count(*)::int as total from classified ${where}`, values);
+    total = Number(fallback.rows[0]?.total || 0);
   }
-  const total = Number(totalResult.rows[0]?.total || 0);
   return {
     returns: pageResult.rows.map((row) => row.data),
     total,
-    counts,
-    channels: [...channels].sort((left, right) => left.localeCompare(right)),
+    counts: summary.counts,
+    channels: summary.channels,
     page,
     pageSize,
     totalPages: Math.max(1, Math.ceil(total / pageSize))

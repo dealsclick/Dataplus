@@ -33,6 +33,8 @@ test('Temu exact order-item linking and deduplicated reverse tracking', () => {
   const record = temuReturnRecord(detail(), [tracking, tracking], { id: 'O', orderNumber: '2086' }, [{ temuOrderItemId: 'ITEM1', sku: 'CAT1', title: 'Product' }]);
   assert.equal(record.items[0].sku, 'CAT1');
   assert.equal(record.items[0].channelLineId, 'PA1-1');
+  assert.equal(record.returnNumber, '');
+  assert.equal(record.channelReturnReference, 'PA1');
   assert.equal(record.returnTracking.length, 1);
   assert.equal(record.returnTracking[0].channelWarehouseType, 1);
   assert.equal(temuReturnRecord(detail(), [], null).orderId, '');

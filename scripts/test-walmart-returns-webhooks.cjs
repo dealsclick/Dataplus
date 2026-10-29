@@ -36,6 +36,8 @@ function run() {
   assert.equal(mapped.orderId, 'ORDER-1');
   assert.equal(mapped.purchaseOrderId, 'PO-123');
   assert.equal(mapped.channelOrderId, 'PO-123');
+  assert.equal(mapped.returnNumber, '');
+  assert.equal(mapped.channelReturnReference, 'RMA-123');
   assert.equal(mapped.status, 'completed');
   assert.equal(mapped.actualRefundAmount, 24.5);
   assert.equal(mapped.items[0].sku, 'LOCAL-SKU');

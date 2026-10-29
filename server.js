@@ -127,7 +127,7 @@ const accountingHandler = createAccountingHandler({
   enrichOrder: order => enrichOrderDetail(order), parseBody, sendJson, sendCsv, can: userCan
 });
 const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt } = require("./lib/return-workflow");
-const { nextOrderReturnNumber, returnNumberBase, returnSlugBase, returnsWithPublicSlugs } = require("./lib/return-identifiers");
+const { nextOrderReturnNumber, normalizeOrderBasedReturnNumbers, returnNumberBase, returnSlugBase, returnsWithPublicSlugs } = require("./lib/return-identifiers");
 const { veeqoShipmentServiceSelections } = require("./lib/veeqo-shipping-options");
 const { addVeeqoCustomsFields, normalizeVeeqoAddressCountry, productCountryOfOrigin } = require("./lib/veeqo-customs");
 const { findFreshVeeqoRate, isStaleVeeqoRateError, veeqoRateExpiresAt, veeqoRateNeedsRefresh } = require("./lib/veeqo-rate-freshness");
@@ -4758,26 +4758,10 @@ function normalizeDb(db) {
     changed = true;
   }
   {
-    const seenReturnNumbers = new Set();
-    let nextReturnSequence = 1;
-    db.returns = (db.returns || []).map((item) => {
-      let returnNumber = String(item.returnNumber || "").trim();
-      if (returnNumber && !seenReturnNumbers.has(returnNumber)) {
-        seenReturnNumbers.add(returnNumber);
-        const match = returnNumber.match(/^RET-(\d+)$/);
-        if (match) nextReturnSequence = Math.max(nextReturnSequence, Number(match[1]) + 1);
-      } else {
-        while (seenReturnNumbers.has(`RET-${String(nextReturnSequence).padStart(5, "0")}`)) nextReturnSequence += 1;
-        returnNumber = `RET-${String(nextReturnSequence).padStart(5, "0")}`;
-        seenReturnNumbers.add(returnNumber);
-        nextReturnSequence += 1;
-        changed = true;
-      }
-      return {
-        ...item,
-        returnNumber
-      };
-    });
+    const normalizedReturnNumbers = normalizeOrderBasedReturnNumbers(db.returns || []);
+    db.returns = normalizedReturnNumbers.records;
+    if (normalizedReturnNumbers.changed) changed = true;
+    const nextReturnSequence = Math.max(0, ...db.returns.map((item) => Number(String(item.returnNumber || "").match(/^RET-(\d+)$/)?.[1] || 0))) + 1;
     db.sequence = db.sequence || {};
     db.sequence.return = Math.max(Number(db.sequence.return || 0), nextReturnSequence - 1);
   }
@@ -25059,8 +25043,8 @@ async function runShopifyReturnImportWorkerJob(job) {
         const amount = confirmed.reduce((sum, row) => sum + Number(row.amountSet?.shopMoney?.amount || 0), 0);
         const lifecycle = ["CLOSED", "CANCELED", "DECLINED"].includes(source.status) ? "closed" : "requested";
         const record = await postgres.upsertImportedReturn({
-          id: `shopify-return-${source.id.split('/').pop()}`, returnNumber: source.name,
-          orderId: order.id, orderNumber: order.orderNumber, source: "Shopify", channel: "Shopify", channelReturnId: source.id,
+          id: `shopify-return-${source.id.split('/').pop()}`, returnNumber: "",
+          orderId: order.id, orderNumber: order.orderNumber, source: "Shopify", channel: "Shopify", channelReturnId: source.id, channelReturnReference: source.name || source.id,
           channelStatus: source.status, channelLifecycleStatus: lifecycle, status: lifecycle,
           createdAt: source.createdAt, channelClosedAt: source.closedAt || "", updatedAt: now,
           amount, actualRefundAmount: confirmed.length ? amount : null, refundStatus: confirmed.length ? "confirmed" : "not_refunded",
@@ -44005,6 +43989,7 @@ function upsertEbayReturnRecord(db = {}, returnRecord = {}, detailRecord = null)
     source: "eBay",
     channel: "eBay",
     channelReturnId: returnId,
+    channelReturnReference: returnId,
     marketplaceReturnId: returnId,
     channelOrderNumber: ebayReturnOrderId(combined) || existing?.channelOrderNumber || "",
     sku: existing?.sku || items[0]?.sku || "",

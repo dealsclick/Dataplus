@@ -39,6 +39,10 @@ assert.doesNotMatch(ebayReturnImport, /readStateField\("returns"\)/);
 assert.match(ebayReturnImport, /postgres\.readImportedReturn\("eBay", returnId\)/);
 assert.match(database, /async function readImportedReturn\(/);
 assert.match(database, /readImportedReturn,/);
+assert.match(database, /entity_documents_returns_number_uidx/);
+const workspaceQuery = database.slice(database.indexOf('async function listReturnsWorkspace('), database.indexOf('async function saveOrder('));
+assert.match(workspaceQuery, /count\(\*\) over\(\)::int as filtered_total/);
+assert.doesNotMatch(workspaceQuery, /lower\(data::text\) like/);
 
 const externalWorker = fs.readFileSync(path.join(__dirname, 'dataplus-worker.js'), 'utf8');
 assert.match(externalWorker, /async function checkScheduledEbayReturnImport\(/);

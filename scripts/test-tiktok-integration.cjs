@@ -126,6 +126,8 @@ async function main() {
   assert.equal(returnRecord.items[0].sku, 'SKU-2');
   assert.equal(returnRecord.items[0].qty, 2);
   assert.equal(returnRecord.status, 'completed');
+  assert.equal(returnRecord.returnNumber, '');
+  assert.equal(returnRecord.channelReturnReference, 'return-1');
 
   const successfulRequest = mapTikTokReturn({
     return_id: 'return-2', order_id: '576000001', return_status: 'RETURN_OR_REFUND_REQUEST_SUCCESS',

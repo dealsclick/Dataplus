@@ -78,3 +78,15 @@ test('legacy duplicate RMA numbers migrate to their original order numbers', () 
   assert.deepEqual(result.records.map((row) => row.returnNumber), ['RET-47776', 'RET-47924', 'RET-47924-2']);
   assert.equal(result.records[0].legacyReturnNumber, 'RET-00052');
 });
+
+test('marketplace return references are retained while DataPlus assigns unique IDs', () => {
+  const result = normalizeOrderBasedReturnNumbers([
+    { id: 'temu', returnNumber: 'PA-987', channelReturnId: 'PA-987', orderNumber: '55577', createdAt: '2026-10-01T12:00:00Z' },
+    { id: 'shopify', returnNumber: '#1004-R1', channelReturnId: 'gid://shopify/Return/4', createdAt: '2026-10-02T12:00:00Z' },
+    { id: 'local', returnNumber: 'RET-55578', orderNumber: '55578', createdAt: '2026-10-03T12:00:00Z' }
+  ], '2026-10-29T12:00:00Z');
+  assert.equal(result.changed, 2);
+  assert.deepEqual(result.records.map((row) => row.returnNumber), ['RET-55577', 'RET-00001', 'RET-55578']);
+  assert.equal(result.records[0].channelReturnId, 'PA-987');
+  assert.equal(result.records[0].legacyReturnNumber, 'PA-987');
+});
