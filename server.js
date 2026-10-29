@@ -20268,6 +20268,7 @@ async function runOrderExportWorkerJob(job = {}) {
       const result = await postgres.listOrders({
         ...filters,
         summary: true,
+        includeReturns: mode === "lines",
         paginated: true,
         page,
         limit: ORDER_EXPORT_BATCH_SIZE,

@@ -41,11 +41,22 @@ const order = {
     title: "Test item",
     brand: "Example Brand",
     supplier: "True Value",
+    vendorSku: "TV-100",
+    mfrPartNumber: "MFR-100",
+    upc: "012345678905",
     qty: 2,
     price: 20,
     cost: 8,
     refundedQty: 1,
     refundedAt: "2026-10-30T10:00:00.000Z"
+  }],
+  returns: [{
+    id: "return-1",
+    returnNumber: "RET-00001",
+    channelReturnId: "CHANNEL-RETURN-1",
+    reason: "DAMAGED",
+    description: "Box arrived crushed",
+    items: [{ lineId: "line-1", sku: "SKU-1", reason: "DAMAGED", description: "Box arrived crushed" }]
   }]
 };
 
@@ -69,6 +80,11 @@ assert.equal(lineRows.length, 1);
 assert.equal(lineRows[0].length, lineHeaders.length);
 assert.equal(lineRows[0][lineHeaders.indexOf("Brand")], "Example Brand");
 assert.equal(lineRows[0][lineHeaders.indexOf("Supplier")], "True Value");
+assert.equal(lineRows[0][lineHeaders.indexOf("Vendor SKU")], "TV-100");
+assert.equal(lineRows[0][lineHeaders.indexOf("Manufacturer part number")], "MFR-100");
+assert.equal(lineRows[0][lineHeaders.indexOf("UPC")], "012345678905");
+assert.equal(lineRows[0][lineHeaders.indexOf("Return reason")], "DAMAGED: Box arrived crushed");
+assert.equal(lineRows[0][lineHeaders.indexOf("Return number")], "RET-00001");
 assert.equal(lineRows[0][lineHeaders.indexOf("Line total")], 40);
 assert.equal(lineRows[0][lineHeaders.indexOf("Refunded quantity")], 1);
 

@@ -263,6 +263,9 @@ async function ensureReturnWorkspaceSchema(client) {
       create index if not exists entity_documents_returns_order_number_idx
         on entity_documents (lower(data->>'orderNumber'))
         where collection = 'returns' and nullif(data->>'orderNumber', '') is not null;
+      create index if not exists entity_documents_returns_order_id_idx
+        on entity_documents ((data->>'orderId'))
+        where collection = 'returns' and nullif(data->>'orderId', '') is not null;
       create index if not exists entity_documents_returns_updated_idx
         on entity_documents (updated_at desc, entity_id desc)
         where collection = 'returns';
@@ -9154,6 +9157,9 @@ function orderLineRowToSummary(row = {}) {
     remainingQty: row.line_remaining_qty,
     brand: row.line_brand || "",
     supplier: row.line_supplier || "",
+    vendorSku: row.line_vendor_sku || "",
+    mfrPartNumber: row.line_mfr_part_number || "",
+    upc: row.line_upc || "",
     cancelledQty: row.line_cancelled_qty,
     cancelledAt: row.line_cancelled_at || "",
     refundedQty: row.line_refunded_qty,
@@ -9289,6 +9295,9 @@ function orderRowToSummary(row = {}, lines = []) {
       cost: item.cost || item.unitCost,
       brand: item.brand || item.brandName,
       supplier: item.supplier || item.vendor || item.vendorName,
+      vendorSku: item.vendorSku || item.vendor_sku || item.sourceSku,
+      mfrPartNumber: item.mfrPartNumber || item.manufacturerPartNumber || item.mfr_part_number || item.mpn,
+      upc: item.upc || item.barcode || item.gtin || item.upcCode,
       status: item.status,
       fulfillmentStatus: item.fulfillmentStatus,
       fulfilledQty: item.fulfilledQty ?? item.fulfilledQuantity ?? item.qtyFulfilled,
@@ -10685,6 +10694,9 @@ async function listOrders(options = {}) {
         coalesce(order_line_items.raw->>'remainingQty', order_line_items.raw->>'remainingQuantity', order_line_items.raw->>'unfulfilledQuantity') as line_remaining_qty,
         coalesce(nullif(order_line_items.raw->>'brand', ''), nullif(order_line_items.raw->>'brandName', ''), nullif(product.brand, ''), nullif(alias_product.brand, ''), '') as line_brand,
         coalesce(nullif(order_line_items.raw->>'supplier', ''), nullif(order_line_items.raw->>'vendor', ''), nullif(order_line_items.raw->>'vendorName', ''), nullif(product.supplier, ''), nullif(alias_product.supplier, ''), '') as line_supplier,
+        coalesce(nullif(order_line_items.raw->>'vendorSku', ''), nullif(order_line_items.raw->>'vendor_sku', ''), nullif(order_line_items.raw->>'sourceSku', ''), nullif(product.vendor_sku, ''), nullif(alias_product.vendor_sku, ''), '') as line_vendor_sku,
+        coalesce(nullif(order_line_items.raw->>'mfrPartNumber', ''), nullif(order_line_items.raw->>'manufacturerPartNumber', ''), nullif(order_line_items.raw->>'mfr_part_number', ''), nullif(order_line_items.raw->>'mpn', ''), nullif(product.mfr_part_number, ''), nullif(alias_product.mfr_part_number, ''), '') as line_mfr_part_number,
+        coalesce(nullif(order_line_items.raw->>'upc', ''), nullif(order_line_items.raw->>'barcode', ''), nullif(order_line_items.raw->>'gtin', ''), nullif(order_line_items.raw->>'upcCode', ''), nullif(product.barcode, ''), nullif(product.raw->>'upc', ''), nullif(product.raw->>'gtin', ''), nullif(product.raw->>'upcCode', ''), nullif(alias_product.barcode, ''), nullif(alias_product.raw->>'upc', ''), nullif(alias_product.raw->>'gtin', ''), nullif(alias_product.raw->>'upcCode', ''), '') as line_upc,
         coalesce(order_line_items.raw->>'cancelledQty', order_line_items.raw->>'canceledQty', order_line_items.raw->>'cancelledQuantity', order_line_items.raw->>'canceledQuantity') as line_cancelled_qty,
         coalesce(order_line_items.raw->>'cancelledAt', order_line_items.raw->>'canceledAt', order_line_items.raw->>'cancelDate', '') as line_cancelled_at,
         coalesce(order_line_items.raw->>'refundedQty', order_line_items.raw->>'refundQty', order_line_items.raw->>'refundedQuantity', order_line_items.raw->>'refundQuantity') as line_refunded_qty,
@@ -10709,7 +10721,49 @@ async function listOrders(options = {}) {
     if (!byOrder.has(line.order_id)) byOrder.set(line.order_id, []);
     byOrder.get(line.order_id).push(line);
   }
-  const mapped = orders.rows.map((row) => summary ? orderRowToSummary(row, byOrder.get(row.order_id) || []) : orderRowToState(row, byOrder.get(row.order_id) || []));
+  const linkedReturnsByOrderId = new Map();
+  const linkedReturnsByOrderNumber = new Map();
+  if (ids.length && options.includeReturns === true) {
+    const orderNumbers = [...new Set(orders.rows.map((row) => String(row.order_number || "").trim().toLowerCase()).filter(Boolean))];
+    const linkedReturns = await client.query(`
+      select data
+      from entity_documents
+      where collection = 'returns'
+        and (
+          data->>'orderId' = any($1::text[])
+          or (cardinality($2::text[]) > 0 and lower(data->>'orderNumber') = any($2::text[]))
+        )
+      order by updated_at, entity_id
+    `, [ids, orderNumbers]);
+    for (const row of linkedReturns.rows) {
+      const record = row.data && typeof row.data === "object" ? row.data : {};
+      const orderId = String(record.orderId || "").trim();
+      const orderNumber = String(record.orderNumber || "").trim().toLowerCase();
+      if (orderId) {
+        if (!linkedReturnsByOrderId.has(orderId)) linkedReturnsByOrderId.set(orderId, []);
+        linkedReturnsByOrderId.get(orderId).push(record);
+      }
+      if (orderNumber) {
+        if (!linkedReturnsByOrderNumber.has(orderNumber)) linkedReturnsByOrderNumber.set(orderNumber, []);
+        linkedReturnsByOrderNumber.get(orderNumber).push(record);
+      }
+    }
+  }
+  const mapped = orders.rows.map((row) => {
+    const order = summary ? orderRowToSummary(row, byOrder.get(row.order_id) || []) : orderRowToState(row, byOrder.get(row.order_id) || []);
+    if (options.includeReturns !== true) return order;
+    const candidates = [
+      ...(Array.isArray(order.returns) ? order.returns : []),
+      ...(linkedReturnsByOrderId.get(String(row.order_id || "")) || []),
+      ...(linkedReturnsByOrderNumber.get(String(row.order_number || "").trim().toLowerCase()) || [])
+    ];
+    const uniqueReturns = new Map();
+    for (const record of candidates) {
+      const identity = String(record?.id || record?.returnNumber || record?.channelReturnId || record?.marketplaceReturnId || JSON.stringify(record || {}));
+      uniqueReturns.set(identity, record);
+    }
+    return { ...order, returns: [...uniqueReturns.values()] };
+  });
   if (paginated) {
     return {
       orders: mapped,
