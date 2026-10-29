@@ -11,6 +11,8 @@ assert.match(warehouseRouteSource, /receiving=\{canReceive \? <InboundReceivingL
 assert.match(warehouseRouteSource, /manual=\{canReceive \? <ManualReceivingPanel mobile/, 'Other stock must remain the ordinary manual receipt flow');
 assert.match(warehouseRouteSource, /const beginQuickCreate = \(draft\?[\s\S]*quickCreatePhotoInputRef\.current\?\.click\(\)/, 'Warehouse quick create must open the product camera directly');
 assert.match(warehouseRouteSource, /<DialogTitle>Quick create product<\/DialogTitle>[\s\S]*\{manualPhotoUrls\.length\}\/8 photos[\s\S]*Take another[\s\S]*Create draft SKU/, 'Warehouse quick create must support a compact multi-photo capture flow');
+assert.match(warehouseRouteSource, /Quick create unit of measure[\s\S]*Quick create case pack/, 'Warehouse quick create must collect UOM and case pack');
+assert.match(warehouseRouteSource, /UOM \{lastScan\.uomName[\s\S]*Case pack \{Math\.max/, 'Matched scans must display UOM and case pack');
 assert.match(warehouseRouteSource, /if \(resumeScanner\) setCameraOpen\(true\)/, 'Camera quick create must return the worker to barcode scanning');
 assert.match(appSource, /href="\/warehouse\/mobile"[\s\S]*Warehouse Mobile/, 'The mobile account menu must link to Warehouse Mobile');
 const start = source.indexOf('async function purchaseOrderWithCatalogImages(');

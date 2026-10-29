@@ -17,7 +17,7 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
   let atomicLineWrites = 0;
   let savedMediaCount = 0;
   const photoDataUrls = ['photo-1', 'photo-2'].map(value => `data:image/jpeg;base64,${Buffer.from(value).toString('base64')}`);
-  const body = { barcode: 'X0039W0Z71', locationBin: 'A-01', quantity: 2, qty: 2, sku: 'TEST-SKU', title: 'Test item', user: 'Test counter', clientActionId: 'quick-action-1', photoDataUrl: photoDataUrls[0], photoDataUrls };
+  const body = { barcode: 'X0039W0Z71', locationBin: 'A-01', quantity: 2, qty: 2, sku: 'TEST-SKU', title: 'Test item', uom: 'CS', casePack: 12, user: 'Test counter', clientActionId: 'quick-action-1', photoDataUrl: photoDataUrls[0], photoDataUrls };
   if (omitSku) delete body.sku;
   if (originalBin !== undefined) body.unknownLocationBin = originalBin;
   const context = {
@@ -27,6 +27,14 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
     resolveScannedCatalogBarcode: async () => ({ product, sourceItem: null }),
     validateWarehouseBin: (_warehouse, bin) => ({ value: bin }),
     auditProductImageUrl: () => '', auditExpectedQuantity: () => 3,
+    UOM_DEFINITIONS: { EA: 'Each', CS: 'Case' },
+    normalizedUomCode: value => String(value || '').trim().toUpperCase(),
+    productUomInfo: item => {
+      const code = String(item.uom || 'EA').toUpperCase();
+      const qty = Math.max(1, Number(item.uomQty || item.uom_qty || 1));
+      const name = code === 'CS' ? 'Case' : 'Each';
+      return { code, name, qty, display: qty > 1 ? `${name} of ${qty}` : name };
+    },
     normalizeWarehouseStockRow: row => row,
     authUser: { name: 'Test counter' }, Buffer,
     crypto: { randomUUID: (() => { let value = 0; return () => `created-id-${++value}`; })() },
@@ -79,10 +87,19 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
   assert.equal(unknown.warehouseReads, 1);
   assert.equal(unknown.written.unknownBarcodes[0].count, 2);
   assert.equal(unknown.audit.unknownBarcodes[0].locationBin, 'A-01');
-  const matched = await run('scan', { product: { id: 'product', sku: 'EXISTING', title: 'Existing product' } });
+  const lookup = await run('lookup', { product: { id: 'product', sku: 'EXISTING', title: 'Existing product', uom: 'CS', uomQty: 24 } });
+  assert.equal(lookup.result.status, 200);
+  assert.equal(lookup.result.data.product.uom, 'CS');
+  assert.equal(lookup.result.data.product.uomName, 'Case');
+  assert.equal(lookup.result.data.product.casePack, 24);
+  const matched = await run('scan', { product: { id: 'product', sku: 'EXISTING', title: 'Existing product', uom: 'CS', uomQty: 24 } });
   assert.equal(matched.result.data.matched, true);
+  assert.equal(matched.result.data.product.uom, 'CS');
+  assert.equal(matched.result.data.product.casePack, 24);
   assert.equal(matched.audit.lines[0].countedQty, 2);
   assert.equal(matched.audit.lines[0].expectedQty, 3);
+  assert.equal(matched.audit.lines[0].uom, 'CS');
+  assert.equal(matched.audit.lines[0].casePack, 24);
   assert.equal(matched.atomicLineWrites, 1);
   const manual = await run('manual-item');
   assert.equal(manual.result.status, 201);
@@ -102,6 +119,9 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
   assert.equal(quick.created.sku, 'DPS10001');
   assert.equal(quick.created.status, 'Draft');
   assert.equal(quick.created.needsProductDetails, true);
+  assert.equal(quick.created.uom, 'CS');
+  assert.equal(quick.created.uomQty, 12);
+  assert.equal(quick.created.packageQuantity, '12');
   assert.deepEqual(Array.from(quick.created.tags), ['warehouse-quick-create', 'needs-product-details']);
   assert.match(quick.created.defaultImage, /^\/api\/warehouse-audits\/audit\/lines\//);
   assert.equal(quick.created.images.length, 2);
@@ -110,6 +130,8 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
   assert.equal(quick.audit.lines[0].quickCreated, true);
   assert.equal(quick.audit.lines[0].reviewStatus, 'needs_details');
   assert.equal(quick.audit.lines[0].countedQty, 2);
+  assert.equal(quick.audit.lines[0].uom, 'CS');
+  assert.equal(quick.audit.lines[0].casePack, 12);
   const duplicateQuick = await run('quick-item', { lines: [{ id: 'line-1', productId: 'quick-product', sku: 'DPS10001', quickCreateClientId: 'quick-action-1', countedQty: 2 }] });
   assert.equal(duplicateQuick.result.status, 200);
   assert.equal(duplicateQuick.result.data.duplicate, true);
@@ -123,7 +145,7 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
   assert.equal(resumed.audit.unknownBarcodes.length, 1);
   assert.equal(resumed.audit.lines[0].sku, 'TEST-SKU');
   assert.equal(resumed.audit.lines[0].locationBin, 'A-01');
-  for (const route of ['next-sku', 'scan', 'quick-item', 'manual-item']) {
+  for (const route of ['next-sku', 'lookup', 'scan', 'quick-item', 'manual-item']) {
     const closed = await run(route, { closed: true });
     assert.equal(closed.result.status, 400);
     assert.equal(closed.warehouseReads, 0);

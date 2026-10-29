@@ -55113,12 +55113,21 @@ async function handleApi(req, res) {
     if (!barcode) return sendJson(res, 400, { error: "Scan a UPC or SKU first." });
     const lookup = await resolveScannedCatalogBarcode(barcode);
     const product = lookup.product || null;
+    const uomInfo = product ? productUomInfo({
+      ...product,
+      uom: product.uom || lookup.sourceItem?.uom,
+      uomQty: product.uomQty || product.uom_qty || lookup.sourceItem?.uomQty || lookup.sourceItem?.uom_qty,
+    }) : null;
     return sendJson(res, 200, {
       matched: Boolean(product),
       product: product ? {
         sku: product.sku,
         title: product.marketplaceTitle || product.title || product.sku,
-        image: auditProductImageUrl(product, lookup.sourceItem || {})
+        image: auditProductImageUrl(product, lookup.sourceItem || {}),
+        uom: uomInfo.code,
+        uomName: uomInfo.name,
+        casePack: uomInfo.qty,
+        uomDisplay: uomInfo.display,
       } : null,
       message: product ? `${product.sku} found in the catalog.` : `No catalog item was found for ${barcode}.`
     });
@@ -55151,6 +55160,11 @@ async function handleApi(req, res) {
     const auditImage = auditProductImageUrl(product || {}, lookup.sourceItem || {});
     const now = new Date().toISOString();
     if (product) {
+      const scannedUomInfo = productUomInfo({
+        ...product,
+        uom: product.uom || lookup.sourceItem?.uom,
+        uomQty: product.uomQty || product.uom_qty || lookup.sourceItem?.uomQty || lookup.sourceItem?.uom_qty,
+      });
       const currentLine = (audit.lines || []).find((entry) => String(entry.productId || entry.sku) === String(product.id || product.sku) && String(entry.locationBin || "").trim().toLowerCase() === resolvedLocationBin.toLowerCase());
       const supplierCount = Math.max(0, Number(product.supplierCount || 0), Number(lookup.sourceItem?.supplierCount || 0), Number(scanSupplierCoverage?.supplierCount || 0));
       const possibleSupplierCount = Math.max(supplierCount, Number(scanSupplierCoverage?.possibleSupplierCount || 0));
@@ -55162,6 +55176,10 @@ async function handleApi(req, res) {
         title: product.marketplaceTitle || product.title || product.sku,
         image: currentLine?.image || auditImage,
         barcode,
+        uom: scannedUomInfo.code,
+        uomName: scannedUomInfo.name,
+        uomQty: scannedUomInfo.qty,
+        casePack: scannedUomInfo.qty,
         locationBin: resolvedLocationBin,
         expectedQty: currentLine?.expectedQty ?? auditExpectedQuantity(product, audit, resolvedLocationBin),
         supplierCount,
@@ -55186,7 +55204,12 @@ async function handleApi(req, res) {
       if (localLineIndex >= 0) audit.lines[localLineIndex] = savedLine;
       else (audit.lines || (audit.lines = [])).push(savedLine);
       audit.updatedAt = now;
-      return sendJson(res, 200, { audit, product, matched: true, message: `${product.sku} counted: ${quantity}.` });
+      return sendJson(res, 200, {
+        audit,
+        product: { ...product, uom: scannedUomInfo.code, uomName: scannedUomInfo.name, uomQty: scannedUomInfo.qty, casePack: scannedUomInfo.qty, uomDisplay: scannedUomInfo.display },
+        matched: true,
+        message: `${product.sku} counted: ${quantity}.`
+      });
     }
     const unknownResult = await postgres.recordWarehouseAuditUnknownScan(audit.id, {
       barcode,
@@ -55976,12 +55999,17 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
     const quantity = Math.max(1, Math.min(100000, Math.floor(Number(body.qty || body.quantity || 1) || 0)));
+    const uom = normalizedUomCode(body.uom || "EA") || "EA";
+    const casePackValue = Number(body.casePack ?? body.uomQty ?? 1);
+    const casePack = Math.floor(casePackValue);
     const clientActionId = String(body.clientActionId || "").trim();
     const photoDataUrls = (Array.isArray(body.photoDataUrls) ? body.photoDataUrls : [body.photoDataUrl])
       .map((value) => String(value || "").trim())
       .filter(Boolean)
       .slice(0, 8);
     if (!barcode) return sendJson(res, 400, { error: "Scan a UPC before quick-creating the product." });
+    if (!UOM_DEFINITIONS[uom]) return sendJson(res, 400, { error: "Choose a supported unit of measure." });
+    if (!Number.isFinite(casePackValue) || casePackValue !== casePack || casePack < 1 || casePack > 100000) return sendJson(res, 400, { error: "Case pack must be a whole number from 1 to 100,000." });
     if (!clientActionId || clientActionId.length > 100) return sendJson(res, 400, { error: "Quick-create request identifier is missing." });
     if (!photoDataUrls.length) return sendJson(res, 400, { error: "Take at least one product photo before quick create." });
     for (const photoDataUrl of photoDataUrls) {
@@ -56018,7 +56046,7 @@ async function handleApi(req, res) {
       id: productId, sku, title, marketplaceTitle: title, barcode,
       qty: quantity, stockQty: quantity, reserved: 0, reorderPoint: 0,
       active: true, status: "Draft", condition: "New", source: "warehouse-audit-quick-create",
-      category: "", mainCategory: "", sourceCategory: "", suggestedPackageCategory: "", supplier: "", brand: "", manufacturer: "", mfrPartNumber: "", vendorSku: "", shortDescription: "", cost: 0, price: 0,
+      category: "", mainCategory: "", sourceCategory: "", suggestedPackageCategory: "", supplier: "", brand: "", manufacturer: "", mfrPartNumber: "", vendorSku: "", shortDescription: "", uom, uomQty: casePack, packageQuantity: String(casePack), cost: 0, price: 0,
       locationBin,
       warehouseStock: [normalizeWarehouseStockRow({ warehouseId: auditWarehouse?.id || audit.warehouseId || "", warehouseName: auditWarehouse?.name || audit.warehouseName || "Warehouse", locationBin, qty: quantity, reserved: 0 }, auditWarehouse)],
       images: imageUrls, defaultImage: imageUrl,
@@ -56027,12 +56055,12 @@ async function handleApi(req, res) {
       createdAt: now, updatedAt: now, createdBy,
       createdMethod: "Warehouse audit quick create", createdSource: "Warehouse audit", createdSourceDetail: audit.auditNumber,
       createdAuditId: audit.id, createdAuditNumber: audit.auditNumber,
-      quickCreate: { barcode, auditId: audit.id, auditNumber: audit.auditNumber, clientActionId, photoCapturedAt: now, photoCount: imageUrls.length }
+      quickCreate: { barcode, auditId: audit.id, auditNumber: audit.auditNumber, clientActionId, uom, casePack, photoCapturedAt: now, photoCount: imageUrls.length }
     };
     await postgres.upsertProductsFromState([product]);
     await postgres.upsertInventoryLevelsFromProducts([product]);
     const line = {
-      id: lineId, productId, sku, title, image: imageUrl, images: imageUrls, barcode, locationBin,
+      id: lineId, productId, sku, title, image: imageUrl, images: imageUrls, barcode, uom, uomName: UOM_DEFINITIONS[uom], uomQty: casePack, casePack, locationBin,
       expectedQty: quantity, countedQty: quantity, firstScannedAt: now, lastScannedAt: now,
       reviewStatus: "needs_details", source: "warehouse-audit-quick-create", quickCreated: true,
       quickCreateClientId: clientActionId, createdProductSku: sku, createdProductId: productId
