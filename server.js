@@ -15,6 +15,7 @@ const nodemailer = require("nodemailer");
 const { PDFParse } = require("pdf-parse");
 const { groupReleases, loadReleaseHistory, readDeploymentStatus } = require("./lib/release-history");
 const ebayOAuthState = require("./lib/ebay-oauth-state");
+const channelOAuthState = require("./lib/channel-oauth-state");
 const ftp = require("basic-ftp");
 const { XMLParser, XMLBuilder } = require("fast-xml-parser");
 const postgres = require("./db");
@@ -27443,15 +27444,45 @@ function buildTemuAuthorizationUrl(db = {}, options = {}) {
     error.statusCode = 400;
     throw error;
   }
-  const state = crypto.randomBytes(16).toString("hex");
-  db.connectorState = db.connectorState || {};
-  db.connectorState.temuOauthState = state;
-  db.connectorState.temuOauthStateExpiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+  const state = options.sessionToken
+    ? channelOAuthState.createState({
+      provider: "Temu",
+      clientId: config.appKey,
+      signingSecret: config.appSecret,
+      redirectUri,
+      sessionToken: options.sessionToken,
+      returnTo: options.returnTo,
+      defaultReturnTo: "/channels?channel=Temu"
+    })
+    : crypto.randomBytes(16).toString("hex");
+  if (!options.sessionToken) {
+    db.connectorState = db.connectorState || {};
+    db.connectorState.temuOauthState = state;
+    db.connectorState.temuOauthStateExpiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+  }
   const authUrl = new URL(config.authorizationUrl || DEFAULT_CHANNEL_SETTINGS.temuAuthorizationUrl);
   authUrl.searchParams.set("appKey", config.appKey);
   authUrl.searchParams.set("redirect_uri", redirectUri);
   authUrl.searchParams.set("state", state);
   return { authUrl: authUrl.toString(), redirectUri, state };
+}
+
+function clearTemuOAuthState(connectorState = {}) {
+  delete connectorState.temuOauthState;
+  delete connectorState.temuOauthStateExpiresAt;
+}
+
+function validateLegacyTemuOAuthState(connectorState = {}, suppliedState) {
+  const expectedState = String(connectorState.temuOauthState || "").trim();
+  const receivedState = String(suppliedState || "").trim();
+  const expiresAt = Date.parse(String(connectorState.temuOauthStateExpiresAt || ""));
+  if (!expectedState || !receivedState || expectedState !== receivedState) {
+    throw new Error("The Temu callback state did not match. Start the connection again from DataPlus.");
+  }
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    throw new Error("This Temu sign-in link expired. Start the connection again from DataPlus.");
+  }
+  return "/channels?channel=Temu";
 }
 
 async function readTemuAuthState() {
@@ -29152,16 +29183,53 @@ function veeqoConfig(settings = {}) {
   };
 }
 
-function veeqoAuthorizeUrl(settings = {}) {
+function veeqoAuthorizeUrl(settings = {}, options = {}) {
   const config = veeqoConfig(settings);
   if (!config.clientId) throw new Error("Add the Veeqo client ID before connecting OAuth.");
+  if (!config.clientSecret) throw new Error("Add the Veeqo client secret before connecting OAuth.");
   if (!config.redirectUri) throw new Error("Add the Veeqo redirect URI before connecting OAuth.");
+  const state = `veeqo.${channelOAuthState.createState({
+    provider: "Veeqo",
+    clientId: config.clientId,
+    signingSecret: config.clientSecret,
+    redirectUri: config.redirectUri,
+    sessionToken: options.sessionToken,
+    returnTo: options.returnTo,
+    defaultReturnTo: "/settings?tab=fulfillment"
+  })}`;
   const authUrl = new URL("https://app.veeqo.com/oauth/authorize");
   authUrl.searchParams.set("client_id", config.clientId);
   authUrl.searchParams.set("redirect_uri", config.redirectUri);
   authUrl.searchParams.set("response_type", "code");
   authUrl.searchParams.set("scope", "");
+  authUrl.searchParams.set("state", state);
   return authUrl.toString();
+}
+
+function isVeeqoOAuthCallbackRequest(req) {
+  const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+  if (url.pathname === "/auth/veeqo/callback") return true;
+  const state = String(url.searchParams.get("state") || "");
+  return url.pathname === "/"
+    && state.startsWith("veeqo.v2.")
+    && (url.searchParams.has("code") || url.searchParams.has("error") || url.searchParams.has("error_description"));
+}
+
+function validateVeeqoOAuthState(settings = {}, req, suppliedState) {
+  const config = veeqoConfig(settings);
+  const state = String(suppliedState || "").trim();
+  if (!state.startsWith("veeqo.v2.")) {
+    throw new Error("The Veeqo callback state did not match. Start the connection again from DataPlus.");
+  }
+  return channelOAuthState.validateState({
+    provider: "Veeqo",
+    clientId: config.clientId,
+    signingSecret: config.clientSecret,
+    redirectUri: config.redirectUri,
+    sessionToken: oauthSessionToken(req, "Veeqo"),
+    state: state.slice("veeqo.".length),
+    defaultReturnTo: "/settings?tab=fulfillment"
+  }).returnTo;
 }
 
 async function exchangeVeeqoAuthorizationCode(settings = {}, code = "") {
@@ -39268,8 +39336,10 @@ function isEbayOAuthCallbackRequest(req) {
   // Some existing eBay RuNames are configured to return to the DataPlus home page.
   // Accept that legacy callback only when it contains our signed OAuth state, then
   // validate it in handleEbayCallback before exchanging anything with eBay.
+  const state = String(url.searchParams.get("state") || "").trim();
+  const legacyState = String(readConnectorStateSync().ebayOauthState || "").trim();
   return url.pathname === "/"
-    && url.searchParams.has("state")
+    && (state.startsWith("v2.") || Boolean(legacyState && state === legacyState))
     && (url.searchParams.has("code") || url.searchParams.has("error") || url.searchParams.has("error_description"));
 }
 
@@ -39293,11 +39363,11 @@ function validateEbayOAuthState(connectorState = {}, suppliedState) {
   return normalizeEbayOAuthReturnTo(connectorState.ebayOauthReturnTo);
 }
 
-function ebayOAuthSessionToken(req) {
+function oauthSessionToken(req, provider = "this channel") {
   const token = cookieValue(req, "dataplus_session");
   const session = token ? readAuthSessions()[authSessionStorageKey(token)] : null;
   if (!session || !Number.isFinite(Date.parse(session.expiresAt || "")) || Date.parse(session.expiresAt) <= Date.now()) {
-    const error = new Error("Sign in to DataPlus again before connecting eBay.");
+    const error = new Error(`Sign in to DataPlus again before connecting ${provider}.`);
     error.statusCode = 401;
     throw error;
   }
@@ -64602,7 +64672,12 @@ async function handleApi(req, res) {
       });
       if (dbCache.data) dbCache.data.systemSettings = next;
       appendChannelApiLog({ channel: "Veeqo", transport: "OAuth", method: "GET", path: "/oauth/authorize", operation: "Veeqo OAuth started", statusCode: 302, ok: true, message: "Operator redirected to Veeqo authorization." });
-      res.writeHead(302, { Location: veeqoAuthorizeUrl(settings) });
+      res.writeHead(302, {
+        Location: veeqoAuthorizeUrl(settings, {
+          sessionToken: oauthSessionToken(req, "Veeqo"),
+          returnTo: "/settings?tab=fulfillment"
+        })
+      });
       return res.end();
     } catch (error) {
       const next = writeSystemSettingsStore({
@@ -64619,30 +64694,40 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/auth/veeqo/launch") {
     const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
     try {
-      const authUrl = veeqoAuthorizeUrl(settings);
+      veeqoAuthorizeUrl(settings, {
+        sessionToken: oauthSessionToken(req, "Veeqo"),
+        returnTo: "/settings?tab=fulfillment"
+      });
       return sendHtml(res, 200, `<!doctype html><title>Connect Veeqo</title><style>body{font-family:Arial,sans-serif;max-width:760px;margin:48px auto;padding:0 20px;line-height:1.45;color:#111}a.button{display:inline-block;background:#2563eb;color:#fff;padding:10px 14px;border-radius:8px;text-decoration:none;font-weight:700}.muted{color:#555}</style><h1>Connect Veeqo</h1><p>DataPlus will send you to Veeqo to approve access. After approval, Veeqo redirects back to DataPlus with a short authorization code. DataPlus then exchanges that code for an access token and stores the token.</p><p class="muted">Redirect URI: ${escapeHtml(settings.veeqoRedirectUri || "")}</p><p><a class="button" href="/auth/veeqo/start">Continue to Veeqo</a></p><p><a href="/settings?tab=fulfillment">Return to Fulfillment settings</a></p>`);
     } catch (error) {
       return sendHtml(res, 400, `<!doctype html><title>Connect Veeqo</title><h1>Veeqo setup needs attention</h1><p>${escapeHtml(error.message || "Unable to prepare Veeqo authorization.")}</p><p><a href="/settings?tab=fulfillment">Return to Fulfillment settings</a></p>`);
     }
   }
 
-  if (req.method === "GET" && (url.pathname === "/auth/veeqo/callback" || (url.pathname === "/" && (url.searchParams.has("code") || url.searchParams.has("error"))))) {
+  if (req.method === "GET" && isVeeqoOAuthCallbackRequest(req)) {
+    const current = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
+    let returnTo = "/settings?tab=fulfillment";
+    try {
+      returnTo = validateVeeqoOAuthState(current, req, url.searchParams.get("state"));
+    } catch (stateError) {
+      const failed = writeSystemSettingsStore({ ...current, veeqoLastAuthCallbackAt: new Date().toISOString(), veeqoLastAuthStatus: "failed", veeqoLastAuthMessage: stateError.message });
+      if (dbCache.data) dbCache.data.systemSettings = failed;
+      appendChannelApiLog({ channel: "Veeqo", transport: "OAuth", method: "GET", path: "/auth/veeqo/callback", operation: "Veeqo OAuth state rejected", statusCode: 400, ok: false, message: stateError.message });
+      return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><h1>Veeqo authorization failed</h1><p>${escapeHtml(stateError.message)}</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
+    }
     const code = String(url.searchParams.get("code") || "").trim();
     const errorParam = String(url.searchParams.get("error") || "").trim();
     if (errorParam) {
-      const current = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
       const next = writeSystemSettingsStore({ ...current, veeqoLastAuthCallbackAt: new Date().toISOString(), veeqoLastAuthStatus: "failed", veeqoLastAuthMessage: errorParam });
       if (dbCache.data) dbCache.data.systemSettings = next;
-      return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><h1>Veeqo authorization failed</h1><p>${escapeHtml(errorParam)}</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
+      return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><h1>Veeqo authorization failed</h1><p>${escapeHtml(errorParam)}</p><p><a href="${escapeHtml(returnTo)}">Return to DataPlus</a></p>`);
     }
     if (!code) {
-      const current = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
       const message = "Veeqo did not return an authorization code.";
       const next = writeSystemSettingsStore({ ...current, veeqoLastAuthCallbackAt: new Date().toISOString(), veeqoLastAuthStatus: "failed", veeqoLastAuthMessage: message });
       if (dbCache.data) dbCache.data.systemSettings = next;
-      return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><h1>Veeqo authorization failed</h1><p>${escapeHtml(message)}</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
+      return sendHtml(res, 400, `<!doctype html><title>Veeqo connection</title><h1>Veeqo authorization failed</h1><p>${escapeHtml(message)}</p><p><a href="${escapeHtml(returnTo)}">Return to DataPlus</a></p>`);
     }
-    const current = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
     try {
       const token = await exchangeVeeqoAuthorizationCode(current, code);
       const next = writeSystemSettingsStore({
@@ -64658,12 +64743,12 @@ async function handleApi(req, res) {
       });
       if (dbCache.data) dbCache.data.systemSettings = next;
       appendChannelApiLog({ channel: "Veeqo", transport: "OAuth", method: "POST", path: "/oauth/token", operation: "Veeqo OAuth connected", statusCode: 200, ok: true, message: "Veeqo OAuth access token generated and stored." });
-      return sendHtml(res, 200, `<!doctype html><title>Veeqo connected</title><h1>Veeqo connected</h1><p>DataPlus received the authorization code, exchanged it with Veeqo, and stored the access token.</p><p>Next: return to Fulfillment settings and click Test Veeqo.</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
+      return sendHtml(res, 200, `<!doctype html><title>Veeqo connected</title><h1>Veeqo connected</h1><p>DataPlus received the authorization code, exchanged it with Veeqo, and stored the access token.</p><p>Next: return to Fulfillment settings and click Test Veeqo.</p><p><a href="${escapeHtml(returnTo)}">Return to DataPlus</a></p>`);
     } catch (error) {
       const failed = writeSystemSettingsStore({ ...current, veeqoLastAuthCallbackAt: new Date().toISOString(), veeqoLastAuthStatus: "failed", veeqoLastAuthMessage: error.message || "Veeqo OAuth failed." });
       if (dbCache.data) dbCache.data.systemSettings = failed;
       appendChannelApiLog({ channel: "Veeqo", transport: "OAuth", method: "POST", path: "/oauth/token", operation: "Veeqo OAuth failed", statusCode: 502, ok: false, message: error.message || "Veeqo OAuth failed." });
-      return sendHtml(res, 502, `<!doctype html><title>Veeqo connection</title><h1>Veeqo token exchange failed</h1><p>${escapeHtml(error.message || "Unable to exchange the authorization code.")}</p><p><a href="/settings?tab=fulfillment">Return to DataPlus</a></p>`);
+      return sendHtml(res, 502, `<!doctype html><title>Veeqo connection</title><h1>Veeqo token exchange failed</h1><p>${escapeHtml(error.message || "Unable to exchange the authorization code.")}</p><p><a href="${escapeHtml(returnTo)}">Return to DataPlus</a></p>`);
     }
   }
 
@@ -68191,8 +68276,11 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/temu/auth-url" && postgres.isPostgresEnabled()) {
     const db = await readDbFast({ skipInventory: true });
-    const result = buildTemuAuthorizationUrl(db, { redirectUri: temuCallbackUrlFromRequest(req) });
-    await writeDb(normalizeDb({ ...db, inventory: [] }));
+    const result = buildTemuAuthorizationUrl(db, {
+      redirectUri: temuCallbackUrlFromRequest(req),
+      returnTo: url.searchParams.get("returnTo"),
+      sessionToken: oauthSessionToken(req, "Temu")
+    });
     return sendJson(res, 200, result);
   }
 
@@ -70104,8 +70192,11 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/temu/auth-url") {
-    const result = buildTemuAuthorizationUrl(db, { redirectUri: temuCallbackUrlFromRequest(req) });
-    await writeDb(db);
+    const result = buildTemuAuthorizationUrl(db, {
+      redirectUri: temuCallbackUrlFromRequest(req),
+      returnTo: url.searchParams.get("returnTo"),
+      sessionToken: oauthSessionToken(req, "Temu")
+    });
     return sendJson(res, 200, result);
   }
 
@@ -73377,7 +73468,12 @@ async function handleTikTokStart(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const environment = url.searchParams.get('environment') === 'development' ? 'development' : 'production';
   const credentials = getTikTokCredentials();
-  const authorization = credentials.beginAuthorization(environment, { actorId: actor.id, actorName: actor.name || actor.username, returnTo: url.searchParams.get('returnTo') });
+  const authorization = credentials.beginAuthorization(environment, {
+    actorId: actor.id,
+    actorName: actor.name || actor.username,
+    returnTo: url.searchParams.get('returnTo'),
+    sessionToken: oauthSessionToken(req, 'TikTok Shop')
+  });
   const saved = credentials.get(environment);
   const { sellerAuthorizationUrl } = require('./lib/tiktok-oauth');
   const location = sellerAuthorizationUrl({ serviceId: saved.serviceId, state: authorization.state, region: saved.region });
@@ -73391,11 +73487,14 @@ async function handleTikTokStart(req, res) {
 }
 
 async function handleTikTokCallback(req, res) {
+  await hydrateAuthSessionsStore();
   const url = new URL(req.url, `http://${req.headers.host}`);
   const credentials = getTikTokCredentials();
   let authorization;
   try {
-    authorization = credentials.consumeAuthorization(url.searchParams.get('state'));
+    authorization = credentials.consumeAuthorization(url.searchParams.get('state'), {
+      sessionToken: oauthSessionToken(req, 'TikTok Shop')
+    });
   } catch (error) {
     return sendHtml(res, 400, tiktokAuthorizationResultHtml({ success: false, message: error.message }));
   }
@@ -73440,10 +73539,42 @@ async function handleTikTokCallback(req, res) {
 }
 
 async function handleTemuCallback(req, res) {
+  await hydrateAuthSessionsStore();
   const db = await readDb({ skipInventory: postgres.isPostgresEnabled() });
   const url = new URL(req.url, `http://${req.headers.host}`);
   const code = url.searchParams.get("code");
+  const stateToken = url.searchParams.get("state");
   const error = url.searchParams.get("error") || url.searchParams.get("error_description");
+  db.connectorState = { ...(db.connectorState || {}), ...readConnectorStateSync() };
+
+  let returnTo = "/channels?channel=Temu";
+  try {
+    returnTo = String(stateToken || "").startsWith("v2.")
+      ? channelOAuthState.validateState({
+        provider: "Temu",
+        clientId: getTemuConfig(db).appKey,
+        signingSecret: getTemuConfig(db).appSecret,
+        redirectUri: temuCallbackUrlFromRequest(req),
+        sessionToken: oauthSessionToken(req, "Temu"),
+        state: stateToken,
+        defaultReturnTo: "/channels?channel=Temu"
+      }).returnTo
+      : validateLegacyTemuOAuthState(db.connectorState, stateToken);
+  } catch (stateError) {
+    return sendHtml(res, 400, `
+      <!doctype html>
+      <title>Temu Authorization Failed</title>
+      <body style="font-family:system-ui;padding:32px;line-height:1.5">
+        <h1>Temu authorization failed</h1>
+        <p>${escapeHtml(stateError.message)}</p>
+        <p><a href="/channels?channel=Temu">Return to DataPlus</a></p>
+      </body>
+    `);
+  }
+
+  clearTemuOAuthState(db.connectorState);
+  writeConnectorStateSync(db.connectorState);
+  if (!postgres.isPostgresEnabled()) await writeDb(db);
 
   if (error) {
     return sendHtml(res, 400, `
@@ -73455,7 +73586,7 @@ async function handleTemuCallback(req, res) {
       <body style="font-family:system-ui;padding:32px">
         <h1>Temu authorization failed</h1>
         <p>${escapeHtml(error)}</p>
-        <p><a href="/">Return to DataPlus</a></p>
+        <p><a href="${escapeHtml(returnTo)}">Return to DataPlus</a></p>
       </body>
     `);
   }
@@ -73474,7 +73605,7 @@ async function handleTemuCallback(req, res) {
       <body style="font-family:system-ui;padding:32px">
         <h1>Temu connected</h1>
         <p>Access token saved${result.mallId ? ` for mall ${escapeHtml(result.mallId)}` : ""}.</p>
-        <p><a href="/">Return to DataPlus</a></p>
+        <p><a href="${escapeHtml(returnTo)}">Return to DataPlus</a></p>
       </body>
     `);
   } catch (exchangeError) {
@@ -73490,25 +73621,28 @@ async function handleTemuCallback(req, res) {
         <h1>Temu token exchange failed</h1>
         <p>${escapeHtml(message)}</p>
         ${expiredCode ? "<p>Temu authorization codes are short-lived and can only be exchanged once. Start the Temu connection again from DataPlus and approve it in the newly opened Temu window.</p><p><a href=\"/auth/temu/start\" style=\"display:inline-block;background:#2563eb;color:white;padding:10px 14px;border-radius:8px;text-decoration:none;font-weight:700\">Start Temu authorization again</a></p>" : ""}
-        <p><a href="/">Return to DataPlus</a></p>
+        <p><a href="${escapeHtml(returnTo)}">Return to DataPlus</a></p>
       </body>
     `);
   }
 }
 
 async function handleTemuStart(req, res) {
+  await hydrateAuthSessionsStore();
   const db = await readTemuAuthState();
-  const result = buildTemuAuthorizationUrl(db, { redirectUri: temuCallbackUrlFromRequest(req) });
-  if (postgres.isPostgresEnabled()) {
-    writeConnectorStateSync(db.connectorState || {});
-  }
-  else await writeDb(normalizeDb({ ...db, inventory: [] }));
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const result = buildTemuAuthorizationUrl(db, {
+    redirectUri: temuCallbackUrlFromRequest(req),
+    returnTo: url.searchParams.get("returnTo"),
+    sessionToken: oauthSessionToken(req, "Temu")
+  });
   res.writeHead(302, { Location: result.authUrl });
   res.end();
 }
 
 async function handleEbayStart(req, res) {
   try {
+    await hydrateAuthSessionsStore();
     const url = new URL(req.url, `http://${req.headers.host}`);
     const db = postgres.isPostgresEnabled()
       ? { connectorState: await readConnectorStateStore() }
@@ -73516,7 +73650,7 @@ async function handleEbayStart(req, res) {
     const authUrl = await beginEbayAuthorization(db, {
       returnTo: url.searchParams.get("returnTo"),
       forceLogin: true,
-      sessionToken: ebayOAuthSessionToken(req)
+      sessionToken: oauthSessionToken(req, "eBay")
     });
     res.writeHead(302, { Location: authUrl });
     res.end();
@@ -73577,6 +73711,7 @@ function ebayAuthorizationResultHtml(options = {}) {
 }
 
 async function handleEbayCallback(req, res) {
+  await hydrateAuthSessionsStore();
   const url = new URL(req.url, `http://${req.headers.host}`);
   const code = url.searchParams.get("code");
   const stateToken = url.searchParams.get("state");
@@ -73591,7 +73726,7 @@ async function handleEbayCallback(req, res) {
     returnTo = String(stateToken || "").startsWith("v2.")
       ? ebayOAuthState.validateState({
         ...getEbayConfig(db),
-        sessionToken: ebayOAuthSessionToken(req),
+        sessionToken: oauthSessionToken(req, "eBay"),
         state: stateToken,
         ttlMs: EBAY_OAUTH_STATE_TTL_MS
       })
@@ -74068,7 +74203,7 @@ function startServer() {
       handleEbayCallback(req, res).catch((error) => {
         sendHtml(res, 500, `<h1>eBay callback error</h1><p>${escapeHtml(error.message)}</p>`);
       });
-    } else if (req.url.startsWith("/api/") || req.url.startsWith("/auth/veeqo/") || /^\/\?(?:.*&)?(?:code|error)=/.test(req.url)) {
+    } else if (req.url.startsWith("/api/") || req.url.startsWith("/auth/veeqo/") || isVeeqoOAuthCallbackRequest(req)) {
       handleApi(req, res).catch(async (error) => {
         console.error(error);
         const status = apiErrorStatus(error);

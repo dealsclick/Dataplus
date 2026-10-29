@@ -56,15 +56,20 @@ async function main() {
     assert.equal(savedText.includes('access-token'), false);
     assert.equal(credentials.status('production').appConfigured, true);
     assert.equal(credentials.status('production').configured, false);
-    const authorization = credentials.beginAuthorization('production', { actorId: 'user-1', actorName: 'Luis', returnTo: '/channels?channel=TikTok%20Shop' });
-    assert.match(authorization.state, /^production\./);
+    const sessionToken = 'signed-in-dataplus-session';
+    const authorization = credentials.beginAuthorization('production', { actorId: 'user-1', actorName: 'Luis', returnTo: '/channels?channel=TikTok%20Shop', sessionToken });
+    const parallelAuthorization = credentials.beginAuthorization('production', { actorId: 'user-1', actorName: 'Luis', returnTo: '/channels?channel=TikTok%20Shop&tab=sync', sessionToken });
+    assert.match(authorization.state, /^production\.v2\./);
+    assert.ok(authorization.state.length < 512);
     assert.equal(credentials.status('production').authorizationPending, true);
-    assert.throws(() => credentials.consumeAuthorization('production.invalid'), /invalid or expired/);
-    const consumed = credentials.consumeAuthorization(authorization.state);
+    assert.throws(() => credentials.consumeAuthorization('production.invalid', { sessionToken }), /invalid or expired/);
+    assert.throws(() => credentials.consumeAuthorization(authorization.state, { sessionToken: 'another-session' }), /did not match this DataPlus session/);
+    const consumed = credentials.consumeAuthorization(authorization.state, { sessionToken });
     assert.equal(consumed.environment, 'production');
     assert.equal(consumed.actorId, 'user-1');
     assert.equal(consumed.actorName, 'Luis');
-    assert.throws(() => credentials.consumeAuthorization(authorization.state), /invalid or expired/);
+    assert.throws(() => credentials.consumeAuthorization(authorization.state, { sessionToken }), /invalid or expired/);
+    assert.equal(credentials.consumeAuthorization(parallelAuthorization.state, { sessionToken }).returnTo, '/channels?channel=TikTok%20Shop&tab=sync');
     credentials.updateTokens('production', { access_token: 'next-access', refresh_token: 'refresh-token', expires_in: 3600, user_type: 0 });
     assert.equal(credentials.get('production').accessToken, 'next-access');
     assert.equal(credentials.get('production').refreshToken, 'refresh-token');
@@ -80,8 +85,9 @@ async function main() {
   assert.equal(sellerUrl.searchParams.get('service_id'), 'service-id');
   assert.equal(sellerUrl.searchParams.get('state'), 'production.state');
   assert.equal(isTikTokAuthorizationCallbackUrl('/auth/tiktok/callback?code=auth-code&state=production.state'), true);
-  assert.equal(isTikTokAuthorizationCallbackUrl('/?auth_code=auth-code&state=production.state'), true);
-  assert.equal(isTikTokAuthorizationCallbackUrl('/?error=access_denied&state=development.state'), true);
+  assert.equal(isTikTokAuthorizationCallbackUrl('/?auth_code=auth-code&state=production.v2.payload.signature'), true);
+  assert.equal(isTikTokAuthorizationCallbackUrl('/?error=access_denied&state=development.v2.payload.signature'), true);
+  assert.equal(isTikTokAuthorizationCallbackUrl('/?auth_code=auth-code&state=production.legacy-state'), true);
   assert.equal(isTikTokAuthorizationCallbackUrl('/?code=auth-code&state=ebay-state'), false);
   assert.equal(isTikTokAuthorizationCallbackUrl('/auth/ebay/callback?code=auth-code&state=production.state'), false);
   const exchanged = await exchangeAuthorizationCode({
