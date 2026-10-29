@@ -924,11 +924,11 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                         </SelectContent>
                       </Select>
                       <p className="text-xs text-muted-foreground">
-                        {channelFilterScope === "ebay" ? "Choose whether products are ready to launch." : "Choose a channel status to filter."}
+                        {channelFilterScope === "ebay" ? "Choose whether products exist on eBay or are ready to launch." : "Choose a channel status to filter."}
                       </p>
                       {channelFilterScope === "ebay" ? (
                         <div className="rounded-md border border-blue-500/30 bg-blue-500/5 p-2 text-xs text-muted-foreground">
-                          Ready means the SKU passed the full eBay launch preflight within the last 24 hours. Not ready means it is not live and has no current passing preflight. Run an eBay launch preflight to refresh the result.
+                          Not in eBay catalog excludes SKUs with a detected listing or prepared offer. Ready means the SKU passed the full eBay launch preflight within the last 24 hours. Run an eBay launch preflight to refresh readiness.
                         </div>
                       ) : null}
                     </div>
@@ -953,6 +953,10 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                       }}
                       className="grid gap-2"
                     >
+                      <Label htmlFor="ebay-not-in-catalog" className="flex cursor-pointer items-start gap-3 rounded-md border border-blue-500/30 bg-blue-500/5 p-3 hover:bg-blue-500/10">
+                        <RadioGroupItem id="ebay-not-in-catalog" value="ebay-missing" className="mt-0.5" />
+                        <span className="min-w-0"><span className="flex items-center gap-1.5 font-medium text-blue-800 dark:text-blue-200"><PackageSearch className="size-4" /> Not in eBay catalog</span><span className="mt-1 block text-xs font-normal text-muted-foreground">No detected eBay listing or prepared offer exists for this SKU.</span></span>
+                      </Label>
                       <Label htmlFor="ebay-ready-to-launch" className="flex cursor-pointer items-start gap-3 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 hover:bg-emerald-500/10">
                         <RadioGroupItem id="ebay-ready-to-launch" value="ebay-validated-ready" className="mt-0.5" />
                         <span className="min-w-0"><span className="flex items-center gap-1.5 font-medium text-emerald-800 dark:text-emerald-200"><CheckCircle2 className="size-4" /> Ready to launch</span><span className="mt-1 block text-xs font-normal text-muted-foreground">Passed the current full eBay launch preflight.</span></span>
