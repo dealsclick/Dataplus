@@ -21,6 +21,14 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 
 type Json = Record<string, any>
 
+const settlementOnlyDisabledFields = [
+  'walmartLinkExistingEnabled', 'walmartOrdersEnabled', 'walmartOrderScheduleEnabled',
+  'walmartLaunchEnabled', 'walmartInventoryEnabled', 'walmartInventoryScheduleEnabled',
+  'walmartReturnsEnabled', 'walmartReturnScheduleEnabled', 'walmartWebhooksEnabled',
+  'walmartCancellationEnabled', 'walmartPriceEnabled', 'walmartOrderUpdatesEnabled',
+  'walmartFeedPollingEnabled', 'createMissingOrderSkusFromSource'
+]
+
 async function request(path: string, body?: Json): Promise<any> {
 
   const response = await fetch(`/api/walmart/${path}`, { credentials: 'same-origin', ...(body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}) })
@@ -130,6 +138,8 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
   const dirty = Object.keys(edits).length > 0
 
   const enabled = channel.settings?.channelEnabled === true
+  const settlementOnly = rules.walmartOperatingMode === 'settlements_only'
+  const accountMode = !rules.channelEnabled ? 'disabled' : settlementOnly ? 'settlements_only' : 'active'
   const credentialsDirty = clientId !== (status.clientId || '') || Boolean(clientSecret) || channelType !== (status.channelType || 'direct') || channelTypeId !== (status.channelTypeId || '')
   async function verifyConnection() {
     if (!enabled) await onSave(channel.id, { settings: { ...channel.settings, channelEnabled: true } })
@@ -140,6 +150,20 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
 
 
   const update = (key: string, value: unknown) => { setEdits(current => ({ ...current, [key]: value })); setPreview(null) }
+
+  function setAccountMode(mode: string) {
+    setEdits(current => {
+      if (mode === 'settlements_only') return {
+        ...current,
+        channelEnabled: true,
+        walmartOperatingMode: 'settlements_only',
+        walmartSettlementImportEnabled: true,
+        ...Object.fromEntries(settlementOnlyDisabledFields.map(field => [field, false]))
+      }
+      return { ...current, channelEnabled: mode === 'active', walmartOperatingMode: 'active' }
+    })
+    setPreview(null)
+  }
 
   async function saveRules(nextTab?: string) {
     const patch = { ...edits }
@@ -154,11 +178,15 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
 
     <CardHeader className="flex flex-row flex-wrap items-start justify-between gap-3">
 
-      <div className="min-w-0"><CardTitle>{catalogMode ? 'Walmart catalog launch' : 'Walmart Marketplace setup'} <Badge variant={enabled ? 'default' : 'outline'}>{enabled ? 'Enabled' : 'Disabled'}</Badge></CardTitle><CardDescription className="mt-2">{catalogMode ? 'Review catalog items and UPC matches before submitting to Walmart.' : 'Connect your US account, choose features, then configure only what you need.'}</CardDescription></div>
+      <div className="min-w-0"><CardTitle>{catalogMode ? 'Walmart catalog launch' : 'Walmart Marketplace setup'} <Badge variant={accountMode === 'settlements_only' ? 'secondary' : accountMode === 'active' ? 'default' : 'outline'}>{accountMode === 'settlements_only' ? 'Settlements only' : accountMode === 'active' ? 'Enabled' : 'Disabled'}</Badge></CardTitle><CardDescription className="mt-2">{catalogMode ? 'Review catalog items and UPC matches before submitting to Walmart.' : settlementOnly ? 'Seller operations are inactive. Settlement imports, reports, and historical records remain available.' : 'Connect your US account, choose features, then configure only what you need.'}</CardDescription></div>
 
       {!catalogMode && <DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline" disabled={busy}>Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end">
 
         <DropdownMenuItem disabled={busy || !status.configured || credentialsDirty} onSelect={() => void run(verifyConnection)}>Verify connection</DropdownMenuItem>
+
+        <DropdownMenuItem disabled={settlementOnly} onSelect={() => { setAccountMode('settlements_only'); setTab('rules') }}>Use settlements only</DropdownMenuItem>
+
+        <DropdownMenuItem disabled={!settlementOnly} onSelect={() => { setAccountMode('active'); setTab('rules') }}>Reactivate marketplace operations</DropdownMenuItem>
 
         <DropdownMenuItem disabled={!enabled} onSelect={() => void run(() => request('taxonomy/refresh', {}))}>Refresh Walmart taxonomy</DropdownMenuItem>
 
@@ -209,14 +237,16 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
         </TabsContent>
 
         <TabsContent value="rules" className="space-y-4">
-          <div className="flex min-w-0 items-start justify-between gap-4 rounded-md border p-4"><div className="min-w-0"><label htmlFor="walmart-link-listings" className="font-medium">Automatically link existing Walmart listings</label><p id="walmart-link-description" className="mt-1 text-sm text-muted-foreground">When enabled, the worker checks now and daily for seller listings created outside DataPlus. Links by exact seller SKU first, then unique UPC/GTIN. Turning this off stops future linking and keeps saved links. Prices and inventory are unchanged.</p><p className="mt-2 text-xs text-muted-foreground">Production only. Save changes to apply. Progress and review results appear in Jobs.</p></div><Switch id="walmart-link-listings" aria-describedby="walmart-link-description" checked={rules.walmartLinkExistingEnabled === true} onCheckedChange={value => update('walmartLinkExistingEnabled', value)} /></div>
+          <div className="grid gap-2 rounded-md border p-4"><label className="grid gap-2 text-sm font-medium">Walmart account mode<select className="h-9 rounded-md border bg-background px-3 font-normal" value={accountMode} onChange={event => setAccountMode(event.target.value)}><option value="active">Active marketplace operations</option><option value="settlements_only">Settlements only</option><option value="disabled">Fully disabled</option></select></label><p className="text-xs text-muted-foreground">Settlements only stops orders, returns, listings, inventory, prices, tracking, webhooks, and feed polling. Historical records remain available, and reconciliation reports can still be imported automatically or from a file.</p></div>
+          {settlementOnly && <p className="rounded-md border border-amber-400/60 bg-amber-50 p-3 text-sm text-amber-950 dark:bg-amber-950/30 dark:text-amber-100">Walmart seller activity is inactive. DataPlus will keep only settlement reconciliation enabled.</p>}
+          <div className="flex min-w-0 items-start justify-between gap-4 rounded-md border p-4"><div className="min-w-0"><label htmlFor="walmart-link-listings" className="font-medium">Automatically link existing Walmart listings</label><p id="walmart-link-description" className="mt-1 text-sm text-muted-foreground">When enabled, the worker checks now and daily for seller listings created outside DataPlus. Links by exact seller SKU first, then unique UPC/GTIN. Turning this off stops future linking and keeps saved links. Prices and inventory are unchanged.</p><p className="mt-2 text-xs text-muted-foreground">Production only. Save changes to apply. Progress and review results appear in Jobs.</p></div><Switch id="walmart-link-listings" aria-describedby="walmart-link-description" disabled={settlementOnly} checked={rules.walmartLinkExistingEnabled === true} onCheckedChange={value => update('walmartLinkExistingEnabled', value)} /></div>
 <div><h3 className="font-medium">Choose what DataPlus can do</h3><p className="text-sm text-muted-foreground">Select the features you want, then save. You can use order import without launching products. Scheduled imports run automatically only when selected.</p></div>
 
           <div className="grid gap-3 sm:grid-cols-2">
 
-            {([['channelEnabled', 'Enable Walmart channel'], ['walmartOrdersEnabled', 'Allow order import'], ['createMissingOrderSkusFromSource', 'Create SKU from order import'], ['walmartOrderScheduleEnabled', 'Schedule order imports'], ['walmartReturnsEnabled', 'Allow Walmart return import'], ['walmartReturnScheduleEnabled', 'Schedule return reconciliation'], ['walmartWebhooksEnabled', 'Process signed order and return webhooks'], ['walmartCancellationEnabled', 'Allow reviewed Walmart line cancellations'], ['walmartSettlementImportEnabled', 'Import Walmart reconciliation reports'], ['walmartLaunchEnabled', 'Catalog launch (review required)'], ['walmartInventoryEnabled', 'Allow inventory updates and inactive-item protection'], ['walmartInventoryScheduleEnabled', 'Schedule linked-listing inventory sync'], ['walmartPriceEnabled', 'Allow reviewed price updates'], ['walmartOrderUpdatesEnabled', 'Allow order acknowledgment and tracking']] as const).map(([key, label]) => <label className="flex gap-2 items-center text-sm" key={key}><input type="checkbox" checked={key === 'walmartInventoryScheduleEnabled' || key === 'createMissingOrderSkusFromSource' || key === 'walmartSettlementImportEnabled' ? rules[key] !== false : rules[key] === true} onChange={e => update(key, e.target.checked)} />{label}</label>)}
+            {([['walmartOrdersEnabled', 'Allow order import'], ['createMissingOrderSkusFromSource', 'Create SKU from order import'], ['walmartOrderScheduleEnabled', 'Schedule order imports'], ['walmartReturnsEnabled', 'Allow Walmart return import'], ['walmartReturnScheduleEnabled', 'Schedule return reconciliation'], ['walmartWebhooksEnabled', 'Process signed order and return webhooks'], ['walmartCancellationEnabled', 'Allow reviewed Walmart line cancellations'], ['walmartSettlementImportEnabled', 'Import Walmart reconciliation reports'], ['walmartLaunchEnabled', 'Catalog launch (review required)'], ['walmartInventoryEnabled', 'Allow inventory updates and inactive-item protection'], ['walmartInventoryScheduleEnabled', 'Schedule linked-listing inventory sync'], ['walmartPriceEnabled', 'Allow reviewed price updates'], ['walmartOrderUpdatesEnabled', 'Allow order acknowledgment and tracking']] as const).map(([key, label]) => <label className="flex gap-2 items-center text-sm" key={key}><input type="checkbox" disabled={settlementOnly} checked={key === 'walmartInventoryScheduleEnabled' || key === 'createMissingOrderSkusFromSource' || key === 'walmartSettlementImportEnabled' ? rules[key] !== false : rules[key] === true} onChange={e => update(key, e.target.checked)} />{label}</label>)}
 
-            <label className="flex gap-2 items-center text-sm"><input type="checkbox" checked={rules.walmartFeedPollingEnabled !== false} onChange={e => update('walmartFeedPollingEnabled', e.target.checked)} />Automatically check submitted feed results</label><label className="grid gap-2 text-sm">Environment<select className="h-9 rounded-md border bg-background px-3" value={rules.walmartEnvironment || 'production'} onChange={e => update('walmartEnvironment', e.target.value)}><option value="production">Production</option><option value="sandbox">Sandbox</option></select></label>
+            <label className="flex gap-2 items-center text-sm"><input type="checkbox" disabled={settlementOnly} checked={rules.walmartFeedPollingEnabled !== false} onChange={e => update('walmartFeedPollingEnabled', e.target.checked)} />Automatically check submitted feed results</label><label className="grid gap-2 text-sm">Environment<select className="h-9 rounded-md border bg-background px-3" value={rules.walmartEnvironment || 'production'} onChange={e => update('walmartEnvironment', e.target.value)}><option value="production">Production</option><option value="sandbox">Sandbox</option></select></label>
 
             <label className="grid gap-2 text-sm">Item spec version override (optional)<Input value={rules.walmartSpecVersion || ''} placeholder="Use downloaded Walmart version" onChange={e => update('walmartSpecVersion', e.target.value)} /></label>
 
@@ -255,6 +285,7 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
 
         <TabsContent value="review" className="space-y-4">
           <h3 className="font-medium">Review your setup</h3>
+          <p className="text-sm">Account mode: {accountMode === 'settlements_only' ? 'Settlements only' : accountMode === 'active' ? 'Active marketplace operations' : 'Fully disabled'}</p>
           <p className="text-sm">Connection: {status.connection?.verified ? 'Verified' : 'Needs verification'}</p>
           <div className="grid gap-2 sm:grid-cols-2">{[['walmartLinkExistingEnabled', 'Automatic listing links'], ['walmartOrdersEnabled', 'Order import'], ['walmartOrderScheduleEnabled', 'Scheduled order imports'], ['walmartReturnsEnabled', 'Return import'], ['walmartReturnScheduleEnabled', 'Scheduled return reconciliation'], ['walmartWebhooksEnabled', 'Order and return webhooks'], ['walmartCancellationEnabled', 'Reviewed line cancellations'], ['walmartSettlementImportEnabled', 'Settlement reconciliation'], ['walmartLaunchEnabled', 'Catalog launch'], ['walmartInventoryEnabled', 'Inventory updates'], ['walmartInventoryScheduleEnabled', 'Scheduled inventory sync'], ['walmartPriceEnabled', 'Price updates'], ['walmartOrderUpdatesEnabled', 'Acknowledgment and tracking']].map(([key, label]) => <p className="flex justify-between gap-2 rounded border p-2 text-sm" key={key}>{label}<Badge variant={(key === 'walmartInventoryScheduleEnabled' || key === 'walmartSettlementImportEnabled' ? rules[key] !== false : rules[key]) ? 'secondary' : 'outline'}>{(key === 'walmartInventoryScheduleEnabled' || key === 'walmartSettlementImportEnabled' ? rules[key] !== false : rules[key]) ? 'Enabled' : 'Off'}</Badge></p>)}</div>
           {status.launchReconciliation && <Card>
@@ -296,7 +327,8 @@ export function WalmartChannel({ channel, onSave, onRefresh, warehouses = [], ca
 
         <TabsContent value="settlements" className="space-y-4">
           <div><h3 className="font-medium">Walmart settlements</h3><p className="text-sm text-muted-foreground">Download reconciliation reports, preserve every report, attach fee lines to orders, and retain payout references in Accounting. Existing reports are idempotent and are enriched when Walmart later supplies more payout data.</p></div>
-          <div className="flex flex-wrap gap-2"><Button disabled={busy || dirty || !enabled || channel.settings?.walmartSettlementImportEnabled === false} onClick={() => void run(() => request('settlements/import', { lookbackDays: 90 }))}>Import available reconciliation reports</Button><Button variant="outline" asChild><a href="/accounting?view=channel-fees">Open Accounting settlements</a></Button></div>
+          {settlementOnly && <p className="rounded border p-3 text-sm">This is the only active Walmart workflow. If Walmart API access is unavailable, upload the reconciliation CSV from Accounting instead.</p>}
+          <div className="flex flex-wrap gap-2"><Button disabled={busy || dirty || !enabled || channel.settings?.walmartSettlementImportEnabled === false} onClick={() => void run(() => request('settlements/import', { lookbackDays: 90 }))}>Import available reconciliation reports</Button><Button variant="outline" asChild><a href="/accounting?view=channel-fees">Upload or review settlement files</a></Button></div>
           <p className="text-xs text-muted-foreground">Automatic discovery runs daily after 6:30 AM server time. Last job: {status.settlementSchedule?.jobId || 'None'}.</p>
         </TabsContent>
 

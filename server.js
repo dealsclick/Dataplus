@@ -23,6 +23,7 @@ const { createCompanyStore, LEGACY_TENANT, LEGACY_COMPANY } = require("./lib/com
 const { buildOrderIdentity } = require("./lib/order-identity");
 const { SUPERUSER_FEATURES, isSuperuser: isSuperuserAccount, normalizedFeatureSettings, featureAccessForUser } = require("./lib/superuser-access");
 const { channelIsEnabled } = require("./lib/channel-enabled");
+const { applyWalmartSettings, walmartIsSettlementOnly } = require("./lib/walmart-settings");
 const { operationJobChannel, operationJobTrigger } = require('./lib/job-classification');
 const { evaluateFulfillmentIntervention } = require("./lib/fulfillment-intervention");
 const { splitFulfillmentRoutes } = require("./lib/fulfillment-package-split");
@@ -5089,7 +5090,7 @@ function normalizeChannel(channel = {}) {
   const isShopify = String(channel.name || "").trim().toLowerCase() === "shopify";
   const settings = {
     ...DEFAULT_CHANNEL_SETTINGS,
-    ...(channel.name === "Walmart" ? { channelEnabled: false, walmartOrdersEnabled: false, walmartLaunchEnabled: false, walmartSettlementImportEnabled: true, walmartInventoryScheduleEnabled: true, walmartInventoryScheduleHours: 12, walmartEnvironment: "production", walmartSpecVersion: "", walmartPriceMarkupPercent: 30, walmartMinMarginPercent: 15 } : {}),
+    ...(channel.name === "Walmart" ? { channelEnabled: false, walmartOperatingMode: "active", walmartOrdersEnabled: false, walmartLaunchEnabled: false, walmartSettlementImportEnabled: true, walmartInventoryScheduleEnabled: true, walmartInventoryScheduleHours: 12, walmartEnvironment: "production", walmartSpecVersion: "", walmartPriceMarkupPercent: 30, walmartMinMarginPercent: 15 } : {}),
     ...rawSettings,
     ...(isShopify ? { priceMarkupPercent: rawSettings.priceMarkupPercent ?? SHOPIFY_PRICE_MARKUP_PERCENT } : {})
   };
@@ -63715,7 +63716,10 @@ async function handleApi(req, res) {
       else channel.settings[field] = String(body[field] || "");
     }
     if (body.channelEnabled !== undefined) channel.status = channel.settings.channelEnabled ? "active" : "inactive";
-    if (channel.name === "Walmart") channel.settings = require("./lib/walmart-settings").applyWalmartSettings(channel.settings, body);
+    if (channel.name === "Walmart") {
+      channel.settings = applyWalmartSettings(channel.settings, body);
+      channel.status = walmartIsSettlementOnly(channel.settings) ? "settlements_only" : channel.settings.channelEnabled ? "active" : "inactive";
+    }
     Object.assign(channel, normalizeChannel(channel));
     await postgres.writeStateDocuments({ connections: db.connections || [] });
     appendChannelApiLog({
@@ -71673,7 +71677,10 @@ async function handleApi(req, res) {
       else channel.settings[field] = String(body[field] || "");
     }
     if (body.channelEnabled !== undefined) channel.status = channel.settings.channelEnabled ? "active" : "inactive";
-    if (channel.name === "Walmart") channel.settings = require("./lib/walmart-settings").applyWalmartSettings(channel.settings, body);
+    if (channel.name === "Walmart") {
+      channel.settings = applyWalmartSettings(channel.settings, body);
+      channel.status = walmartIsSettlementOnly(channel.settings) ? "settlements_only" : channel.settings.channelEnabled ? "active" : "inactive";
+    }
     const normalized = normalizeChannel(channel);
     Object.assign(channel, normalized);
     await writeDb(db);

@@ -39,8 +39,26 @@ async function main() {
   assert.equal(enabledSettings.walmartOrderLookbackDays, 45);
   assert.equal(enabledSettings.clientSecret, undefined);
   assert.equal(applyWalmartSettings(enabledSettings, { settings: { channelEnabled: false } }).channelEnabled, false);
+  const settlementOnlySettings = applyWalmartSettings({
+    ...enabledSettings,
+    walmartOrdersEnabled: true,
+    walmartOrderScheduleEnabled: true,
+    walmartReturnsEnabled: true,
+    walmartReturnScheduleEnabled: true,
+    walmartInventoryEnabled: true,
+    walmartInventoryScheduleEnabled: true,
+    walmartPriceEnabled: true,
+    walmartOrderUpdatesEnabled: true,
+    walmartWebhooksEnabled: true,
+    walmartFeedPollingEnabled: true,
+    createMissingOrderSkusFromSource: true
+  }, { settings: { walmartOperatingMode: 'settlements_only' } });
+  assert.equal(settlementOnlySettings.channelEnabled, true);
+  assert.equal(settlementOnlySettings.walmartSettlementImportEnabled, true);
+  for (const field of ['walmartOrdersEnabled', 'walmartOrderScheduleEnabled', 'walmartReturnsEnabled', 'walmartReturnScheduleEnabled', 'walmartInventoryEnabled', 'walmartInventoryScheduleEnabled', 'walmartPriceEnabled', 'walmartOrderUpdatesEnabled', 'walmartWebhooksEnabled', 'walmartFeedPollingEnabled', 'createMissingOrderSkusFromSource']) assert.equal(settlementOnlySettings[field], false, `${field} is off in settlements-only mode`);
   assert.throws(() => applyWalmartSettings({}, { settings: { walmartMinMarginPercent: 100 } }), /Invalid/);
   assert.throws(() => applyWalmartSettings({}, { settings: { walmartEnvironment: 'global' } }), /Invalid/);
+  assert.throws(() => applyWalmartSettings({}, { settings: { walmartOperatingMode: 'inventory_only' } }), /Invalid/);
 
   let candidateQuery = '';
   const candidateIds = await walmartStatusReconciliationCandidatesFromDatabase({
@@ -685,6 +703,18 @@ async function main() {
   credentials.save('sandbox', { clientId: 'sandbox-fixture', clientSecret: 'rotated-secret', channelType: 'direct' });
   await service.run(pendingCredentialsJob); assert.equal(pendingCredentialsJob.status, 'failed'); assert.match(pendingCredentialsJob.message, /credentials changed/);
   channel.settings.channelEnabled = false; await assert.rejects(service.queue('orders', {}), /Enable Walmart/);
+  channel.settings.channelEnabled = true;
+  const pendingModeJob = (await service.queue('orders', {})).job;
+  channel.settings = applyWalmartSettings(channel.settings, { settings: { walmartOperatingMode: 'settlements_only' } });
+  await service.run(pendingModeJob);
+  assert.equal(pendingModeJob.status, 'failed');
+  assert.match(pendingModeJob.message, /Settlements only mode/);
+  await assert.rejects(service.queue('pricing', {}), /Settlements only mode/);
+  await assert.rejects(service.queue('feed', { feedId: 'old-feed' }), /Settlements only mode/);
+  const settlementModeJob = (await service.queue('settlements', {})).job;
+  assert.equal(settlementModeJob.workerTask, 'walmart-settlements');
+  settlementModeJob.status = 'success';
+  channel.settings = applyWalmartSettings(channel.settings, { settings: { walmartOperatingMode: 'active', channelEnabled: true, walmartOrdersEnabled: true, walmartFeedPollingEnabled: false } });
   // Automatic linking is independent of orders, account-bound, daily and default-off.
   assert.equal(applyWalmartSettings({}, {settings:{walmartLinkExistingEnabled:'true'}}).walmartLinkExistingEnabled, true);
   assert.throws(() => applyWalmartSettings({}, {settings:{walmartLinkExistingEnabled:'yes'}}), /Invalid/);

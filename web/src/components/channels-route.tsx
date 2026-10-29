@@ -82,7 +82,7 @@ function ChannelsPage({
                 onClick={() => setSelectedId(channel.id)}
               >
                 <span>{channel.name}</span>
-                <Badge variant={channel.connected ? "default" : "outline"}>{channel.status || (channel.connected ? "active" : "draft")}</Badge>
+                <Badge variant={channel.connected ? "default" : "outline"}>{String(channel.status || (channel.connected ? "active" : "draft")).replaceAll("_", " ")}</Badge>
               </Button>
             ))}
           </CardContent>
