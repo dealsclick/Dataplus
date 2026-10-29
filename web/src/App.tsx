@@ -3805,7 +3805,7 @@ function JobsPage({
                       <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-xs">
                         <span className="text-muted-foreground">Category</span><span className="text-right">{jobCategory(job)}</span>
                         <span className="text-muted-foreground">Channel</span><span className="text-right">{jobChannelLabel(job)}</span>
-                        <span className="text-muted-foreground">Run type</span><span className="text-right capitalize">{jobRunType(job)}</span>
+                        <span className="text-muted-foreground">Started by</span><span className="text-right">{jobRunType(job) === "automated" ? "Automation" : "User"}</span>
                         <span className="text-muted-foreground">Rows</span><span className="text-right">{numberLabel(job.processedRows)} / {numberLabel(job.totalRows)}</span>
                         <span className="text-muted-foreground">Started</span><span className="text-right">{dateLabel(job.startedAt || job.createdAt)}</span>
                       </div>
@@ -3821,7 +3821,7 @@ function JobsPage({
                       <TableHead>Status</TableHead>
                       <TableHead>Job</TableHead>
                       <TableHead>Category</TableHead>
-                      <TableHead>Run type</TableHead>
+                      <TableHead>Started by</TableHead>
                       <TableHead>Channel</TableHead>
                       <TableHead>Progress</TableHead>
                       <TableHead>Rows</TableHead>
@@ -3832,11 +3832,11 @@ function JobsPage({
                   </TableHeader>
                   <TableBody>
                     {visibleJobs.map((job) => (
-                      <TableRow key={job.id} className="cursor-pointer" onClick={() => onSelectJob(job)}>
+                      <TableRow key={job.id}>
                         <TableCell><HoverCard><HoverCardTrigger asChild><Badge variant={jobStatusTone(job.status)}>{jobStatusLabel(job.status)}</Badge></HoverCardTrigger><HoverCardContent className="w-72"><p className="font-medium">{jobStatusLabel(job.status)}</p><p className="mt-1 text-xs text-muted-foreground">{job.message || job.details || "No additional status detail was recorded."}</p></HoverCardContent></HoverCard></TableCell>
                         <TableCell className="max-w-[360px]">
                           <div className="flex min-w-0 items-center gap-2">
-                            <p className="truncate font-medium">{jobOperationLabel(job)}</p>
+                            <button type="button" className="min-w-0 truncate text-left font-medium hover:underline" onClick={() => onSelectJob(job)} title={`Open ${jobReference(job)}`}>{jobOperationLabel(job)}</button>
                             {isWalmartFeedStatusCheck(job) ? <Badge variant="outline" className="shrink-0 text-[10px]">Status only</Badge> : null}
                             {isEbayLaunchPreflight(job) ? <Badge variant="outline" className="shrink-0 text-[10px]">No publish</Badge> : null}
                           </div>
@@ -3862,7 +3862,7 @@ function JobsPage({
                           <p className="truncate text-xs text-muted-foreground">{job.message || job.fileName || "No status update recorded."}</p>
                         </TableCell>
                         <TableCell className="text-sm text-muted-foreground">{jobCategory(job)}</TableCell>
-                        <TableCell><Badge variant={jobRunType(job) === "automated" ? "info" : "outline"} className="whitespace-nowrap">{jobRunType(job) === "automated" ? <CalendarDays className="size-3" /> : <Play className="size-3" />}{jobRunType(job) === "automated" ? "Automated" : "Manual"}</Badge></TableCell>
+                        <TableCell><Badge variant={jobRunType(job) === "automated" ? "info" : "outline"} className="whitespace-nowrap" title={jobRunType(job) === "automated" ? "Started by a schedule, webhook, or system process" : "Started by a user"}>{jobRunType(job) === "automated" ? <CalendarDays className="size-3" /> : <Play className="size-3" />}{jobRunType(job) === "automated" ? "Automation" : "User"}</Badge></TableCell>
                         <TableCell><Badge variant={jobChannelLabel(job) === "Internal" ? "secondary" : "outline"} className="whitespace-nowrap"><Store className="size-3" />{jobChannelLabel(job)}</Badge></TableCell>
                         <TableCell className="min-w-36">
                           <div className="flex items-center gap-2">
@@ -4282,7 +4282,7 @@ function JobDetail({ job, onRetry, onStop, onUpdate, fullPage = false }: { job?:
           <Detail label="Category" value={jobCategory(job)} />
           <Detail label="Type" value={jobTypeLabel(job)} />
           <Detail label="Channel" value={jobChannelLabel(job)} />
-          <Detail label="Run type" value={jobRunType(job) === "automated" ? "Automated" : "Manual"} />
+          <Detail label="Started by" value={jobRunType(job) === "automated" ? "Automation" : "User"} />
           {jobImportMode(job) ? <Detail label="Import mode" value={jobImportMode(job)} /> : null}
           <Detail label="Started" value={dateLabel(job.startedAt || job.createdAt)} />
           <Detail label="Finished" value={dateLabel(job.finishedAt)} />
