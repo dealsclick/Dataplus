@@ -14,7 +14,10 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
   let warehouseReads = 0;
   let written;
   let created;
-  const body = { barcode: 'X0039W0Z71', locationBin: 'A-01', quantity: 2, qty: 2, sku: 'TEST-SKU', title: 'Test item', user: 'Test counter', clientActionId: 'quick-action-1', photoDataUrl: `data:image/jpeg;base64,${Buffer.from('photo').toString('base64')}` };
+  let atomicLineWrites = 0;
+  let savedMediaCount = 0;
+  const photoDataUrls = ['photo-1', 'photo-2'].map(value => `data:image/jpeg;base64,${Buffer.from(value).toString('base64')}`);
+  const body = { barcode: 'X0039W0Z71', locationBin: 'A-01', quantity: 2, qty: 2, sku: 'TEST-SKU', title: 'Test item', user: 'Test counter', clientActionId: 'quick-action-1', photoDataUrl: photoDataUrls[0], photoDataUrls };
   if (omitSku) delete body.sku;
   if (originalBin !== undefined) body.unknownLocationBin = originalBin;
   const context = {
@@ -33,6 +36,25 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
       isPostgresEnabled: () => true,
       readWarehouseAudit: async () => audit,
       saveWarehouseAudit: async next => { written = { warehouseAudits: [next] }; return next; },
+      saveWarehouseAuditMetadata: async next => { written = { auditMetadata: { ...next, lines: undefined } }; return true; },
+      applyWarehouseAuditScan: async (_auditId, input) => {
+        atomicLineWrites++;
+        const current = lines.find(line => String(line.productId || line.sku) === String(input.productId || input.sku) && String(line.locationBin || '').toLowerCase() === String(input.locationBin || '').toLowerCase());
+        return { ...current, ...input.line, id: current?.id || input.line.id, countedQty: Number(current?.countedQty || 0) + Number(input.quantity || 0) };
+      },
+      recordWarehouseAuditUnknownScan: async (_auditId, input) => {
+        const next = unknowns.map(entry => ({ ...entry }));
+        const current = next.find(entry => entry.barcode === input.barcode && String(entry.locationBin || '').toLowerCase() === String(input.locationBin || '').toLowerCase());
+        if (current) current.count = Number(current.count || 0) + Number(input.quantity || 0);
+        else next.push({ barcode: input.barcode, count: input.quantity, locationBin: input.locationBin, scannedAt: input.scannedAt, sourceMatch: input.sourceMatch });
+        written = { unknownBarcodes: next };
+        return { unknownBarcodes: next };
+      },
+      saveWarehouseAuditLine: async (_auditId, line, options) => {
+        atomicLineWrites++;
+        savedMediaCount = options.photoDataUrls.length;
+        return { ...line };
+      },
       readStateField: async key => { assert.equal(key, 'warehouseAudits'); return [audit]; },
       readStateFields: async keys => { assert.deepEqual(Array.from(keys), ['warehouses']); warehouseReads++; return { warehouses: [{ id: 'physical', name: 'Physical', isPhysical: true }] }; },
       readVendorCatalogSupplierCoverageBySkus: async () => [],
@@ -44,7 +66,7 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
     },
   };
   const result = await vm.runInNewContext(`(async () => { ${source.slice(start, end)} })()`, context);
-  return { result, audit, warehouseReads, written, created };
+  return { result, audit, warehouseReads, written, created, atomicLineWrites, savedMediaCount };
 }
 
 (async () => {
@@ -55,12 +77,13 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
   assert.equal(unknown.result.status, 200);
   assert.equal(unknown.result.data.matched, false);
   assert.equal(unknown.warehouseReads, 1);
-  assert.equal(unknown.written.warehouseAudits[0].unknownBarcodes[0].count, 2);
+  assert.equal(unknown.written.unknownBarcodes[0].count, 2);
   assert.equal(unknown.audit.unknownBarcodes[0].locationBin, 'A-01');
   const matched = await run('scan', { product: { id: 'product', sku: 'EXISTING', title: 'Existing product' } });
   assert.equal(matched.result.data.matched, true);
   assert.equal(matched.audit.lines[0].countedQty, 2);
   assert.equal(matched.audit.lines[0].expectedQty, 3);
+  assert.equal(matched.atomicLineWrites, 1);
   const manual = await run('manual-item');
   assert.equal(manual.result.status, 201);
   assert.equal(manual.created.status, 'Draft');
@@ -81,6 +104,9 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
   assert.equal(quick.created.needsProductDetails, true);
   assert.deepEqual(Array.from(quick.created.tags), ['warehouse-quick-create', 'needs-product-details']);
   assert.match(quick.created.defaultImage, /^\/api\/warehouse-audits\/audit\/lines\//);
+  assert.equal(quick.created.images.length, 2);
+  assert.equal(quick.created.quickCreate.photoCount, 2);
+  assert.equal(quick.savedMediaCount, 2);
   assert.equal(quick.audit.lines[0].quickCreated, true);
   assert.equal(quick.audit.lines[0].reviewStatus, 'needs_details');
   assert.equal(quick.audit.lines[0].countedQty, 2);

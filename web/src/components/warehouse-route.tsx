@@ -1833,13 +1833,12 @@ function WarehouseAuditPanel({
   };
   const saveManualQuickCreatedProduct = async () => {
     if (!resumedAudit || !manualUnknown || quickCreateBusy) return;
-    const photoDataUrl = manualPhotoUrls[0] || "";
-    if (!photoDataUrl) return toast.error("Take one product photo before quick create.");
+    if (!manualPhotoUrls.length) return toast.error("Take at least one product photo before quick create.");
     setQuickCreateBusy(true);
     try {
       const result = await api<{ audit?: Record<string, unknown>; product?: { sku?: string }; message?: string }>(
         `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/quick-item`,
-        { method: "POST", body: JSON.stringify({ barcode: manualUnknown.barcode, qty: Math.max(1, Number(manualUnknown.qty) || 1), locationBin: manualUnknown.locationBin || activeBin, photoDataUrl, clientActionId: manualQuickCreateClientId || crypto.randomUUID(), user: operatorName }) },
+        { method: "POST", body: JSON.stringify({ barcode: manualUnknown.barcode, qty: Math.max(1, Number(manualUnknown.qty) || 1), locationBin: manualUnknown.locationBin || activeBin, photoDataUrls: manualPhotoUrls.slice(0, 8), clientActionId: manualQuickCreateClientId || crypto.randomUUID(), user: operatorName }) },
       );
       if (result.audit) applyAuditUpdate(result.audit);
       setManualUnknown(null);
@@ -2764,7 +2763,7 @@ function WarehouseAuditPanel({
                       }
                     />
                   </Field>
-                  <Field label="Product photo">
+                  <Field label="Product photos (up to 8)">
                     <div className="grid gap-2">
                     <div className="flex flex-wrap gap-2">
                       <label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted">

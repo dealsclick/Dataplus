@@ -52,6 +52,10 @@ trap deployment_failed ERR
 echo "Building DataPlus application images..."
 docker compose build
 
+echo "Stopping paused TikTok and retired Walmart worker lanes..."
+docker compose stop worker-orders-tiktok worker-walmart || true
+docker compose rm -f worker-orders-tiktok worker-walmart || true
+
 echo "Pausing new label purchases and draining active purchase jobs..."
 docker compose run --rm --no-deps \
   dataplus node scripts/wait-for-label-purchases.cjs --pause --timeout-seconds "${DATAPLUS_LABEL_DRAIN_TIMEOUT_SECONDS:-1800}"
@@ -70,6 +74,10 @@ docker compose run --rm --no-deps \
 echo "Reconciling retained Temu label estimates and settlement matches..."
 docker compose run --rm --no-deps \
   dataplus node scripts/repair-temu-shipping-costs.cjs --apply
+
+echo "Compacting redundant no-change routing job history..."
+docker compose run --rm --no-deps \
+  dataplus node scripts/prune-redundant-routing-jobs.cjs
 
 echo "Starting production services and waiting for health checks..."
 docker compose up -d --build --remove-orphans --wait --wait-timeout 180

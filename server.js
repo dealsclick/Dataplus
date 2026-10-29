@@ -7357,12 +7357,17 @@ async function cleanupPostgresImportJobArtifacts() {
   const retention = await pruneExpiredPostgresImportJobArtifacts();
   const orphans = await pruneOrphanPostgresImportJobDirectories();
   const expiredPurchaseOrderRequests = await postgres.prunePurchaseOrderCreationRequests(PURCHASE_ORDER_REQUEST_RETENTION_DAYS);
+  const prunedNoopRoutingJobs = await postgres.pruneRedundantNoopOperationJobs({
+    workerTask: "paid-order-routing",
+    keepRecent: 100
+  });
   return {
-    cleaned: retention.expiredJobs + orphans.orphanDirs + expiredPurchaseOrderRequests,
+    cleaned: retention.expiredJobs + orphans.orphanDirs + expiredPurchaseOrderRequests + prunedNoopRoutingJobs,
     expiredArtifacts: retention.expiredJobs,
     removedArtifactFiles: retention.removedFiles + orphans.orphanFiles,
     orphanArtifactDirs: orphans.orphanDirs,
     expiredPurchaseOrderRequests,
+    prunedNoopRoutingJobs,
     failures: retention.failures + orphans.failures,
     scannedJobs: retention.scannedJobs
   };
@@ -20008,13 +20013,13 @@ async function runJobsRetentionCleanupWorkerJob(job = {}) {
     phase: "complete",
     message: result.failures
       ? `Jobs retention cleanup completed with ${Number(result.failures).toLocaleString()} file error${Number(result.failures) === 1 ? "" : "s"}. Review worker logs before retrying.`
-      : result.expiredArtifacts || result.orphanArtifactDirs || result.expiredPurchaseOrderRequests
-      ? `Jobs retention cleanup removed ${Number(result.removedArtifactFiles || 0).toLocaleString()} file${Number(result.removedArtifactFiles || 0) === 1 ? "" : "s"} and ${Number(result.expiredPurchaseOrderRequests || 0).toLocaleString()} expired PO retry record${Number(result.expiredPurchaseOrderRequests || 0) === 1 ? "" : "s"}.`
+      : result.expiredArtifacts || result.orphanArtifactDirs || result.expiredPurchaseOrderRequests || result.prunedNoopRoutingJobs
+      ? `Jobs retention cleanup removed ${Number(result.removedArtifactFiles || 0).toLocaleString()} file${Number(result.removedArtifactFiles || 0) === 1 ? "" : "s"}, ${Number(result.expiredPurchaseOrderRequests || 0).toLocaleString()} expired PO retry record${Number(result.expiredPurchaseOrderRequests || 0) === 1 ? "" : "s"}, and ${Number(result.prunedNoopRoutingJobs || 0).toLocaleString()} redundant no-change routing job${Number(result.prunedNoopRoutingJobs || 0) === 1 ? "" : "s"}.`
       : "Jobs retention cleanup complete. No expired files found.",
-    details: `Job files: ${IMPORT_JOB_FILE_RETENTION_DAYS} days. PO retry records: ${PURCHASE_ORDER_REQUEST_RETENTION_DAYS} days. Scanned compact job rows: ${result.scannedJobs || 0}. Expired job files: ${result.expiredArtifacts || 0}. Orphan folders: ${result.orphanArtifactDirs || 0}. Expired PO retry records: ${result.expiredPurchaseOrderRequests || 0}. File errors: ${result.failures || 0}.`,
-    totalRows: Number(result.expiredArtifacts || 0) + Number(result.orphanArtifactDirs || 0) + Number(result.expiredPurchaseOrderRequests || 0),
-    processedRows: Number(result.expiredArtifacts || 0) + Number(result.orphanArtifactDirs || 0) + Number(result.expiredPurchaseOrderRequests || 0),
-    changed: Number(result.removedArtifactFiles || 0) + Number(result.expiredPurchaseOrderRequests || 0),
+    details: `Job files: ${IMPORT_JOB_FILE_RETENTION_DAYS} days. PO retry records: ${PURCHASE_ORDER_REQUEST_RETENTION_DAYS} days. Scanned compact job rows: ${result.scannedJobs || 0}. Expired job files: ${result.expiredArtifacts || 0}. Orphan folders: ${result.orphanArtifactDirs || 0}. Expired PO retry records: ${result.expiredPurchaseOrderRequests || 0}. Redundant no-change routing jobs: ${result.prunedNoopRoutingJobs || 0}. File errors: ${result.failures || 0}.`,
+    totalRows: Number(result.expiredArtifacts || 0) + Number(result.orphanArtifactDirs || 0) + Number(result.expiredPurchaseOrderRequests || 0) + Number(result.prunedNoopRoutingJobs || 0),
+    processedRows: Number(result.expiredArtifacts || 0) + Number(result.orphanArtifactDirs || 0) + Number(result.expiredPurchaseOrderRequests || 0) + Number(result.prunedNoopRoutingJobs || 0),
+    changed: Number(result.removedArtifactFiles || 0) + Number(result.expiredPurchaseOrderRequests || 0) + Number(result.prunedNoopRoutingJobs || 0),
     progressPercent: 100,
     estimatedSecondsRemaining: 0,
     finishedAt: new Date().toISOString()
@@ -54311,7 +54316,9 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "image" && postgres.isPostgresEnabled()) {
-    const media = await postgres.readWarehouseAuditMedia(decodeURIComponent(parts[2]), decodeURIComponent(parts[4]));
+    const mediaKey = String(url.searchParams.get("key") || "image").trim().toLowerCase();
+    if (!/^image(?:-[2-8])?$/.test(mediaKey)) return sendJson(res, 400, { error: "Invalid warehouse image key." });
+    const media = await postgres.readWarehouseAuditMedia(decodeURIComponent(parts[2]), decodeURIComponent(parts[4]), mediaKey);
     if (!media?.encodedContent) return sendJson(res, 404, { error: "Warehouse audit image not found." });
     const content = Buffer.from(media.encodedContent, "base64");
     res.writeHead(200, {
@@ -55144,44 +55151,54 @@ async function handleApi(req, res) {
     const auditImage = auditProductImageUrl(product || {}, lookup.sourceItem || {});
     const now = new Date().toISOString();
     if (product) {
-      const line = (audit.lines || []).find((entry) => String(entry.productId || entry.sku) === String(product.id || product.sku) && String(entry.locationBin || "").trim().toLowerCase() === resolvedLocationBin.toLowerCase());
-      if (line) {
-        line.countedQty = Number(line.countedQty || 0) + quantity;
-        line.image = line.image || auditImage;
-        line.supplierCount = Math.max(0, Number(product.supplierCount || 0), Number(lookup.sourceItem?.supplierCount || 0), Number(scanSupplierCoverage?.supplierCount || 0));
-        line.hasMultipleSuppliers = Boolean(product.hasMultipleSuppliers || lookup.sourceItem?.hasMultipleSuppliers || scanSupplierCoverage?.hasMultipleSuppliers || line.supplierCount >= 2);
-        line.possibleSupplierCount = Math.max(line.supplierCount, Number(scanSupplierCoverage?.possibleSupplierCount || 0));
-        line.hasPossibleMultipleSuppliers = Boolean(scanSupplierCoverage?.hasPossibleMultipleSuppliers || line.possibleSupplierCount >= 2);
-        line.supplierCoverageMatchType = String(scanSupplierCoverage?.supplierCoverageMatchType || coverageProduct?.supplierCoverageMatchType || "");
-        line.lastScannedAt = now;
-        line.reviewStatus = "unreviewed";
-      } else (audit.lines || (audit.lines = [])).push({
-        id: crypto.randomUUID(),
+      const currentLine = (audit.lines || []).find((entry) => String(entry.productId || entry.sku) === String(product.id || product.sku) && String(entry.locationBin || "").trim().toLowerCase() === resolvedLocationBin.toLowerCase());
+      const supplierCount = Math.max(0, Number(product.supplierCount || 0), Number(lookup.sourceItem?.supplierCount || 0), Number(scanSupplierCoverage?.supplierCount || 0));
+      const possibleSupplierCount = Math.max(supplierCount, Number(scanSupplierCoverage?.possibleSupplierCount || 0));
+      const lineTemplate = {
+        ...(currentLine || {}),
+        id: currentLine?.id || crypto.randomUUID(),
         productId: product.id || product.sku,
         sku: product.sku,
         title: product.marketplaceTitle || product.title || product.sku,
-        image: auditImage,
+        image: currentLine?.image || auditImage,
         barcode,
         locationBin: resolvedLocationBin,
-        expectedQty: auditExpectedQuantity(product, audit, resolvedLocationBin),
-        countedQty: quantity,
-        supplierCount: Math.max(0, Number(product.supplierCount || 0), Number(lookup.sourceItem?.supplierCount || 0), Number(scanSupplierCoverage?.supplierCount || 0)),
-        hasMultipleSuppliers: Boolean(product.hasMultipleSuppliers || lookup.sourceItem?.hasMultipleSuppliers || scanSupplierCoverage?.hasMultipleSuppliers || Number(product.supplierCount || 0) >= 2 || Number(lookup.sourceItem?.supplierCount || 0) >= 2),
-        possibleSupplierCount: Math.max(0, Number(product.supplierCount || 0), Number(lookup.sourceItem?.supplierCount || 0), Number(scanSupplierCoverage?.possibleSupplierCount || scanSupplierCoverage?.supplierCount || 0)),
-        hasPossibleMultipleSuppliers: Boolean(scanSupplierCoverage?.hasPossibleMultipleSuppliers || Number(scanSupplierCoverage?.possibleSupplierCount || 0) >= 2),
+        expectedQty: currentLine?.expectedQty ?? auditExpectedQuantity(product, audit, resolvedLocationBin),
+        supplierCount,
+        hasMultipleSuppliers: Boolean(product.hasMultipleSuppliers || lookup.sourceItem?.hasMultipleSuppliers || scanSupplierCoverage?.hasMultipleSuppliers || supplierCount >= 2),
+        possibleSupplierCount,
+        hasPossibleMultipleSuppliers: Boolean(scanSupplierCoverage?.hasPossibleMultipleSuppliers || possibleSupplierCount >= 2),
         supplierCoverageMatchType: String(scanSupplierCoverage?.supplierCoverageMatchType || coverageProduct?.supplierCoverageMatchType || ""),
-        firstScannedAt: now,
+        firstScannedAt: currentLine?.firstScannedAt || now,
         lastScannedAt: now,
         reviewStatus: "unreviewed"
+      };
+      const savedLine = await postgres.applyWarehouseAuditScan(audit.id, {
+        productId: lineTemplate.productId,
+        sku: lineTemplate.sku,
+        locationBin: resolvedLocationBin,
+        quantity,
+        updatedAt: now,
+        line: lineTemplate
       });
+      if (!savedLine) return sendJson(res, 500, { error: "The scanned item could not be saved." });
+      const localLineIndex = (audit.lines || []).findIndex((entry) => String(entry.id || "") === String(savedLine.id || ""));
+      if (localLineIndex >= 0) audit.lines[localLineIndex] = savedLine;
+      else (audit.lines || (audit.lines = [])).push(savedLine);
       audit.updatedAt = now;
-      await postgres.saveWarehouseAudit(audit);
       return sendJson(res, 200, { audit, product, matched: true, message: `${product.sku} counted: ${quantity}.` });
     }
-    const unknown = (audit.unknownBarcodes || (audit.unknownBarcodes = [])).find((entry) => String(entry.barcode) === barcode && String(entry.locationBin || "").trim().toLowerCase() === resolvedLocationBin.toLowerCase());
-    if (unknown) { unknown.count = Number(unknown.count || 0) + quantity; if (lookup.sourceItem) unknown.sourceMatch = lookup.sourceItem; } else audit.unknownBarcodes.push({ barcode, count: quantity, locationBin: resolvedLocationBin, scannedAt: now, sourceMatch: lookup.sourceItem || null });
+    const unknownResult = await postgres.recordWarehouseAuditUnknownScan(audit.id, {
+      barcode,
+      quantity,
+      locationBin: resolvedLocationBin,
+      scannedAt: now,
+      updatedAt: now,
+      sourceMatch: lookup.sourceItem || null
+    });
+    if (!unknownResult) return sendJson(res, 500, { error: "The unknown barcode could not be saved." });
+    audit.unknownBarcodes = unknownResult.unknownBarcodes;
     audit.updatedAt = now;
-    await postgres.saveWarehouseAudit(audit);
     return sendJson(res, 200, { audit, matched: false, barcode, sourceItem: lookup.sourceItem, message: lookup.sourceItem ? `${barcode} was found in the source catalog as ${lookup.sourceItem.sku || lookup.sourceItem.vendorSku || "a source SKU"}, but is not yet an approved catalog SKU.` : `${barcode} saved as an unknown UPC.` });
   }
 
@@ -55960,13 +55977,19 @@ async function handleApi(req, res) {
     const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
     const quantity = Math.max(1, Math.min(100000, Math.floor(Number(body.qty || body.quantity || 1) || 0)));
     const clientActionId = String(body.clientActionId || "").trim();
-    const photoDataUrl = String(body.photoDataUrl || "").trim();
+    const photoDataUrls = (Array.isArray(body.photoDataUrls) ? body.photoDataUrls : [body.photoDataUrl])
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+      .slice(0, 8);
     if (!barcode) return sendJson(res, 400, { error: "Scan a UPC before quick-creating the product." });
     if (!clientActionId || clientActionId.length > 100) return sendJson(res, 400, { error: "Quick-create request identifier is missing." });
-    const photoMatch = /^data:(image\/(?:jpe?g|webp));base64,([A-Za-z0-9+/=\s]+)$/i.exec(photoDataUrl);
-    if (!photoMatch) return sendJson(res, 400, { error: "Take one product photo before quick create." });
-    const photoBytes = Buffer.from(photoMatch[2], "base64");
-    if (!photoBytes.length || photoBytes.length > 1_572_864) return sendJson(res, 413, { error: "The quick-create photo must be 1.5 MB or smaller." });
+    if (!photoDataUrls.length) return sendJson(res, 400, { error: "Take at least one product photo before quick create." });
+    for (const photoDataUrl of photoDataUrls) {
+      const photoMatch = /^data:(image\/(?:png|jpe?g|webp));base64,([A-Za-z0-9+/=\s]+)$/i.exec(photoDataUrl);
+      if (!photoMatch) return sendJson(res, 400, { error: "Use up to 8 PNG, JPG, or WebP photos for quick create." });
+      const photoBytes = Buffer.from(photoMatch[2], "base64");
+      if (!photoBytes.length || photoBytes.length > 1_572_864) return sendJson(res, 413, { error: "Each quick-create photo must be 1.5 MB or smaller." });
+    }
     const audit = await postgres.readWarehouseAudit(parts[2]);
     if (!audit) return notFound(res);
     if (audit.status !== "in_progress") return sendJson(res, 400, { error: "This warehouse audit is closed." });
@@ -55989,6 +56012,7 @@ async function handleApi(req, res) {
     const lineId = crypto.randomUUID();
     const productId = crypto.randomUUID();
     const imageUrl = `/api/warehouse-audits/${encodeURIComponent(audit.id)}/lines/${encodeURIComponent(lineId)}/image`;
+    const imageUrls = photoDataUrls.map((_, index) => index === 0 ? imageUrl : `${imageUrl}?key=image-${index + 1}`);
     const title = `Unidentified product ${barcode}`;
     const product = {
       id: productId, sku, title, marketplaceTitle: title, barcode,
@@ -55997,29 +56021,30 @@ async function handleApi(req, res) {
       category: "", mainCategory: "", sourceCategory: "", suggestedPackageCategory: "", supplier: "", brand: "", manufacturer: "", mfrPartNumber: "", vendorSku: "", shortDescription: "", cost: 0, price: 0,
       locationBin,
       warehouseStock: [normalizeWarehouseStockRow({ warehouseId: auditWarehouse?.id || audit.warehouseId || "", warehouseName: auditWarehouse?.name || audit.warehouseName || "Warehouse", locationBin, qty: quantity, reserved: 0 }, auditWarehouse)],
-      images: [imageUrl], defaultImage: imageUrl,
+      images: imageUrls, defaultImage: imageUrl,
       tags: ["warehouse-quick-create", "needs-product-details"],
       catalogReviewStatus: "needs_details", needsProductDetails: true,
       createdAt: now, updatedAt: now, createdBy,
       createdMethod: "Warehouse audit quick create", createdSource: "Warehouse audit", createdSourceDetail: audit.auditNumber,
       createdAuditId: audit.id, createdAuditNumber: audit.auditNumber,
-      quickCreate: { barcode, auditId: audit.id, auditNumber: audit.auditNumber, clientActionId, photoCapturedAt: now }
+      quickCreate: { barcode, auditId: audit.id, auditNumber: audit.auditNumber, clientActionId, photoCapturedAt: now, photoCount: imageUrls.length }
     };
     await postgres.upsertProductsFromState([product]);
     await postgres.upsertInventoryLevelsFromProducts([product]);
     const line = {
-      id: lineId, productId, sku, title, image: photoDataUrl, barcode, locationBin,
+      id: lineId, productId, sku, title, image: imageUrl, images: imageUrls, barcode, locationBin,
       expectedQty: quantity, countedQty: quantity, firstScannedAt: now, lastScannedAt: now,
       reviewStatus: "needs_details", source: "warehouse-audit-quick-create", quickCreated: true,
       quickCreateClientId: clientActionId, createdProductSku: sku, createdProductId: productId
     };
-    (audit.lines || (audit.lines = [])).push(line);
+    const savedLine = await postgres.saveWarehouseAuditLine(audit.id, line, { photoDataUrls, replaceMedia: true });
+    if (!savedLine) return sendJson(res, 500, { error: "The quick-created product photos could not be saved." });
+    (audit.lines || (audit.lines = [])).push(savedLine);
     const unknownIndex = (audit.unknownBarcodes || (audit.unknownBarcodes = [])).findIndex((entry) => String(entry.barcode || "") === barcode && String(entry.locationBin || "").trim().toLowerCase() === locationBin.toLowerCase());
     if (unknownIndex >= 0) audit.unknownBarcodes.splice(unknownIndex, 1);
     audit.updatedAt = now;
     audit.lifecycleEvents = [...(Array.isArray(audit.lifecycleEvents) ? audit.lifecycleEvents : []), { type: "quick_product_created", at: now, user: createdBy, sku, barcode }].slice(-100);
-    await postgres.saveWarehouseAudit(audit);
-    line.image = imageUrl;
+    await postgres.saveWarehouseAuditMetadata(audit);
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
     return sendJson(res, 201, { audit, product, message: `${sku} was quick-created as a draft. Add its product details later from Catalog.` });
@@ -73975,6 +74000,14 @@ function escapeHtml(value) {
 let orderRoutingProcessing = false;
 let purchasePoolProcessing = false;
 const SCHEDULED_ORDER_ROUTING_LIMIT = 25;
+const SCHEDULED_ORDER_ROUTING_NOOP_COOLDOWN_MS = Math.max(
+  60_000,
+  Number(process.env.SCHEDULED_ORDER_ROUTING_NOOP_COOLDOWN_MS || 15 * 60_000) || 15 * 60_000
+);
+
+function scheduledOrderRoutingFingerprint(candidateIds = []) {
+  return [...new Set(candidateIds.map(String).filter(Boolean))].sort().join("|");
+}
 
 async function readOrderRoutingContext(options = {}) {
   if (!postgres.isPostgresEnabled()) return normalizeDb(await readDbFast({ skipInventory: true, orderLimit: 1, purchaseOrderLimit: 1 }));
@@ -74032,6 +74065,19 @@ async function processScheduledOrderRouting() {
     const candidateIds = await scheduledOrderRoutingCandidateIds(workflowSettings, systemSettings);
     if (!candidateIds.length) return;
     if (await activeWorkerTask("paid-order-routing")) return;
+    const candidateFingerprint = scheduledOrderRoutingFingerprint(candidateIds);
+    const latest = await postgres.readLatestOperationJobByWorkerTask("paid-order-routing");
+    const latestFinishedAt = new Date(latest?.finishedAt || latest?.updatedAt || 0).getTime();
+    const latestChanged = Number(latest?.changed ?? latest?.changedCount ?? 0) || 0;
+    const latestErrors = Number(latest?.errorCount || 0) || 0;
+    if (
+      latest?.workerPayload?.candidateFingerprint === candidateFingerprint
+      && ["success", "warning"].includes(String(latest.status || "").toLowerCase())
+      && latestChanged === 0
+      && latestErrors === 0
+      && Number.isFinite(latestFinishedAt)
+      && Date.now() - latestFinishedAt < SCHEDULED_ORDER_ROUTING_NOOP_COOLDOWN_MS
+    ) return;
     const queueDb = { importJobs: [] };
     const job = createImportJob(queueDb, {
       section: "Orders",
@@ -74045,7 +74091,7 @@ async function processScheduledOrderRouting() {
       progressPercent: 0,
       phase: "queued",
       workerTask: "paid-order-routing",
-      workerPayload: { scheduled: true, background: true, candidateIds },
+      workerPayload: { scheduled: true, background: true, candidateIds, candidateFingerprint },
       message: `${candidateIds.length} paid order${candidateIds.length === 1 ? " is" : "s are"} queued for fulfillment routing.`
     });
     await postgres.upsertOperationJob(job);
@@ -74174,6 +74220,7 @@ async function runPaidOrderRoutingWorkerJob(job = {}) {
       phase: "complete",
       progressPercent: 100,
       processedRows,
+      changed: routedOrders,
       changedCount: routedOrders,
       errorCount: errors.length,
       errors,

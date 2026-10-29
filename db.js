@@ -1867,6 +1867,9 @@ async function initRelationalSchema() {
     create index if not exists operations_jobs_status_idx on operations_jobs (status, updated_at desc);
     create index if not exists operations_jobs_category_idx on operations_jobs (category, updated_at desc);
     create index if not exists operations_jobs_updated_idx on operations_jobs (updated_at desc);
+    create index if not exists operations_jobs_worker_task_updated_idx
+      on operations_jobs ((raw ->> 'workerTask'), updated_at desc)
+      where nullif(raw ->> 'workerTask', '') is not null;
     create index if not exists operations_jobs_artifact_retention_idx
       on operations_jobs (coalesce(ended_at, updated_at, started_at, created_at), job_id)
       where lower(status) in ('success', 'warning', 'failed', 'stopped');
@@ -2529,8 +2532,20 @@ function warehouseAuditLineId(auditId, line = {}, position = 0) {
     || `${String(auditId || "audit")}:line:${Math.max(0, Number(position || 0))}`;
 }
 
-function warehouseAuditMediaUrl(auditId, lineId) {
-  return `/api/warehouse-audits/${encodeURIComponent(String(auditId || ""))}/lines/${encodeURIComponent(String(lineId || ""))}/image`;
+function warehouseAuditMediaUrl(auditId, lineId, mediaKey = "image") {
+  const base = `/api/warehouse-audits/${encodeURIComponent(String(auditId || ""))}/lines/${encodeURIComponent(String(lineId || ""))}/image`;
+  return mediaKey === "image" ? base : `${base}?key=${encodeURIComponent(String(mediaKey || "image"))}`;
+}
+
+function warehouseAuditLineWithMedia(row = {}) {
+  const payload = row.line_payload && typeof row.line_payload === "object" ? { ...row.line_payload } : {};
+  payload.id = payload.id || row.line_id;
+  const mediaKeys = Array.isArray(row.media_keys) ? row.media_keys.filter(Boolean) : [];
+  if (mediaKeys.length) {
+    payload.images = mediaKeys.map((mediaKey) => warehouseAuditMediaUrl(row.audit_id, row.line_id, mediaKey));
+    payload.image = payload.images[0];
+  }
+  return payload;
 }
 
 async function readWarehouseAudits() {
@@ -2545,19 +2560,18 @@ async function readWarehouseAudits() {
     `),
     client.query(`
       select l.audit_id, l.line_id, l.line_payload,
-        exists (
-          select 1 from warehouse_audit_media m
-          where m.audit_id = l.audit_id and m.line_id = l.line_id and m.media_key = 'image'
-        ) as has_image
+        coalesce((
+          select array_agg(m.media_key order by case when m.media_key = 'image' then 0 else 1 end, m.media_key)
+          from warehouse_audit_media m
+          where m.audit_id = l.audit_id and m.line_id = l.line_id
+        ), '{}'::text[]) as media_keys
       from warehouse_audit_lines l
       order by l.audit_id, l.position, l.line_id
     `)
   ]);
   const linesByAudit = new Map();
   for (const row of lines.rows) {
-    const payload = row.line_payload && typeof row.line_payload === "object" ? { ...row.line_payload } : {};
-    payload.id = payload.id || row.line_id;
-    if (row.has_image) payload.image = warehouseAuditMediaUrl(row.audit_id, row.line_id);
+    const payload = warehouseAuditLineWithMedia(row);
     const bucket = linesByAudit.get(row.audit_id) || [];
     bucket.push(payload);
     linesByAudit.set(row.audit_id, bucket);
@@ -2644,20 +2658,16 @@ async function readWarehouseAudit(auditId = "") {
   if (!row) return null;
   const linesResult = await client.query(`
     select l.audit_id, l.line_id, l.line_payload,
-      exists (
-        select 1 from warehouse_audit_media m
-        where m.audit_id = l.audit_id and m.line_id = l.line_id and m.media_key = 'image'
-      ) as has_image
+      coalesce((
+        select array_agg(m.media_key order by case when m.media_key = 'image' then 0 else 1 end, m.media_key)
+        from warehouse_audit_media m
+        where m.audit_id = l.audit_id and m.line_id = l.line_id
+      ), '{}'::text[]) as media_keys
     from warehouse_audit_lines l
     where l.audit_id = $1
     order by l.position, l.line_id
   `, [row.audit_id]);
-  const lines = linesResult.rows.map((lineRow) => {
-    const payload = lineRow.line_payload && typeof lineRow.line_payload === "object" ? { ...lineRow.line_payload } : {};
-    payload.id = payload.id || lineRow.line_id;
-    if (lineRow.has_image) payload.image = warehouseAuditMediaUrl(lineRow.audit_id, lineRow.line_id);
-    return payload;
-  });
+  const lines = linesResult.rows.map(warehouseAuditLineWithMedia);
   return {
     ...(row.audit_payload && typeof row.audit_payload === "object" ? row.audit_payload : {}),
     id: row.audit_payload?.id || row.audit_id,
@@ -2764,6 +2774,219 @@ async function replaceWarehouseAudits(audits = [], options = {}) {
 async function saveWarehouseAudit(audit = {}, options = {}) {
   if (!audit || typeof audit !== "object" || !nullableString(audit.id)) return false;
   return replaceWarehouseAudits([audit], { ...options, preserveOthers: true });
+}
+
+async function saveWarehouseAuditMetadata(audit = {}, options = {}) {
+  const pool = getPool();
+  const auditId = nullableString(audit.id);
+  if (!pool || !auditId) return false;
+  await initRelationalSchema();
+  const client = options.client || pool;
+  const { lines: _lines, ...auditPayload } = audit;
+  const result = await client.query(`
+    update warehouse_audits
+    set audit_number = coalesce($2, audit_number),
+      warehouse_id = coalesce($3, warehouse_id),
+      supplier_id = coalesce($4, supplier_id),
+      status = coalesce($5, status),
+      audit_payload = $6::jsonb,
+      updated_at = now()
+    where audit_id = $1
+  `, [
+    auditId,
+    nullableString(audit.auditNumber),
+    nullableString(audit.warehouseId),
+    nullableString(audit.supplierId),
+    nullableString(audit.status),
+    JSON.stringify({ ...auditPayload, id: auditId })
+  ]);
+  return result.rowCount > 0;
+}
+
+async function applyWarehouseAuditScan(auditId = "", input = {}) {
+  const pool = getPool();
+  const normalizedAuditId = nullableString(auditId);
+  const productId = nullableString(input.productId);
+  const sku = nullableString(input.sku);
+  const locationBin = String(input.locationBin || "").trim();
+  const quantity = Math.max(1, Math.floor(Number(input.quantity || 1) || 1));
+  const template = input.line && typeof input.line === "object" ? { ...input.line } : {};
+  if (!pool || !normalizedAuditId || (!productId && !sku)) return null;
+  await initRelationalSchema();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("select 1 from warehouse_audits where audit_id = $1 for update", [normalizedAuditId]);
+    const existing = await client.query(`
+      select line_id, position, line_payload
+      from warehouse_audit_lines
+      where audit_id = $1
+        and lower(coalesce(line_payload ->> 'locationBin', '')) = lower($2)
+        and (
+          ($3 <> '' and coalesce(line_payload ->> 'productId', '') = $3)
+          or ($4 <> '' and lower(coalesce(sku, line_payload ->> 'sku', '')) = lower($4))
+        )
+      order by position, line_id
+      limit 1
+      for update
+    `, [normalizedAuditId, locationBin, productId || "", sku || ""]);
+    let line;
+    if (existing.rows.length) {
+      const row = existing.rows[0];
+      const current = row.line_payload && typeof row.line_payload === "object" ? row.line_payload : {};
+      line = {
+        ...current,
+        ...template,
+        id: row.line_id,
+        countedQty: Number(current.countedQty || 0) + quantity
+      };
+      await client.query(`
+        update warehouse_audit_lines
+        set sku = $3, barcode = $4, line_payload = $5::jsonb, updated_at = now()
+        where audit_id = $1 and line_id = $2
+      `, [normalizedAuditId, row.line_id, nullableString(line.sku), nullableString(line.barcode), JSON.stringify(line)]);
+    } else {
+      const lineId = warehouseAuditLineId(normalizedAuditId, template, Date.now());
+      line = { ...template, id: lineId, countedQty: quantity };
+      await client.query(`
+        insert into warehouse_audit_lines (audit_id, line_id, position, sku, barcode, line_payload, updated_at)
+        values (
+          $1, $2,
+          coalesce((select max(position) + 1 from warehouse_audit_lines where audit_id = $1), 0),
+          $3, $4, $5::jsonb, now()
+        )
+      `, [normalizedAuditId, lineId, nullableString(line.sku), nullableString(line.barcode), JSON.stringify(line)]);
+    }
+    await client.query(`
+      update warehouse_audits
+      set audit_payload = jsonb_set(coalesce(audit_payload, '{}'::jsonb), '{updatedAt}', to_jsonb($2::text), true),
+        updated_at = now()
+      where audit_id = $1
+    `, [normalizedAuditId, nullableString(input.updatedAt) || new Date().toISOString()]);
+    await client.query("commit");
+    return line;
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function recordWarehouseAuditUnknownScan(auditId = "", input = {}) {
+  const pool = getPool();
+  const normalizedAuditId = nullableString(auditId);
+  const barcode = nullableString(input.barcode);
+  const locationBin = String(input.locationBin || "").trim();
+  const quantity = Math.max(1, Math.floor(Number(input.quantity || 1) || 1));
+  if (!pool || !normalizedAuditId || !barcode) return null;
+  await initRelationalSchema();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const result = await client.query(`
+      select audit_payload
+      from warehouse_audits
+      where audit_id = $1
+      for update
+    `, [normalizedAuditId]);
+    if (!result.rows.length) {
+      await client.query("rollback");
+      return null;
+    }
+    const payload = result.rows[0].audit_payload && typeof result.rows[0].audit_payload === "object"
+      ? { ...result.rows[0].audit_payload }
+      : {};
+    const unknownBarcodes = Array.isArray(payload.unknownBarcodes) ? payload.unknownBarcodes.map((entry) => ({ ...entry })) : [];
+    const match = unknownBarcodes.find((entry) => String(entry.barcode || "") === barcode
+      && String(entry.locationBin || "").trim().toLowerCase() === locationBin.toLowerCase());
+    if (match) {
+      match.count = Number(match.count || 0) + quantity;
+      if (input.sourceMatch) match.sourceMatch = input.sourceMatch;
+    } else {
+      unknownBarcodes.push({
+        barcode,
+        count: quantity,
+        locationBin,
+        scannedAt: nullableString(input.scannedAt) || new Date().toISOString(),
+        sourceMatch: input.sourceMatch || null
+      });
+    }
+    payload.unknownBarcodes = unknownBarcodes;
+    payload.updatedAt = nullableString(input.updatedAt) || new Date().toISOString();
+    await client.query(`
+      update warehouse_audits
+      set audit_payload = $2::jsonb, updated_at = now()
+      where audit_id = $1
+    `, [normalizedAuditId, JSON.stringify(payload)]);
+    await client.query("commit");
+    return { payload, unknownBarcodes };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function saveWarehouseAuditLine(auditId = "", line = {}, options = {}) {
+  const pool = getPool();
+  const normalizedAuditId = nullableString(auditId);
+  if (!pool || !normalizedAuditId || !line || typeof line !== "object") return null;
+  await initRelationalSchema();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const lineId = warehouseAuditLineId(normalizedAuditId, line, Date.now());
+    const stored = { ...line, id: lineId };
+    const mediaUrl = warehouseAuditMediaUrl(normalizedAuditId, lineId);
+    const isStoredMediaUrl = (value) => String(value || "") === mediaUrl || String(value || "").startsWith(`${mediaUrl}?key=`);
+    if (isStoredMediaUrl(stored.image)) delete stored.image;
+    if (Array.isArray(stored.images) && stored.images.every(isStoredMediaUrl)) delete stored.images;
+    await client.query(`
+      insert into warehouse_audit_lines (audit_id, line_id, position, sku, barcode, line_payload, updated_at)
+      values (
+        $1, $2,
+        coalesce((select max(position) + 1 from warehouse_audit_lines where audit_id = $1), 0),
+        $3, $4, $5::jsonb, now()
+      )
+      on conflict (audit_id, line_id) do update set
+        sku = excluded.sku,
+        barcode = excluded.barcode,
+        line_payload = excluded.line_payload,
+        updated_at = now()
+    `, [normalizedAuditId, lineId, nullableString(line.sku), nullableString(line.barcode), JSON.stringify(stored)]);
+    const photoDataUrls = Array.isArray(options.photoDataUrls) ? options.photoDataUrls.slice(0, 8) : [];
+    const storedMediaKeys = [];
+    for (let index = 0; index < photoDataUrls.length; index += 1) {
+      const match = /^data:([^;]+);base64,(.+)$/s.exec(String(photoDataUrls[index] || ""));
+      if (!match) continue;
+      const mediaKey = index === 0 ? "image" : `image-${index + 1}`;
+      storedMediaKeys.push(mediaKey);
+      await client.query(`
+        insert into warehouse_audit_media (audit_id, line_id, media_key, mime_type, encoded_content, updated_at)
+        values ($1, $2, $3, $4, $5, now())
+        on conflict (audit_id, line_id, media_key) do update set
+          mime_type = excluded.mime_type,
+          encoded_content = excluded.encoded_content,
+          updated_at = now()
+      `, [normalizedAuditId, lineId, mediaKey, match[1] || "image/jpeg", match[2]]);
+    }
+    if (options.replaceMedia === true) {
+      await client.query(`
+        delete from warehouse_audit_media
+        where audit_id = $1 and line_id = $2 and not (media_key = any($3::text[]))
+      `, [normalizedAuditId, lineId, storedMediaKeys]);
+    }
+    await client.query("commit");
+    const images = storedMediaKeys.map((mediaKey) => warehouseAuditMediaUrl(normalizedAuditId, lineId, mediaKey));
+    return { ...stored, ...(images.length ? { image: images[0], images } : {}) };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function readWarehouseAuditMedia(auditId, lineId, mediaKey = "image") {
@@ -13708,6 +13931,46 @@ async function readLatestOperationJobByWorkerTask(workerTask = "") {
   return result.rows[0] ? operationJobFromRow(result.rows[0]) : null;
 }
 
+async function pruneRedundantNoopOperationJobs(options = {}) {
+  const client = getPool();
+  if (!client) return 0;
+  await initRelationalSchema();
+  const workerTask = nullableString(options.workerTask) || "paid-order-routing";
+  const keepRecent = Math.max(25, Math.min(1000, Number(options.keepRecent || 100) || 100));
+  const result = await client.query(`
+    with ranked as (
+      select job_id,
+        row_number() over (order by coalesce(ended_at, updated_at, created_at) desc, job_id desc) as row_number
+      from operations_jobs
+      where raw ->> 'workerTask' = $1
+        and lower(status) = 'success'
+        and coalesce(
+          changed_rows,
+          case when raw ->> 'changedCount' ~ '^-?[0-9]+$' then (raw ->> 'changedCount')::integer end,
+          case when raw ->> 'changed' ~ '^-?[0-9]+$' then (raw ->> 'changed')::integer end,
+          0
+        ) = 0
+        and coalesce(
+          missing_rows,
+          case when raw ->> 'missingCount' ~ '^-?[0-9]+$' then (raw ->> 'missingCount')::integer end,
+          0
+        ) = 0
+        and coalesce(
+          case when raw ->> 'errorCount' ~ '^-?[0-9]+$' then (raw ->> 'errorCount')::integer end,
+          0
+        ) = 0
+    ), removed as (
+      delete from operations_jobs target
+      using ranked
+      where target.job_id = ranked.job_id
+        and ranked.row_number > $2
+      returning target.job_id
+    )
+    select count(*)::int as removed from removed
+  `, [workerTask, keepRecent]);
+  return Number(result.rows[0]?.removed || 0);
+}
+
 async function readOperationJobs(limit = 250) {
   const client = getPool();
   if (!client) return [];
@@ -19082,6 +19345,7 @@ module.exports = {
   readOperationJobsPage,
   readOperationJob,
   readLatestOperationJobByWorkerTask,
+  pruneRedundantNoopOperationJobs,
   readExpiredOperationJobArtifactBatch,
   expireOperationJobArtifacts,
   readExistingOperationJobIds,
@@ -19228,6 +19492,10 @@ module.exports = {
   readWarehouseAudit,
   replaceWarehouseAudits,
   saveWarehouseAudit,
+  saveWarehouseAuditMetadata,
+  applyWarehouseAuditScan,
+  recordWarehouseAuditUnknownScan,
+  saveWarehouseAuditLine,
   readWarehouseAuditMedia,
   readAuthSessions,
   replaceAuthSessions,
