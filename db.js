@@ -13942,7 +13942,11 @@ async function pruneRedundantNoopOperationJobs(options = {}) {
       select job_id,
         row_number() over (order by coalesce(ended_at, updated_at, created_at) desc, job_id desc) as row_number
       from operations_jobs
-      where raw ->> 'workerTask' = $1
+      where (
+          raw ->> 'workerTask' = $1
+          or lower(coalesce(name, '')) = 'paid order routing'
+          or lower(coalesce(raw ->> 'operation', '')) = 'paid order routing'
+        )
         and lower(status) = 'success'
         and coalesce(
           changed_rows,
