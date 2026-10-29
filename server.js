@@ -26893,6 +26893,37 @@ function publicSourceManagerFields(item = {}) {
   return fields;
 }
 
+const EXPLICIT_CHANNEL_SECRET_FIELDS = new Set([
+  "temuAppKey",
+  "temuAppSecret",
+  "temuAccessToken",
+  "ebayWebhookVerificationToken"
+]);
+
+function channelSettingIsSecret(field = "") {
+  const key = String(field || "");
+  if (!key || /(?:configured|enabled|expiresAt|verifiedAt)$/i.test(key)) return false;
+  return EXPLICIT_CHANNEL_SECRET_FIELDS.has(key)
+    || /(?:secret|password|accessToken|refreshToken|verificationToken|apiKey|privateKey|signingKey|hmac)/i.test(key);
+}
+
+function publicChannelSettings(settings = {}) {
+  const sanitized = {};
+  for (const [field, value] of Object.entries(settings && typeof settings === "object" ? settings : {})) {
+    if (channelSettingIsSecret(field)) {
+      sanitized[field] = "";
+      sanitized[`${field}Configured`] = Boolean(value);
+      continue;
+    }
+    if (Array.isArray(value)) {
+      sanitized[field] = value.map((entry) => entry && typeof entry === "object" ? publicChannelSettings(entry) : entry);
+      continue;
+    }
+    sanitized[field] = value && typeof value === "object" ? publicChannelSettings(value) : value;
+  }
+  return sanitized;
+}
+
 function publicConnection(connection = {}) {
   const logoDataUrl = String(connection.logoDataUrl || "");
   const normalized = normalizeChannel(connection);
@@ -26905,7 +26936,7 @@ function publicConnection(connection = {}) {
     externalAccount: isShopify ? shopifyConfig.shop : normalized.externalAccount,
     shopifyConfig,
     logoDataUrl: logoDataUrl.length <= 120000 ? logoDataUrl : "",
-    settings: normalized.settings
+    settings: publicChannelSettings(normalized.settings)
   };
 }
 
@@ -63695,7 +63726,7 @@ async function handleApi(req, res) {
     Object.assign(channel, normalizeChannel(channel));
     await postgres.writeStateDocuments({ connections: db.connections || [] });
     appendChannelApiLog({ kind: "activity", channel: channel.name || "Channel", actionGroup: "warehouse_mapping", operation: "Warehouse mappings reconciled", status: result.healthy ? "success" : "warning", ok: result.healthy, entityType: "channel", entityId: channel.id, actor: "DataPlus", trigger: "manual", message: result.healthy ? `${result.mappings.length} warehouse mapping(s) passed validation.` : `${result.issues.length} warehouse mapping issue(s) require attention.` });
-    return sendJson(res, 200, { channel, ...result });
+    return sendJson(res, 200, { channel: publicConnection(channel), ...result });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "channels" && parts[2] && postgres.isPostgresEnabled()) {
@@ -63741,7 +63772,7 @@ async function handleApi(req, res) {
       trigger: "manual",
       message: `${channel.name || "Channel"} settings were updated.`
     });
-    return sendJson(res, 200, { channel });
+    return sendJson(res, 200, { channel: publicConnection(channel) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "confirm" && postgres.isPostgresEnabled()) {
@@ -71696,7 +71727,7 @@ async function handleApi(req, res) {
     Object.assign(channel, normalizeChannel(channel));
     await writeDb(db);
     appendChannelApiLog({ kind: "activity", channel: channel.name || "Channel", actionGroup: "warehouse_mapping", operation: "Warehouse mappings reconciled", status: result.healthy ? "success" : "warning", ok: result.healthy, entityType: "channel", entityId: channel.id, actor: "DataPlus", trigger: "manual", message: result.healthy ? `${result.mappings.length} warehouse mapping(s) passed validation.` : `${result.issues.length} warehouse mapping issue(s) require attention.` });
-    return sendJson(res, 200, { channel, ...result });
+    return sendJson(res, 200, { channel: publicConnection(channel), ...result });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "channels" && parts[2]) {
@@ -71743,7 +71774,7 @@ async function handleApi(req, res) {
       trigger: "manual",
       message: `${channel.name || "Channel"} settings were updated.`
     });
-    return sendJson(res, 200, { channel, state: publicState(db) });
+    return sendJson(res, 200, { channel: publicConnection(channel), state: publicState(db) });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "orders" && parts[2]) {
@@ -74648,6 +74679,8 @@ module.exports = {
   normalizeCatalogProductForInventory,
   exactEligibleOrderSourceProduct,
   normalizeChannel,
+  publicChannelSettings,
+  publicConnection,
   createInventoryFromOrderLine,
   ensureProductsForImportedOrders,
   hydrateOrdersLocalCosts,

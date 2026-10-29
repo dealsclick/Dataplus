@@ -447,8 +447,11 @@ type ChannelSettings = {
   temuEndpoint?: string
   temuAuthorizationUrl?: string
   temuAppKey?: string
+  temuAppKeyConfigured?: boolean
   temuAppSecret?: string
+  temuAppSecretConfigured?: boolean
   temuAccessToken?: string
+  temuAccessTokenConfigured?: boolean
   temuMallId?: string
   temuOrderPageSize?: number
   temuConnectionOk?: boolean
@@ -512,6 +515,7 @@ type ChannelSettings = {
   ebayWebhookOrderSyncEnabled?: boolean
   ebayWebhookEndpoint?: string
   ebayWebhookVerificationToken?: string
+  ebayWebhookVerificationTokenConfigured?: boolean
   ebayNotificationAlertEmail?: string
   whatnotApiEnvironment?: string
   whatnotGraphqlEndpoint?: string
