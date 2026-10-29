@@ -1053,6 +1053,8 @@ function WarehouseAuditPanel({
   const [cameraScanQuantity, setCameraScanQuantity] = useState("1");
   const [cameraLookupBusy, setCameraLookupBusy] = useState(false);
   const [quickCreateBusy, setQuickCreateBusy] = useState(false);
+  const [quickCreatePhotoOpen, setQuickCreatePhotoOpen] = useState(false);
+  const [quickCreateResumeScanner, setQuickCreateResumeScanner] = useState(false);
   const [manualQuickCreateClientId, setManualQuickCreateClientId] = useState("");
   const [torchAvailable, setTorchAvailable] = useState(false);
   const [torchEnabled, setTorchEnabled] = useState(false);
@@ -1085,6 +1087,7 @@ function WarehouseAuditPanel({
   const [ebayReadinessBusy, setEbayReadinessBusy] = useState(false);
   const [ebayShadowLaunchBusy, setEbayShadowLaunchBusy] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const quickCreatePhotoInputRef = useRef<HTMLInputElement | null>(null);
   const manualTitleRef = useRef<HTMLInputElement | null>(null);
   const manualCreateRef = useRef<HTMLDivElement | null>(null);
   const photoAnalysisRequestRef = useRef(0);
@@ -1577,15 +1580,28 @@ function WarehouseAuditPanel({
     }
   };
   submitScanRef.current = submit;
-  const beginQuickCreate = () => {
-    if (!lastScan || lastScan.matched) return;
-    const quantity = Math.max(1, Math.min(100000, Math.floor(Number(cameraScanQuantity) || 1)));
-    setManualUnknown({ barcode: lastScan.barcode, sku: "", title: "", locationBin: activeBin, qty: String(quantity) });
+  const beginQuickCreate = (draft?: Record<string, string>) => {
+    const scannedDraft = !draft && lastScan && !lastScan.matched
+      ? {
+          barcode: lastScan.barcode,
+          sku: "",
+          title: "",
+          locationBin: activeBin,
+          qty: String(Math.max(1, Math.min(100000, Math.floor(Number(cameraScanQuantity) || 1)))),
+        }
+      : null;
+    const nextDraft = draft || scannedDraft;
+    if (!nextDraft?.barcode) return;
+    const resumeScanner = Boolean(cameraOpen && lastScan && !lastScan.matched);
+    setManualUnknown(nextDraft);
     setManualQuickCreateClientId(crypto.randomUUID());
     setManualPhotoUrls([]);
+    setPhotoAnalysisStatus("idle");
+    setQuickCreateResumeScanner(resumeScanner);
+    setQuickCreatePhotoOpen(true);
     setCameraOpen(false);
-    setCameraMessage(`Take one product photo for ${lastScan.barcode}, then choose Quick create.`);
-    window.setTimeout(() => manualCreateRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+    setCameraMessage(`Take product photos for ${nextDraft.barcode}, then create the draft SKU.`);
+    quickCreatePhotoInputRef.current?.click();
   };
   const continueToFullCreate = async () => {
     if (!lastScan || lastScan.matched || cameraLookupBusy) return;
@@ -1831,6 +1847,16 @@ function WarehouseAuditPanel({
       }
     }
   };
+  const closeQuickCreatePhotoCapture = () => {
+    setQuickCreatePhotoOpen(false);
+    setQuickCreateResumeScanner(false);
+    if (quickCreateResumeScanner) {
+      setManualUnknown(null);
+      setManualPhotoUrls([]);
+      setManualQuickCreateClientId("");
+      setCameraOpen(true);
+    }
+  };
   const saveManualQuickCreatedProduct = async () => {
     if (!resumedAudit || !manualUnknown || quickCreateBusy) return;
     if (!manualPhotoUrls.length) return toast.error("Take at least one product photo before quick create.");
@@ -1841,12 +1867,17 @@ function WarehouseAuditPanel({
         { method: "POST", body: JSON.stringify({ barcode: manualUnknown.barcode, qty: Math.max(1, Number(manualUnknown.qty) || 1), locationBin: manualUnknown.locationBin || activeBin, photoDataUrls: manualPhotoUrls.slice(0, 8), clientActionId: manualQuickCreateClientId || crypto.randomUUID(), user: operatorName }) },
       );
       if (result.audit) applyAuditUpdate(result.audit);
+      const message = result.message || `${String(result.product?.sku || "Draft SKU")} quick-created.`;
+      const resumeScanner = quickCreateResumeScanner;
+      setQuickCreatePhotoOpen(false);
+      setQuickCreateResumeScanner(false);
       setManualUnknown(null);
       setManualPhotoUrls([]);
       setManualQuickCreateClientId("");
-      setLastScan(null);
+      resetCameraScan(`${message} Ready for the next barcode.`);
+      if (resumeScanner) setCameraOpen(true);
       scannerFeedback("success");
-      toast.success(result.message || `${String(result.product?.sku || "Draft SKU")} quick-created.`);
+      toast.success(message);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to quick-create this product.");
     } finally {
@@ -1917,13 +1948,16 @@ function WarehouseAuditPanel({
       locationBin: String(item.locationBin || ""),
       qty: String(Math.max(1, Number(item.count) || 1)),
     };
+    if (mode === "quick") {
+      beginQuickCreate(draft);
+      return;
+    }
     setManualUnknown(draft);
     setManualQuickCreateClientId(crypto.randomUUID());
     setManualPhotoUrls([]);
     setPhotoAnalysisStatus("idle");
     setCameraOpen(false);
     window.setTimeout(() => manualCreateRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
-    if (mode === "quick") return;
     await startManualSkuCreation(draft);
   };
   const shareAuditLink = async () => {
@@ -2520,12 +2554,87 @@ function WarehouseAuditPanel({
                   {cameraStreamState !== "ready" && !lastScan && <div className="absolute inset-0 grid place-items-center bg-black/85 p-5 text-center text-white"><div className="max-w-xs"><p className="font-medium">{cameraStreamState === "opening" ? "Starting camera..." : cameraStreamState === "permission" ? "Camera permission is needed" : "Camera could not start"}</p><p className="mt-2 text-sm text-white/75">{cameraStreamState === "permission" ? "Allow Camera for dataplusapp.duckdns.org in Safari. Safari remembers this choice until it is changed in website settings." : "Make sure no other app is using the camera, then try again."}</p>{cameraStreamState !== "opening" && <Button className="mt-4" variant="secondary" onClick={() => { setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); }}>Try camera again</Button>}</div></div>}
                   {cameraStreamState === "ready" && <div className="pointer-events-none absolute inset-x-[7%] top-1/2 -translate-y-1/2" aria-hidden="true"><div className="h-28 rounded-md border-2 border-emerald-400/90 shadow-[0_0_18px_rgba(74,222,128,.55)]"><div className="mt-14 h-0.5 bg-emerald-400" /></div><p className="mx-auto mt-3 w-fit rounded-full bg-black/75 px-3 py-1.5 text-xs font-medium text-white">{cameraMode === "bin" ? "Align one bin label inside the frame" : `Align one barcode inside the frame · ${scannerEngine === "native" ? "Fast scan" : "Compatible scan"}`}</p></div>}
                   {!lastScan && cameraLookupBusy && <div className="absolute inset-0 grid place-items-center bg-black/40"><div className="flex max-w-[90%] items-center gap-2 rounded-md bg-background px-4 py-3 text-foreground shadow-xl" role="status" aria-live="assertive"><Loader2 className="size-5 shrink-0 animate-spin" /><span className="truncate">{cameraMode === "bin" ? "Checking bin" : "Searching for product"}{barcode ? ` ${barcode}` : ""}...</span></div></div>}
-                  {lastScan && <div data-testid="camera-notifications" className={`absolute inset-x-3 top-3 max-h-[46%] overflow-y-auto rounded-md border p-3 text-white shadow-xl ${lastScan.matched ? "border-emerald-300 bg-emerald-700" : "border-amber-300 bg-amber-700"}`} aria-live="polite"><div className="flex items-start gap-3">{lastScan.matched ? <CheckCircle2 className="mt-0.5 size-5 shrink-0" /> : <AlertTriangle className="mt-0.5 size-5 shrink-0" />}<div className="min-w-0 flex-1"><p className="font-semibold">{lastScan.matched ? "Catalog item matched" : "Product not found"}</p><p className="mt-1 break-all font-mono text-xs text-white/80">{lastScan.sku || lastScan.barcode}</p>{lastScan.title && <p className="mt-1 truncate text-sm">{lastScan.title}</p>}<p className="mt-1 text-sm">{busy || quickCreateBusy ? "Saving..." : cameraMessage}</p><div className="mt-3 flex items-center gap-3"><Label htmlFor="camera-scan-quantity" className="shrink-0 text-sm font-medium text-white">Counted quantity</Label><Input id="camera-scan-quantity" className="h-10 max-w-32 bg-background text-base text-foreground" type="number" min="1" max="100000" inputMode="numeric" autoFocus value={cameraScanQuantity} onChange={(event) => setCameraScanQuantity(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && lastScan.matched) { event.preventDefault(); void confirmCameraScan(); } }} /></div>{!lastScan.matched ? <p className="mt-2 text-xs text-white/80">Skip it, quick-create a draft with one native camera photo, or open the full workflow.</p> : null}</div></div></div>}
+                  {lastScan && <div data-testid="camera-notifications" className={`absolute inset-x-3 top-3 max-h-[46%] overflow-y-auto rounded-md border p-3 text-white shadow-xl ${lastScan.matched ? "border-emerald-300 bg-emerald-700" : "border-amber-300 bg-amber-700"}`} aria-live="polite"><div className="flex items-start gap-3">{lastScan.matched ? <CheckCircle2 className="mt-0.5 size-5 shrink-0" /> : <AlertTriangle className="mt-0.5 size-5 shrink-0" />}<div className="min-w-0 flex-1"><p className="font-semibold">{lastScan.matched ? "Catalog item matched" : "Product not found"}</p><p className="mt-1 break-all font-mono text-xs text-white/80">{lastScan.sku || lastScan.barcode}</p>{lastScan.title && <p className="mt-1 truncate text-sm">{lastScan.title}</p>}<p className="mt-1 text-sm">{busy || quickCreateBusy ? "Saving..." : cameraMessage}</p><div className="mt-3 flex items-center gap-3"><Label htmlFor="camera-scan-quantity" className="shrink-0 text-sm font-medium text-white">Counted quantity</Label><Input id="camera-scan-quantity" className="h-10 max-w-32 bg-background text-base text-foreground" type="number" min="1" max="100000" inputMode="numeric" autoFocus value={cameraScanQuantity} onChange={(event) => setCameraScanQuantity(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && lastScan.matched) { event.preventDefault(); void confirmCameraScan(); } }} /></div>{!lastScan.matched ? <p className="mt-2 text-xs text-white/80">Skip it, open Quick create to take product photos, or use the full workflow.</p> : null}</div></div></div>}
                 </div>
                 <DialogFooter className="warehouse-audit-camera-footer !m-0 shrink-0 !flex-col gap-2 rounded-none border-t bg-background px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 sm:!flex-row sm:items-center sm:justify-between">
                   <p className="w-full text-xs text-muted-foreground sm:min-w-0 sm:flex-1 sm:truncate">{cameraMessage || "Camera stays open between products for faster scanning."}</p>
                   <div className="grid w-full shrink-0 grid-cols-3 gap-2 sm:w-auto">
-                    {lastScan && !lastScan.matched ? <><Button variant="outline" onClick={() => resetCameraScan("Skipped. Ready for the next barcode.")}>Skip</Button><Button variant="outline" disabled={cameraLookupBusy || busy} onClick={() => void continueToFullCreate()}>{cameraLookupBusy || busy ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />} Full create</Button><Button disabled={cameraLookupBusy || busy} onClick={beginQuickCreate}><Camera className="size-4" /> Quick create</Button></> : lastScan ? <><Button variant="outline" onClick={closeCameraScanner}>Done</Button><Button variant="outline" disabled={cameraLookupBusy} onClick={() => resetCameraScan()}>Cancel scan</Button><Button disabled={cameraLookupBusy || busy} onClick={() => void confirmCameraScan()}>{cameraLookupBusy || busy ? <Loader2 className="size-4 animate-spin" /> : null} Add count</Button></> : <Button className="col-span-3 w-full" variant="outline" onClick={closeCameraScanner}>Done</Button>}
+                    {lastScan && !lastScan.matched ? <><Button variant="outline" onClick={() => resetCameraScan("Skipped. Ready for the next barcode.")}>Skip</Button><Button variant="outline" disabled={cameraLookupBusy || busy} onClick={() => void continueToFullCreate()}>{cameraLookupBusy || busy ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />} Full create</Button><Button disabled={cameraLookupBusy || busy} onClick={() => beginQuickCreate()}><Camera className="size-4" /> Quick create</Button></> : lastScan ? <><Button variant="outline" onClick={closeCameraScanner}>Done</Button><Button variant="outline" disabled={cameraLookupBusy} onClick={() => resetCameraScan()}>Cancel scan</Button><Button disabled={cameraLookupBusy || busy} onClick={() => void confirmCameraScan()}>{cameraLookupBusy || busy ? <Loader2 className="size-4 animate-spin" /> : null} Add count</Button></> : <Button className="col-span-3 w-full" variant="outline" onClick={closeCameraScanner}>Done</Button>}
+                  </div>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+            <input
+              ref={quickCreatePhotoInputRef}
+              className="sr-only"
+              type="file"
+              accept="image/*"
+              capture="environment"
+              tabIndex={-1}
+              onChange={(event) => {
+                void readManualPhotos(event.currentTarget.files);
+                event.currentTarget.value = "";
+              }}
+            />
+            <Dialog open={quickCreatePhotoOpen} onOpenChange={(open) => { if (!open && !quickCreateBusy) closeQuickCreatePhotoCapture(); }}>
+              <DialogContent className="!inset-0 !flex !h-[100dvh] !max-w-none !translate-x-0 !translate-y-0 flex-col gap-0 overflow-hidden rounded-none p-0 sm:!left-1/2 sm:!top-1/2 sm:!h-[min(88dvh,720px)] sm:!max-w-xl sm:!-translate-x-1/2 sm:!-translate-y-1/2 sm:rounded-lg" showCloseButton={false}>
+                <DialogHeader className="shrink-0 border-b px-4 py-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <DialogTitle>Quick create product</DialogTitle>
+                      <DialogDescription>Photograph the product, then create the draft SKU and continue scanning.</DialogDescription>
+                    </div>
+                    <Badge className="shrink-0" variant="outline">{manualPhotoUrls.length}/8 photos</Badge>
+                  </div>
+                  <div className="mt-2 flex min-w-0 flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                    <span>UPC <span className="font-mono font-medium text-foreground">{String(manualUnknown?.barcode || "-")}</span></span>
+                    <span>Qty <span className="font-medium text-foreground">{String(manualUnknown?.qty || "1")}</span></span>
+                    <span>Bin <span className="font-medium text-foreground">{String(manualUnknown?.locationBin || activeBin || "Unassigned")}</span></span>
+                  </div>
+                </DialogHeader>
+                <div className="min-h-0 flex-1 overflow-y-auto bg-muted/20 p-4">
+                  {manualPhotoUrls.length ? (
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                      {manualPhotoUrls.map((photo, index) => (
+                        <div key={`${photo.slice(-24)}-${index}`} className="group relative aspect-square overflow-hidden rounded-md border bg-background">
+                          <img src={photo} alt={`Product photo ${index + 1}`} className="size-full object-cover" />
+                          <Badge className="absolute bottom-2 left-2 bg-black/75 text-white" variant="secondary">Photo {index + 1}</Badge>
+                          <Button
+                            type="button"
+                            size="icon"
+                            variant="secondary"
+                            className="absolute right-2 top-2 size-8 bg-background/90"
+                            aria-label={`Remove product photo ${index + 1}`}
+                            onClick={() => removeManualPhoto(index)}
+                          >
+                            <X className="size-4" />
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className="grid min-h-72 w-full place-items-center rounded-md border border-dashed bg-background p-6 text-center hover:bg-muted/50"
+                      onClick={() => quickCreatePhotoInputRef.current?.click()}
+                    >
+                      <span>
+                        <Camera className="mx-auto size-10 text-primary" />
+                        <span className="mt-3 block font-medium">Take the first product photo</span>
+                        <span className="mt-1 block text-sm text-muted-foreground">Use the back camera. You can add up to eight photos.</span>
+                      </span>
+                    </button>
+                  )}
+                </div>
+                <DialogFooter className="!m-0 shrink-0 !flex-col gap-2 rounded-none border-t bg-background px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 sm:!flex-row sm:items-center sm:justify-between">
+                  <Button className="w-full sm:w-auto" variant="outline" disabled={quickCreateBusy} onClick={closeQuickCreatePhotoCapture}>Cancel</Button>
+                  <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto">
+                    <Button className="w-full" variant="outline" disabled={quickCreateBusy || manualPhotoUrls.length >= 8} onClick={() => quickCreatePhotoInputRef.current?.click()}>
+                      <Camera className="size-4" /> {manualPhotoUrls.length ? "Take another" : "Take photo"}
+                    </Button>
+                    <Button className="w-full" disabled={quickCreateBusy || !manualPhotoUrls.length} onClick={() => void saveManualQuickCreatedProduct()}>
+                      {quickCreateBusy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} Create draft SKU
+                    </Button>
                   </div>
                 </DialogFooter>
               </DialogContent>
@@ -2594,7 +2703,7 @@ function WarehouseAuditPanel({
                 <div>
                   <p className="font-medium">Resolve unmatched UPC</p>
                   <p className="text-xs text-muted-foreground">
-                    DataPlus checked the local catalog first. Quick create saves the UPC, quantity, bin, and first photo so scanning can continue. Full product details can be completed later.
+                    DataPlus checked the local catalog first. Quick create opens the product camera, saves up to eight photos with the UPC, quantity, and bin, then returns to scanning. Full product details can be completed later.
                   </p>
                 </div>
                 <div className="grid gap-2 rounded-md border bg-background/70 p-3 text-sm md:grid-cols-[minmax(0,1fr)_auto]">
@@ -2608,7 +2717,7 @@ function WarehouseAuditPanel({
                     <Button
                       size="sm"
                       disabled={quickCreateBusy || busy}
-                      onClick={() => void saveManualQuickCreatedProduct()}
+                      onClick={() => beginQuickCreate(manualUnknown)}
                     >
                       {quickCreateBusy ? <Loader2 className="size-4 animate-spin" /> : <Camera className="size-4" />} Quick create
                     </Button>
@@ -2885,7 +2994,7 @@ function WarehouseAuditPanel({
                     size="sm"
                     variant="outline"
                     disabled={quickCreateBusy || busy || Number(manualUnknown.qty || 0) <= 0}
-                    onClick={() => void saveManualQuickCreatedProduct()}
+                    onClick={() => beginQuickCreate(manualUnknown)}
                   >
                     {quickCreateBusy ? <Loader2 className="size-4 animate-spin" /> : <Camera className="size-4" />} Quick create
                   </Button>

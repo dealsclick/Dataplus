@@ -9,6 +9,9 @@ assert.match(mobileSource, /section === "receiving"[\s\S]*: receiving\)}/, 'Mobi
 assert.doesNotMatch(mobileSource, /function PurchaseQueue/, 'The obsolete search-only mobile PO landing must stay removed');
 assert.match(warehouseRouteSource, /receiving=\{canReceive \? <InboundReceivingLauncher mobile/, 'Mobile receiving must use the existing/manual PO launcher');
 assert.match(warehouseRouteSource, /manual=\{canReceive \? <ManualReceivingPanel mobile/, 'Other stock must remain the ordinary manual receipt flow');
+assert.match(warehouseRouteSource, /const beginQuickCreate = \(draft\?[\s\S]*quickCreatePhotoInputRef\.current\?\.click\(\)/, 'Warehouse quick create must open the product camera directly');
+assert.match(warehouseRouteSource, /<DialogTitle>Quick create product<\/DialogTitle>[\s\S]*\{manualPhotoUrls\.length\}\/8 photos[\s\S]*Take another[\s\S]*Create draft SKU/, 'Warehouse quick create must support a compact multi-photo capture flow');
+assert.match(warehouseRouteSource, /if \(resumeScanner\) setCameraOpen\(true\)/, 'Camera quick create must return the worker to barcode scanning');
 assert.match(appSource, /href="\/warehouse\/mobile"[\s\S]*Warehouse Mobile/, 'The mobile account menu must link to Warehouse Mobile');
 const start = source.indexOf('async function purchaseOrderWithCatalogImages(');
 const end = source.indexOf('\nasync function ', start + 1);
