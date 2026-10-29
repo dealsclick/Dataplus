@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { api } from "@/lib/client-api"
-import type { LiteState, Vendor } from "../App"
+import type { Vendor } from "../App"
 
 const emptyVendor = { name: "", code: "", contactName: "", email: "", phone: "", website: "", notes: "" }
 
@@ -24,7 +24,7 @@ export function VendorCreateDialog({
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
-  onCreated: (vendor: Vendor, state?: LiteState) => void | Promise<void>
+  onCreated: (vendor: Vendor) => void | Promise<void>
   context?: "vendors" | "external-receipt"
 }) {
   const [draft, setDraft] = useState(emptyVendor)
@@ -35,11 +35,11 @@ export function VendorCreateDialog({
     if (!draft.name.trim() || saving) return
     setSaving(true)
     try {
-      const result = await api<{ vendor: Vendor; state?: LiteState }>("/api/vendors", {
+      const result = await api<{ vendor: Vendor }>("/api/vendors", {
         method: "POST",
         body: JSON.stringify({ ...draft, name: draft.name.trim(), code: draft.code.trim() })
       })
-      await onCreated(result.vendor, result.state)
+      await onCreated(result.vendor)
       toast.success(`${result.vendor.name} was created as an inactive vendor.`)
       onOpenChange(false)
     } catch (error) {

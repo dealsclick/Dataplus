@@ -25,6 +25,7 @@ import { UserCompanyAccess } from "./user-company-access"
 import { SuperuserActivity } from "./superuser-activity"
 import { CarrierProviderSettings } from "./carrier-provider-settings"
 import { api, dateLabel, numberLabel } from "../lib/client-api"
+import { loadAppReferences } from "../lib/app-state"
 import { Detail, Field, PageHeader, ToggleField } from "./app-ui"
 import {
   permissionActionLabel, userCan,
@@ -33,7 +34,7 @@ import { ReleaseHistorySettings, VendorFeedScheduleManager } from "./legacy-work
 import type { SupplierIndexStatus } from "./legacy-workspaces"
 import type {
   AuthPermission, AuthPermissionArea, AuthPermissionAuditEvent, AuthPermissionMatrix,
-  AuthPermissionTemplate, AuthUser, ImportJob, LiteState,
+  AuthPermissionTemplate, AuthUser, ImportJob,
   SystemSettings, WorkerStatus,
 } from "../App"
 function SettingsPage({
@@ -170,7 +171,7 @@ function SettingsPage({
       .finally(() => setOrderWorkflowLoading(false))
   }, [])
   useEffect(() => {
-    void api<LiteState>("/api/state?lite=1")
+    void loadAppReferences(["warehouses"])
       .then((state) => setSettingsWarehouses((state.warehouses || []) as Array<Record<string, unknown>>))
       .catch(() => setSettingsWarehouses([]))
   }, [])

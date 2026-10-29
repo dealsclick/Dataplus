@@ -52,6 +52,7 @@ import { NotificationCapture,NotificationCenter } from "./components/notificatio
 import { orderSidebarItems as operationsSidebarItems } from "./components/order-navigation"
 import { QuickFindBarcodeScanner } from "./components/quick-find-barcode-scanner"
 import { SystemBrandMark } from "./components/system-brand-mark"
+import { cachedAppVersion,clearAppStateCache,loadAppBootstrap,loadAppReferences,loadAppSummary,updateAppReference,type AppProjection,type AppReferenceName } from "./lib/app-state"
 import { api,dateLabel,numberLabel } from "./lib/client-api"
 export { channelFilterLabel,marketplaceChannelKey } from "./lib/catalog-channel-utils"
 export type { MarketplaceChannelKey } from "./lib/catalog-channel-utils"
@@ -1535,6 +1536,13 @@ function viewFromPath(pathname = "/"): AppView {
   return "overview"
 }
 
+function appReferencesForView(view: AppView, warehouseMobile = false): AppReferenceName[] {
+  const references = new Set<AppReferenceName>()
+  if (["overview", "jobs", "vendors", "brands", "brand-detail"].includes(view)) references.add("vendors")
+  if (view === "channels" || warehouseMobile) references.add("warehouses")
+  return [...references]
+}
+
 function currentAppLocation() {
   return `${window.location.pathname}${window.location.search}${window.location.hash}`
 }
@@ -2124,6 +2132,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const [refreshing, setRefreshing] = useState(false)
   const workspaceLoadedRef = useRef(false)
   const workspaceRefreshPendingRef = useRef(false)
+  const loadedReferencesRef = useRef(new Set<AppReferenceName>())
   const [checkingShopify, setCheckingShopify] = useState(false)
   const [shopifyAuth, setShopifyAuth] = useState<ShopifyAuthCheck | null>(null)
   const [selectedJobId, setSelectedJobId] = useState<string>("")
@@ -2182,6 +2191,8 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
       // Clear client state even if the server session has already expired.
     } finally {
       workspaceLoadedRef.current = false
+      loadedReferencesRef.current.clear()
+      clearAppStateCache()
       setAuth({ authenticated: false })
       setState({})
       setJobs([])
@@ -2315,8 +2326,21 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     setView("job-detail")
   }
 
+  async function loadWorkspaceReferences(nextView = view, force = false) {
+    const references = appReferencesForView(nextView, warehouseMobile)
+    if (!references.length) return
+    references.forEach((name) => loadedReferencesRef.current.add(name))
+    const result = await loadAppReferences(references, force)
+    setState((current) => ({
+      ...current,
+      ...(references.includes("vendors") ? { vendors: (result.vendors || []) as Vendor[] } : {}),
+      ...(references.includes("brands") ? { brands: (result.brands || []) as Brand[] } : {}),
+      ...(references.includes("warehouses") ? { warehouses: (result.warehouses || []) as Array<Record<string, unknown>> } : {}),
+    }))
+  }
+
   async function refreshData({ quiet = false } = {}) {
-    if (companyOnly) { setLoading(false); return }
+    if (companySettings || orderTools) { setLoading(false); return }
     if (quiet && (document.hidden || workspaceRefreshPendingRef.current)) return
     // Order details own their data lifecycle. Loading the global shell state here
     // competes with the order query and repeats every minute without feeding this page.
@@ -2326,8 +2350,20 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     if (!quiet && !initialLoad) setRefreshing(true)
     workspaceRefreshPendingRef.current = true
     try {
-      const nextState = await api<LiteState>("/api/state?lite=1")
-      setState(nextState)
+      const references = appReferencesForView(view, warehouseMobile)
+      const [bootstrap, referenceState] = await Promise.all([
+        loadAppBootstrap(!quiet),
+        references.length ? loadAppReferences(references, !quiet) : Promise.resolve({} as AppProjection),
+      ])
+      references.forEach((name) => loadedReferencesRef.current.add(name))
+      setState((current) => ({
+        ...current,
+        connections: (bootstrap.connections || current.connections || []) as ChannelConnection[],
+        systemSettings: (bootstrap.systemSettings || current.systemSettings || {}) as SystemSettings,
+        ...(references.includes("vendors") ? { vendors: (referenceState.vendors || []) as Vendor[] } : {}),
+        ...(references.includes("brands") ? { brands: (referenceState.brands || []) as Brand[] } : {}),
+        ...(references.includes("warehouses") ? { warehouses: (referenceState.warehouses || []) as Array<Record<string, unknown>> } : {}),
+      }))
     } catch (error) {
       if (!quiet) toast.error(error instanceof Error ? error.message : "Unable to load DataPlus.")
     } finally {
@@ -2338,6 +2374,28 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     }
     const jobsWorkspaceActive = /^\/(jobs|operations)(\/|$)/.test(window.location.pathname)
     if (jobsWorkspaceActive) void loadJobs({}, quiet)
+  }
+
+  async function refreshAppSummary() {
+    if (document.hidden || workspaceRefreshPendingRef.current) return
+    try {
+      const result = await loadAppSummary()
+      if (result.workerStatus) setWorkerStatus(result.workerStatus as WorkerStatus)
+      const versions = result.versions || {}
+      if (["connections", "systemSettings", "connectorState"].some((name) => versions[name] && versions[name] !== cachedAppVersion(name))) {
+        const bootstrap = await loadAppBootstrap(true)
+        setState((current) => ({
+          ...current,
+          connections: (bootstrap.connections || current.connections || []) as ChannelConnection[],
+          systemSettings: (bootstrap.systemSettings || current.systemSettings || {}) as SystemSettings,
+        }))
+      }
+      const activeReferences = appReferencesForView(view, warehouseMobile)
+      const staleReferences = activeReferences.filter((name) => loadedReferencesRef.current.has(name) && versions[name] && versions[name] !== cachedAppVersion(name))
+      if (staleReferences.length) await loadWorkspaceReferences(view, true)
+    } catch {
+      // Page-specific data remains usable when the lightweight status poll is unavailable.
+    }
   }
 
   function navigateTo(nextView: AppView) {
@@ -2397,11 +2455,10 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   }) {
     if (confirmMessage && !window.confirm(confirmMessage)) return
     try {
-      const result = await api<{ job?: ImportJob; importJobs?: ImportJob[]; state?: LiteState; message?: string }>(path, {
+      const result = await api<{ job?: ImportJob; importJobs?: ImportJob[]; message?: string }>(path, {
         method: "POST",
         body: JSON.stringify(body),
       })
-      if (result.state) setState((current) => ({ ...current, ...result.state }))
       if (result.importJobs) setJobs(result.importJobs)
       else if (result.job) setJobs((current) => [result.job as ImportJob, ...current.filter((job) => job.id !== result.job?.id)])
       toast.success(result.message || successMessage)
@@ -2425,17 +2482,14 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
 
   async function saveChannel(channelId: string, patch: Record<string, unknown>) {
     try {
-      const result = await api<{ channel: ChannelConnection; state?: LiteState }>(`/api/channels/${encodeURIComponent(channelId)}`, {
+      const result = await api<{ channel: ChannelConnection }>(`/api/channels/${encodeURIComponent(channelId)}`, {
         method: "PATCH",
         body: JSON.stringify(patch),
       })
-      setState((current) => ({
-        ...current,
-        ...(result.state || {}),
-        connections: (result.state?.connections || current.connections || []).map((channel) => (
-          channel.id === channelId ? result.channel : channel
-        )),
-      }))
+      setState((current) => {
+        const connections = (current.connections || []).map((channel) => channel.id === channelId ? result.channel : channel)
+        return { ...current, connections }
+      })
       toast.success("Channel settings saved.")
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to save channel settings.")
@@ -2445,17 +2499,15 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
 
   async function saveVendor(vendorId: string, patch: Record<string, unknown>) {
     try {
-      const result = await api<{ vendor: Vendor; state?: LiteState; catalogRefreshJob?: ImportJob | null }>(`/api/vendors/${encodeURIComponent(vendorId)}`, {
+      const result = await api<{ vendor: Vendor; catalogRefreshJob?: ImportJob | null }>(`/api/vendors/${encodeURIComponent(vendorId)}`, {
         method: "PATCH",
         body: JSON.stringify(patch),
       })
-      setState((current) => ({
-        ...current,
-        ...(result.state || {}),
-        vendors: (result.state?.vendors || current.vendors || []).map((vendor) => (
-          vendor.id === vendorId ? result.vendor : vendor
-        )),
-      }))
+      setState((current) => {
+        const vendors = (current.vendors || []).map((vendor) => vendor.id === vendorId ? result.vendor : vendor)
+        updateAppReference("vendors", vendors)
+        return { ...current, vendors }
+      })
       toast.success(result.catalogRefreshJob
         ? `Vendor settings saved. Catalog refresh queued as ${jobReference(result.catalogRefreshJob)}.`
         : "Vendor settings saved.")
@@ -2467,11 +2519,15 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
 
   async function createBrand(patch: Record<string, unknown>) {
     try {
-      const result = await api<{ brand: Brand; state?: LiteState }>("/api/brands", {
+      const result = await api<{ brand: Brand }>("/api/brands", {
         method: "POST",
         body: JSON.stringify(patch),
       })
-      setState((current) => ({ ...current, ...(result.state || {}), brands: result.state?.brands || [result.brand, ...(current.brands || [])] }))
+      setState((current) => {
+        const brands = [result.brand, ...(current.brands || []).filter((brand) => brand.id !== result.brand.id)]
+        updateAppReference("brands", brands)
+        return { ...current, brands }
+      })
       toast.success("Brand created.")
       return result.brand
     } catch (error) {
@@ -2482,15 +2538,15 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
 
   async function saveBrand(brandId: string, patch: Record<string, unknown>) {
     try {
-      const result = await api<{ brand: Brand; state?: LiteState }>(`/api/brands/${encodeURIComponent(brandId)}`, {
+      const result = await api<{ brand: Brand }>(`/api/brands/${encodeURIComponent(brandId)}`, {
         method: "PATCH",
         body: JSON.stringify(patch),
       })
-      setState((current) => ({
-        ...current,
-        ...(result.state || {}),
-        brands: (result.state?.brands || current.brands || []).map((brand) => brand.id === brandId ? result.brand : brand),
-      }))
+      setState((current) => {
+        const brands = (current.brands || []).map((brand) => brand.id === brandId ? result.brand : brand)
+        updateAppReference("brands", brands)
+        return { ...current, brands }
+      })
       toast.success("Brand profile saved.")
       return result.brand
     } catch (error) {
@@ -2501,11 +2557,15 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
 
   async function runBrandAction(brandId: string, action: "enable" | "disable" | "void") {
     try {
-      const result = await api<{ brand: Brand; state?: LiteState }>(`/api/brands/${encodeURIComponent(brandId)}/action`, {
+      const result = await api<{ brand: Brand }>(`/api/brands/${encodeURIComponent(brandId)}/action`, {
         method: "POST",
         body: JSON.stringify({ action }),
       })
-      setState((current) => ({ ...current, ...(result.state || {}), brands: (result.state?.brands || current.brands || []).map((brand) => brand.id === brandId ? result.brand : brand) }))
+      setState((current) => {
+        const brands = (current.brands || []).map((brand) => brand.id === brandId ? result.brand : brand)
+        updateAppReference("brands", brands)
+        return { ...current, brands }
+      })
       toast.success(`Brand ${action === "void" ? "voided" : action === "enable" ? "enabled" : "disabled"}.`)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to update brand status.")
@@ -2515,14 +2575,13 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
 
   async function saveSystemSettings(patch: Record<string, unknown>) {
     try {
-      const result = await api<{ state?: LiteState; systemSettings?: SystemSettings }>("/api/system-settings", {
+      const result = await api<{ systemSettings?: SystemSettings }>("/api/system-settings", {
         method: "PATCH",
         body: JSON.stringify(patch),
       })
       setState((current) => ({
         ...current,
-        ...(result.state || {}),
-        systemSettings: result.systemSettings || result.state?.systemSettings || { ...current.systemSettings, ...patch },
+        systemSettings: result.systemSettings || { ...current.systemSettings, ...patch },
       }))
       toast.success("System settings saved.")
     } catch (error) {
@@ -2533,13 +2592,20 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
 
   useEffect(() => {
     if (!auth.authenticated) return
-    if (companyOnly) { setLoading(false); return }
+    if (companySettings || orderTools) { setLoading(false); return }
     refreshData()
-    // Workspace-specific pages refresh their active work independently. Keep
-    // shared shell data current without crowding operational queries.
-    const timer = window.setInterval(() => refreshData({ quiet: true }), 60_000)
+    // Poll only the compact version/health summary. Changed references reload
+    // independently, while operational pages continue to own their data.
+    const timer = window.setInterval(() => { void refreshAppSummary() }, 30_000)
     return () => window.clearInterval(timer)
-  }, [auth.authenticated, companyOnly])
+  }, [auth.authenticated, companySettings, orderTools])
+
+  useEffect(() => {
+    if (!auth.authenticated || companySettings || orderTools || !workspaceLoadedRef.current) return
+    void loadWorkspaceReferences(view).catch((error) => {
+      toast.error(error instanceof Error ? error.message : "Unable to load workspace references.")
+    })
+  }, [auth.authenticated, companySettings, orderTools, view])
 
   useEffect(() => {
     if (!auth.authenticated || companyOnly || !["jobs", "operations", "job-detail"].includes(view)) return
@@ -2984,7 +3050,11 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                   <VendorsPage
                     vendors={state.vendors || []}
                     onSaveVendor={saveVendor}
-                    onVendorCreated={(vendor, nextState) => setState((current) => ({ ...current, ...(nextState || {}), vendors: nextState?.vendors || [vendor, ...(current.vendors || []).filter((row) => row.id !== vendor.id)] }))}
+                    onVendorCreated={(vendor) => setState((current) => {
+                      const vendors = [vendor, ...(current.vendors || []).filter((row) => row.id !== vendor.id)]
+                      updateAppReference("vendors", vendors)
+                      return { ...current, vendors }
+                    })}
                   />
                 )}
                 {view === "brands" && <BrandsPage vendors={state.vendors || []} onCreateBrand={createBrand} />}

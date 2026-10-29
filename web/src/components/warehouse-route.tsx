@@ -28,10 +28,11 @@ import { WarehouseMobile } from "./warehouse-mobile"
 import { OutboundAuditWorkspace } from "./outbound-audit-workspace"
 import { VendorCreateDialog } from "./vendor-create-dialog"
 import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
+import { loadAppBootstrap, loadAppReferences } from "../lib/app-state"
 import { compressEvidenceImage, startFastBarcodeScanner } from "../lib/fast-barcode-scanner"
 import { Detail, Field, PageHeader } from "./app-ui"
 import { ProductDetailSheet } from "./legacy-workspaces"
-import type { CatalogItem, ImportJob, LiteState, SystemSettings, Vendor } from "../App"
+import type { CatalogItem, ImportJob, SystemSettings, Vendor } from "../App"
 type WarehouseRegisterRecord = {
   id?: string
   code?: string
@@ -170,7 +171,7 @@ function WarehouseRegister() {
   const load = async () => {
     setLoading(true)
     try {
-      const result = await api<LiteState>("/api/state?lite=1")
+      const result = await loadAppReferences(["warehouses"], true)
       setWarehouses((result.warehouses || []) as WarehouseRegisterRecord[])
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load warehouses.")
@@ -322,7 +323,7 @@ function WarehouseRegister() {
 function WarehouseBinManager({ fixedWarehouseId = "", onChanged, mobile = false }: { fixedWarehouseId?: string; onChanged?: () => void | Promise<void>; mobile?: boolean } = {}) {
   const [binQuery, setBinQuery] = useState("")
   type Bin = { id?: string; code?: string; name?: string; type?: string; section?: string; aisle?: string; nickname?: string; active?: boolean; isDefault?: boolean; notes?: string }
-  type WarehouseRecord = { id?: string; name?: string; code?: string; bins?: Bin[]; requireBinValidation?: boolean }
+  type WarehouseRecord = { id?: string; name?: string; code?: string; bins?: Bin[]; requireBinValidation?: boolean; isPhysical?: boolean; inventorySourceType?: string }
   const [warehouses, setWarehouses] = useState<WarehouseRecord[]>([])
   const [warehouseId, setWarehouseId] = useState("")
   const [dialogOpen, setDialogOpen] = useState(false)
@@ -334,8 +335,8 @@ function WarehouseBinManager({ fixedWarehouseId = "", onChanged, mobile = false 
   const selected = warehouses.find((warehouse) => String(warehouse.id) === warehouseId) || warehouses[0]
   const load = async () => {
     try {
-      const result = await api<LiteState>("/api/state?lite=1")
-      const rows = (result.warehouses || []).filter(row => !mobile || (row.isPhysical !== false && row.inventorySourceType !== "supplier_feed")) as WarehouseRecord[]
+      const result = await loadAppReferences(["warehouses"], true)
+      const rows = ((result.warehouses || []) as WarehouseRecord[]).filter(row => !mobile || (row.isPhysical !== false && row.inventorySourceType !== "supplier_feed"))
       setWarehouses(rows)
       const requestedWarehouseId = fixedWarehouseId || new URLSearchParams(window.location.search).get("warehouseId") || ""
       setWarehouseId((current) => current || (rows.some((row) => String(row.id) === requestedWarehouseId) ? requestedWarehouseId : String(rows[0]?.id || "")))
@@ -562,11 +563,11 @@ function InboundReceivingLauncher({ mobile = false, operatorName = "Warehouse" }
 
   const loadReferenceData = async () => {
     try {
-      const state = await api<LiteState>("/api/state?lite=1")
-      const physical = (state.warehouses || []).filter((item) => item.isPhysical !== false && item.inventorySourceType !== "supplier_feed" && item.allowReceiving !== false)
+      const state = await loadAppReferences(["warehouses", "vendors"])
+      const physical = ((state.warehouses || []) as Array<{ id?: string; isPhysical?: boolean; inventorySourceType?: string; allowReceiving?: boolean; isDefaultReceiving?: boolean }>).filter((item) => item.isPhysical !== false && item.inventorySourceType !== "supplier_feed" && item.allowReceiving !== false)
       setWarehouses(physical as typeof warehouses)
       setWarehouseId((current) => current || String(physical.find((item) => item.isDefaultReceiving)?.id || physical[0]?.id || ""))
-      setVendors((state.vendors || []).filter((vendor) => {
+      setVendors(((state.vendors || []) as Vendor[]).filter((vendor) => {
         const status = String(vendor.status || "active").trim().toLowerCase()
         return !["retired", "deleted"].includes(status) && !vendor.retirement?.retiredAt
       }).sort((left, right) => String(left.name || "").localeCompare(String(right.name || ""), undefined, { sensitivity: "base" })))
@@ -717,7 +718,7 @@ function WarehouseAuditHistory({ mobile = false }: { mobile?: boolean } = {}) {
   const [pin, setPin] = useState("")
   const [adminUserId, setAdminUserId] = useState("")
   const [acting, setActing] = useState(false)
-  const load = async () => { setLoading(true); try { const params = new URLSearchParams({ summary: "1", page: String(page), pageSize: "25", sort }); const [result, state] = await Promise.all([api<{ audits?: Array<Record<string, unknown>>; total?: number; totalPages?: number }>(`/api/warehouse-audits?${params.toString()}`), api<LiteState>("/api/state?lite=1")]); setAudits(result.audits || []); setTotal(Number(result.total || 0)); setTotalPages(Math.max(1, Number(result.totalPages || 1))); setAdminUserId(String(state.systemSettings?.activeSystemUserId || "")) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load warehouse audits.") } finally { setLoading(false) } }
+  const load = async () => { setLoading(true); try { const params = new URLSearchParams({ summary: "1", page: String(page), pageSize: "25", sort }); const [result, state] = await Promise.all([api<{ audits?: Array<Record<string, unknown>>; total?: number; totalPages?: number }>(`/api/warehouse-audits?${params.toString()}`), loadAppBootstrap()]); setAudits(result.audits || []); setTotal(Number(result.total || 0)); setTotalPages(Math.max(1, Number(result.totalPages || 1))); setAdminUserId(String(state.systemSettings?.activeSystemUserId || "")) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load warehouse audits.") } finally { setLoading(false) } }
   useEffect(() => { void load() }, [page, sort])
   const openAction = (audit: Record<string, unknown>, nextAction: "lock" | "delete") => { setActionAudit(audit); setAction(nextAction); setPin("") }
   const confirmAction = async () => { if (!actionAudit || !pin.trim()) return; setActing(true); try { const path = action === "lock" ? `/api/warehouse-audits/${encodeURIComponent(String(actionAudit.id))}/lock` : `/api/warehouse-audits/${encodeURIComponent(String(actionAudit.id))}`; const result = await api<{ message?: string }>(path, { method: action === "lock" ? "POST" : "DELETE", body: JSON.stringify({ adminPin: pin, adminUserId }) }); toast.success(result.message || `Audit ${action}ed.`); setActionAudit(null); await load() } catch (error) { toast.error(error instanceof Error ? error.message : `Unable to ${action} audit.`) } finally { setActing(false) } }
@@ -765,7 +766,7 @@ function ManualReceivingPanel({ mobile = false }: { mobile?: boolean } = {}) {
   const [receipts, setReceipts] = useState<Array<Record<string, unknown>>>([])
   const [warehouses, setWarehouses] = useState<Array<{ id?: string; name?: string; requireBinValidation?: boolean; bins?: Array<{ code?: string; name?: string; active?: boolean }> }>>([])
   const [busy, setBusy] = useState(false)
-  const load = async () => { try { const [receiptResult, state] = await Promise.all([api<{ receipts?: Array<Record<string, unknown>> }>("/api/warehouse-receipts"), api<LiteState>("/api/state?lite=1")]); setReceipts(receiptResult.receipts || []); const physical = (state.warehouses || []).filter(item => item.isPhysical !== false && item.inventorySourceType !== "supplier_feed" && item.allowReceiving !== false); setWarehouses(physical as typeof warehouses); if (mobile) setWarehouse(current => physical.some(item => String(item.id) === current || String(item.name) === current) ? current : String(physical[0]?.id || "")) } catch { /* The receipt form remains usable if history is unavailable. */ } }
+  const load = async () => { try { const [receiptResult, state] = await Promise.all([api<{ receipts?: Array<Record<string, unknown>> }>("/api/warehouse-receipts"), loadAppReferences(["warehouses"])]); setReceipts(receiptResult.receipts || []); const physical = ((state.warehouses || []) as Array<{ id?: string; name?: string; isPhysical?: boolean; inventorySourceType?: string; allowReceiving?: boolean }>).filter(item => item.isPhysical !== false && item.inventorySourceType !== "supplier_feed" && item.allowReceiving !== false); setWarehouses(physical as typeof warehouses); if (mobile) setWarehouse(current => physical.some(item => String(item.id) === current || String(item.name) === current) ? current : String(physical[0]?.id || "")) } catch { /* The receipt form remains usable if history is unavailable. */ } }
   useEffect(() => { void load() }, [])
   const receive = async () => {
     if ((mobile && !selectedWarehouse) || busy || !lookup.trim() || !Number.isFinite(Number(quantity)) || Number(quantity) <= 0 || (selectedWarehouse?.requireBinValidation === true && !locationBin)) return
@@ -1180,11 +1181,11 @@ function WarehouseAuditPanel({
       };
       const [result, state] = await Promise.all([
         auditRequest(),
-        api<LiteState>("/api/state?lite=1"),
+        Promise.all([loadAppReferences(["warehouses", "vendors"]), loadAppBootstrap()]).then(([references, bootstrap]) => ({ ...references, ...bootstrap })),
       ]);
       setAudits(result.audits || []);
       setAuditWarehouses((state.warehouses || []) as typeof auditWarehouses);
-      setAuditVendors((state.vendors || []).filter((vendor) => String(vendor.status || "active").toLowerCase() === "active"));
+      setAuditVendors(((state.vendors || []) as Vendor[]).filter((vendor) => String(vendor.status || "active").toLowerCase() === "active"));
       setScannerSettings(state.systemSettings || {});
     } finally {
       setAuditsLoading(false);

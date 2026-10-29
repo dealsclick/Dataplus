@@ -27435,6 +27435,46 @@ function publicState(db, options = {}) {
   return { ...safeDb, summary: db.__summaryOverride || summarize({ ...safeDb, inventory: db.inventory || [], orders: db.orders || [] }), inventoryLoaded: !lite, categorySettingsLoaded: !lite, ordersLoaded: !lite };
 }
 
+const APP_BOOTSTRAP_FIELDS = ["systemSettings", "connections", "connectorState"];
+const APP_REFERENCE_FIELDS = new Set(["vendors", "brands", "warehouses"]);
+const APP_VERSION_FIELDS = [...APP_BOOTSTRAP_FIELDS, ...APP_REFERENCE_FIELDS, "workerHeartbeat"];
+
+function appProjectionVersion(versions = {}, fields = []) {
+  const value = fields.map((field) => `${field}=${versions[field] || "0:0"}`).join("|");
+  return crypto.createHash("sha1").update(value).digest("hex").slice(0, 16);
+}
+
+async function readAppProjection(fields = []) {
+  if (postgres.isPostgresEnabled()) return postgres.readAppStateProjection(fields);
+  const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  return {
+    state: Object.fromEntries(fields.map((field) => [field, db[field] ?? (APP_REFERENCE_FIELDS.has(field) ? [] : {})])),
+    versions: Object.fromEntries(fields.map((field) => [field, "legacy:1"]))
+  };
+}
+
+function publicAppProjection(state = {}) {
+  return publicState({
+    ...state,
+    inventory: [],
+    orders: [],
+    purchaseOrders: [],
+    importJobs: []
+  }, { lite: true });
+}
+
+function sendVersionedProjection(req, res, payload, version) {
+  const etag = `W/\"${version}\"`;
+  res.setHeader("ETag", etag);
+  res.setHeader("Cache-Control", "private, no-cache");
+  if (String(req.headers["if-none-match"] || "") === etag) {
+    res.writeHead(304);
+    res.end();
+    return;
+  }
+  return sendJson(res, 200, payload);
+}
+
 async function withOperationalSummary(db, options = {}) {
   if (!postgres.isPostgresEnabled()) return db;
   const now = Date.now();
@@ -27463,11 +27503,6 @@ async function withOperationalSummary(db, options = {}) {
       }))
     }
   };
-}
-
-async function postgresLiteStateResponse(extra = {}) {
-  const base = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-  return publicState({ ...base, ...extra, inventory: [] }, { lite: true });
 }
 
 function publicStateJson(db, options = {}) {
@@ -50045,7 +50080,7 @@ async function queueShopifyProductCreateJob(payload = {}) {
   } else {
     await postgres.upsertOperationJob(normalizeImportJob(job));
   }
-  return { job: normalizeImportJob(job), state: await postgresLiteStateResponse({ importJobs: [job] }) };
+  return { job: normalizeImportJob(job) };
 }
 
 async function queueShopifyProductStatusUpdateJob(payload = {}) {
@@ -62877,8 +62912,7 @@ async function handleApi(req, res) {
     db.brands.unshift(brand);
     await postgres.writeStateDocuments({ brands: db.brands || [] });
     await redisCache.deleteByPrefix("dataplus:brand-catalog-summary:");
-    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { brand, state: publicState(stateDb, { lite: true }) });
+    return sendJson(res, 200, { brand });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "brands" && parts[2] === "summary" && parts.length === 3 && postgres.isPostgresEnabled()) {
@@ -62945,8 +62979,7 @@ async function handleApi(req, res) {
     brand.updatedAt = new Date().toISOString();
     await postgres.writeStateDocuments({ brands: db.brands || [] });
     await redisCache.deleteByPrefix("dataplus:brand-catalog-summary:");
-    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { brand, state: publicState(stateDb, { lite: true }) });
+    return sendJson(res, 200, { brand });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "brands" && parts[2] && parts[3] === "action" && postgres.isPostgresEnabled()) {
@@ -62961,8 +62994,7 @@ async function handleApi(req, res) {
     brand.updatedAt = new Date().toISOString();
     await postgres.writeStateDocuments({ brands: db.brands || [] });
     await redisCache.deleteByPrefix("dataplus:brand-catalog-summary:");
-    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { brand, state: publicState(stateDb, { lite: true }) });
+    return sendJson(res, 200, { brand });
   }
 
   if (["GET", "POST"].includes(req.method) && parts[0] === "api" && parts[1] === "vendors" && parts[2] && parts[3] === "catalog-refresh" && parts.length === 4) {
@@ -63091,8 +63123,7 @@ async function handleApi(req, res) {
     // A new supplier must be visible immediately in catalog facet options;
     // otherwise the cached dropdown can stay stale until its TTL expires.
     await redisCache.deleteByPrefix("dataplus:products:");
-    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { vendor, state: publicState(stateDb, { lite: true }) });
+    return sendJson(res, 200, { vendor });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts[2] && parts[3] === "purchase-schedule" && parts[4] === "preview" && postgres.isPostgresEnabled()) {
@@ -63316,10 +63347,8 @@ async function handleApi(req, res) {
         reason: becameEligible ? "Vendor became active and catalog-included" : "Vendor catalog inclusion settings changed"
       })
       : null;
-    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
     return sendJson(res, 200, {
       vendor: normalizedVendor,
-      state: publicState(stateDb, { lite: true }),
       catalogRefreshJob: catalogRefreshJob ? clientImportJob(catalogRefreshJob) : null
     });
   }
@@ -63351,8 +63380,7 @@ async function handleApi(req, res) {
       user: body.user || "Luis"
     });
     await postgres.writeStateDocuments({ vendors: db.vendors || [] });
-    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { file: record, vendor, state: publicState(stateDb, { lite: true }) });
+    return sendJson(res, 200, { file: record, vendor });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts[2] && parts[3] === "action" && postgres.isPostgresEnabled()) {
@@ -63374,8 +63402,7 @@ async function handleApi(req, res) {
       });
     }
     await postgres.writeStateDocuments({ vendors: db.vendors || [] });
-    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { vendor, state: publicState(stateDb, { lite: true }) });
+    return sendJson(res, 200, { vendor });
   }
 
   if (req.method === "GET" && url.pathname === "/api/import-jobs/progress" && postgres.isPostgresEnabled()) {
@@ -63714,8 +63741,7 @@ async function handleApi(req, res) {
       trigger: "manual",
       message: `${channel.name || "Channel"} settings were updated.`
     });
-    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { channel, state: publicState(stateDb, { lite: true }) });
+    return sendJson(res, 200, { channel });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "confirm" && postgres.isPostgresEnabled()) {
@@ -64293,6 +64319,68 @@ async function handleApi(req, res) {
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
     return sendJson(res, enabled ? 501 : 400, { order, shipment, error: shipment.channelSync.message });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/app/bootstrap") {
+    const projection = await readAppProjection(APP_BOOTSTRAP_FIELDS);
+    const state = publicAppProjection(projection.state);
+    const version = appProjectionVersion(projection.versions, APP_BOOTSTRAP_FIELDS);
+    return sendVersionedProjection(req, res, {
+      changed: url.searchParams.get("version") !== version,
+      version,
+      versions: projection.versions,
+      connections: state.connections || [],
+      systemSettings: state.systemSettings || {},
+      connectorState: state.connectorState || {}
+    }, version);
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/app/references") {
+    const fields = [...new Set(String(url.searchParams.get("include") || "")
+      .split(",")
+      .map((field) => field.trim())
+      .filter((field) => APP_REFERENCE_FIELDS.has(field)))];
+    if (!fields.length) return sendJson(res, 400, { error: "Choose at least one reference: vendors, brands, or warehouses." });
+    const projection = await readAppProjection(fields);
+    const state = publicAppProjection(projection.state);
+    const version = appProjectionVersion(projection.versions, fields);
+    const unchanged = url.searchParams.get("version") === version;
+    return sendVersionedProjection(req, res, unchanged
+      ? { changed: false, version, versions: projection.versions }
+      : {
+          changed: true,
+          version,
+          versions: projection.versions,
+          ...(fields.includes("vendors") ? { vendors: state.vendors || [] } : {}),
+          ...(fields.includes("brands") ? { brands: projection.state.brands || [] } : {}),
+          ...(fields.includes("warehouses") ? { warehouses: projection.state.warehouses || [] } : {})
+        }, version);
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/app/summary") {
+    const [versions, heartbeatProjection] = postgres.isPostgresEnabled()
+      ? await Promise.all([
+          postgres.readAppStateVersions(APP_VERSION_FIELDS),
+          postgres.readAppStateProjection(["workerHeartbeat", "systemSettings"])
+        ])
+      : [Object.fromEntries(APP_VERSION_FIELDS.map((field) => [field, "legacy:1"])), await readAppProjection(["workerHeartbeat", "systemSettings"])];
+    const workerStatus = await readWorkerStatus(readSystemSettingsStore(heartbeatProjection.state.systemSettings || {})).catch(() => ({}));
+    const summaryState = await withOperationalSummary({ connections: [] }, { refresh: true });
+    const version = appProjectionVersion(versions, APP_VERSION_FIELDS);
+    return sendVersionedProjection(req, res, {
+      version,
+      versions,
+      workerStatus,
+      summary: summaryState.__summaryOverride || null
+    }, version);
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/catalog-import-reviews") {
+    const projection = await readAppProjection(["catalogImportReviews"]);
+    return sendJson(res, 200, {
+      reviews: normalizeCatalogImportReviews(projection.state.catalogImportReviews || []),
+      version: projection.versions.catalogImportReviews || "0:0"
+    });
   }
 
   if (req.method === "GET" && url.pathname === "/api/state") {
@@ -67431,10 +67519,6 @@ async function handleApi(req, res) {
     return draftLike;
   }
 
-  async function postgresLiteState(extra = {}) {
-    return postgresLiteStateResponse(extra);
-  }
-
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts.length === 2 && postgres.isPostgresEnabled()) {
     const drafts = await postgres.readStateField("orderDrafts").catch(() => []);
     const orderDrafts = Array.isArray(drafts) ? drafts.sort((left, right) => new Date(right.updatedAt || right.createdAt || 0).getTime() - new Date(left.updatedAt || left.createdAt || 0).getTime()) : [];
@@ -67986,7 +68070,7 @@ async function handleApi(req, res) {
       publicStateJsonCache = null;
       await redisCache.deleteByPrefix("dataplus:products:");
       await redisCache.deleteByPrefix("dataplus:product-detail:");
-      return sendJson(res, 200, { changed: result.deleted || 0, state: await postgresLiteState() });
+      return sendJson(res, 200, { changed: result.deleted || 0 });
     }
     const statusByAction = {
       "set-active": "Active",
@@ -68006,7 +68090,7 @@ async function handleApi(req, res) {
     publicStateJsonCache = null;
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
-    return sendJson(res, 200, { changed: products?.length || 0, allFiltered, limited: allFiltered && allFilteredTotal > ids.length, state: await postgresLiteState() });
+    return sendJson(res, 200, { changed: products?.length || 0, allFiltered, limited: allFiltered && allFilteredTotal > ids.length });
   }
 
   if (req.method === "POST" && url.pathname === "/api/import/inventory" && postgres.isPostgresEnabled()) {
@@ -68067,7 +68151,7 @@ async function handleApi(req, res) {
     upsertImportJobStore(job);
     await postgres.upsertOperationJob(job);
     publicStateJsonCache = null;
-    return sendJson(res, 200, { changed, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }) });
+    return sendJson(res, 200, { changed, job: normalizeImportJob(job) });
   }
 
   if (req.method === "POST" && url.pathname === "/api/shopify/status-sync-all" && postgres.isPostgresEnabled()) {
@@ -68094,14 +68178,14 @@ async function handleApi(req, res) {
       setActiveJobProgress(job.id, { status: "queued", phase: "queued", totalRows: limit, processedRows: 0, startedAt: job.startedAt || new Date().toISOString() });
       startShopifyStatusSyncJob(job.id, { limit });
     }
-    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }), message: job.message });
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), message: job.message });
   }
 
   if (req.method === "POST" && url.pathname === "/api/shopify/product-status-update" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     try {
       const result = await queueShopifyProductStatusUpdateJob(body);
-      return sendJson(res, 202, { queued: true, job: normalizeImportJob(result.job), state: await postgresLiteState({ importJobs: [result.job] }), message: result.job.message });
+      return sendJson(res, 202, { queued: true, job: normalizeImportJob(result.job), message: result.job.message });
     } catch (error) {
       return sendJson(res, 400, { error: error.message || "Unable to queue Shopify product status update." });
     }
@@ -68111,7 +68195,7 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     try {
       const result = await queueShopifyProductPublicationJob(body);
-      return sendJson(res, 202, { queued: true, job: normalizeImportJob(result.job), state: await postgresLiteState({ importJobs: [result.job] }), message: result.job.message });
+      return sendJson(res, 202, { queued: true, job: normalizeImportJob(result.job), message: result.job.message });
     } catch (error) {
       return sendJson(res, 400, { error: error.message || "Unable to queue Shopify publication update." });
     }
@@ -68121,7 +68205,7 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });
     const result = await queueShopifySkuMapSyncJob(db, body, { operation: "Shopify SKU pair audit" });
-    return sendJson(res, 202, { queued: !result.duplicate, duplicate: result.duplicate, job: normalizeImportJob(result.job), state: await postgresLiteState({ importJobs: [result.job] }), message: result.job.message });
+    return sendJson(res, 202, { queued: !result.duplicate, duplicate: result.duplicate, job: normalizeImportJob(result.job), message: result.job.message });
   }
 
   if (req.method === "POST" && url.pathname === "/api/shopify/shipping-profiles/sync") {
@@ -68143,7 +68227,6 @@ async function handleApi(req, res) {
     return sendJson(res, 200, {
       profiles,
       channel,
-      state: postgres.isPostgresEnabled() ? await postgresLiteState() : publicState(db),
       message: `Imported ${profiles.length.toLocaleString()} Shopify shipping profile${profiles.length === 1 ? "" : "s"}.`
     });
   }
@@ -68152,7 +68235,7 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });
     const result = await queueShopifyShippingEligibilitySyncJob(db, body);
-    return sendJson(res, 202, { queued: true, job: normalizeImportJob(result.job), state: await postgresLiteState({ importJobs: [result.job] }), message: result.job.message });
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(result.job), message: result.job.message });
   }
 
   if (req.method === "POST" && url.pathname === "/api/shopify/token-refresh") {
@@ -68284,7 +68367,7 @@ async function handleApi(req, res) {
     } else {
       await postgres.upsertOperationJob(normalizeImportJob(job));
     }
-    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }), message: job.message });
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), message: job.message });
   }
 
   if (req.method === "POST" && url.pathname === "/api/shopify/product-create" && postgres.isPostgresEnabled()) {
@@ -68336,7 +68419,7 @@ async function handleApi(req, res) {
     } else {
       await postgres.upsertOperationJob(normalizeImportJob(job));
     }
-    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }), message: job.message });
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), message: job.message });
   }
 
   if (req.method === "POST" && url.pathname === "/api/shopify/product-type-collections-sync" && postgres.isPostgresEnabled()) {
@@ -68381,7 +68464,7 @@ async function handleApi(req, res) {
     } else {
       await postgres.upsertOperationJob(normalizeImportJob(job));
     }
-    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }), message: job.message });
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), message: job.message });
   }
 
   if (req.method === "POST" && url.pathname === "/api/shopify/taxonomy-push" && postgres.isPostgresEnabled()) {
@@ -68426,7 +68509,7 @@ async function handleApi(req, res) {
     } else {
       await postgres.upsertOperationJob(normalizeImportJob(job));
     }
-    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: await postgresLiteState({ importJobs: [job] }), message: job.message });
+    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), message: job.message });
   }
 
   if (req.method === "POST" && url.pathname === "/api/shopify/inventory-update" && postgres.isPostgresEnabled()) {
@@ -68438,14 +68521,12 @@ async function handleApi(req, res) {
         return sendJson(res, 202, {
           queued: true,
           job: normalizeImportJob(result.duplicate),
-          state: await postgresLiteState({ importJobs: [result.duplicate] }),
           message: `${result.duplicate.operation || "Shopify inventory job"} is already ${String(result.duplicate.status || "queued").toLowerCase()}.`
         });
       }
       return sendJson(res, 202, {
         queued: true,
         job: normalizeImportJob(result.job),
-        state: await postgresLiteState({ importJobs: [result.job] }),
         message: result.job.message
       });
     } catch (error) {
@@ -68517,7 +68598,7 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true });
     const result = await exchangeTemuCode(db, body.code);
     await writeDb(normalizeDb({ ...db, inventory: [] }));
-    return sendJson(res, 200, { ...result, state: await postgresLiteState() });
+    return sendJson(res, 200, result);
   }
 
   if (req.method === "GET" && url.pathname === "/api/temu/auth-url" && postgres.isPostgresEnabled()) {
@@ -68534,7 +68615,7 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true });
     const result = await testTemuConnection(db);
     await writeDb(normalizeDb({ ...db, inventory: [] }));
-    return sendJson(res, 200, { ...result, state: await postgresLiteState({ connections: db.connections }) });
+    return sendJson(res, 200, result);
   }
 
   if (req.method === "GET" && url.pathname === "/api/temu/warehouses" && postgres.isPostgresEnabled()) {
@@ -68559,7 +68640,6 @@ async function handleApi(req, res) {
         queued: true,
         duplicate: result.duplicate,
         job: normalizeImportJob(result.job),
-        state: await postgresLiteState({ connections: db.connections, importJobs: [result.job] }),
         message: result.job.message
       });
     } catch (error) {
@@ -68582,7 +68662,6 @@ async function handleApi(req, res) {
         queued: true,
         duplicate: result.duplicate,
         job: normalizeImportJob(result.job),
-        state: await postgresLiteState({ connections: db.connections, importJobs: [result.job] }),
         message: result.job.message
       });
     } catch (error) {
@@ -68612,7 +68691,6 @@ async function handleApi(req, res) {
       queued: true,
       job: normalizeImportJob(job),
       channel,
-      state: await postgresLiteState({ connections: db.connections, importJobs: [job] }),
       message: job.message
     });
   }
@@ -68626,7 +68704,6 @@ async function handleApi(req, res) {
         queued: true,
         duplicate: result.duplicate,
         job: normalizeImportJob(result.job),
-        state: await postgresLiteState({ connections: db.connections, importJobs: [result.job] }),
         message: result.job.message
       });
     } catch (error) {
@@ -68659,7 +68736,6 @@ async function handleApi(req, res) {
         queued: true,
         duplicate: result.duplicate,
         job: normalizeImportJob(result.job),
-        state: await postgresLiteState({ connections: db.connections, importJobs: [result.job] }),
         message: result.job.message
       });
     } catch (error) {
@@ -68676,7 +68752,6 @@ async function handleApi(req, res) {
         queued: true,
         duplicate: result.duplicate,
         job: normalizeImportJob(result.job),
-        state: await postgresLiteState({ connections: db.connections, importJobs: [result.job] }),
         message: result.job.message
       });
     } catch (error) {
@@ -68693,7 +68768,6 @@ async function handleApi(req, res) {
         queued: true,
         duplicate: result.duplicate,
         job: normalizeImportJob(result.job),
-        state: await postgresLiteState({ connections: db.connections, importJobs: [result.job] }),
         message: result.job.message
       });
     } catch (error) {
@@ -68711,7 +68785,6 @@ async function handleApi(req, res) {
       job: normalizeImportJob(job),
       merchantLocationKey,
       channel,
-      state: await postgresLiteState({ connections: db.connections, importJobs: [job] }),
       message: job.message
     });
   }
@@ -68725,7 +68798,6 @@ async function handleApi(req, res) {
         queued: true,
         duplicate: result.duplicate,
         job: normalizeImportJob(result.job),
-        state: await postgresLiteState({ connections: db.connections, importJobs: [result.job] }),
         message: result.job.message
       });
     } catch (error) {
@@ -69257,13 +69329,11 @@ async function handleApi(req, res) {
         if (existing) Object.assign(existing, item);
         await writeDb(normalizeDb(db));
       }
-      const stateDb = postgres.isPostgresEnabled() ? await postgresLiteState() : normalizeDb(await readDbFast());
       return sendJson(res, 200, {
         ok: true,
         item: publicInventoryItem(item),
         status: result.payload,
         changed: result.changed,
-        state: postgres.isPostgresEnabled() ? stateDb : publicState(stateDb),
         message: result.changed.length
           ? `Updated Shopify status for ${item.sku || item.title || item.id}.`
           : `Shopify status already current for ${item.sku || item.title || item.id}.`
@@ -69304,13 +69374,11 @@ async function handleApi(req, res) {
     } else if (synced || changed) {
       await writeDb(normalizeDb(db));
     }
-    const stateDb = postgres.isPostgresEnabled() ? await postgresLiteState() : normalizeDb(db);
     return sendJson(res, 200, {
       ok: !errors.length,
       synced,
       changed,
       errors: errors.slice(0, 25),
-      state: postgres.isPostgresEnabled() ? stateDb : publicState(stateDb),
       message: `Shopify GraphQL sync checked ${synced.toLocaleString()} product${synced === 1 ? "" : "s"}${changed ? ` and updated ${changed.toLocaleString()}` : ""}${errors.length ? `; ${errors.length.toLocaleString()} failed` : ""}.`
     });
   }
@@ -70518,7 +70586,6 @@ async function handleApi(req, res) {
         queued: true,
         duplicate: result.duplicate,
         job: normalizeImportJob(result.job),
-        state: postgres.isPostgresEnabled() ? await postgresLiteState({ importJobs: [result.job] }) : publicState({ ...db, importJobs: [result.job] }, { lite: true }),
         message: result.duplicate ? "An eBay offers and live-status sync is already queued or running." : result.job.message
       });
     } catch (error) {

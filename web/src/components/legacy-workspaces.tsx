@@ -112,6 +112,7 @@ import { lazy,Suspense,useEffect,useMemo,useRef,useState,type ClipboardEvent as 
 import { toast } from "sonner"
 import { catalogChannelState,channelFilterLabel,ebayListingOperatorState,marketplaceListingUrl } from "../lib/catalog-channel-utils"
 import { api,dateLabel,moneyLabel,numberLabel } from "../lib/client-api"
+import { loadAppBootstrap,loadAppReferences } from "../lib/app-state"
 import { readWorkspaceCache,writeWorkspaceCache } from "../lib/workspace-cache"
 import { CategoryMappingOverview,MappingIndicator } from "./category-mapping-overview"
 import { CategoryMappingWorkspace } from "./category-mapping-workspace"
@@ -141,7 +142,6 @@ import type {
   ChannelConnection,
   ChannelLogEntry,
   ImportJob,
-  LiteState,
   ProductItem,
   QuickProductResult,
   ReleaseChange,
@@ -1433,8 +1433,8 @@ export function StandaloneProductPage() {
   }, [sku])
   useEffect(() => {
     let cancelled = false
-    api<LiteState>("/api/state?lite=1")
-      .then((result) => { if (!cancelled) setChannels(result.connections || []) })
+    loadAppBootstrap()
+      .then((result) => { if (!cancelled) setChannels((result.connections || []) as ChannelConnection[]) })
       .catch(() => { if (!cancelled) setChannels([]) })
     return () => { cancelled = true }
   }, [])
@@ -6216,7 +6216,7 @@ export function OrderLineActionPanel({ mode, orderId, order, lines, warehouses, 
   }, [mode, order, warehouses, lines])
   useEffect(() => {
     if (mode !== "return") return
-    void api<LiteState>("/api/state?lite=1").then((state) => setDefaultRestockingFeePercent(Math.max(0, Math.min(100, Number(state.systemSettings?.returnDefaultCustomerRestockingPercent ?? 30))))).catch(() => undefined)
+    void loadAppBootstrap().then((state) => setDefaultRestockingFeePercent(Math.max(0, Math.min(100, Number(state.systemSettings?.returnDefaultCustomerRestockingPercent ?? 30))))).catch(() => undefined)
   }, [mode])
   const save = async () => {
     if (!selected.length) return toast.error("Choose at least one line quantity.")
@@ -8493,8 +8493,8 @@ export function ImportReviewPage() {
   async function load() {
     setLoading(true)
     try {
-      const state = await api<LiteState>("/api/state?lite=1")
-      setReviews(state.catalogImportReviews || [])
+      const result = await api<{ reviews?: CatalogImportReview[] }>("/api/catalog-import-reviews")
+      setReviews(result.reviews || [])
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load protected import changes.")
     } finally {
@@ -9390,8 +9390,8 @@ export function InventoryWorkspace() {
 
   useEffect(() => {
     void load(1, {})
-    api<{ state?: { warehouses?: Array<{ id?: string; name?: string; code?: string; bins?: unknown[]; warehouseType?: string; inventorySourceType?: string; isPhysical?: boolean }> } }>("/api/state?lite=1")
-      .then((result) => setWarehouses(result.state?.warehouses || []))
+    loadAppReferences(["warehouses"])
+      .then((result) => setWarehouses((result.warehouses || []) as typeof warehouses))
       .catch(() => {})
   }, [])
 
@@ -9836,7 +9836,7 @@ export function BrandDetailPage({ vendors, onCreateBrand, onSaveBrand, onBrandAc
   </div>
 }
 
-export function VendorsPage({ vendors, onSaveVendor, onVendorCreated }: { vendors: Vendor[]; onSaveVendor: (id: string, patch: Record<string, unknown>) => Promise<void>; onVendorCreated: (vendor: Vendor, state?: LiteState) => void }) {
+export function VendorsPage({ vendors, onSaveVendor, onVendorCreated }: { vendors: Vendor[]; onSaveVendor: (id: string, patch: Record<string, unknown>) => Promise<void>; onVendorCreated: (vendor: Vendor) => void }) {
   const [query, setQuery] = useState("")
   const [createVendorOpen, setCreateVendorOpen] = useState(false)
   const [catalogFilter, setCatalogFilter] = useState("all")
@@ -9966,7 +9966,7 @@ export function VendorsPage({ vendors, onSaveVendor, onVendorCreated }: { vendor
           </CardContent>
         </Card>
       </div>
-      <VendorCreateDialog open={createVendorOpen} onOpenChange={setCreateVendorOpen} onCreated={(vendor, nextState) => { onVendorCreated(vendor, nextState); window.history.pushState({}, "", `/vendors/${encodeURIComponent(vendor.id)}`); window.dispatchEvent(new PopStateEvent("popstate")) }} />
+      <VendorCreateDialog open={createVendorOpen} onOpenChange={setCreateVendorOpen} onCreated={(vendor) => { onVendorCreated(vendor); window.history.pushState({}, "", `/vendors/${encodeURIComponent(vendor.id)}`); window.dispatchEvent(new PopStateEvent("popstate")) }} />
     </div>
   )
 }
@@ -10163,7 +10163,7 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
     setDraft({})
     setSchedulePreview([])
   }, [vendor.id])
-  useEffect(() => { void api<{ warehouses?: Array<Record<string, unknown>> }>("/api/state?lite=1").then((state) => setWarehouses(state.warehouses || [])).catch(() => undefined) }, [])
+  useEffect(() => { void loadAppReferences(["warehouses"]).then((state) => setWarehouses((state.warehouses || []) as Array<Record<string, unknown>>)).catch(() => undefined) }, [])
 
   function update(field: string, next: unknown) {
     setDraft((current) => ({ ...current, [field]: next }))

@@ -2544,6 +2544,101 @@ async function readLiteState(options = {}) {
   };
 }
 
+const APP_STATE_PROJECTION_FIELDS = new Set([
+  "systemSettings",
+  "connections",
+  "connectorState",
+  "vendors",
+  "brands",
+  "warehouses",
+  "workerHeartbeat",
+  "catalogImportReviews"
+]);
+
+function projectionVersion(rows = []) {
+  let latest = 0;
+  let count = 0;
+  for (const row of rows) {
+    const timestamp = new Date(row.updated_at || 0).getTime();
+    if (Number.isFinite(timestamp)) latest = Math.max(latest, timestamp);
+    count += Math.max(1, Number(row.row_count || 1));
+  }
+  return `${latest}:${count}`;
+}
+
+async function readAppStateProjection(requestedFields = []) {
+  const client = getPool();
+  if (!client) return { state: {}, versions: {} };
+  await initRelationalSchema();
+  const fields = [...new Set((requestedFields || [])
+    .map((field) => String(field || "").trim())
+    .filter((field) => APP_STATE_PROJECTION_FIELDS.has(field)))];
+  if (!fields.length) return { state: {}, versions: {} };
+  const hasDocuments = await stateDocumentCount();
+  if (!hasDocuments) {
+    const legacy = await readState({ skipInventory: true, orderLimit: 0, purchaseOrderLimit: 0 }) || {};
+    const state = Object.fromEntries(fields.map((field) => [field, legacy[field] ?? (ENTITY_DOCUMENT_COLLECTIONS.has(field) ? [] : {})]));
+    return { state, versions: Object.fromEntries(fields.map((field) => [field, "legacy:1"])) };
+  }
+  const [documents, entities] = await Promise.all([
+    client.query("select doc_key, data, updated_at from state_documents where doc_key = any($1::text[])", [fields]),
+    client.query(`
+      select collection, data, updated_at
+      from entity_documents
+      where collection = any($1::text[])
+      order by collection, position, entity_id
+    `, [fields])
+  ]);
+  const state = {};
+  const versionRows = new Map(fields.map((field) => [field, []]));
+  for (const field of fields) {
+    if (ENTITY_DOCUMENT_COLLECTIONS.has(field)) state[field] = [];
+  }
+  for (const row of documents.rows) {
+    state[row.doc_key] = row.data;
+    versionRows.get(row.doc_key)?.push(row);
+  }
+  for (const row of entities.rows) {
+    if (!Array.isArray(state[row.collection])) state[row.collection] = [];
+    state[row.collection].push(row.data);
+    versionRows.get(row.collection)?.push(row);
+  }
+  if (fields.includes("systemSettings") && state.systemSettings && typeof state.systemSettings === "object") {
+    state.systemSettings = { ...state.systemSettings, ...(await readOperationalIdentitySettings(client)) };
+  }
+  return {
+    state,
+    versions: Object.fromEntries(fields.map((field) => [field, projectionVersion(versionRows.get(field) || [])]))
+  };
+}
+
+async function readAppStateVersions(requestedFields = []) {
+  const client = getPool();
+  if (!client) return {};
+  await initRelationalSchema();
+  const fields = [...new Set((requestedFields || [])
+    .map((field) => String(field || "").trim())
+    .filter((field) => APP_STATE_PROJECTION_FIELDS.has(field)))];
+  if (!fields.length) return {};
+  const [documents, entities] = await Promise.all([
+    client.query(`
+      select doc_key as field, max(updated_at) as updated_at, count(*)::int as row_count
+      from state_documents
+      where doc_key = any($1::text[])
+      group by doc_key
+    `, [fields]),
+    client.query(`
+      select collection as field, max(updated_at) as updated_at, count(*)::int as row_count
+      from entity_documents
+      where collection = any($1::text[])
+      group by collection
+    `, [fields])
+  ]);
+  const rowsByField = new Map(fields.map((field) => [field, []]));
+  for (const row of [...documents.rows, ...entities.rows]) rowsByField.get(row.field)?.push(row);
+  return Object.fromEntries(fields.map((field) => [field, projectionVersion(rowsByField.get(field) || [])]));
+}
+
 function warehouseAuditLineId(auditId, line = {}, position = 0) {
   return nullableString(line.id)
     || `${String(auditId || "audit")}:line:${Math.max(0, Number(position || 0))}`;
@@ -19608,6 +19703,8 @@ module.exports = {
   isPostgresEnabled,
   readState,
   readLiteState,
+  readAppStateProjection,
+  readAppStateVersions,
   readStateDocumentFast,
   readEntityDocumentCollectionFast,
   readStateField,
