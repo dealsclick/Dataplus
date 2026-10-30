@@ -12334,84 +12334,164 @@ async function findReturnsForReceiving(query = "", options = {}) {
     .map((value) => nullableString(value)?.toLowerCase()).filter(Boolean))];
   const phoneKey = key.replace(/\D/g, "");
   const searchPattern = key.length >= 2 ? `%${key}%` : "";
-  const result = await client.query(`
+  const trackingKeys = candidates.length ? candidates : [key];
+  const returnResult = await client.query(`
     with source as (
-      select returns.entity_id, returns.data, returns.updated_at,
-        linked.buyer as order_buyer, linked.buyer_email as order_email,
-        linked.phone as order_phone, linked.customer_id as order_customer_id,
-        linked.raw as order_raw,
+      select entity_id, data, updated_at,
         (
-          lower(returns.entity_id) = $1
-          or lower(coalesce(returns.data->>'id', '')) = $1
-          or lower(coalesce(returns.data->>'returnNumber', '')) = $1
-          or lower(coalesce(returns.data->>'channelReturnId', '')) = $1
-          or lower(coalesce(returns.data->>'orderId', '')) = $1
-          or lower(coalesce(returns.data->>'orderNumber', '')) = $1
-          or lower(coalesce(returns.data->>'channelOrderId', '')) = $1
-          or lower(coalesce(returns.data->>'trackingNumber', '')) = any($2::text[])
-          or regexp_replace(lower(coalesce(returns.data->>'trackingNumber', '')), '[^a-z0-9]', '', 'g') = any($2::text[])
-          or lower(coalesce(returns.data->'returnLabel'->>'trackingNumber', '')) = any($2::text[])
-          or regexp_replace(lower(coalesce(returns.data->'returnLabel'->>'trackingNumber', '')), '[^a-z0-9]', '', 'g') = any($2::text[])
+          lower(entity_id) = $1
+          or lower(coalesce(data->>'id', '')) = $1
+          or lower(coalesce(data->>'returnNumber', '')) = $1
+          or lower(coalesce(data->>'channelReturnId', '')) = $1
+          or lower(coalesce(data->>'orderId', '')) = $1
+          or lower(coalesce(data->>'orderNumber', '')) = $1
+          or lower(coalesce(data->>'channelOrderId', '')) = $1
+          or lower(coalesce(data->>'trackingNumber', '')) = any($2::text[])
+          or regexp_replace(lower(coalesce(data->>'trackingNumber', '')), '[^a-z0-9]', '', 'g') = any($2::text[])
+          or lower(coalesce(data->'returnLabel'->>'trackingNumber', '')) = any($2::text[])
+          or regexp_replace(lower(coalesce(data->'returnLabel'->>'trackingNumber', '')), '[^a-z0-9]', '', 'g') = any($2::text[])
           or exists (
             select 1
-            from jsonb_array_elements(case when jsonb_typeof(returns.data->'returnTracking') = 'array' then returns.data->'returnTracking' else '[]'::jsonb end) tracking
+            from jsonb_array_elements(case when jsonb_typeof(data->'returnTracking') = 'array' then data->'returnTracking' else '[]'::jsonb end) tracking
             where lower(coalesce(tracking->>'trackingNumber', tracking->>'tracking', tracking->>'trackingNo', tracking->>'trackingCode', tracking->>'waybillNumber', tracking->>'mailNo', '')) = any($2::text[])
               or regexp_replace(lower(coalesce(tracking->>'trackingNumber', tracking->>'tracking', tracking->>'trackingNo', tracking->>'trackingCode', tracking->>'waybillNumber', tracking->>'mailNo', '')), '[^a-z0-9]', '', 'g') = any($2::text[])
           )
           or exists (
             select 1
-            from jsonb_array_elements(case when jsonb_typeof(returns.data->'returnLabelHistory') = 'array' then returns.data->'returnLabelHistory' else '[]'::jsonb end) tracking
+            from jsonb_array_elements(case when jsonb_typeof(data->'returnLabelHistory') = 'array' then data->'returnLabelHistory' else '[]'::jsonb end) tracking
             where lower(coalesce(tracking->>'trackingNumber', tracking->>'tracking', tracking->>'trackingNo', tracking->>'trackingCode', tracking->>'waybillNumber', tracking->>'mailNo', '')) = any($2::text[])
               or regexp_replace(lower(coalesce(tracking->>'trackingNumber', tracking->>'tracking', tracking->>'trackingNo', tracking->>'trackingCode', tracking->>'waybillNumber', tracking->>'mailNo', '')), '[^a-z0-9]', '', 'g') = any($2::text[])
           )
         ) as exact_match
-      from entity_documents returns
-      left join lateral (
-        select orders.buyer, orders.buyer_email, orders.phone, orders.customer_id, orders.raw
-        from order_records orders
-        where orders.order_id = returns.data->>'orderId'
-          or (coalesce(returns.data->>'orderNumber', '') <> '' and lower(coalesce(orders.order_number, '')) = lower(returns.data->>'orderNumber'))
-        order by (orders.order_id = returns.data->>'orderId') desc, orders.updated_at desc
-        limit 1
-      ) linked on true
-      where returns.collection = 'returns'
-    ), matched as (
-      select *, case when exact_match then 0 else 1 end as match_rank
-      from source
-      where exact_match or ($4 <> '' and (
-        lower(concat_ws(' ',
-          data->>'customerName', data->>'buyer', data->'customer'->>'name', order_buyer,
-          data->>'customerEmail', data->>'buyerEmail', data->'customer'->>'email', order_email,
-          data->>'customerId', data->>'customerAccount', data->'customer'->>'id', order_customer_id,
-          data->'shippingAddress'->>'name', data->'shippingAddress'->>'line1', data->'shippingAddress'->>'line2',
-          data->'shippingAddress'->>'city', data->'shippingAddress'->>'state', data->'shippingAddress'->>'postalCode', data->'shippingAddress'->>'zip',
-          data->'address'->>'name', data->'address'->>'line1', data->'address'->>'line2',
-          data->'address'->>'city', data->'address'->>'state', data->'address'->>'postalCode', data->'address'->>'zip',
-          order_raw->'address'->>'name', order_raw->'address'->>'line1', order_raw->'address'->>'line2',
-          order_raw->'address'->>'city', order_raw->'address'->>'state', order_raw->'address'->>'postalCode', order_raw->'address'->>'zip',
-          order_raw->'shippingAddress'->>'name', order_raw->'shippingAddress'->>'line1', order_raw->'shippingAddress'->>'line2',
-          order_raw->'shippingAddress'->>'city', order_raw->'shippingAddress'->>'state', order_raw->'shippingAddress'->>'postalCode', order_raw->'shippingAddress'->>'zip'
-        )) like $4
-        or ($3 <> '' and length($3) >= 4 and regexp_replace(concat_ws(' ', data->>'customerPhone', data->>'phone', data->'customer'->>'phone', data->'shippingAddress'->>'phone', data->'address'->>'phone', order_phone), '\\D', '', 'g') like '%' || $3 || '%')
-        or exists (
-          select 1
-          from jsonb_array_elements(case when jsonb_typeof(data->'items') = 'array' then data->'items' else '[]'::jsonb end) item
-          where lower(concat_ws(' ', item->>'sku', item->>'upc', item->>'gtin', item->>'barcode', item->>'vendorSku', item->>'manufacturerPartNumber', item->>'mpn', item->>'title', coalesce(item->'sourceSkus', '[]'::jsonb)::text)) like $4
-        )
-      ))
+      from entity_documents
+      where collection = 'returns'
     )
-    select data || jsonb_strip_nulls(jsonb_build_object(
-      'customerName', coalesce(nullif(data->>'customerName', ''), nullif(data->>'buyer', ''), nullif(data->'customer'->>'name', ''), order_buyer),
-      'customerEmail', coalesce(nullif(data->>'customerEmail', ''), nullif(data->>'buyerEmail', ''), nullif(data->'customer'->>'email', ''), order_email),
-      'customerPhone', coalesce(nullif(data->>'customerPhone', ''), nullif(data->>'phone', ''), nullif(data->'customer'->>'phone', ''), order_phone),
-      'customerId', coalesce(nullif(data->>'customerId', ''), nullif(data->'customer'->>'id', ''), order_customer_id),
-      'shippingAddress', coalesce(nullif(data->'shippingAddress', '{}'::jsonb), nullif(data->'address', '{}'::jsonb), nullif(order_raw->'address', '{}'::jsonb), nullif(order_raw->'shippingAddress', '{}'::jsonb))
-    )) as data
-    from matched
-    order by match_rank, updated_at desc, entity_id desc
+    select entity_id, data, updated_at, exact_match
+    from source
+    where exact_match or ($4 <> '' and (
+      lower(concat_ws(' ',
+        data->>'customerName', data->>'buyer', data->'customer'->>'name',
+        data->>'customerEmail', data->>'buyerEmail', data->'customer'->>'email',
+        data->>'customerId', data->>'customerAccount', data->'customer'->>'id',
+        data->'shippingAddress'->>'name', data->'shippingAddress'->>'city', data->'shippingAddress'->>'state', data->'shippingAddress'->>'postalCode', data->'shippingAddress'->>'zip',
+        data->'address'->>'name', data->'address'->>'city', data->'address'->>'state', data->'address'->>'postalCode', data->'address'->>'zip'
+      )) like $4
+      or ($3 <> '' and length($3) >= 4 and regexp_replace(concat_ws(' ', data->>'customerPhone', data->>'phone', data->'customer'->>'phone', data->'shippingAddress'->>'phone', data->'address'->>'phone'), '\\D', '', 'g') like '%' || $3 || '%')
+      or exists (
+        select 1
+        from jsonb_array_elements(case when jsonb_typeof(data->'items') = 'array' then data->'items' else '[]'::jsonb end) item
+        where lower(concat_ws(' ', item->>'sku', item->>'upc', item->>'gtin', item->>'barcode', item->>'vendorSku', item->>'manufacturerPartNumber', item->>'mpn', item->>'title', coalesce(item->'sourceSkus', '[]'::jsonb)::text)) like $4
+      )
+    ))
+    order by exact_match desc, updated_at desc, entity_id desc
     limit $5
-  `, [key, candidates.length ? candidates : [key], phoneKey, searchPattern, limit]);
-  return result.rows.map((row) => ({ ...row.data, returnSlug: returnSlugBase(row.data) }));
+  `, [key, trackingKeys, phoneKey, searchPattern, limit]);
+
+  const matched = returnResult.rows.map((row) => ({ ...row, matchRank: row.exact_match ? 0 : 1 }));
+  let orderCandidates = [];
+  if (matched.length < limit) {
+    const likelyZip = /^\d{5}(?:-?\d{4})?$/.test(phoneKey) && key.replace(/\D/g, "") === phoneKey;
+    const orderResult = await client.query(`
+      select order_id, order_number, channel_order_id, buyer, buyer_email, phone, customer_id, raw, updated_at,
+        case
+          when lower(order_id) = $1
+            or lower(coalesce(order_number, '')) = $1
+            or lower(coalesce(internal_order_number, '')) = $1
+            or lower(coalesce(marketplace_order_id, '')) = $1
+            or lower(coalesce(channel_order_id, '')) = $1
+            or lower(coalesce(tracking_number, '')) = any($2::text[])
+            or regexp_replace(lower(coalesce(tracking_number, '')), '[^a-z0-9]', '', 'g') = any($2::text[])
+          then 0 else 1
+        end as match_rank
+      from order_records
+      where lower(coalesce(status, '')) <> 'deleted' and (
+        lower(order_id) = $1
+        or lower(coalesce(order_number, '')) = $1
+        or lower(coalesce(internal_order_number, '')) = $1
+        or lower(coalesce(marketplace_order_id, '')) = $1
+        or lower(coalesce(channel_order_id, '')) = $1
+        or lower(coalesce(tracking_number, '')) = any($2::text[])
+        or regexp_replace(lower(coalesce(tracking_number, '')), '[^a-z0-9]', '', 'g') = any($2::text[])
+        or lower(coalesce(order_number, '')) like $3
+        or lower(coalesce(internal_order_number, '')) like $3
+        or lower(coalesce(marketplace_order_id, '')) like $3
+        or lower(coalesce(channel_order_id, '')) like $3
+        or ($4 <> '' and (
+          lower(coalesce(buyer, '')) like $4
+          or lower(coalesce(buyer_email, '')) like $4
+          or lower(coalesce(customer_id, '')) like $4
+        ))
+        or ($5 <> '' and length($5) >= 4 and regexp_replace(coalesce(phone, ''), '\\D', '', 'g') like '%' || $5 || '%')
+        or ($6::boolean and lower(coalesce(
+          raw->'address'->>'postalCode', raw->'address'->>'zip',
+          raw->'shippingAddress'->>'postalCode', raw->'shippingAddress'->>'zip', ''
+        )) like $4)
+      )
+      order by match_rank, updated_at desc, order_id desc
+      limit 100
+    `, [key, trackingKeys, `${key}%`, searchPattern, phoneKey, likelyZip]);
+    orderCandidates = orderResult.rows;
+
+    if (orderCandidates.length) {
+      const existingIds = matched.map((row) => row.entity_id);
+      const orderIds = [...new Set(orderCandidates.map((row) => row.order_id).filter(Boolean))];
+      const orderNumbers = [...new Set(orderCandidates.flatMap((row) => [row.order_number, row.channel_order_id]).map((value) => nullableString(value)?.toLowerCase()).filter(Boolean))];
+      const linkedResult = await client.query(`
+        select entity_id, data, updated_at
+        from entity_documents
+        where collection = 'returns'
+          and (cardinality($1::text[]) = 0 or entity_id <> all($1::text[]))
+          and (
+            data->>'orderId' = any($2::text[])
+            or lower(coalesce(data->>'orderNumber', '')) = any($3::text[])
+            or lower(coalesce(data->>'channelOrderId', '')) = any($3::text[])
+          )
+        order by updated_at desc, entity_id desc
+        limit $4
+      `, [existingIds, orderIds, orderNumbers, limit - matched.length]);
+      matched.push(...linkedResult.rows.map((row) => ({ ...row, matchRank: 1 })));
+    }
+  }
+
+  if (!matched.length) return [];
+  const allOrderIds = [...new Set(matched.map((row) => nullableString(row.data?.orderId)).filter(Boolean))];
+  const allOrderNumbers = [...new Set(matched.flatMap((row) => [row.data?.orderNumber, row.data?.channelOrderId]).map((value) => nullableString(value)?.toLowerCase()).filter(Boolean))];
+  const missingOrderIds = allOrderIds.filter((id) => !orderCandidates.some((order) => order.order_id === id));
+  const missingOrderNumbers = allOrderNumbers.filter((number) => !orderCandidates.some((order) => [order.order_number, order.channel_order_id].some((value) => nullableString(value)?.toLowerCase() === number)));
+  if (missingOrderIds.length || missingOrderNumbers.length) {
+    const enrichment = await client.query(`
+      select order_id, order_number, channel_order_id, buyer, buyer_email, phone, customer_id, raw, updated_at
+      from order_records
+      where order_id = any($1::text[])
+        or lower(coalesce(order_number, '')) = any($2::text[])
+        or lower(coalesce(channel_order_id, '')) = any($2::text[])
+      order by updated_at desc
+    `, [missingOrderIds, missingOrderNumbers]);
+    orderCandidates.push(...enrichment.rows);
+  }
+
+  const orderById = new Map(orderCandidates.map((order) => [String(order.order_id || ""), order]));
+  const orderByNumber = new Map(orderCandidates.flatMap((order) => [order.order_number, order.channel_order_id]
+    .map((value) => [nullableString(value)?.toLowerCase() || "", order])));
+  return matched
+    .sort((a, b) => a.matchRank - b.matchRank || String(b.updated_at || "").localeCompare(String(a.updated_at || "")) || String(b.entity_id || "").localeCompare(String(a.entity_id || "")))
+    .slice(0, limit)
+    .map((row) => {
+      const data = row.data || {};
+      const linked = orderById.get(String(data.orderId || ""))
+        || orderByNumber.get(nullableString(data.orderNumber)?.toLowerCase() || "")
+        || orderByNumber.get(nullableString(data.channelOrderId)?.toLowerCase() || "");
+      const orderRaw = linked?.raw || {};
+      return {
+        ...data,
+        customerName: data.customerName || data.buyer || data.customer?.name || linked?.buyer || "",
+        customerEmail: data.customerEmail || data.buyerEmail || data.customer?.email || linked?.buyer_email || "",
+        customerPhone: data.customerPhone || data.phone || data.customer?.phone || linked?.phone || "",
+        customerId: data.customerId || data.customer?.id || linked?.customer_id || "",
+        shippingAddress: data.shippingAddress || data.address || orderRaw.address || orderRaw.shippingAddress || {},
+        returnSlug: returnSlugBase(data)
+      };
+    });
 }
 
 async function allocateImportedReturnNumber(client) {
