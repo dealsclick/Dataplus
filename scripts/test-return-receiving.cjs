@@ -1,7 +1,17 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { findReturnReceipts } = require('../lib/return-receiving-lookup');
 const { validateReturnReceipt, returnNeedsAttention } = require('../lib/return-workflow');
+test('receiving lookup route is registered before the generic return detail route', () => {
+  const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const receivingLookupRoute = serverSource.indexOf('url.pathname === "/api/returns/receiving-lookup"');
+  const returnDetailRoute = serverSource.indexOf('parts[1] === "returns" && parts[2] && !parts[3]');
+  assert.notEqual(receivingLookupRoute, -1);
+  assert.notEqual(returnDetailRoute, -1);
+  assert.ok(receivingLookupRoute < returnDetailRoute, 'the generic return detail route would swallow receiving-lookup');
+});
 test('exact scans match closed returns, order references and tracking without merging cases', () => {
   const records = [
     { id: 'r1', orderNumber: 2156, channelOrderId: 'PO-1', channelLifecycleStatus: 'closed', returnNumber: 'RET1001', returnTracking: [{ trackingNumber: 'ABC123' }] },
