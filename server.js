@@ -130,7 +130,7 @@ const accountingHandler = createAccountingHandler({
   queueTemuReportImport: (req, scope, actor, metadata) => queueTemuSettlementReportImport(req, scope, actor, metadata),
   enrichOrder: order => enrichOrderDetail(order), parseBody, sendJson, sendCsv, can: userCan
 });
-const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt, returnChangeSnapshot, appendReturnChangeHistory } = require("./lib/return-workflow");
+const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt, returnChangeSnapshot, appendReturnChangeHistory, evaluateVendorReturnEligibility } = require("./lib/return-workflow");
 const { normalizeSequentialReturnNumbers, returnSlugBase, returnsWithPublicSlugs } = require("./lib/return-identifiers");
 const { veeqoShipmentServiceSelections } = require("./lib/veeqo-shipping-options");
 const { addVeeqoCustomsFields, normalizeVeeqoAddressCountry, productCountryOfOrigin } = require("./lib/veeqo-customs");
@@ -8634,6 +8634,24 @@ async function enrichReturnItemCatalogImages(records = []) {
       return { ...line, defaultImage };
     })
   }));
+}
+
+async function enrichReturnVendorEligibility(records = [], fallbackOrders = []) {
+  const source = Array.isArray(records) ? records : [];
+  const orderIds = [...new Set(source.map((record) => String(record.orderId || "").trim()).filter(Boolean))];
+  const linkedOrders = postgres.isPostgresEnabled() && orderIds.length
+    ? await postgres.readOrdersByIds(orderIds)
+    : (Array.isArray(fallbackOrders) ? fallbackOrders : []);
+  const orderById = new Map(linkedOrders.map((order) => [String(order.id || ""), order]));
+  const orderByNumber = new Map(linkedOrders.flatMap((order) => [order.orderNumber, order.channelOrderId, order.channelOrderNumber, order.marketplaceOrderId]
+    .filter(Boolean).map((value) => [String(value).trim().toLowerCase(), order])));
+  return source.map((record) => {
+    const order = orderById.get(String(record.orderId || ""))
+      || orderByNumber.get(String(record.orderNumber || "").trim().toLowerCase())
+      || orderByNumber.get(String(record.channelOrderId || "").trim().toLowerCase())
+      || {};
+    return { ...record, vendorReturnEligibility: evaluateVendorReturnEligibility(record, order) };
+  });
 }
 
 function auditProductImageUrl(product = {}, sourceItem = {}) {
@@ -61714,10 +61732,17 @@ async function handleApi(req, res) {
     if (!userCan(authUser, "orders.returns", "view")) return sendJson(res, 403, { error: "Returns view permission is required." });
     const query = String(url.searchParams.get("q") || "").trim();
     if (!query || query.length > 300) return sendJson(res, 400, { error: "Enter a return, order, tracking, customer, address, or item reference (up to 300 characters)." });
-    const matches = postgres.isPostgresEnabled()
-      ? await postgres.findReturnsForReceiving(query, { limit: 50, trackingCandidates: trackingLookupCandidates(query) })
-      : findReturnReceipts((await readDb()).returns || [], query).slice(0, 50);
-    const enriched = await enrichReturnItemCatalogImages(matches);
+    let matches;
+    let fallbackOrders = [];
+    if (postgres.isPostgresEnabled()) {
+      matches = await postgres.findReturnsForReceiving(query, { limit: 50, trackingCandidates: trackingLookupCandidates(query) });
+    } else {
+      const legacyDb = await readDb();
+      matches = findReturnReceipts(legacyDb.returns || [], query).slice(0, 50);
+      fallbackOrders = legacyDb.orders || [];
+    }
+    const eligibilityEnriched = await enrichReturnVendorEligibility(matches, fallbackOrders);
+    const enriched = await enrichReturnItemCatalogImages(eligibilityEnriched);
     return sendJson(res, 200, { returns: enriched, total: enriched.length });
   }
 
@@ -62629,7 +62654,7 @@ async function handleApi(req, res) {
         ? postgres.findReturnsForReceiving(canonicalTrackingValue(query) || query, { limit: 20, trackingCandidates: candidates, exactOnly: true })
         : Promise.resolve([])
     ]);
-    const returnMatches = returnsWithPublicSlugs(await enrichReturnItemCatalogImages(rawReturnMatches)).slice(0, 20);
+    const returnMatches = returnsWithPublicSlugs(await enrichReturnItemCatalogImages(await enrichReturnVendorEligibility(rawReturnMatches))).slice(0, 20);
     const orders = orderMatches.map(({ order, shipmentId, trackingNumber, provider }) => ({
       id: String(order.id || ""),
       orderNumber: String(order.orderNumber || order.internalOrderNumber || order.id || ""),
@@ -62847,6 +62872,7 @@ async function handleApi(req, res) {
     }
     if (record.status === "received" && !record.receivedAt) record.receivedAt = new Date().toISOString().slice(0, 10);
     if (record.status === "received" && !record.receivedBy) record.receivedBy = actingUser;
+    if (body.receiptOnly) record.vendorReturnEligibility = evaluateVendorReturnEligibility(record, order);
     const shouldPrioritizeReturnStock = orderRuntimeSettings(db).returnsPrioritizeOpenOrderAllocation === true
       && ["received", "inspection", "resolved", "done"].includes(String(record.status || "").toLowerCase())
       && String(record.inspectionStatus || "").toLowerCase() === "passed"

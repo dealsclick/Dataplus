@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { findReturnReceipts } = require('../lib/return-receiving-lookup');
-const { validateReturnReceipt, returnNeedsAttention, returnChangeSnapshot, appendReturnChangeHistory } = require('../lib/return-workflow');
+const { validateReturnReceipt, returnNeedsAttention, returnChangeSnapshot, appendReturnChangeHistory, evaluateVendorReturnEligibility } = require('../lib/return-workflow');
 test('receiving lookup route is registered before the generic return detail route', () => {
   const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const receivingLookupRoute = serverSource.indexOf('url.pathname === "/api/returns/receiving-lookup"');
@@ -13,8 +13,30 @@ test('receiving lookup route is registered before the generic return detail rout
   assert.ok(receivingLookupRoute < returnDetailRoute, 'the generic return detail route would swallow receiving-lookup');
   assert.match(serverSource, /receiving-lookup[\s\S]*readProductsByKeys\(skus[\s\S]*defaultImage/, 'receiving lookup must enrich returned items with compact catalog images');
   assert.match(serverSource, /receiptAttachments[\s\S]*attachmentCount: receiptAttachments\.length/, 'receiving history must retain the photo evidence count');
+  assert.match(serverSource, /enrichReturnVendorEligibility[\s\S]*readOrdersByIds[\s\S]*evaluateVendorReturnEligibility/, 'return receiving must batch-load orders and calculate vendor-return eligibility');
+  assert.match(serverSource, /receiving-lookup[\s\S]*enrichReturnVendorEligibility/, 'receiving lookup must include vendor-return eligibility');
   const dbSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
   assert.match(dbSource, /orderNumber: data\.orderNumber \|\| linked\?\.order_number[\s\S]*channelOrderId: data\.channelOrderId/, 'receiving lookup must fill linked DataPlus and channel order numbers');
+});
+test('vendor return eligibility uses an inclusive 30-day order window and supplier context', () => {
+  const record = { items: [{ sku: 'A' }] };
+  const order = {
+    orderDate: '2026-10-01',
+    fulfillmentRoutes: [{ sku: 'A', vendorId: 'vendor-1', vendorName: 'True Value', purchaseOrderId: 'po-1', purchaseOrderNumber: 'PO-100' }]
+  };
+  const eligible = evaluateVendorReturnEligibility(record, order, { now: '2026-10-31T20:00:00Z' });
+  assert.equal(eligible.qualifies, true);
+  assert.equal(eligible.status, 'eligible');
+  assert.equal(eligible.daysSinceOrder, 30);
+  assert.equal(eligible.daysRemaining, 0);
+  assert.equal(eligible.deadline, '2026-10-31');
+  assert.equal(eligible.supplier, 'True Value');
+  assert.equal(eligible.purchaseOrderNumber, 'PO-100');
+  const expired = evaluateVendorReturnEligibility(record, order, { now: '2026-11-01T00:00:00Z' });
+  assert.equal(expired.qualifies, false);
+  assert.equal(expired.status, 'expired');
+  const unknown = evaluateVendorReturnEligibility(record, {}, { now: '2026-10-31T00:00:00Z' });
+  assert.equal(unknown.status, 'unknown');
 });
 test('exact scans match closed returns, order references and tracking without merging cases', () => {
   const records = [
