@@ -98,6 +98,7 @@ test("shipping reporting uses rebuildable indexed facts after an atomic backfill
   assert.match(db, /function mark_shipping_report_fact_dirty/);
   assert.match(db, /async function refreshShippingReportingFactsBatch/);
   assert.match(db, /pg_try_advisory_xact_lock/);
+  assert.match(db, /coalesce\([\s\S]*resolved_package_weight > 0[\s\S]*false[\s\S]*as package_data_complete/);
   assert.match(db, /shippingReportingFactsReady/);
   assert.match(db, /factSource: useFacts \? "shipping_report_facts" : "live_projection"/);
   assert.match(server, /async function runShippingReportFactsRefreshWorkerJob/);

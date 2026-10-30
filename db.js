@@ -17220,7 +17220,13 @@ function shippingReportingBaseSql(spec, options = {}) {
           when resolved_package_weight > 0 then 'missing_dimensions'
           else 'missing_all'
         end as dimension_status,
-        resolved_package_weight > 0 and resolved_package_length > 0 and resolved_package_width > 0 and resolved_package_height > 0 as package_data_complete
+        coalesce(
+          resolved_package_weight > 0
+            and resolved_package_length > 0
+            and resolved_package_width > 0
+            and resolved_package_height > 0,
+          false
+        ) as package_data_complete
       from shipment_source
     )`;
 }

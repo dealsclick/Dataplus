@@ -22,7 +22,8 @@ async function run() {
       values
         ('shipping-report-test-snapshot', 'SR-SNAPSHOT', 'temu', 'temu', 'shipped', 20, 20, '2026-10-10', '{}'::jsonb),
         ('shipping-report-test-history', 'SR-HISTORY', 'ebay', 'ebay', 'shipped', 30, 30, '2026-10-11', '{"shipments":[{"id":"history-label","package":{"weight":7,"length":18,"width":12,"height":9}}]}'::jsonb),
-        ('shipping-report-test-normalized', 'SR-NORMALIZED', 'walmart', 'walmart', 'shipped', 40, 40, '2026-10-12', '{}'::jsonb)
+        ('shipping-report-test-normalized', 'SR-NORMALIZED', 'walmart', 'walmart', 'shipped', 40, 40, '2026-10-12', '{}'::jsonb),
+        ('shipping-report-test-missing', 'SR-MISSING', 'shopify', 'shopify', 'shipped', 50, 50, '2026-10-13', '{}'::jsonb)
     `);
     await pool.query(`
       insert into order_shipment_financials (
@@ -31,12 +32,13 @@ async function run() {
       ) values
         ('shipping-report-test-snapshot', 'snapshot-label', 'SR-SNAPSHOT', 'TRACK-SNAPSHOT', 'temu', 5, null, null, null, null, '2026-10-10', '{"packageDetails":{"weightPounds":4,"lengthInches":14,"widthInches":10,"heightInches":8}}'::jsonb),
         ('shipping-report-test-history', 'history-label', 'SR-HISTORY', 'TRACK-HISTORY', 'ebay', 6, null, null, null, null, '2026-10-11', '{}'::jsonb),
-        ('shipping-report-test-normalized', 'normalized-label', 'SR-NORMALIZED', 'TRACK-NORMALIZED', 'walmart', 7, 2, 10, 8, 6, '2026-10-12', '{}'::jsonb)
+        ('shipping-report-test-normalized', 'normalized-label', 'SR-NORMALIZED', 'TRACK-NORMALIZED', 'walmart', 7, 2, 10, 8, 6, '2026-10-12', '{}'::jsonb),
+        ('shipping-report-test-missing', 'missing-label', 'SR-MISSING', 'TRACK-MISSING', 'shopify', 8, null, null, null, null, '2026-10-13', '{}'::jsonb)
     `);
 
     const report = await postgres.salesShippingReportingSummary({ from: "2026-10-01", to: "2026-10-31" });
     assert.equal(report.factSource, "live_projection");
-    assert.equal(Number(report.summary.shipment_count), 3);
+    assert.equal(Number(report.summary.shipment_count), 4);
     assert.equal(Number(report.summary.package_coverage_count), 2, "the summary stays bounded and does not scan deep legacy shipment JSON");
 
     const coreReport = await postgres.salesShippingReportingSummary({ from: "2026-10-01", to: "2026-10-31", includeProfitability: false });
@@ -65,10 +67,10 @@ async function run() {
 
     const rebuilt = await postgres.refreshShippingReportingFactsBatch({ rebuild: true, reset: true, limit: 10 });
     assert.equal(rebuilt.complete, true);
-    assert.equal(rebuilt.processedOrders, 3);
+    assert.equal(rebuilt.processedOrders, 4);
     const factsStatus = await postgres.shippingReportingFactsStatus();
     assert.equal(factsStatus.ready, true);
-    assert.equal(factsStatus.factRows, 3);
+    assert.equal(factsStatus.factRows, 4);
 
     const factReport = await postgres.salesShippingReportingSummary({ from: "2026-10-01", to: "2026-10-31" });
     assert.equal(factReport.factSource, "shipping_report_facts");
