@@ -57900,6 +57900,7 @@ async function handleApi(req, res) {
         queue: url.searchParams.get("queue"),
         channel: url.searchParams.get("channel"),
         query: url.searchParams.get("q") || url.searchParams.get("query"),
+        receivedOnly: url.searchParams.get("receivedOnly"),
         page: url.searchParams.get("page"),
         pageSize: url.searchParams.get("pageSize") || url.searchParams.get("limit")
       })

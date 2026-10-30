@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Camera, ImagePlus, MapPin, Package, RotateCcw, ScanLine, Trash2, UserRound } from "lucide-react"
+import { Camera, Clock3, ImagePlus, MapPin, Package, RefreshCw, RotateCcw, ScanLine, Trash2, UserRound } from "lucide-react"
 import { Badge } from "./ui/badge"
 import { Button } from "./ui/button"
 import { Input } from "./ui/input"
@@ -31,6 +31,14 @@ function customerLocation(record: Row) {
   const customer = customerDetails(record)
   return [customer.city, [customer.state, customer.postalCode].filter(Boolean).join(" ")].filter(Boolean).join(", ")
 }
+function dateLabel(value: unknown) {
+  const date = new Date(text(value))
+  return Number.isNaN(date.getTime()) ? "Unknown time" : date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+}
+function returnHref(record: Row) {
+  const slug = text(record.returnSlug, record.returnNumber, record.id).toLowerCase()
+  return `/returns/${encodeURIComponent(slug)}`
+}
 function returnItems(record: Row) {
   return rows(record.items).slice(0, 4).map((line) => ({
     sku: text(line.sku, line.upc, line.vendorSku),
@@ -49,6 +57,7 @@ async function json(path: string, body?: unknown) {
 export function ReturnReceiving({ warehouses, onUpdated }: { warehouses: Row[]; onUpdated: () => Promise<void> }) {
   const [query, setQuery] = useState(""), [matches, setMatches] = useState<Row[]>([]), [total, setTotal] = useState<number | null>(null)
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [message, setMessage] = useState("")
+  const [recentRecords, setRecentRecords] = useState<Row[]>([]), [recentLoading, setRecentLoading] = useState(true)
   const [record, setRecord] = useState<Row | null>(null), [draft, setDraft] = useState<Record<string, string>>({}), [photos, setPhotos] = useState<Photo[]>([])
   const [receivingWarehouses, setReceivingWarehouses] = useState<Row[]>(warehouses)
   const photoInputRef = useRef<HTMLInputElement>(null)
@@ -60,6 +69,15 @@ export function ReturnReceiving({ warehouses, onUpdated }: { warehouses: Row[]; 
     }).catch(() => undefined)
     return () => { mounted = false }
   }, [])
+  async function loadRecent() {
+    setRecentLoading(true)
+    try {
+      const result = await json("/api/returns/workspace?receivedOnly=1&page=1&pageSize=10")
+      setRecentRecords(rows(result.returns))
+    } catch { setRecentRecords([]) }
+    finally { setRecentLoading(false) }
+  }
+  useEffect(() => { void loadRecent() }, [])
   async function lookup() {
     setBusy(true); setError(""); setMessage(""); setMatches([]); setTotal(null)
     try { const result = await json(`/api/returns/receiving-lookup?q=${encodeURIComponent(query.trim())}`); setMatches(result.returns || []); setTotal(result.total) }
@@ -99,8 +117,9 @@ export function ReturnReceiving({ warehouses, onUpdated }: { warehouses: Row[]; 
       if (photos.some(photo => !savedPhotoIds.has(photo.id))) throw new Error("The receipt was recorded, but one or more photos were not returned as saved evidence. Reopen this return before continuing.")
       const savedEligibility = object(object(result.return).vendorReturnEligibility)
       const vendorReturnMessage = savedEligibility.qualifies === true ? " This order qualifies for vendor-return review; Purchasing must confirm the supplier RMA." : ""
-      setRecord(null); setMatches([]); setTotal(null); setQuery(""); setMessage(`Receipt saved${photos.length ? ` with ${photos.length} photo${photos.length === 1 ? "" : "s"}` : ""}. Stock remains unavailable until inspection and restock approval.${vendorReturnMessage}`)
+      setRecord(null); setMatches([]); setTotal(null); setQuery(""); setMessage(`Receipt saved${photos.length ? ` with ${photos.length} photo${photos.length === 1 ? "" : "s"}` : ""}. It now appears in Recently received below. Stock remains unavailable until inspection and restock approval.${vendorReturnMessage}`)
       await onUpdated()
+      await loadRecent()
     } catch (e) { setError(e instanceof Error ? e.message : "Unable to save receipt") }
     finally { setBusy(false) }
   }
@@ -117,6 +136,7 @@ export function ReturnReceiving({ warehouses, onUpdated }: { warehouses: Row[]; 
     {total === 0 && <p className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">No saved return matches this search.</p>}
     {total !== null && total >= 50 && <p className="text-sm text-muted-foreground">Showing the newest 50 matches. Add another customer, order, or item detail to narrow the search.</p>}
     <div className="grid gap-2">{matches.map(row => { const customer = customerDetails(row); const location = customerLocation(row); const items = returnItems(row); const returnNumber = text(row.returnNumber, row.id); const channelReturnNumber = text(row.channelReturnId, row.channelReturnReference); const orderNumber = text(row.orderNumber, row.orderId); const channelOrderNumber = text(row.channelOrderId, row.channelOrderNumber, row.marketplaceOrderId); const vendorEligibility = object(row.vendorReturnEligibility); return <article key={String(row.id)} className="grid gap-3 rounded-md border bg-card p-3 text-sm"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="font-semibold">{returnNumber || channelReturnNumber || "Return"}</p><Badge variant="outline">{String(row.source || row.channelSource || "Local")}</Badge><Badge variant={row.restockedAt ? "success" : "secondary"}>{row.restockedAt ? "Restocked" : String(row.receivingStatus || "Not received")}</Badge>{vendorEligibility.qualifies === true ? <Badge variant="success">Vendor return eligible</Badge> : null}</div></div><Button size="sm" disabled={busy || Boolean(row.restockedAt)} onClick={() => open(row)}>{row.restockedAt ? "Received" : "Receive"}</Button></div><dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs"><div><dt className="text-muted-foreground">DataPlus order</dt><dd className="truncate font-medium">{orderNumber || "Unmatched"}</dd></div><div><dt className="text-muted-foreground">Channel order</dt><dd className="truncate font-medium">{channelOrderNumber || "Not provided"}</dd></div>{channelReturnNumber && channelReturnNumber !== returnNumber ? <div className="col-span-2"><dt className="text-muted-foreground">Channel return</dt><dd className="truncate font-medium">{channelReturnNumber}</dd></div> : null}</dl>{customer.name && <p className="flex min-w-0 items-center gap-2"><UserRound className="size-4 shrink-0 text-muted-foreground" /><span className="truncate">{customer.name}</span></p>}{location && <p className="flex items-center gap-1.5 text-xs text-muted-foreground"><MapPin className="size-3.5" />{location}</p>}{items.length > 0 && <div className="grid gap-2 border-t pt-2">{items.map((item, index) => <div key={`${item.sku}-${index}`} className="flex min-w-0 items-center gap-2">{item.image ? <a href={item.image} target="_blank" rel="noopener noreferrer" className="shrink-0"><img src={item.image} alt={item.title || item.sku} className="size-12 rounded object-contain" /></a> : <span className="grid size-12 shrink-0 place-items-center rounded bg-muted"><Package className="size-5 text-muted-foreground" /></span>}<div className="min-w-0"><p className="truncate font-mono text-xs font-medium">{item.sku || "Unmatched item"}{item.qty > 1 ? ` × ${item.qty}` : ""}</p>{item.title ? <p className="truncate text-xs text-muted-foreground">{item.title}</p> : null}</div></div>)}</div>}</article> })}</div>
+    <section aria-label="Recently received returns" className="grid gap-2 border-t pt-4"><div className="flex items-center justify-between gap-3"><div><h2 className="font-semibold">Recently received</h2><p className="text-xs text-muted-foreground">The 10 latest warehouse return receipts.</p></div><Button type="button" size="icon-sm" variant="ghost" disabled={recentLoading} onClick={() => void loadRecent()} title="Refresh recent returns"><RefreshCw className={`size-4 ${recentLoading ? "animate-spin" : ""}`} /><span className="sr-only">Refresh recent returns</span></Button></div>{recentLoading ? <div className="h-20 animate-pulse rounded-md bg-muted" /> : recentRecords.length ? <div className="grid gap-2">{recentRecords.map(row => { const customer = customerDetails(row); const location = customerLocation(row); return <article key={`recent-${String(row.id)}`} className="grid gap-2 rounded-md border bg-card p-3 text-sm"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><a className="font-semibold text-primary hover:underline" href={returnHref(row)}>{text(row.returnNumber, row.id) || "Return"}</a><Badge variant="success">Received</Badge><Badge variant="outline">{text(row.channelSource, row.source) || "Local"}</Badge></div><p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground"><Clock3 className="size-3.5" />{dateLabel(row.updatedAt || row.receivedAt)}</p></div><Button asChild size="sm" variant="outline"><a href={returnHref(row)}>View</a></Button></div><div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs"><div><p className="text-muted-foreground">Order</p><p className="truncate font-medium">{text(row.orderNumber, row.orderId) || "Unmatched"}</p></div><div><p className="text-muted-foreground">Warehouse</p><p className="truncate font-medium">{text(row.warehouseName) || "Unassigned"}</p></div><div><p className="text-muted-foreground">Received by</p><p className="truncate">{text(row.receivedBy) || "Not recorded"}</p></div><div><p className="text-muted-foreground">Disposition</p><p className="truncate capitalize">{text(row.disposition, row.inspectionStatus).replaceAll("_", " ") || "Pending inspection"}</p></div></div>{customer.name || location ? <p className="truncate text-xs text-muted-foreground">{[customer.name, location].filter(Boolean).join(" · ")}</p> : null}</article> })}</div> : <p className="rounded-md border border-dashed p-5 text-center text-sm text-muted-foreground">No returns have been received yet.</p>}</section>
     <Dialog open={Boolean(record)} onOpenChange={value => { if (!value && !busy) setRecord(null) }}><DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle className="break-all">Receive {String(record?.returnNumber || record?.channelReturnId || "return")}</DialogTitle></DialogHeader>
       <p className="text-sm text-muted-foreground">Channel status: {String(record?.channelStatus || record?.channelLifecycleStatus || "Unknown")} / Local receiving only</p>
       {record && error && <p role="alert" className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">{error}</p>}

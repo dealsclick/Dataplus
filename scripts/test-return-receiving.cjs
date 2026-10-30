@@ -17,6 +17,8 @@ test('receiving lookup route is registered before the generic return detail rout
   assert.match(serverSource, /receiving-lookup[\s\S]*enrichReturnVendorEligibility/, 'receiving lookup must include vendor-return eligibility');
   const dbSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
   assert.match(dbSource, /orderNumber: data\.orderNumber \|\| linked\?\.order_number[\s\S]*channelOrderId: data\.channelOrderId/, 'receiving lookup must fill linked DataPlus and channel order numbers');
+  assert.match(dbSource, /receivedOnly[\s\S]*data->>'receivedAt'/, 'returns workspace must support a bounded recent-receipts query');
+  assert.match(dbSource, /from order_records linked_order[\s\S]*shippingAddress'[\s\S]*postalCode/, 'desktop return search must include linked-order customer addresses');
 });
 test('vendor return eligibility uses an inclusive 30-day order window and supplier context', () => {
   const record = { items: [{ sku: 'A' }] };

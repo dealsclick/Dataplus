@@ -24,6 +24,7 @@ assert.match(returnReceivingSource, /compressEvidenceImage\(file,[\s\S]*maxBytes
 assert.match(returnReceivingSource, /savedPhotoIds[\s\S]*one or more photos were not returned as saved evidence/, 'Return receiving must verify photo persistence before reporting success');
 assert.match(returnReceivingSource, /stockPhotoRequired[\s\S]*1 required[\s\S]*stockPhotoRequired && photos\.length < 1/, 'New items marked for restock must require one receipt photo');
 assert.match(returnReceivingSource, /Qualifies for vendor return review[\s\S]*Use vendor return[\s\S]*return_to_vendor/, 'Eligible returns must show the 30-day vendor-return notice and disposition shortcut');
+assert.match(returnReceivingSource, /receivedOnly=1[\s\S]*Recently received[\s\S]*Received by[\s\S]*Disposition/, 'Mobile return receiving must show and refresh the latest warehouse receipts');
 assert.match(returnReceivingSource, /selectedWarehouse[\s\S]*activeBins[\s\S]*Choose a bin/, 'Selecting a return warehouse must load its active bins');
 assert.doesNotMatch(returnReceivingSource, /disabled=\{busy \|\| !draft\.warehouseId/, 'Warehouse selection must remain optional for a receipt-only return');
 assert.match(warehouseRouteSource, /const beginQuickCreate = \(draft\?[\s\S]*quickCreatePhotoInputRef\.current\?\.click\(\)/, 'Warehouse quick create must open the product camera directly');

@@ -12674,6 +12674,7 @@ async function listReturnsWorkspace(options = {}) {
     : "all";
   const channel = String(options.channel || "all").trim();
   const query = String(options.query || options.q || "").trim().toLowerCase();
+  const receivedOnly = options.receivedOnly === true || String(options.receivedOnly || "").toLowerCase() === "true" || String(options.receivedOnly || "") === "1";
   const values = [];
   const conditions = [];
   if (queue !== "all") {
@@ -12684,14 +12685,59 @@ async function listReturnsWorkspace(options = {}) {
     values.push(channel.toLowerCase());
     conditions.push(`lower(channel_value) = $${values.length}`);
   }
+  if (receivedOnly) conditions.push(`coalesce(data->>'receivedAt', '') <> ''`);
   if (query) {
     values.push(query);
-    conditions.push(`strpos(lower(concat_ws(' ',
-      data->>'returnNumber', data->>'channelReturnId', data->>'channelReturnReference',
-      data->>'orderNumber', data->>'channelOrderId', data->>'customerName', data->>'buyer',
-      data->>'customerEmail', data->>'buyerEmail', data->>'trackingNumber', data->>'reason',
-      data->>'sku', data->'items'::text, data->'returnTracking'::text
-    )), $${values.length}) > 0`);
+    const queryParameter = values.length;
+    values.push(query.replace(/\D/g, ""));
+    const digitsParameter = values.length;
+    conditions.push(`(
+      strpos(lower(concat_ws(' ',
+        data->>'returnNumber', data->>'channelReturnId', data->>'channelReturnReference',
+        data->>'orderId', data->>'orderNumber', data->>'channelOrderId',
+        data->>'customerName', data->>'buyer', data->'customer'->>'name',
+        data->>'customerEmail', data->>'buyerEmail', data->'customer'->>'email',
+        data->>'customerId', data->>'customerAccount', data->'customer'->>'id',
+        data->>'trackingNumber', data->>'reason', data->>'sku',
+        data->'shippingAddress'->>'name', data->'shippingAddress'->>'line1', data->'shippingAddress'->>'line2',
+        data->'shippingAddress'->>'city', data->'shippingAddress'->>'state', data->'shippingAddress'->>'postalCode', data->'shippingAddress'->>'zip',
+        data->'address'->>'name', data->'address'->>'line1', data->'address'->>'line2',
+        data->'address'->>'city', data->'address'->>'state', data->'address'->>'postalCode', data->'address'->>'zip',
+        data->'items'::text, data->'returnTracking'::text, data->'returnLabel'::text, data->'returnLabelHistory'::text
+      )), $${queryParameter}) > 0
+      or ($${digitsParameter} <> '' and length($${digitsParameter}) >= 4 and regexp_replace(concat_ws(' ',
+        data->>'customerPhone', data->>'phone', data->'customer'->>'phone',
+        data->'shippingAddress'->>'phone', data->'address'->>'phone'
+      ), '\\D', '', 'g') like '%' || $${digitsParameter} || '%')
+      or exists (
+        select 1
+        from order_records linked_order
+        where (
+          (coalesce(data->>'orderId', '') <> '' and linked_order.order_id = data->>'orderId')
+          or (coalesce(data->>'orderNumber', '') <> '' and (
+            lower(coalesce(linked_order.order_number, '')) = lower(data->>'orderNumber')
+            or lower(coalesce(linked_order.internal_order_number, '')) = lower(data->>'orderNumber')
+          ))
+          or (coalesce(data->>'channelOrderId', '') <> '' and (
+            lower(coalesce(linked_order.channel_order_id, '')) = lower(data->>'channelOrderId')
+            or lower(coalesce(linked_order.marketplace_order_id, '')) = lower(data->>'channelOrderId')
+          ))
+        ) and (
+          strpos(lower(concat_ws(' ',
+            linked_order.order_id, linked_order.order_number, linked_order.internal_order_number,
+            linked_order.channel_order_id, linked_order.marketplace_order_id,
+            linked_order.buyer, linked_order.buyer_email, linked_order.customer_id,
+            linked_order.raw->'address'->>'name', linked_order.raw->'address'->>'line1', linked_order.raw->'address'->>'line2',
+            linked_order.raw->'address'->>'city', linked_order.raw->'address'->>'state', linked_order.raw->'address'->>'postalCode', linked_order.raw->'address'->>'zip',
+            linked_order.raw->'shippingAddress'->>'name', linked_order.raw->'shippingAddress'->>'line1', linked_order.raw->'shippingAddress'->>'line2',
+            linked_order.raw->'shippingAddress'->>'city', linked_order.raw->'shippingAddress'->>'state', linked_order.raw->'shippingAddress'->>'postalCode', linked_order.raw->'shippingAddress'->>'zip'
+          )), $${queryParameter}) > 0
+          or ($${digitsParameter} <> '' and length($${digitsParameter}) >= 4 and regexp_replace(concat_ws(' ',
+            linked_order.phone, linked_order.raw->'address'->>'phone', linked_order.raw->'shippingAddress'->>'phone'
+          ), '\\D', '', 'g') like '%' || $${digitsParameter} || '%')
+        )
+      )
+    )`);
   }
   const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
   const offset = (page - 1) * pageSize;
