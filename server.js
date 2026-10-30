@@ -15119,6 +15119,17 @@ async function buildReturnOpenOrderAllocationReview(record, db = {}) {
   };
 }
 
+async function purchaseOrdersForReturn(record = {}) {
+  const skus = [...new Set((record.items || []).map((line) => String(line.sku || "").trim()).filter(Boolean))];
+  if (!skus.length) return [];
+  const groups = await Promise.all(skus.map((sku) => postgres.listPurchaseOrders({ sku, limit: 1000 })));
+  const unique = new Map();
+  for (const purchaseOrder of groups.flat()) {
+    if (purchaseOrder?.id) unique.set(String(purchaseOrder.id), purchaseOrder);
+  }
+  return [...unique.values()];
+}
+
 function findPurchaseOrderReceiptLine(po = {}, input = {}) {
   const lines = Array.isArray(po.items) ? po.items : [];
   const routeId = String(input.routeId || "").trim();
@@ -61620,7 +61631,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "pdf" && postgres.isPostgresEnabled()) {
-    const state = await readDbFast({ skipInventory: true });
+    const state = await postgres.readStateFields(["systemSettings", "warehouses"], { fallbackToLegacy: true });
     const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
     const order = await postgres.readOrderByKey(String(record.orderId || ""));
@@ -61635,7 +61646,7 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "print" && postgres.isPostgresEnabled()) {
     if (!userCan(authUser, "orders.returns", "view")) return sendJson(res, 403, { error: "Returns view permission is required." });
-    const state = await readDbFast({ skipInventory: true });
+    const state = await postgres.readStateFields(["systemSettings", "warehouses"], { fallbackToLegacy: true });
     const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
     const order = await postgres.readOrderByKey(String(record.orderId || ""));
@@ -61674,7 +61685,7 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "returns" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
     if (!userCan(authUser, "orders.returns", "view")) return sendJson(res, 403, { error: "Returns view permission is required." });
-    const state = await readDbFast({ skipInventory: true });
+    const state = await postgres.readStateFields(["warehouses"], { fallbackToLegacy: true });
     const record = await postgres.readReturnByKey(decodeURIComponent(String(parts[2] || "")));
     if (!record) return notFound(res);
     const order = record.orderId ? await postgres.readOrderByKey(String(record.orderId)) : null;
@@ -61683,7 +61694,10 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "rates" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const state = await readDbFast({ skipInventory: true });
+    const releaseReturnLock = await postgres.acquireReturnWriteLock(parts[2]);
+    if (!releaseReturnLock) return sendJson(res, 409, { error: "This return is already being updated. Retry shortly." });
+    try {
+    const state = await postgres.readStateFields(["connections", "systemSettings", "warehouses"], { fallbackToLegacy: true });
     const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
     if (await postgres.countReturnsByNumber(record.returnNumber, record.id)) return sendJson(res, 409, { error: "This RMA number is duplicated. Repair the RMA identifiers before buying a label." });
@@ -61704,11 +61718,15 @@ async function handleApi(req, res) {
     } catch (error) {
       return sendJson(res, 502, { error: `Return-label quote failed: ${error.message || "Unknown error"}` });
     }
+    } finally { await releaseReturnLock(); }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "labels" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const state = await readDbFast({ skipInventory: true });
+    const releaseReturnLock = await postgres.acquireReturnWriteLock(parts[2]);
+    if (!releaseReturnLock) return sendJson(res, 409, { error: "This return is already being updated. Retry shortly." });
+    try {
+    const state = await postgres.readStateFields(["connections", "systemSettings", "warehouses"], { fallbackToLegacy: true });
     const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
     if (await postgres.countReturnsByNumber(record.returnNumber, record.id)) return sendJson(res, 409, { error: "This RMA number is duplicated. Repair the RMA identifiers before buying a label." });
@@ -61752,11 +61770,15 @@ async function handleApi(req, res) {
       appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "POST", path: "/shipping/api/v1/shipments", operation: "Return label purchase failed", statusCode: 502, ok: false, entityType: "return", entityId: record.id, message: error.message || "Unknown return-label error." });
       return sendJson(res, 502, { error: `Return-label purchase failed: ${error.message || "Unknown error"}` });
     }
+    } finally { await releaseReturnLock(); }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "void" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const state = await readDbFast({ skipInventory: true });
+    const releaseReturnLock = await postgres.acquireReturnWriteLock(parts[2]);
+    if (!releaseReturnLock) return sendJson(res, 409, { error: "This return is already being updated. Retry shortly." });
+    try {
+    const state = await postgres.readStateFields(["systemSettings"], { fallbackToLegacy: true });
     const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
     const label = record.returnLabel || {};
@@ -61793,11 +61815,14 @@ async function handleApi(req, res) {
       appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "DELETE", path: apiPath, operation: "Void return label failed", statusCode: 502, ok: false, entityType: "return", entityId: record.id, message: label.voidError });
       return sendJson(res, 502, { error: `Return-label void failed: ${label.voidError}` });
     }
+    } finally { await releaseReturnLock(); }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "refund" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const state = await readDbFast({ skipInventory: true });
+    const releaseReturnLock = await postgres.acquireReturnWriteLock(parts[2]);
+    if (!releaseReturnLock) return sendJson(res, 409, { error: "This return is already being updated. Retry shortly." });
+    try {
     const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
     const label = record.returnLabel || {};
@@ -61824,10 +61849,14 @@ async function handleApi(req, res) {
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
     return sendJson(res, 200, { return: record, message: "Return-label refund recorded and applied to order profit reporting." });
+    } finally { await releaseReturnLock(); }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "shipping" && parts[4] === "refresh" && postgres.isPostgresEnabled()) {
-    const state = await readDbFast({ skipInventory: true });
+    const releaseReturnLock = await postgres.acquireReturnWriteLock(parts[2]);
+    if (!releaseReturnLock) return sendJson(res, 409, { error: "This return is already being updated. Retry shortly." });
+    try {
+    const state = await postgres.readStateFields(["systemSettings"], { fallbackToLegacy: true });
     const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
     const label = record.returnLabel || {};
@@ -61858,11 +61887,14 @@ async function handleApi(req, res) {
       appendChannelApiLog({ channel: "Veeqo", transport: "HTTP", method: "GET", path: apiPath, operation: "Refresh return shipment failed", statusCode: 502, ok: false, entityType: "return", entityId: record.id, message: error.message || "Unknown Veeqo error." });
       return sendJson(res, 502, { error: `Return tracking refresh failed: ${error.message || "Unknown error"}` });
     }
+    } finally { await releaseReturnLock(); }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "tracking" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const state = await readDbFast({ skipInventory: true });
+    const releaseReturnLock = await postgres.acquireReturnWriteLock(parts[2]);
+    if (!releaseReturnLock) return sendJson(res, 409, { error: "This return is already being updated. Retry shortly." });
+    try {
     const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
     const trackingNumber = String(body.trackingNumber || "").trim().slice(0, 120);
@@ -61885,11 +61917,15 @@ async function handleApi(req, res) {
     }
     await postgres.saveReturn(record);
     return sendJson(res, 200, { return: record, tracking, message: "Customer return tracking saved." });
+    } finally { await releaseReturnLock(); }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "send-customer" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const state = await readDbFast({ skipInventory: true });
+    const releaseReturnLock = await postgres.acquireReturnWriteLock(parts[2]);
+    if (!releaseReturnLock) return sendJson(res, 409, { error: "This return is already being updated. Retry shortly." });
+    try {
+    const state = await postgres.readStateFields(["systemSettings", "warehouses"], { fallbackToLegacy: true });
     const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
     const order = await postgres.readOrderByKey(String(record.orderId || ""));
@@ -61931,10 +61967,14 @@ async function handleApi(req, res) {
       await postgres.saveReturn(record).catch(() => {});
       return sendJson(res, 502, { error: `RMA email failed: ${error.message || "Unknown error"}` });
     }
+    } finally { await releaseReturnLock(); }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "sync-shopify" && postgres.isPostgresEnabled()) {
-    const state = await readDbFast({ skipInventory: true });
+    const releaseReturnLock = await postgres.acquireReturnWriteLock(parts[2]);
+    if (!releaseReturnLock) return sendJson(res, 409, { error: "This return is already being updated. Retry shortly." });
+    try {
+    const state = await postgres.readStateFields(["connections", "systemSettings"], { fallbackToLegacy: true });
     const returnRecord = await postgres.readReturnByKey(parts[2]);
     if (!returnRecord) return notFound(res);
     const order = await postgres.readOrderByKey(String(returnRecord.orderId || ""));
@@ -61957,6 +61997,7 @@ async function handleApi(req, res) {
       await postgres.saveReturn(returnRecord);
       return sendJson(res, 502, { error: `Shopify return sync failed: ${error.message || "Unknown error"}` });
     }
+    } finally { await releaseReturnLock(); }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "payments" && parts[4] && parts[5] === "capture-shopify" && postgres.isPostgresEnabled()) {
@@ -62591,15 +62632,15 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "returns" && parts[2] && parts[3] === "allocate-open-orders" && postgres.isPostgresEnabled()) {
-    const releaseReturnLock = await postgres.acquireReturnWriteLock();
-    if (!releaseReturnLock) return sendJson(res, 409, { error: "Another return update is being saved. Retry shortly." });
+    const releaseReturnLock = await postgres.acquireReturnWriteLock(parts[2]);
+    if (!releaseReturnLock) return sendJson(res, 409, { error: "This return is already being updated. Retry shortly." });
     try {
-      const db = await readDbFast({ skipInventory: true });
-      db.inventoryLedger = await postgres.readStateField("inventoryLedger") || [];
-      db.purchaseRequirements = await postgres.readStateField("purchaseRequirements") || [];
-      db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 });
       const record = await postgres.readReturnByKey(parts[2]);
       if (!record) return notFound(res);
+      const db = await postgres.readStateFields(["systemSettings", "warehouses"], { fallbackToLegacy: true });
+      db.inventoryLedger = [];
+      db.purchaseRequirements = await postgres.readStateField("purchaseRequirements") || [];
+      db.purchaseOrders = await purchaseOrdersForReturn(record);
       const settings = orderRuntimeSettings(db);
       if (settings.returnsPrioritizeOpenOrderAllocation !== true) return sendJson(res, 400, { error: "Return-to-order allocation is disabled in System Settings." });
       if (!['received', 'inspection'].includes(String(record.status || '').toLowerCase()) || String(record.inspectionStatus || '').toLowerCase() !== 'passed') return sendJson(res, 400, { error: "Receive and pass inspection before allocating returned stock." });
@@ -62646,7 +62687,8 @@ async function handleApi(req, res) {
       record.updatedAt = new Date().toISOString();
       if (touchedProducts.length) { await postgres.upsertProductsFromState(touchedProducts); await postgres.upsertInventoryLevelsFromProducts(touchedProducts); }
       await postgres.saveReturn(record);
-      await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [], purchaseRequirements: db.purchaseRequirements || [] });
+      await postgres.prependInventoryLedgerEvents(db.inventoryLedger || []);
+      await postgres.writeStateDocuments({ purchaseRequirements: db.purchaseRequirements || [] });
       clearOrderApiCache();
       return sendJson(res, 200, { return: record, allocation: record.allocationReview });
     } finally { await releaseReturnLock(); }
@@ -62657,8 +62699,8 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const action = String(body.action || "").trim().toLowerCase();
     if (!["approve", "reject", "request_revision"].includes(action)) return sendJson(res, 400, { error: "Choose approve, reject, or request revision." });
-    const releaseReturnLock = await postgres.acquireReturnWriteLock();
-    if (!releaseReturnLock) return sendJson(res, 409, { error: "Another return update is being saved. Retry shortly." });
+    const releaseReturnLock = await postgres.acquireReturnWriteLock(parts[2]);
+    if (!releaseReturnLock) return sendJson(res, 409, { error: "This return is already being updated. Retry shortly." });
     try {
       const record = await postgres.readReturnByKey(parts[2]);
       if (!record) return notFound(res);
@@ -62688,15 +62730,17 @@ async function handleApi(req, res) {
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "returns" && parts[2] && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
-    const releaseReturnLock = await postgres.acquireReturnWriteLock();
-    if (!releaseReturnLock) return sendJson(res, 409, { error: "Another return update is being saved. Retry shortly." });
+    const releaseReturnLock = await postgres.acquireReturnWriteLock(parts[2]);
+    if (!releaseReturnLock) return sendJson(res, 409, { error: "This return is already being updated. Retry shortly." });
     try {
-    const db = await readDbFast({ skipInventory: true });
-    db.inventoryLedger = await postgres.readStateField("inventoryLedger") || [];
-    db.purchaseRequirements = await postgres.readStateField("purchaseRequirements") || [];
-    db.purchaseOrders = await postgres.listPurchaseOrders({ limit: 5000 });
     const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
+    if (body.expectedUpdatedAt && String(body.expectedUpdatedAt) !== String(record.updatedAt || "")) {
+      return sendJson(res, 409, { error: "This return changed after you opened it. Reload the latest return before saving." });
+    }
+    const db = await postgres.readStateFields(["systemSettings", "warehouses"], { fallbackToLegacy: true });
+    db.inventoryLedger = [];
+    db.purchaseOrders = await purchaseOrdersForReturn(record);
     const receiptError = validateReturnReceipt(record, body, db.warehouses || []);
     if (receiptError) return sendJson(res, 400, { error: receiptError });
     const receiptStatus = body.status || record.status;
@@ -62843,16 +62887,15 @@ async function handleApi(req, res) {
     record.updatedAt = new Date().toISOString();
     if (body.receiptOnly) record.receiptHistory = [...(record.receiptHistory || []), { id: crypto.randomUUID(), at: record.updatedAt, user: actingUser, warehouseId: record.warehouseId, binLocation: record.binLocation, condition: record.condition, disposition: record.disposition, items: record.items.map(line => ({ sku: line.sku, receivedQty: line.receivedQty })) }];
     await postgres.saveReturn(record);
-    await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+    await postgres.prependInventoryLedgerEvents(db.inventoryLedger || []);
     if (order) {
       const orderReturns = await postgres.readOrderReturns(order);
       reconcileOrderReturns(order, orderReturns);
       normalizeSourceOrderCompletion(order);
       await postgres.saveOrder(order);
     }
-    clearOrderApiCache();
-    const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { return: record, vendorReturnLinks, state: publicState(stateDb, { lite: true }) });
+    if (order) clearOrderApiCache(order.id);
+    return sendJson(res, 200, { return: record, vendorReturnLinks });
     } finally { await releaseReturnLock(); }
   }
 

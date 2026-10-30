@@ -86,11 +86,10 @@ function labelState(record: Row) {
   return lower(record.returnLabelPolicy) === "merchant_provided" ? "Required" : "Customer ships"
 }
 
-export function ReturnsWorkspace({ warehouses, busy, refreshKey = 0, onUpdated, onTotalChange, onSync, onTransactions }: {
+export function ReturnsWorkspace({ warehouses, busy, refreshKey = 0, onTotalChange, onSync, onTransactions }: {
   warehouses: Row[]
   busy: boolean
   refreshKey?: number
-  onUpdated: () => Promise<void>
   onTotalChange?: (total: number) => void
   onSync: () => Promise<void>
   onTransactions: (record: Row) => void
@@ -139,7 +138,7 @@ export function ReturnsWorkspace({ warehouses, busy, refreshKey = 0, onUpdated, 
     }, query.trim() ? 250 : 0)
     return () => { controller.abort(); window.clearTimeout(timer) }
   }, [queue, channel, page, query, refreshKey, reloadToken, onTotalChange])
-  const refreshReturns = async () => { setReloadToken((current) => current + 1); await onUpdated() }
+  const refreshReturns = async () => { setReloadToken((current) => current + 1) }
   const filtered = records
   const show = (column: Column) => columns.has(column)
   const syncShopify = async (record: Row) => {

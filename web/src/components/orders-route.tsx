@@ -843,7 +843,7 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
     </div>
     {tab === "orders" && <a className="text-sm text-primary underline" href="/orders/data-review">Data Review</a>}
     {tab === "orders" && <ImportDashboard compact />}
-    {tab === "returns" && <ReturnsWorkspace warehouses={warehouses} busy={busy} refreshKey={returnsRefreshKey} onUpdated={load} onTotalChange={setReturnTotal} onSync={importChannelReturns} onTransactions={setTransactionReturn} />}
+    {tab === "returns" && <ReturnsWorkspace warehouses={warehouses} busy={busy} refreshKey={returnsRefreshKey} onTotalChange={setReturnTotal} onSync={importChannelReturns} onTransactions={setTransactionReturn} />}
     {tab === "orders" && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       <MetricCard label={orderWorkspace === "open" ? "Action required" : "Orders (7 days)"} value={numberLabel(orderWorkspace === "open" ? actionRequiredCount : Number(orderMetrics.last7DaysCount || 0))} icon={orderWorkspace === "open" ? AlertTriangle : ShoppingBag} />
       <MetricCard label={orderWorkspace === "open" ? "Ready to ship" : "Matching orders"} value={numberLabel(orderWorkspace === "open" ? counts["ready-ship"] : filteredTotal)} icon={Truck} />

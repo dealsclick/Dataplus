@@ -3447,6 +3447,24 @@ async function readStateFields(fields = [], options = {}) {
   return state;
 }
 
+async function prependInventoryLedgerEvents(events = []) {
+  const client = getPool();
+  const rows = (Array.isArray(events) ? events : []).filter((event) => event && typeof event === "object");
+  if (!client || !rows.length) return 0;
+  await initRelationalSchema();
+  await client.query(`
+    insert into state_documents (doc_key, data, updated_at)
+    values ('inventoryLedger', $1::jsonb, now())
+    on conflict (doc_key) do update set
+      data = excluded.data || case
+        when jsonb_typeof(state_documents.data) = 'array' then state_documents.data
+        else '[]'::jsonb
+      end,
+      updated_at = now()
+  `, [JSON.stringify(rows)]);
+  return rows.length;
+}
+
 async function readCategoryState() {
   const client = getPool();
   if (!client) return null;
@@ -12201,11 +12219,29 @@ async function listDuplicateOrderRecords(options = {}) {
   return (await Promise.all(result.rows.map((row) => readOrderByKey(row.order_id)))).filter(Boolean);
 }
 
-async function acquireReturnWriteLock() {
+async function acquireReturnWriteLock(reference = "") {
   const client = await getPool().connect();
-  const result = await client.query("select pg_try_advisory_lock(hashtext('dataplus-returns')) as locked");
+  const key = nullableString(reference);
+  let lockName = "dataplus-returns";
+  if (key) {
+    const resolved = await client.query(`
+      select entity_id
+      from entity_documents
+      where collection = 'returns' and (
+        entity_id = $1
+        or data->>'id' = $1
+        or lower(data->>'returnNumber') = lower($1)
+        or lower(data->>'channelReturnId') = lower($1)
+        or lower(data->>'legacyReturnNumber') = lower($1)
+      )
+      order by updated_at desc
+      limit 1
+    `, [key]);
+    lockName = `dataplus-return:${resolved.rows[0]?.entity_id || key.toLowerCase()}`;
+  }
+  const result = await client.query("select pg_try_advisory_lock(hashtext($1)) as locked", [lockName]);
   if (!result.rows[0].locked) { client.release(); return null; }
-  return async () => { try { await client.query("select pg_advisory_unlock(hashtext('dataplus-returns'))"); } finally { client.release(); } };
+  return async () => { try { await client.query("select pg_advisory_unlock(hashtext($1))", [lockName]); } finally { client.release(); } };
 }
 
 async function readImportedReturn(source = "", channelReturnId = "") {
@@ -12357,6 +12393,9 @@ async function upsertImportedReturn(record) {
     await client.query('begin');
     await client.query("select pg_advisory_xact_lock(hashtext('dataplus-returns'))");
     await client.query('select pg_advisory_xact_lock(hashtext($1))', [`return:${record.source}:${record.channelReturnId}`]);
+    const identity = await client.query(`select entity_id from entity_documents where collection = 'returns'
+      and lower(data->>'source') = lower($1) and data->>'channelReturnId' = $2 limit 1`, [record.source, record.channelReturnId]);
+    await client.query('select pg_advisory_xact_lock(hashtext($1))', [`dataplus-return:${identity.rows[0]?.entity_id || record.id}`]);
     const found = await client.query(`select data from entity_documents where collection = 'returns'
       and lower(data->>'source') = lower($1) and data->>'channelReturnId' = $2 for update`, [record.source, record.channelReturnId]);
     const prior = found.rows[0]?.data;
@@ -20095,6 +20134,7 @@ module.exports = {
   readEntityDocumentCollectionFast,
   readStateField,
   readStateFields,
+  prependInventoryLedgerEvents,
   readWarehouseAudits,
   listWarehouseAuditsPage,
   readWarehouseAudit,

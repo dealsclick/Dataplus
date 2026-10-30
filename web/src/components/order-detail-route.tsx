@@ -102,7 +102,7 @@ function RmaDetailPage() {
     setSaving(true)
     try {
       const items = (Array.isArray(record.items) ? record.items as Array<Record<string, unknown>> : []).map((line, index) => ({ ...line, receivedQty: Number(draft[`received-${index}`] ?? line.receivedQty ?? 0) }))
-      const result = await api<{ return?: Record<string, unknown> }>(`/api/returns/${encodeURIComponent(String(record.id || ""))}`, { method: "PATCH", body: JSON.stringify({ ...draft, returnFee: Number(draft.returnFee || 0), items }) })
+      const result = await api<{ return?: Record<string, unknown> }>(`/api/returns/${encodeURIComponent(String(record.id || ""))}`, { method: "PATCH", body: JSON.stringify({ ...draft, expectedUpdatedAt: String(record.updatedAt || ""), returnFee: Number(draft.returnFee || 0), items }) })
       if (String((result.return?.allocationReview as Record<string, unknown> | undefined)?.status || "") === "pending") await api(`/api/returns/${encodeURIComponent(String(record.id || ""))}/allocate-open-orders`, { method: "POST" })
       await load(); toast.success("RMA updated.")
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update this RMA.") } finally { setSaving(false) }
@@ -119,7 +119,7 @@ function RmaDetailPage() {
         const dataUrl = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result || "")); reader.onerror = () => reject(new Error("Unable to read the selected evidence.")); reader.readAsDataURL(file) })
         attachments.push({ id: crypto.randomUUID(), name: file.name, size: file.size, mimeType: file.type, dataUrl, stage: "review", source: "RMA detail" })
       }
-      await api(`/api/returns/${encodeURIComponent(String(record.id || ""))}`, { method: "PATCH", body: JSON.stringify({ attachments }) })
+      await api(`/api/returns/${encodeURIComponent(String(record.id || ""))}`, { method: "PATCH", body: JSON.stringify({ attachments, expectedUpdatedAt: String(record.updatedAt || "") }) })
       await load(); toast.success(`${attachments.length} evidence file${attachments.length === 1 ? "" : "s"} added.`)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to add return evidence.") } finally { setSaving(false) }
   }
