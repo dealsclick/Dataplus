@@ -18,8 +18,16 @@ test('receiving lookup route is registered before the generic return detail rout
   const dbSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
   assert.match(dbSource, /orderNumber: data\.orderNumber \|\| linked\?\.order_number[\s\S]*channelOrderId: data\.channelOrderId/, 'receiving lookup must fill linked DataPlus and channel order numbers');
   assert.match(dbSource, /receivedOnly[\s\S]*data->>'receivedAt'/, 'returns workspace must support a bounded recent-receipts query');
+  assert.match(dbSource, /entity_documents_returns_received_idx[\s\S]*data->>'receivedAt'/, 'recent receipt sorting must have a targeted partial index');
+  assert.match(dbSource, /const orderBy = receivedOnly[\s\S]*data->>'receivedAt'[\s\S]*updated_at desc/, 'recent receipts must sort by the actual receipt time');
   assert.match(dbSource, /findOrderReferencesForReturnWorkspace[\s\S]*from order_records[\s\S]*postalCode/, 'desktop return search must resolve linked-order customer ZIP codes once');
   assert.doesNotMatch(dbSource, /from order_records linked_order/, 'desktop return search must not rescan orders once per return row');
+});
+test('desktop returns exposes a server-side recently received filter', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'returns-workspace.tsx'), 'utf8');
+  assert.match(source, /receivingFilter === "received"[\s\S]*params\.set\("receivedOnly", "1"\)/);
+  assert.match(source, /<SelectItem value="received">Recently received<\/SelectItem>/);
+  assert.match(source, /receivingFilter === "received" \? record\.receivedAt/);
 });
 test('vendor return eligibility uses an inclusive 30-day order window and supplier context', () => {
   const record = { items: [{ sku: 'A' }] };

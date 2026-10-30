@@ -269,6 +269,9 @@ async function ensureReturnWorkspaceSchema(client) {
       create index if not exists entity_documents_returns_updated_idx
         on entity_documents (updated_at desc, entity_id desc)
         where collection = 'returns';
+      create index if not exists entity_documents_returns_received_idx
+        on entity_documents ((data->>'receivedAt') desc, entity_id desc)
+        where collection = 'returns' and nullif(btrim(data->>'receivedAt'), '') is not null;
       create index if not exists entity_documents_returns_status_idx
         on entity_documents (lower(coalesce(nullif(data->>'status', ''), nullif(data->>'returnStatus', ''), '')))
         where collection = 'returns';
@@ -12739,7 +12742,7 @@ async function listReturnsWorkspace(options = {}) {
     values.push(channel.toLowerCase());
     conditions.push(`lower(channel_value) = $${values.length}`);
   }
-  if (receivedOnly) conditions.push(`coalesce(data->>'receivedAt', '') <> ''`);
+  if (receivedOnly) conditions.push(`nullif(btrim(data->>'receivedAt'), '') is not null`);
   if (query) {
     values.push(query);
     const queryParameter = values.length;
@@ -12774,11 +12777,14 @@ async function listReturnsWorkspace(options = {}) {
   }
   const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
   const offset = (page - 1) * pageSize;
+  const orderBy = receivedOnly
+    ? `nullif(btrim(data->>'receivedAt'), '') desc, updated_at desc, entity_id desc`
+    : `updated_at desc, entity_id desc`;
   const [pageResult, summary] = await Promise.all([
     client.query(`${RETURNS_WORKSPACE_SOURCE_CTE}
       select data, return_queue, channel_value, count(*) over()::int as filtered_total
       from classified ${where}
-      order by updated_at desc, entity_id desc
+      order by ${orderBy}
       limit $${values.length + 1} offset $${values.length + 2}
     `, [...values, pageSize, offset]),
     readReturnsWorkspaceSummary(client)
