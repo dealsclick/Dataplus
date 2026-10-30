@@ -31,7 +31,7 @@ import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
 import { loadAppBootstrap, loadAppReferences } from "../lib/app-state"
 import { compressEvidenceImage, startFastBarcodeScanner } from "../lib/fast-barcode-scanner"
 import { Detail, Field, PageHeader } from "./app-ui"
-import { ProductDetailSheet } from "./legacy-workspaces"
+import { ProductDetailSheet } from "./product-workspaces"
 import type { CatalogItem, ImportJob, SystemSettings, Vendor } from "../App"
 type WarehouseRegisterRecord = {
   id?: string

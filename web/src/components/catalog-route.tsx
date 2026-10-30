@@ -34,12 +34,12 @@ import type { MarketplaceChannelKey } from "../lib/catalog-channel-utils"
 import { cn } from "@/lib/utils"
 import { ContextActions, Field, MetricCard, PageHeader, ToggleField } from "./app-ui"
 import {
-  AttributesPage, AttributeGroupsPage, CategoriesWorkspace, CategoryReviewPage, CatalogChannelMarks,
-  catalogCategoryLeaf, catalogCellText, CatalogResourcePage, CatalogSupplierCoverage, catalogWorkspaceTabFromPath,
-  catalogWorkspaceTabs, ImportReviewPage,
-  InventorySourceCell, InventoryWorkspace, ProductDetailSheet, SkuChangesPage, VendorMappingsPage,
-} from "./legacy-workspaces"
-import type { CatalogWorkspaceTab } from "./legacy-workspaces"
+  AttributesPage, AttributeGroupsPage, CategoriesWorkspace, CategoryReviewPage, CatalogResourcePage,
+  catalogWorkspaceTabFromPath, catalogWorkspaceTabs, ImportReviewPage, InventorySourceCell,
+  InventoryWorkspace, SkuChangesPage, VendorMappingsPage,
+} from "./catalog-workspaces"
+import type { CatalogWorkspaceTab } from "./catalog-workspaces"
+import { CatalogChannelMarks, catalogCategoryLeaf, catalogCellText, CatalogSupplierCoverage, ProductDetailSheet } from "./product-workspaces"
 import { launchWalmartExisting, normalizeUnifiedCatalogFilters, unifiedCatalogSourceFilters, unifiedCatalogUsesManagedRecords } from "../App"
 import type {
   CatalogItem, CatalogResponse, ChannelConnection, EbayListingBlockerReport,

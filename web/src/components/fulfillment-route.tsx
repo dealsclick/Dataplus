@@ -39,7 +39,7 @@ import { BulkSearchActions } from "./bulk-search-csv-button"
 import { TrackingCameraLookup } from "./tracking-camera-lookup"
 import { OutboundAuditWorkspace } from "./outbound-audit-workspace"
 import { Detail, Field, PageHeader, ToggleField } from "./app-ui"
-import { sortShippingRatesForDisplay } from "./legacy-workspaces"
+import { sortShippingRatesForDisplay } from "./order-workspaces"
 import type { ImportJob, ProductItem } from "../App"
 
 type FulfillmentCarrierService = { id: string; name: string; enabled: boolean }

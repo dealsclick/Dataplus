@@ -34,8 +34,9 @@ import {
 } from "../App"
 import {
   OrderListPreview, getOrderRoutingState, isDoneOrderRow, orderHasBlockingException,
-  orderListSearchText, rmaHref, trackingUrlForShipment,
-} from "./legacy-workspaces"
+  orderListSearchText, trackingUrlForShipment,
+} from "./order-workspaces"
+import { rmaHref } from "./product-workspaces"
 import type { LiteState } from "../App"
 
 const ReturnsWorkspace = lazy(() => import("./returns-workspace").then((module) => ({ default: module.ReturnsWorkspace })))

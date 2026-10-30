@@ -28,7 +28,7 @@ import {
   jobImportModeDescription, jobOperationLabel, jobProgress, jobRunType, jobStatusLabel, jobStatusTone,
   openJobSettings, scheduleDescription,
 } from "../App"
-import { ChannelLogsPanel, VendorFeedScheduleManager, channelLogStatusLabel } from "./legacy-workspaces"
+import { ChannelLogsPanel, VendorFeedScheduleManager, channelLogStatusLabel } from "./product-workspaces"
 import type { ChannelConnection, ChannelLogEntry, ImportJob, SystemSettings, Vendor, VendorFeedSchedule, WorkerStatus } from "../App"
 
 export function JobsPage({

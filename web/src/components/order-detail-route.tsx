@@ -43,11 +43,9 @@ import {
   OrderCustomerPanel,
   OrderDocumentsPanel,
   OrderFinancePanel,
-  OrderFulfillmentItemRows,
   orderAttentionItems,
   orderFulfillmentRateReview,
   orderHasBlockingException,
-  OrderItemsProfitLoss,
   OrderLineActionPanel,
   OrderOperationsPanel,
   OrderRefundSyncPanel,
@@ -55,7 +53,6 @@ import {
   OrderReturnsPanel,
   orderStateLabel,
   ReturnLabelPanel,
-  rmaHref,
   shipmentDisplayValue,
   ShipmentGroupPanel,
   ShippingLabelReadinessPanel,
@@ -65,7 +62,8 @@ import {
   UniversalShippingLabelDialog,
   useFulfillmentCarriers,
   walmartOrderIdentifiers,
-} from "./legacy-workspaces"
+} from "./order-workspaces"
+import { OrderFulfillmentItemRows, OrderItemsProfitLoss, rmaHref } from "./product-workspaces"
 import { orderHref, orderUrlKey } from "../App"
 
 export { OrderDetailWorkspace, RmaDetailPage }

@@ -9,6 +9,7 @@ const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), "u
 const db = read("db.js");
 const server = read("server.js");
 const app = read("web/src/App.tsx");
+const catalogWorkspaces = read("web/src/components/catalog-workspaces.tsx");
 const component = read("web/src/components/sales-shipping-report.tsx");
 const charts = read("web/src/components/shipping-report-charts.tsx");
 const ledger = read("web/src/components/shipping-report-ledger.tsx");
@@ -43,7 +44,7 @@ test("shipping reporting keeps revenue, estimates, and actual cost distinct", ()
 });
 
 test("shipping reporting is bounded and supports the expected audit filters", () => {
-  assert.match(db, /RELATIONAL_SCHEMA_VERSION = "2026-10-23-shipping-disputes-v1"/);
+  assert.match(db, /RELATIONAL_SCHEMA_VERSION = "2026-10-29-shipping-report-facts-v1"/);
   assert.match(db, /salesShippingReportingSummary/);
   assert.match(db, /salesShippingReportingShipments/);
   assert.match(db, /function shippingReportingFilterSpec[\s\S]*const params = \[\];\s+const baseWhere = \[\];/);
@@ -88,6 +89,22 @@ test("shipping reporting is bounded and supports the expected audit filters", ()
   assert.match(db, /costBasis/);
   assert.match(db, /dimensionStatus/);
   assert.match(db, /varianceStatus/);
+});
+
+test("shipping reporting uses rebuildable indexed facts after an atomic backfill", () => {
+  assert.match(db, /create table if not exists shipping_report_facts/);
+  assert.match(db, /create table if not exists reporting_fact_dirty_orders/);
+  assert.match(db, /create table if not exists reporting_fact_state/);
+  assert.match(db, /function mark_shipping_report_fact_dirty/);
+  assert.match(db, /async function refreshShippingReportingFactsBatch/);
+  assert.match(db, /pg_try_advisory_xact_lock/);
+  assert.match(db, /shippingReportingFactsReady/);
+  assert.match(db, /factSource: useFacts \? "shipping_report_facts" : "live_projection"/);
+  assert.match(server, /async function runShippingReportFactsRefreshWorkerJob/);
+  assert.match(server, /async function maybeQueueShippingReportFactsRefresh/);
+  assert.match(worker, /"shipping-report-facts-refresh"/);
+  assert.match(worker, /dataplus\.runShippingReportFactsRefreshWorkerJob\(job\)/);
+  assert.match(workerLanes, /'shipping-report-facts-refresh': \{ lane: 'report-facts', limit: 1 \}/);
 });
 
 test("shipping routes expose summary, paginated ledger, and CSV export", () => {
@@ -211,13 +228,14 @@ test("shipping export worker streams non-overlapping long-range windows and retr
 });
 
 test("new React app exposes shipping as a dedicated lazily loaded report", () => {
-  assert.match(app, /const SalesShippingReport = lazy/);
+  assert.match(app, /const ShippingReportsPage = lazy\(\(\) => import\("\.\/components\/catalog-workspaces"\)/);
   assert.match(app, /"shipping-reports": "\/reports\/shipping"/);
   assert.match(app, /id: "shipping-reports", label: "Shipping Report"/);
-  assert.match(app, /function ShippingReportsPage\(\)/);
   assert.match(app, /view === "shipping-reports" && <ShippingReportsPage/);
-  assert.match(app, /<SalesShippingReport from=\{applied\.from\}/);
-  assert.doesNotMatch(app, /TabsTrigger value="shipping">Shipping<\/TabsTrigger><TabsTrigger value="products">Products and customers/);
+  assert.match(catalogWorkspaces, /const SalesShippingReport = lazy/);
+  assert.match(catalogWorkspaces, /export function ShippingReportsPage\(\)/);
+  assert.match(catalogWorkspaces, /<SalesShippingReport from=\{applied\.from\}/);
+  assert.doesNotMatch(catalogWorkspaces, /TabsTrigger value="shipping">Shipping<\/TabsTrigger><TabsTrigger value="products">Products and customers/);
   assert.match(component, /Shipping report/);
   assert.match(component, /Shipment ledger/);
   assert.match(component, /Shipping profitability/);

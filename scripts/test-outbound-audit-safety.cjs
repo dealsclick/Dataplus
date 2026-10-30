@@ -30,7 +30,7 @@ assert.match(upsScan.trackingUrl, /^https:\/\/www\.ups\.com\/track/);
 assert.equal(upsScan.carrier, 'UPS');
 
 const dbSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
-assert.match(dbSource, /RELATIONAL_SCHEMA_VERSION = "2026-10-27-outbound-evidence-v1"/);
+assert.match(dbSource, /RELATIONAL_SCHEMA_VERSION = "2026-10-29-shipping-report-facts-v1"/);
 assert.match(dbSource, /create table if not exists outbound_audit_sessions/);
 assert.match(dbSource, /create table if not exists outbound_audit_scans/);
 assert.match(dbSource, /create table if not exists outbound_audit_evidence/);

@@ -30,8 +30,9 @@ import { Detail, Field, PageHeader, ToggleField } from "./app-ui"
 import {
   permissionActionLabel, userCan,
 } from "../App"
-import { ReleaseHistorySettings, VendorFeedScheduleManager } from "./legacy-workspaces"
-import type { SupplierIndexStatus } from "./legacy-workspaces"
+import { VendorFeedScheduleManager } from "./product-workspaces"
+import { ReleaseHistorySettings } from "./settings-workspaces"
+import type { SupplierIndexStatus } from "./settings-workspaces"
 import type {
   AuthPermission, AuthPermissionArea, AuthPermissionAuditEvent, AuthPermissionMatrix,
   AuthPermissionTemplate, AuthUser, ImportJob,

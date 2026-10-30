@@ -26,7 +26,7 @@ let pool;
 let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
 let returnsWorkspaceSummaryCache = null;
-const RELATIONAL_SCHEMA_VERSION = "2026-10-27-outbound-evidence-v1";
+const RELATIONAL_SCHEMA_VERSION = "2026-10-29-shipping-report-facts-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -1347,6 +1347,113 @@ async function initRelationalSchema() {
     create index if not exists shipping_settlement_lines_match_idx on shipping_settlement_lines (match_status, settlement_id);
     create index if not exists shipping_settlement_lines_matched_order_shipment_idx on shipping_settlement_lines (order_id, shipment_id) where match_status = 'matched';
     create index if not exists shipping_settlement_lines_matched_tracking_idx on shipping_settlement_lines (lower(tracking_number)) where match_status = 'matched' and nullif(tracking_number, '') is not null;
+
+    create extension if not exists pg_trgm;
+    create table if not exists shipping_report_facts (
+      fact_key text primary key,
+      order_id text not null,
+      shipment_id text not null,
+      report_date timestamptz,
+      activity_date timestamptz,
+      shipped_date timestamptz,
+      display_order_number text,
+      internal_order_number text,
+      marketplace_order_id text,
+      buyer text,
+      tracking_number text,
+      report_channel text,
+      carrier text,
+      service text,
+      destination_state text,
+      provider text,
+      purchase_origin text,
+      label_source text,
+      billing_status text,
+      cost_basis text,
+      billing_basis text,
+      order_status text,
+      void_status text,
+      shared_label boolean not null default false,
+      allocated_net_sales numeric not null default 0,
+      allocated_shipping_revenue numeric not null default 0,
+      quoted_cost numeric,
+      current_rate_cost numeric,
+      estimated_shipping_cost numeric,
+      actual_shipping_cost numeric,
+      billed_shipping_cost numeric,
+      refunded_cost numeric not null default 0,
+      allocated_adjustment numeric not null default 0,
+      net_purchased_label_cost numeric,
+      net_estimated_cost numeric not null default 0,
+      effective_shipping_cost numeric not null default 0,
+      reconciliation_variance numeric,
+      package_data_complete boolean not null default false,
+      dimension_status text not null default 'missing_all',
+      resolved_package_weight numeric,
+      search_text text not null default '',
+      data jsonb not null default '{}'::jsonb,
+      refreshed_at timestamptz not null default now(),
+      unique (order_id, shipment_id)
+    );
+    create index if not exists shipping_report_facts_date_idx on shipping_report_facts (report_date desc, order_id, shipment_id);
+    create index if not exists shipping_report_facts_activity_date_idx on shipping_report_facts (activity_date desc, order_id, shipment_id);
+    create index if not exists shipping_report_facts_shipped_date_idx on shipping_report_facts (shipped_date desc, order_id, shipment_id);
+    create index if not exists shipping_report_facts_channel_date_idx on shipping_report_facts (lower(report_channel), report_date desc);
+    create index if not exists shipping_report_facts_carrier_date_idx on shipping_report_facts (lower(carrier), report_date desc);
+    create index if not exists shipping_report_facts_origin_idx on shipping_report_facts (lower(purchase_origin), lower(provider), report_date desc);
+    create index if not exists shipping_report_facts_status_idx on shipping_report_facts (cost_basis, dimension_status, report_date desc);
+    create index if not exists shipping_report_facts_search_idx on shipping_report_facts using gin (search_text gin_trgm_ops);
+
+    create table if not exists reporting_fact_dirty_orders (
+      fact_name text not null,
+      order_id text not null,
+      reason text,
+      enqueued_at timestamptz not null default now(),
+      primary key (fact_name, order_id)
+    );
+    create index if not exists reporting_fact_dirty_orders_queue_idx on reporting_fact_dirty_orders (fact_name, enqueued_at, order_id);
+
+    create table if not exists reporting_fact_state (
+      fact_name text primary key,
+      status text not null default 'pending',
+      source_cursor text,
+      rows_written bigint not null default 0,
+      last_started_at timestamptz,
+      last_completed_at timestamptz,
+      last_error text,
+      updated_at timestamptz not null default now()
+    );
+    insert into reporting_fact_state (fact_name, status)
+    values ('shipping-report', 'pending')
+    on conflict (fact_name) do nothing;
+
+    create or replace function mark_shipping_report_fact_dirty() returns trigger as $$
+    declare
+      affected_order_id text;
+    begin
+      affected_order_id := case when tg_op = 'DELETE' then old.order_id else new.order_id end;
+      if nullif(affected_order_id, '') is not null then
+        insert into reporting_fact_dirty_orders (fact_name, order_id, reason, enqueued_at)
+        values ('shipping-report', affected_order_id, tg_table_name, now())
+        on conflict (fact_name, order_id) do update set reason = excluded.reason, enqueued_at = excluded.enqueued_at;
+      end if;
+      if tg_op = 'DELETE' then return old; end if;
+      return new;
+    end;
+    $$ language plpgsql;
+
+    do $$
+    declare
+      table_name text;
+      trigger_name text;
+    begin
+      foreach table_name in array array['order_records', 'order_line_items', 'order_shipment_financials', 'order_shipping_revenue', 'order_shipment_tracking', 'shipping_settlement_lines'] loop
+        trigger_name := table_name || '_shipping_report_dirty';
+        if not exists (select 1 from pg_trigger where tgname = trigger_name and not tgisinternal) then
+          execute format('create trigger %I after insert or update or delete on %I for each row execute function mark_shipping_report_fact_dirty()', trigger_name, table_name);
+        end if;
+      end loop;
+    end $$;
 
     create table if not exists shipping_dispute_batches (
       batch_id text primary key,
@@ -17118,12 +17225,224 @@ function shippingReportingBaseSql(spec, options = {}) {
     )`;
 }
 
+function shippingReportingFactFilterSpec(options = {}) {
+  const from = nullableString(options.from);
+  const to = nullableString(options.to);
+  const channel = nullableString(options.channel);
+  const carrier = nullableString(options.carrier);
+  const service = nullableString(options.service);
+  const destinationState = nullableString(options.destinationState);
+  const purchaseOrigin = nullableString(options.purchaseOrigin);
+  const labelProvider = nullableString(options.labelProvider);
+  const labelSource = nullableString(options.labelSource);
+  const billingStatus = nullableString(options.billingStatus);
+  const dimensionStatus = ["all", "complete", "missing_weight", "missing_dimensions", "missing_all"].includes(String(options.dimensionStatus || "all"))
+    ? String(options.dimensionStatus || "all") : "all";
+  const varianceStatus = ["all", "billed", "over", "under", "matching"].includes(String(options.varianceStatus || "all"))
+    ? String(options.varianceStatus || "all") : "all";
+  const costBasis = ["all", "reconciled", "estimated", "missing", "adjusted", "refunded"].includes(String(options.costBasis || "all"))
+    ? String(options.costBasis || "all") : "all";
+  const dateBasis = ["order", "activity", "shipped"].includes(String(options.dateBasis || "order"))
+    ? String(options.dateBasis || "order") : "order";
+  const includeVoided = options.includeVoided === true || String(options.includeVoided || "").toLowerCase() === "true";
+  const query = nullableString(options.query);
+  const params = [];
+  const where = [];
+  const reportDateExpression = dateBasis === "activity" ? "fact.activity_date" : dateBasis === "shipped" ? "fact.shipped_date" : "fact.report_date";
+  if (!includeVoided) where.push("lower(coalesce(fact.void_status, '')) not in ('void', 'voided', 'canceled', 'cancelled')");
+  const equalsFilter = (value, expression) => {
+    if (!value || value === "all") return;
+    params.push(value.toLowerCase());
+    where.push(`lower(coalesce(${expression}, '')) = $${params.length}`);
+  };
+  if (from) {
+    params.push(from);
+    where.push(`${reportDateExpression} >= $${params.length}::date`);
+  }
+  if (to) {
+    params.push(to);
+    where.push(`${reportDateExpression} < ($${params.length}::date + interval '1 day')`);
+  }
+  equalsFilter(channel, "fact.report_channel");
+  equalsFilter(carrier, "fact.carrier");
+  equalsFilter(service, "fact.service");
+  equalsFilter(destinationState, "fact.destination_state");
+  equalsFilter(purchaseOrigin, "fact.purchase_origin");
+  equalsFilter(labelProvider, "coalesce(nullif(fact.provider, ''), 'unknown')");
+  equalsFilter(labelSource, "fact.label_source");
+  equalsFilter(billingStatus, "coalesce(nullif(fact.billing_status, ''), 'awaiting_invoice')");
+  if (costBasis === "refunded") where.push("coalesce(fact.refunded_cost, 0) > 0");
+  else if (costBasis !== "all") where.push(`fact.cost_basis = '${costBasis}'`);
+  if (dimensionStatus !== "all") where.push(`fact.dimension_status = '${dimensionStatus}'`);
+  if (varianceStatus === "billed") where.push("fact.billed_shipping_cost is not null");
+  if (varianceStatus === "over") where.push("fact.billed_shipping_cost > fact.net_estimated_cost");
+  if (varianceStatus === "under") where.push("fact.billed_shipping_cost < fact.net_estimated_cost");
+  if (varianceStatus === "matching") where.push("abs(fact.billed_shipping_cost - fact.net_estimated_cost) < 0.01");
+  if (query) {
+    params.push(`%${query.toLowerCase()}%`);
+    where.push(`fact.search_text like $${params.length}`);
+  }
+  return { params, where, reportDateExpression, dateBasis, includeVoided };
+}
+
+async function shippingReportingFactsStatus() {
+  const pool = getPool();
+  if (!pool) return { enabled: false, status: "unavailable", ready: false, dirtyOrders: 0, factRows: 0 };
+  await initRelationalSchema();
+  const result = await pool.query(`
+    select state.*,
+      (select count(*)::int from reporting_fact_dirty_orders where fact_name = 'shipping-report') as dirty_orders,
+      (select count(*)::int from shipping_report_facts) as fact_rows
+    from reporting_fact_state state
+    where state.fact_name = 'shipping-report'
+  `);
+  const row = result.rows[0] || {};
+  return {
+    enabled: true,
+    status: row.status || "pending",
+    ready: row.status === "complete",
+    sourceCursor: row.source_cursor || "",
+    rowsWritten: Number(row.rows_written || 0),
+    dirtyOrders: Number(row.dirty_orders || 0),
+    factRows: Number(row.fact_rows || 0),
+    lastStartedAt: row.last_started_at || null,
+    lastCompletedAt: row.last_completed_at || null,
+    lastError: row.last_error || "",
+    updatedAt: row.updated_at || null
+  };
+}
+
+async function refreshShippingReportingFactsBatch(options = {}) {
+  const pool = getPool();
+  if (!pool) return { enabled: false, busy: false, processedOrders: 0, rowsWritten: 0, complete: false };
+  await initRelationalSchema();
+  const client = await pool.connect();
+  const limit = Math.max(10, Math.min(1000, Number(options.limit || 250) || 250));
+  const rebuild = options.rebuild === true;
+  const reset = rebuild && options.reset === true;
+  const startedAt = new Date();
+  try {
+    await client.query("begin");
+    const lock = await client.query("select pg_try_advisory_xact_lock($1) as acquired", [8249391]);
+    if (lock.rows[0]?.acquired !== true) {
+      await client.query("rollback");
+      return { enabled: true, busy: true, processedOrders: 0, rowsWritten: 0, complete: false };
+    }
+    let cursor = "";
+    if (rebuild) {
+      if (reset) {
+        await client.query("truncate shipping_report_facts");
+        await client.query("delete from reporting_fact_dirty_orders where fact_name = 'shipping-report'");
+        await client.query(`update reporting_fact_state set status='building', source_cursor='', rows_written=0,
+          last_started_at=now(), last_completed_at=null, last_error=null, updated_at=now() where fact_name='shipping-report'`);
+      }
+      const state = await client.query("select source_cursor from reporting_fact_state where fact_name='shipping-report' for update");
+      cursor = String(state.rows[0]?.source_cursor || "");
+    }
+    const ordersResult = rebuild
+      ? await client.query(`select distinct order_id from order_shipment_financials where order_id > $1 order by order_id limit $2`, [cursor, limit])
+      : await client.query(`select order_id from reporting_fact_dirty_orders where fact_name='shipping-report' order by enqueued_at, order_id for update skip locked limit $1`, [limit]);
+    const orderIds = ordersResult.rows.map((row) => String(row.order_id || "")).filter(Boolean);
+    if (!orderIds.length) {
+      if (rebuild) await client.query(`update reporting_fact_state set status='complete', source_cursor=null,
+        rows_written=(select count(*) from shipping_report_facts), last_completed_at=now(), last_error=null, updated_at=now()
+        where fact_name='shipping-report'`);
+      await client.query("commit");
+      const status = await shippingReportingFactsStatus();
+      return { enabled: true, busy: false, processedOrders: 0, rowsWritten: 0, complete: rebuild ? true : status.ready, status };
+    }
+    const spec = shippingReportingFilterSpec({ includeVoided: true, dateBasis: "order" });
+    spec.params.push(orderIds);
+    spec.baseWhere.push(`f.order_id = any($${spec.params.length}::text[])`);
+    await client.query("delete from shipping_report_facts where order_id = any($1::text[])", [orderIds]);
+    const insertResult = await client.query(`${shippingReportingBaseSql(spec)}
+      insert into shipping_report_facts (
+        fact_key, order_id, shipment_id, report_date, activity_date, shipped_date,
+        display_order_number, internal_order_number, marketplace_order_id, buyer, tracking_number,
+        report_channel, carrier, service, destination_state, provider, purchase_origin, label_source,
+        billing_status, cost_basis, billing_basis, order_status, void_status, shared_label,
+        allocated_net_sales, allocated_shipping_revenue, quoted_cost, current_rate_cost,
+        estimated_shipping_cost, actual_shipping_cost, billed_shipping_cost, refunded_cost,
+        allocated_adjustment, net_purchased_label_cost, net_estimated_cost, effective_shipping_cost,
+        reconciliation_variance, package_data_complete, dimension_status, resolved_package_weight,
+        search_text, data, refreshed_at
+      )
+      select
+        md5(scope.order_id || chr(31) || scope.shipment_id), scope.order_id, scope.shipment_id,
+        scope.report_date, coalesce(scope.purchased_at, scope.shipped_at, scope.created_at),
+        coalesce(scope.shipped_at, scope.purchased_at, scope.created_at),
+        scope.display_order_number, scope.internal_order_number, scope.marketplace_order_id, scope.buyer,
+        scope.tracking_number, scope.report_channel, scope.carrier, scope.service, scope.destination_state,
+        scope.provider, scope.purchase_origin, scope.label_source, scope.billing_status, scope.cost_basis,
+        scope.billing_basis, scope.order_status, scope.void_status, scope.shared_label,
+        scope.allocated_net_sales, scope.allocated_shipping_revenue, scope.quoted_cost, scope.current_rate_cost,
+        scope.estimated_shipping_cost, scope.actual_shipping_cost, scope.billed_shipping_cost, scope.refunded_cost,
+        scope.allocated_adjustment, scope.net_purchased_label_cost, scope.net_estimated_cost,
+        scope.effective_shipping_cost, scope.reconciliation_variance, scope.package_data_complete,
+        scope.dimension_status, scope.resolved_package_weight,
+        lower(concat_ws(' ', scope.display_order_number, scope.internal_order_number, scope.marketplace_order_id,
+          scope.buyer, scope.tracking_number, scope.shipment_id, coalesce((
+            select string_agg(concat_ws(' ', line.mapped_sku, line.sku, line.title), ' ')
+            from order_line_items line where line.order_id = scope.order_id
+          ), ''))),
+        to_jsonb(scope), now()
+      from shipping_report_scope scope
+      on conflict (fact_key) do update set
+        order_id=excluded.order_id, shipment_id=excluded.shipment_id, report_date=excluded.report_date,
+        activity_date=excluded.activity_date, shipped_date=excluded.shipped_date,
+        display_order_number=excluded.display_order_number, internal_order_number=excluded.internal_order_number,
+        marketplace_order_id=excluded.marketplace_order_id, buyer=excluded.buyer,
+        tracking_number=excluded.tracking_number, report_channel=excluded.report_channel,
+        carrier=excluded.carrier, service=excluded.service, destination_state=excluded.destination_state,
+        provider=excluded.provider, purchase_origin=excluded.purchase_origin, label_source=excluded.label_source,
+        billing_status=excluded.billing_status, cost_basis=excluded.cost_basis, billing_basis=excluded.billing_basis,
+        order_status=excluded.order_status, void_status=excluded.void_status, shared_label=excluded.shared_label,
+        allocated_net_sales=excluded.allocated_net_sales, allocated_shipping_revenue=excluded.allocated_shipping_revenue,
+        quoted_cost=excluded.quoted_cost, current_rate_cost=excluded.current_rate_cost,
+        estimated_shipping_cost=excluded.estimated_shipping_cost, actual_shipping_cost=excluded.actual_shipping_cost,
+        billed_shipping_cost=excluded.billed_shipping_cost, refunded_cost=excluded.refunded_cost,
+        allocated_adjustment=excluded.allocated_adjustment, net_purchased_label_cost=excluded.net_purchased_label_cost,
+        net_estimated_cost=excluded.net_estimated_cost, effective_shipping_cost=excluded.effective_shipping_cost,
+        reconciliation_variance=excluded.reconciliation_variance, package_data_complete=excluded.package_data_complete,
+        dimension_status=excluded.dimension_status, resolved_package_weight=excluded.resolved_package_weight,
+        search_text=excluded.search_text, data=excluded.data, refreshed_at=now()`, spec.params);
+    await client.query(`delete from reporting_fact_dirty_orders
+      where fact_name='shipping-report' and order_id = any($1::text[]) and enqueued_at <= $2`, [orderIds, startedAt]);
+    const rowsWritten = Number(insertResult.rowCount || 0);
+    let complete = false;
+    if (rebuild) {
+      const nextCursor = orderIds[orderIds.length - 1];
+      complete = orderIds.length < limit;
+      await client.query(`update reporting_fact_state set status=$1, source_cursor=$2,
+        rows_written=rows_written + $3, last_completed_at=case when $1='complete' then now() else last_completed_at end,
+        last_error=null, updated_at=now() where fact_name='shipping-report'`, [complete ? "complete" : "building", complete ? null : nextCursor, rowsWritten]);
+    }
+    await client.query("commit");
+    const status = await shippingReportingFactsStatus();
+    return { enabled: true, busy: false, processedOrders: orderIds.length, rowsWritten, complete, cursor: orderIds[orderIds.length - 1], status };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    await pool.query(`update reporting_fact_state set status=case when status='building' then 'failed' else status end,
+      last_error=$1, updated_at=now() where fact_name='shipping-report'`, [String(error.message || error)]).catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function shippingReportingFactsReady() {
+  const status = await shippingReportingFactsStatus();
+  return status.ready;
+}
+
 async function salesShippingReportingSummary(options = {}) {
   const pool = getPool();
   if (!pool) return null;
   await initRelationalSchema();
   const client = await pool.connect();
   const spec = shippingReportingFilterSpec(options);
+  const useFacts = await shippingReportingFactsReady();
+  const factSpec = useFacts ? shippingReportingFactFilterSpec(options) : null;
   const includeProfitability = options.includeProfitability !== false;
   const dimensionQuery = (expression, alias, limit = 100, orderBy = "shipping_expense desc, shipment_count desc") => `
     select ${expression} as ${alias}, count(*)::int as shipment_count, count(distinct order_id)::int as order_count,
@@ -17163,41 +17482,26 @@ async function salesShippingReportingSummary(options = {}) {
   try {
     await client.query("begin read write");
     await client.query("set local statement_timeout = '45s'");
-    await client.query(`create temp table shipping_report_rows on commit drop as ${shippingReportingBaseSql(spec, { includeHistoricalShipmentFallback: false, includeSettlementFallback: false })}
-      select
-        order_id,
-        display_order_number,
-        tracking_number,
-        report_date,
-        report_channel,
-        carrier,
-        service,
-        destination_state,
-        provider,
-        purchase_origin,
-        label_source,
-        billing_status,
-        cost_basis,
-        billing_basis,
-        order_status,
-        shared_label,
-        allocated_net_sales,
-        allocated_shipping_revenue,
-        quoted_cost,
-        current_rate_cost,
-        estimated_shipping_cost,
-        actual_shipping_cost,
-        billed_shipping_cost,
-        refunded_cost,
-        allocated_adjustment,
-        net_purchased_label_cost,
-        net_estimated_cost,
-        effective_shipping_cost,
-        reconciliation_variance,
-        package_data_complete,
-        dimension_status,
-        resolved_package_weight
-      from shipping_report_scope`, spec.params);
+    const reportRowsSql = useFacts
+      ? `select order_id, display_order_number, tracking_number, ${factSpec.reportDateExpression} as report_date,
+          report_channel, carrier, service, destination_state, provider, purchase_origin, label_source,
+          billing_status, cost_basis, billing_basis, order_status, shared_label, allocated_net_sales,
+          allocated_shipping_revenue, quoted_cost, current_rate_cost, estimated_shipping_cost,
+          actual_shipping_cost, billed_shipping_cost, refunded_cost, allocated_adjustment,
+          net_purchased_label_cost, net_estimated_cost, effective_shipping_cost, reconciliation_variance,
+          package_data_complete, dimension_status, resolved_package_weight
+        from shipping_report_facts fact
+        where ${factSpec.where.length ? factSpec.where.join(" and ") : "true"}`
+      : `${shippingReportingBaseSql(spec, { includeHistoricalShipmentFallback: false, includeSettlementFallback: false })}
+        select order_id, display_order_number, tracking_number, report_date, report_channel, carrier,
+          service, destination_state, provider, purchase_origin, label_source, billing_status, cost_basis,
+          billing_basis, order_status, shared_label, allocated_net_sales, allocated_shipping_revenue,
+          quoted_cost, current_rate_cost, estimated_shipping_cost, actual_shipping_cost,
+          billed_shipping_cost, refunded_cost, allocated_adjustment, net_purchased_label_cost,
+          net_estimated_cost, effective_shipping_cost, reconciliation_variance, package_data_complete,
+          dimension_status, resolved_package_weight
+        from shipping_report_scope`;
+    await client.query(`create temp table shipping_report_rows on commit drop as ${reportRowsSql}`, useFacts ? factSpec.params : spec.params);
     if (includeProfitability) {
       await client.query("create index shipping_report_rows_order_idx on shipping_report_rows(order_id)");
       await client.query(`create temp table shipping_report_line_allocations on commit drop as
@@ -17329,8 +17633,9 @@ async function salesShippingReportingSummary(options = {}) {
       categories: categories?.rows || [],
       suppliers: suppliers?.rows || [],
       products: products?.rows || [],
-      dateBasis: spec.dateBasis,
-      includeVoided: spec.includeVoided
+      dateBasis: useFacts ? factSpec.dateBasis : spec.dateBasis,
+      includeVoided: useFacts ? factSpec.includeVoided : spec.includeVoided,
+      factSource: useFacts ? "shipping_report_facts" : "live_projection"
     };
   } catch (error) {
     await client.query("rollback").catch(() => {});
@@ -17436,10 +17741,83 @@ async function salesShippingReportingTemuSettlements(options = {}) {
   return { summary, transactionTypes };
 }
 
+async function salesShippingReportingShipmentsFromFacts(options = {}) {
+  const client = getPool();
+  const spec = shippingReportingFactFilterSpec(options);
+  const page = Math.max(1, Math.min(100000, Number(options.page || 1)));
+  const exportAll = options.exportAll === true;
+  const pageSize = exportAll
+    ? Math.max(100, Math.min(25000, Number(options.exportPageSize || 25000)))
+    : Math.max(10, Math.min(100, Number(options.pageSize || 25)));
+  const params = [...spec.params, pageSize, (page - 1) * pageSize];
+  const result = await client.query(`with page_rows as (
+      select fact.*, ${spec.reportDateExpression} as selected_report_date, count(*) over()::int as total_count
+      from shipping_report_facts fact
+      where ${spec.where.length ? spec.where.join(" and ") : "true"}
+      order by ${spec.reportDateExpression} desc nulls last, fact.display_order_number desc, fact.shipment_id
+      limit $${params.length - 1} offset $${params.length}
+    )
+    select page_rows.data, page_rows.selected_report_date, page_rows.total_count,
+      line_summary.skus, line_summary.titles, line_summary.suppliers, line_summary.categories, line_summary.units
+    from page_rows
+    left join lateral (
+      select
+        string_agg(distinct coalesce(nullif(line_item.mapped_sku, ''), nullif(line_item.sku, ''), 'Unmapped'), ', ' order by coalesce(nullif(line_item.mapped_sku, ''), nullif(line_item.sku, ''), 'Unmapped')) as skus,
+        string_agg(distinct coalesce(nullif(line_item.title, ''), 'Untitled product'), ' | ' order by coalesce(nullif(line_item.title, ''), 'Untitled product')) as titles,
+        string_agg(distinct coalesce(nullif(exact_product.supplier, ''), nullif(alias_product.supplier, ''), 'Unassigned'), ', ' order by coalesce(nullif(exact_product.supplier, ''), nullif(alias_product.supplier, ''), 'Unassigned')) as suppliers,
+        string_agg(distinct coalesce(nullif(exact_product.main_category, ''), nullif(exact_product.category, ''), nullif(alias_product.main_category, ''), nullif(alias_product.category, ''), 'Uncategorized'), ', ' order by coalesce(nullif(exact_product.main_category, ''), nullif(exact_product.category, ''), nullif(alias_product.main_category, ''), nullif(alias_product.category, ''), 'Uncategorized')) as categories,
+        coalesce(sum(line_item.qty), 0) as units
+      from order_line_items line_item
+      left join products exact_product on lower(exact_product.sku) = lower(coalesce(nullif(line_item.mapped_sku, ''), line_item.sku))
+      left join product_aliases product_alias on product_alias.active = true and lower(product_alias.alias_sku) = lower(coalesce(nullif(line_item.mapped_sku, ''), line_item.sku))
+      left join products alias_product on alias_product.product_id = product_alias.product_id
+      where line_item.order_id = page_rows.order_id
+    ) line_summary on true
+    order by page_rows.selected_report_date desc nulls last,
+      page_rows.display_order_number desc, page_rows.shipment_id`, params);
+  const numericFields = new Set([
+    "quoted_cost", "current_rate_cost", "estimated_shipping_cost", "refunded_cost", "actual_shipping_cost", "settlement_line_total", "billed_shipping_cost", "net_purchased_label_cost", "net_estimated_cost",
+    "allocated_shipping_revenue", "allocated_net_sales", "allocated_adjustment", "effective_shipping_cost",
+    "reconciliation_variance", "calculated_dimensional_weight", "calculated_billable_weight",
+    "package_weight", "package_length", "package_width", "package_height",
+    "resolved_package_weight", "resolved_package_length", "resolved_package_width", "resolved_package_height",
+    "carrier_actual_weight", "carrier_rated_weight", "carrier_dimensional_weight", "carrier_billed_weight",
+    "carrier_billed_length", "carrier_billed_width", "carrier_billed_height", "settlement_line_count", "adjustment_count", "units"
+  ]);
+  const normalizedRows = result.rows.map((row) => {
+    const data = row.data && typeof row.data === "object" ? row.data : {};
+    return {
+      ...data,
+      report_date: row.selected_report_date,
+      skus: row.skus,
+      titles: row.titles,
+      suppliers: row.suppliers,
+      categories: row.categories,
+      units: row.units,
+      package_weight: data.resolved_package_weight ?? data.package_weight,
+      package_length: data.resolved_package_length ?? data.package_length,
+      package_width: data.resolved_package_width ?? data.package_width,
+      package_height: data.resolved_package_height ?? data.package_height,
+      package_measurement_source: data.resolved_package_measurement_source || data.package_measurement_source || "legacy_unknown"
+    };
+  });
+  return {
+    rows: normalizedRows.map((row) => Object.fromEntries(Object.entries(row)
+      .filter(([key]) => !key.startsWith("resolved_package_"))
+      .map(([key, value]) => [key, numericFields.has(key) && value !== null ? Number(value) : value]))),
+    total: Number(result.rows[0]?.total_count || 0),
+    page,
+    pageSize,
+    exportLimit: exportAll ? pageSize : undefined,
+    factSource: "shipping_report_facts"
+  };
+}
+
 async function salesShippingReportingShipments(options = {}) {
   const client = getPool();
   if (!client) return { rows: [], total: 0, page: 1, pageSize: 25 };
   await initRelationalSchema();
+  if (await shippingReportingFactsReady()) return salesShippingReportingShipmentsFromFacts(options);
   const spec = shippingReportingFilterSpec(options);
   const page = Math.max(1, Math.min(100000, Number(options.page || 1)));
   const exportAll = options.exportAll === true;
@@ -19682,6 +20060,8 @@ module.exports = {
   inventoryReportingSummary,
   salesReportingSummary,
   salesReportingOrders,
+  shippingReportingFactsStatus,
+  refreshShippingReportingFactsBatch,
   salesShippingReportingSummary,
   salesShippingReportingTemuSettlements,
   salesShippingReportingShipments,

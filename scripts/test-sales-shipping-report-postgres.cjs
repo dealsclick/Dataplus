@@ -12,6 +12,9 @@ async function run() {
   await postgres.salesShippingReportingSummary({ from: "2026-10-01", to: "2026-10-31" });
   const pool = new Pool({ connectionString: databaseUrl });
   try {
+    await pool.query("delete from shipping_report_facts where order_id like 'shipping-report-test-%'");
+    await pool.query("delete from reporting_fact_dirty_orders where fact_name = 'shipping-report'");
+    await pool.query("update reporting_fact_state set status='pending', source_cursor=null, rows_written=0, last_error=null where fact_name='shipping-report'");
     await pool.query("delete from order_shipment_financials where order_id like 'shipping-report-test-%'");
     await pool.query("delete from order_records where order_id like 'shipping-report-test-%'");
     await pool.query(`
@@ -32,6 +35,7 @@ async function run() {
     `);
 
     const report = await postgres.salesShippingReportingSummary({ from: "2026-10-01", to: "2026-10-31" });
+    assert.equal(report.factSource, "live_projection");
     assert.equal(Number(report.summary.shipment_count), 3);
     assert.equal(Number(report.summary.package_coverage_count), 2, "the summary stays bounded and does not scan deep legacy shipment JSON");
 
@@ -58,8 +62,36 @@ async function run() {
     assert.equal(byOrder.get("SR-SNAPSHOT").package_measurement_source, "channel_import");
     assert.equal(byOrder.get("SR-HISTORY").package_measurement_source, "channel_import");
     assert.equal(byOrder.get("SR-NORMALIZED").package_measurement_source, "channel_import");
-    console.log("shipping report PostgreSQL package fallback: ok");
+
+    const rebuilt = await postgres.refreshShippingReportingFactsBatch({ rebuild: true, reset: true, limit: 10 });
+    assert.equal(rebuilt.complete, true);
+    assert.equal(rebuilt.processedOrders, 3);
+    const factsStatus = await postgres.shippingReportingFactsStatus();
+    assert.equal(factsStatus.ready, true);
+    assert.equal(factsStatus.factRows, 3);
+
+    const factReport = await postgres.salesShippingReportingSummary({ from: "2026-10-01", to: "2026-10-31" });
+    assert.equal(factReport.factSource, "shipping_report_facts");
+    assert.equal(Number(factReport.summary.shipment_count), Number(report.summary.shipment_count));
+    assert.equal(Number(factReport.summary.estimated_shipping_cost), Number(report.summary.estimated_shipping_cost));
+    const factLedger = await postgres.salesShippingReportingShipments({ from: "2026-10-01", to: "2026-10-31", pageSize: 10 });
+    assert.equal(factLedger.factSource, "shipping_report_facts");
+    assert.equal(factLedger.total, ledger.total);
+
+    await pool.query("update order_shipment_financials set estimated_shipping_cost=8 where order_id='shipping-report-test-snapshot'");
+    const dirtyStatus = await postgres.shippingReportingFactsStatus();
+    assert.equal(dirtyStatus.dirtyOrders, 1);
+    const refreshed = await postgres.refreshShippingReportingFactsBatch({ limit: 10 });
+    assert.equal(refreshed.processedOrders, 1);
+    const refreshedLedger = await postgres.salesShippingReportingShipments({ from: "2026-10-01", to: "2026-10-31", pageSize: 10 });
+    assert.equal(refreshedLedger.rows.find((row) => row.order_number === "SR-SNAPSHOT").estimated_shipping_cost, 8);
+    assert.equal((await postgres.shippingReportingFactsStatus()).dirtyOrders, 0);
+    console.log("shipping report PostgreSQL package fallback and incremental facts: ok");
   } finally {
+    await pool.query("delete from shipping_report_facts where order_id like 'shipping-report-test-%'").catch(() => {});
+    await pool.query("delete from reporting_fact_dirty_orders where order_id like 'shipping-report-test-%'").catch(() => {});
+    await pool.query("delete from order_shipment_financials where order_id like 'shipping-report-test-%'").catch(() => {});
+    await pool.query("delete from order_records where order_id like 'shipping-report-test-%'").catch(() => {});
     await pool.end();
     await postgres.closePool();
   }

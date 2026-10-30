@@ -23,7 +23,7 @@ import { api, dateLabel, numberLabel } from "../lib/client-api"
 import { ContextActions, Detail, Field, PageHeader, ToggleField } from "./app-ui"
 import {
   ActionTile, ChannelLogsPanel, PriceModeSelect,
-} from "./legacy-workspaces"
+} from "./product-workspaces"
 import type {
   ChannelConnection, ImportJob, ShopifyAuthCheck, ShopifyWarehouseMapping, WarehouseRoutingRule,
 } from "../App"

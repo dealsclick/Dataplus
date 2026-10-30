@@ -20511,6 +20511,127 @@ async function runShippingReportExportWorkerJob(job = {}) {
   return current;
 }
 
+async function runShippingReportFactsRefreshWorkerJob(job = {}) {
+  if (!postgres.isPostgresEnabled()) throw new Error("Shipping reporting facts require PostgreSQL.");
+  const payload = job.workerPayload || {};
+  const batchSize = Math.max(25, Math.min(1000, Number(payload.batchSize || 250) || 250));
+  let status = await postgres.shippingReportingFactsStatus();
+  const requestedRebuild = payload.rebuild === true;
+  const rebuild = requestedRebuild || status.status !== "complete";
+  let reset = payload.reset === true
+    || status.status === "pending"
+    || (requestedRebuild && status.status === "complete");
+  let processedOrders = 0;
+  let rowsWritten = 0;
+  let current = await persistWorkerImportJob(job, {
+    status: "running",
+    phase: rebuild ? "building_shipping_report_facts" : "refreshing_shipping_report_facts",
+    startedAt: job.startedAt || new Date().toISOString(),
+    processedRows: 0,
+    changed: 0,
+    progressPercent: rebuild ? 0 : 5,
+    message: rebuild
+      ? "Building the indexed Shipping Report projection in bounded order batches."
+      : `${status.dirtyOrders.toLocaleString()} changed order${status.dirtyOrders === 1 ? "" : "s"} queued for Shipping Report refresh.`
+  });
+  const stopped = async () => {
+    const saved = await postgres.readOperationJob(current.id);
+    return !saved || ["stopped", "canceled", "cancelled"].includes(String(saved.status || "").toLowerCase());
+  };
+  if (rebuild) {
+    while (true) {
+      if (await stopped()) throw new Error("Shipping Report fact refresh stopped.");
+      const batch = await postgres.refreshShippingReportingFactsBatch({ rebuild: true, reset, limit: batchSize });
+      reset = false;
+      if (batch.busy) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        continue;
+      }
+      processedOrders += Number(batch.processedOrders || 0);
+      rowsWritten += Number(batch.rowsWritten || 0);
+      status = batch.status || await postgres.shippingReportingFactsStatus();
+      current = await persistWorkerImportJob(current, {
+        processedRows: processedOrders,
+        changed: rowsWritten,
+        progressPercent: batch.complete ? 90 : Math.min(85, Math.max(1, Number(current.progressPercent || 0) + 1)),
+        message: `${processedOrders.toLocaleString()} orders rebuilt into ${status.factRows.toLocaleString()} indexed shipping fact rows.`
+      });
+      if (batch.complete) break;
+    }
+  }
+  status = await postgres.shippingReportingFactsStatus();
+  while (status.dirtyOrders > 0) {
+    if (await stopped()) throw new Error("Shipping Report fact refresh stopped.");
+    const batch = await postgres.refreshShippingReportingFactsBatch({ rebuild: false, limit: batchSize });
+    if (batch.busy) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      status = await postgres.shippingReportingFactsStatus();
+      continue;
+    }
+    processedOrders += Number(batch.processedOrders || 0);
+    rowsWritten += Number(batch.rowsWritten || 0);
+    status = batch.status || await postgres.shippingReportingFactsStatus();
+    current = await persistWorkerImportJob(current, {
+      phase: "refreshing_shipping_report_facts",
+      processedRows: processedOrders,
+      changed: rowsWritten,
+      progressPercent: status.dirtyOrders ? 95 : 99,
+      message: `${processedOrders.toLocaleString()} orders processed; ${status.dirtyOrders.toLocaleString()} changed orders remain.`
+    });
+  }
+  status = await postgres.shippingReportingFactsStatus();
+  return persistWorkerImportJob(current, {
+    status: "success",
+    phase: "complete",
+    totalRows: processedOrders,
+    processedRows: processedOrders,
+    changed: rowsWritten,
+    progressPercent: 100,
+    estimatedSecondsRemaining: 0,
+    finishedAt: new Date().toISOString(),
+    message: `Shipping Report facts are current: ${status.factRows.toLocaleString()} shipment rows, no changed orders waiting.`,
+    details: "Interactive shipping reports now read the indexed fact projection. Operational order, label, tracking, and settlement records remain the source of truth."
+  });
+}
+
+async function queueShippingReportFactsRefreshJob(db = {}, options = {}) {
+  const attrs = {
+    section: "Reporting",
+    category: "Shipping Report",
+    operation: options.rebuild === true ? "Rebuild Shipping Report facts" : "Refresh Shipping Report facts",
+    direction: "maintenance",
+    workerTask: shouldRunJobsInline() ? "" : "shipping-report-facts-refresh",
+    workerPayload: { rebuild: options.rebuild === true, reset: options.reset === true, batchSize: Number(options.batchSize || 250), scheduled: options.scheduled === true, background: true }
+  };
+  const duplicate = await findActiveDuplicateImportJob(db, attrs);
+  if (duplicate) return normalizeImportJob({ ...duplicate, duplicateOfActiveJob: true });
+  const job = createImportJob(db, {
+    ...attrs,
+    status: "queued",
+    phase: "queued",
+    progressPercent: 0,
+    background: true,
+    scheduled: options.scheduled === true,
+    message: options.rebuild === true
+      ? "Shipping Report fact rebuild queued. Reports keep using the live projection until the rebuild completes."
+      : "Changed shipping report facts queued for incremental refresh."
+  });
+  if (shouldRunJobsInline()) setTimeout(() => runShippingReportFactsRefreshWorkerJob(job).catch(async (error) => {
+    await persistWorkerImportJob(job, { status: "failed", phase: "failed", errors: [error.message], message: error.message, finishedAt: new Date().toISOString() });
+  }), 100);
+  return job;
+}
+
+async function maybeQueueShippingReportFactsRefresh() {
+  const status = await postgres.shippingReportingFactsStatus();
+  if (status.status === "complete" && status.dirtyOrders === 0) return null;
+  return queueShippingReportFactsRefreshJob({}, {
+    rebuild: status.status !== "complete",
+    scheduled: true,
+    batchSize: 250
+  });
+}
+
 async function queueShippingReportExportJob(db = {}, reportOptions = {}, columnIds = [], attrs = {}) {
   const normalizedOptions = shippingReportOptionsFromInput(reportOptions);
   if (!normalizedOptions.from || !normalizedOptions.to) throw new Error("Choose a From and To date before exporting the Shipping Report.");
@@ -74678,6 +74799,12 @@ function startServer() {
     jobsRetentionCleanupStart.unref?.();
     const jobsRetentionCleanupInterval = setInterval(scheduleJobsRetentionCleanup, 6 * 60 * 60_000);
     jobsRetentionCleanupInterval.unref?.();
+    const scheduleShippingReportFacts = () => void maybeQueueShippingReportFactsRefresh()
+      .catch((error) => console.warn(`Shipping Report fact refresh check failed: ${error.message}`));
+    const shippingReportFactsStart = setTimeout(scheduleShippingReportFacts, 30_000);
+    shippingReportFactsStart.unref?.();
+    const shippingReportFactsInterval = setInterval(scheduleShippingReportFacts, 60_000);
+    shippingReportFactsInterval.unref?.();
     const labelPurchaseRecoveryStart = setTimeout(() => void recoverTerminalFulfillmentLabelPurchases().catch((error) => console.warn(`Label purchase recovery failed: ${error.message}`)), 2_000);
     labelPurchaseRecoveryStart.unref?.();
     const labelPurchaseRecoveryInterval = setInterval(() => void recoverTerminalFulfillmentLabelPurchases().catch((error) => console.warn(`Label purchase recovery failed: ${error.message}`)), 5 * 60_000);
@@ -74738,6 +74865,7 @@ module.exports = {
   runFulfillmentTrackingRefreshWorkerJob,
   runFulfillmentLabelPurchaseWorkerJob,
   runShippingDisputeQuoteWorkerJob,
+  runShippingReportFactsRefreshWorkerJob,
   runShippingReportExportWorkerJob,
   runOrderExportWorkerJob,
   shippingReportPurchaseWorkflow,
