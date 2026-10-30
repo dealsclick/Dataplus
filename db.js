@@ -3002,7 +3002,7 @@ async function saveWarehouseAuditMetadata(audit = {}, options = {}) {
   await initRelationalSchema();
   const client = options.client || pool;
   const { lines: _lines, ...auditPayload } = audit;
-  const result = await client.query(`
+  let result = await client.query(`
     update warehouse_audits
     set audit_number = coalesce($2, audit_number),
       warehouse_id = coalesce($3, warehouse_id),
@@ -12660,6 +12660,59 @@ async function readReturnsWorkspaceSummary(client) {
   return value;
 }
 
+async function findOrderReferencesForReturnWorkspace(client, query = "") {
+  const key = String(query || "").trim().toLowerCase();
+  if (!key) return { orderIds: [], orderNumbers: [] };
+  const digits = key.replace(/\D/g, "");
+  const likelyZip = /^\d{5}(?:-?\d{4})?$/.test(digits) && key.replace(/\D/g, "") === digits;
+  const pattern = `%${key}%`;
+  const orderPrefix = `${key}%`;
+  const postalPrefix = `${digits.slice(0, 5)}%`;
+  const result = await client.query(`
+    select order_id, order_number, internal_order_number, channel_order_id, marketplace_order_id
+    from order_records
+    where lower(coalesce(status, '')) <> 'deleted' and (
+      lower(order_id) = $1
+      or lower(coalesce(order_number, '')) like $2
+      or lower(coalesce(internal_order_number, '')) like $2
+      or lower(coalesce(channel_order_id, '')) like $2
+      or lower(coalesce(marketplace_order_id, '')) like $2
+      or ($3::boolean and lower(coalesce(
+        raw->'address'->>'postalCode', raw->'address'->>'zip',
+        raw->'shippingAddress'->>'postalCode', raw->'shippingAddress'->>'zip', ''
+      )) like $4)
+      or (not $3::boolean and (
+        lower(coalesce(buyer, '')) like $5
+        or lower(coalesce(buyer_email, '')) like $5
+        or lower(coalesce(customer_id, '')) like $5
+      ))
+      or (not $3::boolean and $6 <> '' and length($6) >= 4 and regexp_replace(coalesce(phone, ''), '\\D', '', 'g') like '%' || $6 || '%')
+    )
+    order by updated_at desc, order_id desc
+    limit 1000
+  `, [key, orderPrefix, likelyZip, postalPrefix, pattern, digits]);
+  if (!result.rows.length && !likelyZip && key.length >= 2) {
+    result = await client.query(`
+      select order_id, order_number, internal_order_number, channel_order_id, marketplace_order_id
+      from order_records
+      where lower(coalesce(status, '')) <> 'deleted'
+        and lower(concat_ws(' ',
+          raw->'address'->>'name', raw->'address'->>'line1', raw->'address'->>'line2',
+          raw->'address'->>'city', raw->'address'->>'state', raw->'address'->>'postalCode', raw->'address'->>'zip',
+          raw->'shippingAddress'->>'name', raw->'shippingAddress'->>'line1', raw->'shippingAddress'->>'line2',
+          raw->'shippingAddress'->>'city', raw->'shippingAddress'->>'state', raw->'shippingAddress'->>'postalCode', raw->'shippingAddress'->>'zip'
+        )) like $1
+      order by updated_at desc, order_id desc
+      limit 1000
+    `, [pattern]);
+  }
+  const orderIds = [...new Set(result.rows.map((row) => String(row.order_id || "").trim()).filter(Boolean))];
+  const orderNumbers = [...new Set(result.rows.flatMap((row) => [
+    row.order_number, row.internal_order_number, row.channel_order_id, row.marketplace_order_id
+  ]).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))];
+  return { orderIds, orderNumbers };
+}
+
 async function listReturnsWorkspace(options = {}) {
   const client = getPool();
   const pageSize = Math.max(1, Math.min(100, Number(options.pageSize || options.limit || 25)));
@@ -12675,6 +12728,7 @@ async function listReturnsWorkspace(options = {}) {
   const channel = String(options.channel || "all").trim();
   const query = String(options.query || options.q || "").trim().toLowerCase();
   const receivedOnly = options.receivedOnly === true || String(options.receivedOnly || "").toLowerCase() === "true" || String(options.receivedOnly || "") === "1";
+  const linkedOrders = query ? await findOrderReferencesForReturnWorkspace(client, query) : { orderIds: [], orderNumbers: [] };
   const values = [];
   const conditions = [];
   if (queue !== "all") {
@@ -12691,6 +12745,10 @@ async function listReturnsWorkspace(options = {}) {
     const queryParameter = values.length;
     values.push(query.replace(/\D/g, ""));
     const digitsParameter = values.length;
+    values.push(linkedOrders.orderIds);
+    const orderIdsParameter = values.length;
+    values.push(linkedOrders.orderNumbers);
+    const orderNumbersParameter = values.length;
     conditions.push(`(
       strpos(lower(concat_ws(' ',
         data->>'returnNumber', data->>'channelReturnId', data->>'channelReturnReference',
@@ -12709,34 +12767,9 @@ async function listReturnsWorkspace(options = {}) {
         data->>'customerPhone', data->>'phone', data->'customer'->>'phone',
         data->'shippingAddress'->>'phone', data->'address'->>'phone'
       ), '\\D', '', 'g') like '%' || $${digitsParameter} || '%')
-      or exists (
-        select 1
-        from order_records linked_order
-        where (
-          (coalesce(data->>'orderId', '') <> '' and linked_order.order_id = data->>'orderId')
-          or (coalesce(data->>'orderNumber', '') <> '' and (
-            lower(coalesce(linked_order.order_number, '')) = lower(data->>'orderNumber')
-            or lower(coalesce(linked_order.internal_order_number, '')) = lower(data->>'orderNumber')
-          ))
-          or (coalesce(data->>'channelOrderId', '') <> '' and (
-            lower(coalesce(linked_order.channel_order_id, '')) = lower(data->>'channelOrderId')
-            or lower(coalesce(linked_order.marketplace_order_id, '')) = lower(data->>'channelOrderId')
-          ))
-        ) and (
-          strpos(lower(concat_ws(' ',
-            linked_order.order_id, linked_order.order_number, linked_order.internal_order_number,
-            linked_order.channel_order_id, linked_order.marketplace_order_id,
-            linked_order.buyer, linked_order.buyer_email, linked_order.customer_id,
-            linked_order.raw->'address'->>'name', linked_order.raw->'address'->>'line1', linked_order.raw->'address'->>'line2',
-            linked_order.raw->'address'->>'city', linked_order.raw->'address'->>'state', linked_order.raw->'address'->>'postalCode', linked_order.raw->'address'->>'zip',
-            linked_order.raw->'shippingAddress'->>'name', linked_order.raw->'shippingAddress'->>'line1', linked_order.raw->'shippingAddress'->>'line2',
-            linked_order.raw->'shippingAddress'->>'city', linked_order.raw->'shippingAddress'->>'state', linked_order.raw->'shippingAddress'->>'postalCode', linked_order.raw->'shippingAddress'->>'zip'
-          )), $${queryParameter}) > 0
-          or ($${digitsParameter} <> '' and length($${digitsParameter}) >= 4 and regexp_replace(concat_ws(' ',
-            linked_order.phone, linked_order.raw->'address'->>'phone', linked_order.raw->'shippingAddress'->>'phone'
-          ), '\\D', '', 'g') like '%' || $${digitsParameter} || '%')
-        )
-      )
+      or data->>'orderId' = any($${orderIdsParameter}::text[])
+      or lower(coalesce(data->>'orderNumber', '')) = any($${orderNumbersParameter}::text[])
+      or lower(coalesce(data->>'channelOrderId', '')) = any($${orderNumbersParameter}::text[])
     )`);
   }
   const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
