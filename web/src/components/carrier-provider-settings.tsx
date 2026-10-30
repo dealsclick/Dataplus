@@ -10,12 +10,21 @@ import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { api, dateLabel } from "../lib/client-api"
 
-type UpsEnvironmentStatus = {
+type CarrierCapability = { id: string; label: string; status: string; detail: string }
+
+type CarrierEnvironmentStatus = {
   environment: "production" | "test"
   clientId?: string
   secretConfigured?: boolean
   accountConfigured?: boolean
   accountEnding?: string
+  accountType?: string
+  cridConfigured?: boolean
+  cridEnding?: string
+  midConfigured?: boolean
+  midEnding?: string
+  webhookAdminEmail?: string
+  webhookSecretConfigured?: boolean
   configured?: boolean
   updatedAt?: string
   lastTestedAt?: string
@@ -25,6 +34,7 @@ type UpsEnvironmentStatus = {
   lastTokenScopes?: string[]
   lastTokenLifetimeSeconds?: number
   lastTokenStatus?: string
+  capabilities?: CarrierCapability[]
 }
 
 type CarrierProviderStatus = {
@@ -43,12 +53,18 @@ type CarrierProviderStatus = {
   lastTokenScopes?: string[]
   lastTokenLifetimeSeconds?: number
   lastTokenStatus?: string
-  environments?: Record<"production" | "test", UpsEnvironmentStatus>
+  cridConfigured?: boolean
+  midConfigured?: boolean
+  accountConfigured?: boolean
+  accountType?: string
+  webhookAdminEmail?: string
+  capabilities?: CarrierCapability[]
+  environments?: Record<"production" | "test", CarrierEnvironmentStatus>
 }
 
 type CarrierProviders = Record<string, CarrierProviderStatus>
 
-const plannedProviderOrder = ["fedex", "usps", "dhl", "ontrac", "amazon_shipping"]
+const plannedProviderOrder = ["fedex", "dhl", "ontrac", "amazon_shipping"]
 
 function tokenLifetimeLabel(seconds = 0) {
   if (!seconds) return "Not reported"
@@ -64,10 +80,15 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
   const [providers, setProviders] = useState<CarrierProviders>({})
   const [loading, setLoading] = useState(true)
   const [dialogOpen, setDialogOpen] = useState(false)
+  const [uspsDialogOpen, setUspsDialogOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [rowTesting, setRowTesting] = useState(false)
+  const [uspsSaving, setUspsSaving] = useState(false)
+  const [uspsTesting, setUspsTesting] = useState(false)
+  const [uspsRowTesting, setUspsRowTesting] = useState(false)
   const [draft, setDraft] = useState({ environment: "production" as "production" | "test", clientId: "", clientSecret: "", accountNumber: "" })
+  const [uspsDraft, setUspsDraft] = useState({ environment: "production" as "production" | "test", clientId: "", clientSecret: "", crid: "", mid: "", accountType: "EPS", accountNumber: "", webhookAdminEmail: "" })
 
   const load = async () => {
     setLoading(true)
@@ -84,9 +105,13 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
   useEffect(() => { void load() }, [])
 
   const ups = providers.ups
+  const usps = providers.usps
   const environmentStatus = (environment = draft.environment) => ups?.environments?.[environment]
   const selectedStatus = environmentStatus()
   const canSubmit = Boolean(draft.clientId.trim() && (draft.clientSecret.trim() || selectedStatus?.secretConfigured) && (draft.accountNumber.trim() || selectedStatus?.accountConfigured))
+  const uspsEnvironmentStatus = (environment = uspsDraft.environment) => usps?.environments?.[environment]
+  const selectedUspsStatus = uspsEnvironmentStatus()
+  const canSubmitUsps = Boolean(uspsDraft.clientId.trim() && (uspsDraft.clientSecret.trim() || selectedUspsStatus?.secretConfigured))
 
   const openUpsDialog = (environment = ups?.environment || "production") => {
     const normalized = environment === "test" ? "test" : "production"
@@ -154,11 +179,68 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
     }
   }
 
+  const openUspsDialog = (environment = usps?.environment || "production") => {
+    const normalized = environment === "test" ? "test" : "production"
+    const status = usps?.environments?.[normalized]
+    setUspsDraft({ environment: normalized, clientId: String(status?.clientId || ""), clientSecret: "", crid: "", mid: "", accountType: String(status?.accountType || "EPS"), accountNumber: "", webhookAdminEmail: String(status?.webhookAdminEmail || "") })
+    setUspsDialogOpen(true)
+  }
+
+  const changeUspsEnvironment = (environment: "production" | "test") => {
+    const status = usps?.environments?.[environment]
+    setUspsDraft({ environment, clientId: String(status?.clientId || ""), clientSecret: "", crid: "", mid: "", accountType: String(status?.accountType || "EPS"), accountNumber: "", webhookAdminEmail: String(status?.webhookAdminEmail || "") })
+  }
+
+  const saveUspsCredentials = async ({ close = true, notify = true }: { close?: boolean; notify?: boolean } = {}) => {
+    setUspsSaving(true)
+    try {
+      const result = await api<{ provider?: CarrierProviderStatus; message?: string }>("/api/shipping-providers/usps/credentials", { method: "PUT", body: JSON.stringify(uspsDraft) })
+      if (result.provider) setProviders((current) => ({ ...current, usps: result.provider as CarrierProviderStatus }))
+      setUspsDraft((current) => ({ ...current, clientSecret: "", crid: "", mid: "", accountNumber: "" }))
+      if (close) setUspsDialogOpen(false)
+      if (notify) toast.success(result.message || "USPS credentials saved.")
+      return true
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save USPS credentials.")
+      return false
+    } finally {
+      setUspsSaving(false)
+    }
+  }
+
+  const verifyAndSaveUsps = async () => {
+    setUspsTesting(true)
+    try {
+      const result = await api<{ message?: string }>("/api/shipping-providers/usps/test", { method: "POST", body: JSON.stringify(uspsDraft) })
+      const saved = await saveUspsCredentials({ close: true, notify: false })
+      if (saved) toast.success(result.message || "USPS connection verified and saved.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "USPS connection test failed.")
+      await load()
+    } finally {
+      setUspsTesting(false)
+    }
+  }
+
+  const testSavedUspsConnection = async () => {
+    setUspsRowTesting(true)
+    try {
+      const result = await api<{ provider?: CarrierProviderStatus; message?: string }>("/api/shipping-providers/usps/test", { method: "POST", body: JSON.stringify({ environment: usps?.environment || "production" }) })
+      if (result.provider) setProviders((current) => ({ ...current, usps: result.provider as CarrierProviderStatus }))
+      toast.success(result.message || "USPS connection verified.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "USPS connection test failed.")
+      await load()
+    } finally {
+      setUspsRowTesting(false)
+    }
+  }
+
   return <>
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base"><Truck className="size-4" /> Direct carrier accounts</CardTitle>
-        <CardDescription>Credentials stay on the server and are never returned to the browser. UPS is available now; additional direct carrier APIs are reserved here for later support.</CardDescription>
+        <CardDescription>Credentials stay on the server and are never returned to the browser. UPS and USPS direct APIs are available; additional carriers remain reserved for later support.</CardDescription>
       </CardHeader>
       <CardContent className="p-0">
         {loading ? <div className="flex items-center gap-2 border-t p-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading carrier connections...</div> : <div className="divide-y border-t">
@@ -181,6 +263,24 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
               <Button type="button" size="sm" variant="outline" asChild><a href="https://developer.ups.com/" target="_blank" rel="noreferrer">UPS portal <ExternalLink className="size-4" /></a></Button>
             </div>
           </div>
+          <div className="grid gap-3 p-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2"><p className="font-semibold">USPS</p><Badge variant={usps?.configured ? "default" : "outline"}>{usps?.configured ? "Configured" : "Not configured"}</Badge><Badge variant="secondary">{usps?.environment === "test" ? "Test" : "Production"}</Badge>{usps?.lastTestStatus === "verified" ? <Badge variant="outline" className="border-emerald-500/50 text-emerald-700 dark:text-emerald-300"><CheckCircle2 className="size-3" /> Verified</Badge> : null}</div>
+              <p className="mt-1 text-sm text-muted-foreground">Direct USPS uses Addresses 3.0, Domestic Prices 3.0, and modern Tracking 3.2. The Consumer Key and Consumer Secret are enough for default-product APIs; postage labels require separate USPS Ship and payment approval.</p>
+              <p className="mt-1 text-xs text-muted-foreground">{usps?.lastTestedAt ? `Last tested ${dateLabel(usps.lastTestedAt)}${usps.lastTestMessage ? `: ${usps.lastTestMessage}` : ""}` : "Connection has not been tested."}</p>
+              {usps?.configured ? <div className="mt-3 grid gap-2 rounded-md border bg-muted/20 p-3 text-sm sm:grid-cols-3">
+                <div><p className="text-xs font-medium uppercase text-muted-foreground">OAuth access</p><div className="mt-1 flex items-center gap-1.5 font-medium">{usps.lastTestStatus === "verified" ? <CheckCircle2 className="size-4 text-emerald-600" /> : <KeyRound className="size-4 text-amber-600" />}{usps.lastTestStatus === "verified" ? "Verified" : "Needs verification"}</div></div>
+                <div><p className="text-xs font-medium uppercase text-muted-foreground">DataPlus uses</p><p className="mt-1 font-medium">Address + Rates + Tracking</p><p className="text-xs text-muted-foreground">Direct USPS scan checks run with the carrier schedule</p></div>
+                <div><p className="text-xs font-medium uppercase text-muted-foreground">Token lifetime</p><p className="mt-1 font-medium">{tokenLifetimeLabel(usps.lastTokenLifetimeSeconds)}</p><p className="text-xs text-muted-foreground">Renews automatically</p></div>
+                <div className="sm:col-span-3"><p className="text-xs font-medium uppercase text-muted-foreground">Capabilities</p><div className="mt-2 grid gap-2 sm:grid-cols-2">{(usps.capabilities || []).map((capability) => <div key={capability.id} className="rounded border bg-background p-2"><div className="flex items-center justify-between gap-2"><p className="font-medium">{capability.label}</p><Badge variant={capability.status === "ready" || capability.status === "setup_available" || capability.status === "email_request_available" ? "outline" : "secondary"}>{capability.status.replaceAll("_", " ")}</Badge></div><p className="mt-1 text-xs text-muted-foreground">{capability.detail}</p></div>)}</div></div>
+              </div> : null}
+            </div>
+            <div className="flex flex-wrap gap-2 lg:justify-end">
+              <Button type="button" size="sm" variant="outline" disabled={!canManage || !usps?.configured || uspsRowTesting} onClick={() => void testSavedUspsConnection()}>{uspsRowTesting ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Test</Button>
+              <Button type="button" size="sm" disabled={!canManage} onClick={() => openUspsDialog()}><Settings2 className="size-4" /> Configure</Button>
+              <Button type="button" size="sm" variant="outline" asChild><a href="https://developers.usps.com/" target="_blank" rel="noreferrer">USPS portal <ExternalLink className="size-4" /></a></Button>
+            </div>
+          </div>
           {plannedProviderOrder.map((id) => {
             const provider = providers[id]
             if (!provider) return null
@@ -201,6 +301,24 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
           <div className="flex gap-2 rounded-md border bg-muted/25 p-3 text-xs text-muted-foreground"><LockKeyhole className="mt-0.5 size-4 shrink-0" /><p>The Client Secret is written to restricted server storage. DataPlus returns only whether a secret is configured.</p></div>
         </div>
         <DialogFooter className="gap-2 sm:gap-0"><Button type="button" variant="outline" disabled={saving || testing} onClick={() => setDialogOpen(false)}>Cancel</Button><Button type="button" variant="outline" disabled={!canSubmit || saving || testing} onClick={() => void saveCredentials()}>{saving && !testing ? <Loader2 className="size-4 animate-spin" /> : null} Save</Button><Button type="button" disabled={!canSubmit || saving || testing} onClick={() => void verifyAndSave()}>{testing ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Verify and save</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog open={uspsDialogOpen} onOpenChange={(open) => { if (!uspsSaving && !uspsTesting) setUspsDialogOpen(open) }}>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] max-w-2xl overflow-y-auto">
+        <DialogHeader><DialogTitle>Configure USPS</DialogTitle><DialogDescription>Enter the Consumer Key and Consumer Secret from the USPS Developer Portal. Optional business identifiers unlock tracking subscriptions, proof-of-delivery email requests, and authorized account pricing.</DialogDescription></DialogHeader>
+        <div className="grid gap-4 py-1 sm:grid-cols-2">
+          <CredentialField label="Environment" hint="TEM returns test data and watermarked labels; Production uses live USPS APIs."><Select value={uspsDraft.environment} onValueChange={(value) => changeUspsEnvironment(value as "production" | "test")}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="production">Production</SelectItem><SelectItem value="test">Test (TEM)</SelectItem></SelectContent></Select></CredentialField>
+          <CredentialField label="Consumer Key" hint="USPS calls this the Consumer Key; it is used as OAuth client_id."><Input value={uspsDraft.clientId} onChange={(event) => setUspsDraft((current) => ({ ...current, clientId: event.target.value }))} autoComplete="off" placeholder="USPS Consumer Key" /></CredentialField>
+          <CredentialField label="Consumer Secret" hint={selectedUspsStatus?.secretConfigured ? "A secret is saved. Leave this blank to keep it." : "Required for the first connection."}><Input type="password" value={uspsDraft.clientSecret} onChange={(event) => setUspsDraft((current) => ({ ...current, clientSecret: event.target.value }))} autoComplete="new-password" placeholder={selectedUspsStatus?.secretConfigured ? "Saved - enter only to replace" : "USPS Consumer Secret"} /></CredentialField>
+          <CredentialField label="CRID" hint={selectedUspsStatus?.cridConfigured ? `CRID ending ${selectedUspsStatus.cridEnding} is saved. Leave blank to keep it.` : "Optional. Required for eligible proof-of-delivery email requests."}><Input value={uspsDraft.crid} onChange={(event) => setUspsDraft((current) => ({ ...current, crid: event.target.value.replace(/\D/g, "") }))} inputMode="numeric" placeholder="Customer Registration ID" /></CredentialField>
+          <CredentialField label="Mailer ID (MID)" hint={selectedUspsStatus?.midConfigured ? `MID ending ${selectedUspsStatus.midEnding} is saved. Leave blank to keep it.` : "Optional. Required for account-wide tracking subscriptions."}><Input value={uspsDraft.mid} onChange={(event) => setUspsDraft((current) => ({ ...current, mid: event.target.value.replace(/\D/g, "") }))} inputMode="numeric" placeholder="Mailer ID" /></CredentialField>
+          <CredentialField label="Pricing account type"><Select value={uspsDraft.accountType} onValueChange={(value) => setUspsDraft((current) => ({ ...current, accountType: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="EPS">Enterprise Payment System (EPS)</SelectItem><SelectItem value="PERMIT">Permit</SelectItem><SelectItem value="METER">Meter</SelectItem><SelectItem value="MID">Mailer ID</SelectItem></SelectContent></Select></CredentialField>
+          <CredentialField label="Pricing / payment account" hint={selectedUspsStatus?.accountConfigured ? `Account ending ${selectedUspsStatus.accountEnding} is saved. Leave blank to keep it.` : "Optional for published rates. Authorized account access is required for contract pricing and labels."}><Input value={uspsDraft.accountNumber} onChange={(event) => setUspsDraft((current) => ({ ...current, accountNumber: event.target.value.replace(/\D/g, "") }))} inputMode="numeric" placeholder="EPS, permit, meter, or MID number" /></CredentialField>
+          <CredentialField label="Webhook administrator email" hint="USPS sends subscription health notices to this address."><Input type="email" value={uspsDraft.webhookAdminEmail} onChange={(event) => setUspsDraft((current) => ({ ...current, webhookAdminEmail: event.target.value }))} autoComplete="email" placeholder="shipping@example.com" /></CredentialField>
+          <div className="flex gap-2 rounded-md border bg-muted/25 p-3 text-xs text-muted-foreground sm:col-span-2"><LockKeyhole className="mt-0.5 size-4 shrink-0" /><p>The Consumer Secret and generated webhook signing secret stay in restricted server storage. USPS label purchase remains unavailable until USPS separately approves USPS Ship, Payments, and the Enterprise Payment Account.</p></div>
+        </div>
+        <DialogFooter className="gap-2 sm:gap-0"><Button type="button" variant="outline" disabled={uspsSaving || uspsTesting} onClick={() => setUspsDialogOpen(false)}>Cancel</Button><Button type="button" variant="outline" disabled={!canSubmitUsps || uspsSaving || uspsTesting} onClick={() => void saveUspsCredentials()}>{uspsSaving && !uspsTesting ? <Loader2 className="size-4 animate-spin" /> : null} Save</Button><Button type="button" disabled={!canSubmitUsps || uspsSaving || uspsTesting} onClick={() => void verifyAndSaveUsps()}>{uspsTesting ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Verify and save</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   </>

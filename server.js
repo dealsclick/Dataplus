@@ -102,6 +102,7 @@ const { createShippingDisputeStore } = require("./lib/shipping-disputes");
 const { createOutboundAuditStore, publicEvidence } = require("./lib/outbound-audit-store");
 const ebayOperations = require("./lib/ebay-operations");
 const upsRating = require("./lib/ups-rating");
+const uspsApi = require("./lib/usps-api");
 const { dailyScheduleKey } = require("./lib/carrier-tracking-schedule");
 const { createCarrierCredentials } = require("./lib/carrier-credentials");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
@@ -29920,6 +29921,67 @@ async function refreshUpsShipmentTracking({ order, shipment, actor = "UPS tracki
   };
 }
 
+async function refreshUspsShipmentTracking({ order, shipment, actor = "USPS tracking refresh" }) {
+  const trackingNumber = String(shipment.trackingNumber || "").trim();
+  if (!trackingNumber) throw new Error("The USPS tracking number is missing.");
+  const previousTrackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
+  const previousPhysicalScanAt = String(shipment.carrierPhysicalScanAt || "");
+  const destination = order.address || order.shippingAddress || order.shipping_address || {};
+  const tracking = await uspsApi.trackShipment(trackingNumber, process.env, carrierCredentials.getUsps(), {
+    mailingDate: shipment.shippedAt || shipment.shipDate || order.shipDate || "",
+    destinationZIPCode: destination.postalCode || destination.postcode || destination.zip || "",
+  });
+  const now = new Date().toISOString();
+  const confirmed = tracking.physicalScan || carrierStatusConfirmsShipment(tracking.status);
+  const confirmation = applyCarrierShipmentConfirmation({
+    order,
+    shipment,
+    trackingStatus: tracking.status,
+    carrierStatus: tracking.statusDescription,
+    carrier: "USPS",
+    trackingNumber,
+    confirmed,
+    occurredAt: tracking.physicalScanAt || tracking.latestActivityAt,
+    actor,
+  });
+  shipment.carrierName = "USPS";
+  shipment.carrier = "USPS";
+  shipment.carrierStatus = tracking.statusDescription;
+  shipment.trackingStatus = tracking.status;
+  shipment.carrierTrackingSource = tracking.source;
+  shipment.carrierTrackingSourceLabel = "Direct USPS";
+  shipment.carrierLatestActivity = tracking.latestActivity;
+  shipment.carrierLatestActivityAt = tracking.latestActivityAt;
+  shipment.carrierActivityCount = Number(tracking.activityCount || 0);
+  shipment.uspsTrackingIdentity = {
+    uniqueTrackingID: tracking.uniqueTrackingID || "",
+    mailingDate: tracking.mailingDate || "",
+  };
+  shipment.deliveryEvidence = {
+    ...(shipment.deliveryEvidence && typeof shipment.deliveryEvidence === "object" ? shipment.deliveryEvidence : {}),
+    provider: "USPS",
+    proofOfDeliveryAvailable: tracking.deliveryEvidence?.proofOfDeliveryAvailable === true,
+    returnReceiptElectronicAvailable: tracking.deliveryEvidence?.returnReceiptElectronicAvailable === true,
+    veriPoint: tracking.deliveryEvidence?.veriPoint === true,
+    receivedBy: tracking.deliveryEvidence?.receivedBy || shipment.deliveryEvidence?.receivedBy || "",
+    location: tracking.deliveryEvidence?.location || shipment.deliveryEvidence?.location || "",
+    synchronousDownloadAvailable: false,
+    emailRequestOnly: tracking.deliveryEvidence?.proofOfDeliveryAvailable === true,
+    checkedAt: now,
+  };
+  if (tracking.physicalScanAt) shipment.carrierPhysicalScanAt = tracking.physicalScanAt;
+  shipment.trackingCheckedAt = now;
+  shipment.trackingRefreshError = "";
+  shipment.updatedAt = now;
+  return {
+    tracking,
+    effectiveTrackingStatus: tracking.status,
+    confirmation,
+    statusChanged: tracking.status !== previousTrackingStatus,
+    physicalScanAdded: !previousPhysicalScanAt && Boolean(tracking.physicalScanAt),
+  };
+}
+
 async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, actor = "Scheduled carrier refresh", allowLabelFallback = true, includeLegacyRecovery = true, checkedBefore = "", trackingOnly = false } = {}) {
   if (!postgres.isPostgresEnabled()) return { checked: 0, updated: 0, confirmed: 0, failed: 0 };
   if (fulfillmentTrackingRefreshPromise) return fulfillmentTrackingRefreshPromise;
@@ -29938,6 +30000,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
       .filter(([id]) => id)).values()];
     const initialFulfillmentState = { batches, printQueue: [], printStations: [], manifests: [], settings: normalizeFulfillmentSettings({}) };
     const settings = await readRuntimeSystemSettings(db.systemSettings || {});
+    const uspsDirectConfigured = uspsApi.config(process.env, carrierCredentials.getUsps()).configured;
     const veeqoMinimumCheckedAt = Date.now() - (force ? 0 : 3 * 60 * 60_000);
     const veeqoMissingTrackingMinimumCheckedAt = Date.now() - (force ? 0 : 5 * 60_000);
     const temuMinimumCheckedAt = Date.now() - (force ? 0 : 5 * 60_000);
@@ -30089,6 +30152,12 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         if (normalizedStatus !== "delivered" || needsDeliveryEvidence) candidates.push({ order, shipment, provider: "ups", sourceProvider: provider, packageSnList: [], checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0 });
         continue;
       }
+      const uspsTracking = trackingNumber && (detectCarrierFromTracking(trackingNumber, carrier) === "USPS" || provider === "usps" || provider === "usps_direct");
+      if (uspsTracking && uspsDirectConfigured && shipment.voidStatus !== "voided") {
+        const normalizedStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
+        if (normalizedStatus !== "delivered") candidates.push({ order, shipment, provider: "usps", sourceProvider: provider, packageSnList: [], checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0 });
+        continue;
+      }
       if (provider !== "veeqo" || shipment.voidStatus === "voided") continue;
       const batchRows = batchRowsByOrder.get(String(order.id || "")) || [];
       const shipmentBatchRows = shipment.fulfillmentBatchId
@@ -30186,6 +30255,34 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
           clearOrderApiCache(order.id);
           invalidateFulfillmentConsoleSnapshot([order.id]);
           appendChannelApiLog({ channel: "UPS", transport: "HTTP", method: "GET", path: apiPath, operation: "Check carrier scan failed", statusCode: 502, ok: false, entityType: "order", entityId: order.id, message: shipment.trackingRefreshError });
+        }
+        continue;
+      }
+      if (provider === "usps") {
+        const trackingNumber = String(shipment.trackingNumber || "").trim();
+        const apiPath = "/tracking/v3r2/tracking";
+        try {
+          const result = await refreshUspsShipmentTracking({ order, shipment, actor });
+          const { tracking, confirmation } = result;
+          summary.checked += 1;
+          if (result.statusChanged || result.physicalScanAdded) summary.updated += 1;
+          if (confirmation.newlyConfirmed) summary.confirmed += 1;
+          const needsWalmartTrackingSync = String(order.source || "").trim().toLowerCase() === "walmart" && walmartShipmentNeedsTrackingSync(shipment);
+          if (shouldSyncRecoveredTracking(shipment) || needsWalmartTrackingSync) await syncDropshipShipmentToChannel(db, order, shipment, actor);
+          order.updatedAt = shipment.updatedAt;
+          await postgres.saveOrder(order);
+          clearOrderApiCache(order.id);
+          invalidateFulfillmentConsoleSnapshot([order.id]);
+          appendChannelApiLog({ channel: "USPS", transport: "HTTP", method: "POST", path: apiPath, operation: "Check carrier scan", statusCode: 200, ok: true, entityType: "order", entityId: order.id, message: `${trackingNumber}: ${tracking.statusDescription}${tracking.physicalScan ? " (physical scan)" : ""}.`, details: { sourceProvider: sourceProvider || "", uniqueTrackingID: tracking.uniqueTrackingID || "", proofOfDeliveryAvailable: tracking.deliveryEvidence?.proofOfDeliveryAvailable === true } });
+        } catch (error) {
+          summary.failed += 1;
+          summary.errors.push({ orderId: order.id, shipmentId: shipment.id, message: error.message || "USPS carrier scan check failed." });
+          shipment.trackingCheckedAt = new Date().toISOString();
+          shipment.trackingRefreshError = error.message || "USPS carrier scan check failed.";
+          await postgres.saveOrder(order);
+          clearOrderApiCache(order.id);
+          invalidateFulfillmentConsoleSnapshot([order.id]);
+          appendChannelApiLog({ channel: "USPS", transport: "HTTP", method: "POST", path: apiPath, operation: "Check carrier scan failed", statusCode: 502, ok: false, entityType: "order", entityId: order.id, message: shipment.trackingRefreshError });
         }
         continue;
       }
@@ -30811,7 +30908,9 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   const providerErrors = [];
   const unavailableRates = [];
   const upsRuntimeCredentials = carrierCredentials.getUps();
+  const uspsRuntimeCredentials = carrierCredentials.getUsps();
   let upsProviderStatus = upsRating.publicStatus(process.env, upsRuntimeCredentials);
+  let uspsProviderStatus = uspsApi.publicStatus(process.env, uspsRuntimeCredentials);
   let veeqoAllocationFallback = null;
   const sourceKey = String(order.source || "").toLowerCase();
   if (!comparisonOnly && sourceKey === "shopify") {
@@ -30854,7 +30953,7 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
   }
   const postalOnlyComparison = comparisonOnly && addressQuoteBasis === "postal_code";
   if (!blockers.length && postalOnlyComparison && !veeqoDuplicateGuard.blocked && veeqoConfig(settings).enabled) {
-    providerErrors.push({ provider: "Veeqo", code: "postal_only_comparison", message: "Veeqo was skipped because this comparison has only a destination ZIP; Direct UPS was used for ZIP-based evidence." });
+    providerErrors.push({ provider: "Veeqo", code: "postal_only_comparison", message: "Veeqo was skipped because this comparison has only a destination ZIP; configured direct carrier APIs were used for ZIP-based evidence." });
   }
   if (!blockers.length && !postalOnlyComparison && !veeqoDuplicateGuard.blocked && veeqoConfig(settings).enabled) {
     fulfillmentRateMemoryStage(order, "veeqo-start");
@@ -30963,6 +31062,29 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
       upsProviderStatus = { ...upsRating.publicStatus(process.env, upsRuntimeCredentials), ok: false, error: error.message || "UPS did not return comparison rates." };
       providerErrors.push({ provider: "UPS", message: upsProviderStatus.error });
     }
+    if (uspsProviderStatus.configured) {
+      try {
+        const uspsResult = await uspsApi.shopRates({
+          reference: String(order.marketplaceOrderNumber || order.orderNumber || order.id || ""),
+          itemValue: Number(order.total || 0),
+          from: { postalCode: fromAddress.postcode, country: fromAddress.country_code },
+          to: { postalCode: toAddress.postcode, country: toAddress.country_code },
+          package: {
+            weight: parcel.weight,
+            length: parcel.length,
+            width: parcel.width,
+            height: parcel.height,
+            weightUnit: parcel.weight_unit,
+            dimensionUnit: parcel.dimension_unit,
+          },
+        }, process.env, uspsRuntimeCredentials);
+        uspsProviderStatus = uspsResult.status;
+        rates.push(...uspsResult.rates);
+      } catch (error) {
+        uspsProviderStatus = { ...uspsApi.publicStatus(process.env, uspsRuntimeCredentials), ok: false, error: error.message || "USPS did not return comparison rates." };
+        providerErrors.push({ provider: "USPS", message: uspsProviderStatus.error });
+      }
+    }
   }
   const status = blockers.length ? "blocked" : providerErrors.length ? "partial" : "loaded";
   fulfillmentRateMemoryStage(order, "quote-complete");
@@ -31005,8 +31127,8 @@ async function getUniversalShippingRates(order, db = {}, body = {}) {
     warehouseFallbackApplied: shipFrom.fallbackApplied,
     warehouseFallbackReason: shipFrom.fallbackReason,
     addressQuoteBasis,
-    providers: { shopify: !comparisonOnly && sourceKey === "shopify", temu: !comparisonOnly && sourceKey === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey), ups: upsProviderStatus.configured === true },
-    providerDetails: { ups: upsProviderStatus, veeqo: veeqoProviderStatus }
+    providers: { shopify: !comparisonOnly && sourceKey === "shopify", temu: !comparisonOnly && sourceKey === "temu", veeqo: config.enabled && Boolean(config.accessToken || config.apiKey), ups: upsProviderStatus.configured === true, usps: uspsProviderStatus.configured === true },
+    providerDetails: { ups: upsProviderStatus, usps: uspsProviderStatus, veeqo: veeqoProviderStatus }
   };
   shipmentRecord.packageSnList = packageSnList;
   shipmentRecord.packageSn = packageSnList[0] || shipmentRecord.packageSn || "";
@@ -33075,7 +33197,7 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
       trackingStatus,
       carrierStatus: shipment.carrierStatus || "",
       carrierTrackingSource: shipment.carrierTrackingSource || "",
-      carrierTrackingSourceLabel: shipment.carrierTrackingSourceLabel || (shipment.carrierTrackingSource === "ups_api" ? "Direct UPS" : shipment.carrierTrackingSource === "veeqo" ? "Veeqo" : ""),
+      carrierTrackingSourceLabel: shipment.carrierTrackingSourceLabel || (shipment.carrierTrackingSource === "ups_api" ? "Direct UPS" : shipment.carrierTrackingSource === "usps_api" ? "Direct USPS" : shipment.carrierTrackingSource === "veeqo" ? "Veeqo" : ""),
       carrierLatestActivity: shipment.carrierLatestActivity || "",
       carrierLatestActivityAt: shipment.carrierLatestActivityAt || "",
       deliveryEvidence: shipment.deliveryEvidence && typeof shipment.deliveryEvidence === "object" ? shipment.deliveryEvidence : null,
@@ -50878,6 +51000,44 @@ async function handleApi(req, res) {
   const parts = url.pathname.split("/").filter(Boolean);
   await hydrateAuthSessionsStore();
 
+  if (req.method === "POST" && url.pathname === "/api/webhooks/usps/tracking") {
+    if (!postgres.isPostgresEnabled()) return sendJson(res, 503, { error: "USPS tracking webhooks require PostgreSQL." });
+    const rawBody = await readRawBody(req);
+    if (rawBody.length > 2 * 1024 * 1024) return sendJson(res, 413, { error: "USPS webhook payload is too large." });
+    let body;
+    try { body = rawBody.length ? JSON.parse(rawBody.toString("utf8")) : {}; }
+    catch { return sendJson(res, 400, { error: "USPS webhook payload is not valid JSON." }); }
+    const runtime = carrierCredentials.getUsps();
+    if (!runtime.webhookSecret || !uspsApi.verifyTrackingNotification(body, req.headers["x-hmac"] || req.headers["hmac-header"], runtime.webhookSecret)) {
+      appendChannelApiLog({ channel: "USPS", transport: "Webhook", method: "POST", path: url.pathname, operation: "Verify USPS tracking notification", statusCode: 401, ok: false, message: "USPS tracking notification HMAC did not match." });
+      return sendJson(res, 401, { error: "USPS webhook signature did not match." });
+    }
+    let event = {};
+    try { event = typeof body.payload === "string" ? JSON.parse(body.payload) : body.payload || {}; }
+    catch { return sendJson(res, 400, { error: "USPS webhook event payload is not valid JSON." }); }
+    const trackingNumber = String(event.trackingNumber || event.uniqueTrackingID || "").trim();
+    if (!trackingNumber) return sendJson(res, 400, { error: "USPS webhook event did not include a tracking number." });
+    void (async () => {
+      try {
+        const candidates = trackingLookupCandidates(trackingNumber);
+        const orders = await postgres.readOrdersByTrackingCandidates(candidates, { limit: 20 });
+        for (const order of orders) {
+          for (const shipment of Array.isArray(order.shipments) ? order.shipments : []) {
+            if (!candidates.some((candidate) => trackingLookupCandidates(shipment.trackingNumber || "").includes(candidate))) continue;
+            await refreshUspsShipmentTracking({ order, shipment, actor: "USPS tracking webhook" });
+          }
+          await postgres.saveOrder(order);
+          clearOrderApiCache(order.id);
+          invalidateFulfillmentConsoleSnapshot([order.id]);
+        }
+        appendChannelApiLog({ channel: "USPS", transport: "Webhook", method: "POST", path: url.pathname, operation: "Apply USPS tracking notification", statusCode: 200, ok: true, message: `${trackingNumber}: refreshed ${orders.length} matching order${orders.length === 1 ? "" : "s"}.` });
+      } catch (error) {
+        appendChannelApiLog({ channel: "USPS", transport: "Webhook", method: "POST", path: url.pathname, operation: "Apply USPS tracking notification failed", statusCode: 502, ok: false, message: error.message || "USPS tracking refresh failed." });
+      }
+    })();
+    return sendJson(res, 200, { accepted: true });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/webhooks/tiktok") {
     if (!postgres.isPostgresEnabled()) return sendJson(res, 503, { error: "TikTok webhooks require PostgreSQL." });
     const rawBody = await readRawBody(req);
@@ -51361,6 +51521,7 @@ async function handleApi(req, res) {
         batches,
         providers: {
           ups: upsRating.publicStatus(process.env, carrierCredentials.getUps()),
+          usps: uspsApi.publicStatus(process.env, carrierCredentials.getUsps()),
           veeqo: {
             enabled: veeqo.enabled,
             configured: Boolean(veeqo.accessToken || veeqo.apiKey),
@@ -51419,40 +51580,40 @@ async function handleApi(req, res) {
       if (!suggestion) return sendJson(res, 404, { error: "Shipping dispute shipment not found." });
       if (!suggestion.postalCode && suggestion.city && suggestion.state) {
         try {
-          const result = await upsRating.suggestPostalCodes({
-            city: suggestion.city,
-            state: suggestion.state,
-            country: suggestion.country || "US",
-          }, process.env, carrierCredentials.getUps(), { selectionKey: `${batchId}:${itemId}` });
+          const uspsStatus = uspsApi.publicStatus(process.env, carrierCredentials.getUsps());
+          const directProvider = uspsStatus.configured ? "USPS" : "UPS";
+          const result = uspsStatus.configured
+            ? await uspsApi.suggestPostalCodes({ city: suggestion.city, state: suggestion.state, country: suggestion.country || "US" }, process.env, carrierCredentials.getUsps(), { selectionKey: `${batchId}:${itemId}` })
+            : await upsRating.suggestPostalCodes({ city: suggestion.city, state: suggestion.state, country: suggestion.country || "US" }, process.env, carrierCredentials.getUps(), { selectionKey: `${batchId}:${itemId}` });
           if (result.selected?.postalCode) {
             suggestion = {
               ...suggestion,
               postalCode: result.selected.postalCode,
               country: result.selected.country || suggestion.country,
-              source: "ups_regional_address_validation",
+              source: directProvider === "USPS" ? "usps_zip_code_lookup" : "ups_regional_address_validation",
               status: "found",
               candidateCount: result.candidateCount,
               evidenceCount: result.candidateCount,
               message: result.candidateCount > 1
-                ? `UPS returned ${result.candidateCount} ZIP candidates for ${suggestion.city}, ${suggestion.state}. DataPlus selected ${result.selected.postalCode} consistently for this dispute row.`
-                : `UPS found ZIP ${result.selected.postalCode} for ${suggestion.city}, ${suggestion.state}.`,
+                ? `${directProvider} returned ${result.candidateCount} ZIP candidates for ${suggestion.city}, ${suggestion.state}. DataPlus selected ${result.selected.postalCode} consistently for this dispute row.`
+                : `${directProvider} found ZIP ${result.selected.postalCode} for ${suggestion.city}, ${suggestion.state}.`,
             };
           } else {
             suggestion = {
               ...suggestion,
-              source: "ups_regional_address_validation",
+              source: directProvider === "USPS" ? "usps_zip_code_lookup" : "ups_regional_address_validation",
               status: "failed",
               candidateCount: 0,
-              message: `Failed - UPS returned no ZIP candidates for ${suggestion.city}, ${suggestion.state}.`,
+              message: `Failed - ${directProvider} returned no ZIP candidates for ${suggestion.city}, ${suggestion.state}.`,
             };
           }
         } catch (error) {
           suggestion = {
             ...suggestion,
-            source: "ups_regional_address_validation",
+            source: "direct_carrier_address_lookup",
             status: "failed",
             candidateCount: 0,
-            message: `Failed - ${error.message || "UPS ZIP lookup could not be completed."}`,
+            message: `Failed - ${error.message || "Direct carrier ZIP lookup could not be completed."}`,
           };
         }
       }
@@ -59401,6 +59562,66 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipments" && parts[4] && parts[5] === "usps-tracking" && parts[6] === "refresh" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const shipment = (Array.isArray(order.shipments) ? order.shipments : []).find((entry) => String(entry.id || "") === String(parts[4]));
+    if (!shipment) return notFound(res);
+    const trackingNumber = String(shipment.trackingNumber || "").trim();
+    if (detectCarrierFromTracking(trackingNumber, shipment.carrierName || shipment.carrier) !== "USPS") {
+      return sendJson(res, 400, { error: "This shipment is not identified as USPS." });
+    }
+    try {
+      const actor = String(authUser?.name || authUser?.username || "DataPlus user");
+      const result = await refreshUspsShipmentTracking({ order, shipment, actor });
+      order.updatedAt = shipment.updatedAt;
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      invalidateFulfillmentConsoleSnapshot([order.id]);
+      appendChannelApiLog({ channel: "USPS", transport: "HTTP", method: "POST", path: "/tracking/v3r2/tracking", operation: "Refresh USPS tracking", statusCode: 200, ok: true, entityType: "order", entityId: order.id, message: `${trackingNumber}: ${result.tracking.statusDescription}.`, details: { uniqueTrackingID: result.tracking.uniqueTrackingID || "", proofOfDeliveryAvailable: result.tracking.deliveryEvidence?.proofOfDeliveryAvailable === true } });
+      return sendJson(res, 200, {
+        message: `USPS tracking refreshed: ${result.tracking.statusDescription}.`,
+        tracking: {
+          status: result.effectiveTrackingStatus,
+          statusDescription: result.tracking.statusDescription,
+          checkedAt: shipment.trackingCheckedAt,
+          source: "usps_api",
+          proofOfDeliveryAvailable: result.tracking.deliveryEvidence?.proofOfDeliveryAvailable === true,
+        },
+        deliveryEvidence: shipment.deliveryEvidence || null,
+      });
+    } catch (error) {
+      shipment.trackingCheckedAt = new Date().toISOString();
+      shipment.trackingRefreshError = error.message || "USPS tracking refresh failed.";
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      invalidateFulfillmentConsoleSnapshot([order.id]);
+      appendChannelApiLog({ channel: "USPS", transport: "HTTP", method: "POST", path: "/tracking/v3r2/tracking", operation: "Refresh USPS tracking failed", statusCode: 502, ok: false, entityType: "order", entityId: order.id, message: shipment.trackingRefreshError });
+      return sendJson(res, 502, { error: shipment.trackingRefreshError });
+    }
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipments" && parts[4] && parts[5] === "usps-tracking" && parts[6] === "proof-of-delivery" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const shipment = (Array.isArray(order.shipments) ? order.shipments : []).find((entry) => String(entry.id || "") === String(parts[4]));
+    if (!shipment) return notFound(res);
+    try {
+      const identity = shipment.uspsTrackingIdentity || {};
+      const recipient = { email: String(body.email || authUser?.email || "").trim(), firstName: String(body.firstName || authUser?.firstName || authUser?.name || "DataPlus").trim(), lastName: String(body.lastName || authUser?.lastName || "User").trim() };
+      const result = await uspsApi.requestProofOfDelivery({ trackingNumber: shipment.trackingNumber, uniqueTrackingID: identity.uniqueTrackingID, mailingDate: identity.mailingDate, letterType: body.letterType }, [recipient], process.env, carrierCredentials.getUsps());
+      shipment.deliveryEvidence = { ...(shipment.deliveryEvidence || {}), proofOfDeliveryRequestedAt: new Date().toISOString(), proofOfDeliveryRecipient: recipient.email, proofOfDeliveryRequestMessage: result.transactionMessage || "USPS accepted the email request." };
+      order.updatedAt = new Date().toISOString();
+      addOrderTimeline(order, { type: "document", title: "USPS proof of delivery requested", message: `USPS will email the eligible delivery record for ${shipment.trackingNumber} to ${recipient.email}.`, user: authUser?.name || authUser?.username || "DataPlus user" });
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      return sendJson(res, 202, { message: shipment.deliveryEvidence.proofOfDeliveryRequestMessage, deliveryEvidence: shipment.deliveryEvidence });
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message || "USPS proof of delivery request failed." });
+    }
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "attachments" && parts[4] && postgres.isPostgresEnabled()) {
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
@@ -65549,7 +65770,7 @@ async function handleApi(req, res) {
       providers: {
         ups: carrierCredentials.status(),
         fedex: { id: "fedex", name: "FedEx", available: false, status: "planned", message: "Direct FedEx API support is planned." },
-        usps: { id: "usps", name: "USPS", available: false, status: "planned", message: "Direct USPS API support is planned." },
+        usps: { ...carrierCredentials.uspsStatus(), ...uspsApi.publicStatus(process.env, carrierCredentials.getUsps()) },
         dhl: { id: "dhl", name: "DHL Express", available: false, status: "planned", message: "Direct DHL Express API support is planned." },
         ontrac: { id: "ontrac", name: "OnTrac", available: false, status: "planned", message: "Direct OnTrac API support is planned." },
         amazon_shipping: { id: "amazon_shipping", name: "Amazon Shipping", available: false, status: "planned", message: "Direct Amazon Shipping API support is planned." },
@@ -65600,6 +65821,89 @@ async function handleApi(req, res) {
       appendChannelApiLog({ channel: "UPS", transport: "OAuth", method: "POST", path: "/security/v1/oauth/token", operation: "UPS connection test failed", statusCode: 502, ok: false, message });
       void recordUserActivity(req, authUser, { eventType: "security", action: "Tested UPS credentials", entityType: "shipping_provider", entityId: `ups:${environment}`, metadata: { environment, ok: false } });
       return sendJson(res, 502, { error: message, provider });
+    }
+  }
+
+  if (url.pathname === "/api/shipping-providers/usps/credentials" && req.method === "PUT") {
+    const scope = notificationScope(req);
+    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
+      return sendJson(res, 409, { error: "Direct carrier credentials are available only for LINQ while company isolation is completed." });
+    }
+    try {
+      const body = await parseBody(req);
+      const status = carrierCredentials.saveUsps(body.environment, body);
+      appendChannelApiLog({ channel: "USPS", transport: "configuration", method: "PUT", path: url.pathname, operation: "Update USPS credentials", statusCode: 200, ok: true, message: `Updated USPS ${status.environment} credentials. Secret remains masked.` });
+      void recordUserActivity(req, authUser, { eventType: "security", action: "Updated USPS credentials", entityType: "shipping_provider", entityId: `usps:${status.environment}`, metadata: { environment: status.environment, cridConfigured: status.cridConfigured, midConfigured: status.midConfigured, accountType: status.accountType, accountEnding: status.accountEnding } });
+      return sendJson(res, 200, { provider: { ...status, ...uspsApi.publicStatus(process.env, carrierCredentials.getUsps(status.environment)) }, message: `USPS ${status.environment} credentials saved. The Consumer Secret remains masked.` });
+    } catch (error) {
+      return sendJson(res, Number(error.statusCode || 400), { error: error.message || "Unable to save USPS credentials." });
+    }
+  }
+
+  if (url.pathname === "/api/shipping-providers/usps/test" && req.method === "POST") {
+    const scope = notificationScope(req);
+    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
+      return sendJson(res, 409, { error: "Direct carrier credentials are available only for LINQ while company isolation is completed." });
+    }
+    const body = await parseBody(req);
+    const environment = String(body.environment || carrierCredentials.activeUspsEnvironment());
+    try {
+      const credentials = carrierCredentials.resolveUspsPatch(environment, body);
+      const result = await uspsApi.verifyCredentials(credentials);
+      const message = `USPS ${result.environment} OAuth connection verified${result.expiresIn ? `; token valid for ${result.expiresIn} seconds` : ""}.`;
+      const savedStatus = carrierCredentials.recordUspsTest(environment, { ok: true, message, scope: result.scope, expiresIn: result.expiresIn, tokenStatus: result.status });
+      const provider = { ...savedStatus, ...uspsApi.publicStatus(process.env, credentials) };
+      appendChannelApiLog({ channel: "USPS", transport: "OAuth", method: "POST", path: "/oauth2/v3/token", operation: "USPS connection test", statusCode: 200, ok: true, message });
+      void recordUserActivity(req, authUser, { eventType: "security", action: "Tested USPS credentials", entityType: "shipping_provider", entityId: `usps:${result.environment}`, metadata: { environment: result.environment, ok: true } });
+      return sendJson(res, 200, { provider, token: result, message });
+    } catch (error) {
+      const message = error.message || "Unable to verify the USPS connection.";
+      const savedStatus = carrierCredentials.recordUspsTest(environment, { ok: false, message });
+      const provider = { ...savedStatus, ...uspsApi.publicStatus(process.env, carrierCredentials.getUsps(environment)) };
+      appendChannelApiLog({ channel: "USPS", transport: "OAuth", method: "POST", path: "/oauth2/v3/token", operation: "USPS connection test failed", statusCode: 502, ok: false, message });
+      void recordUserActivity(req, authUser, { eventType: "security", action: "Tested USPS credentials", entityType: "shipping_provider", entityId: `usps:${environment}`, metadata: { environment, ok: false } });
+      return sendJson(res, 502, { error: message, provider });
+    }
+  }
+
+  if (url.pathname === "/api/shipping-providers/usps/address/verify" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      const result = await uspsApi.standardizeAddress(body, process.env, carrierCredentials.getUsps());
+      return sendJson(res, 200, result);
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message || "USPS address verification failed." });
+    }
+  }
+
+  if (url.pathname === "/api/shipping-providers/usps/city-state" && req.method === "GET") {
+    try {
+      const result = await uspsApi.cityStateLookup(url.searchParams.get("postalCode"), process.env, carrierCredentials.getUsps());
+      return sendJson(res, 200, result);
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message || "USPS city/state lookup failed." });
+    }
+  }
+
+  if (url.pathname === "/api/shipping-providers/usps/subscriptions" && req.method === "GET") {
+    try {
+      return sendJson(res, 200, await uspsApi.listTrackingSubscriptions(process.env, carrierCredentials.getUsps()));
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message || "USPS tracking subscriptions could not be loaded." });
+    }
+  }
+
+  if (url.pathname === "/api/shipping-providers/usps/subscriptions" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      const protocol = String(req.headers["x-forwarded-proto"] || "https").split(",")[0].trim();
+      const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
+      const listenerURL = String(body.listenerURL || (host ? `${protocol}://${host}/api/webhooks/usps/tracking` : ""));
+      const result = await uspsApi.createTrackingSubscription({ ...body, listenerURL }, process.env, carrierCredentials.getUsps());
+      appendChannelApiLog({ channel: "USPS", transport: "HTTP", method: "POST", path: "/subscriptions-tracking/v3r2/subscriptions", operation: "Create USPS tracking subscription", statusCode: 201, ok: true, message: `USPS tracking subscription ${result.subscriptionId || "created"}.` });
+      return sendJson(res, 201, { subscription: result, listenerURL });
+    } catch (error) {
+      return sendJson(res, 502, { error: error.message || "USPS tracking subscription could not be created." });
     }
   }
 
