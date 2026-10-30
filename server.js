@@ -130,7 +130,7 @@ const accountingHandler = createAccountingHandler({
   queueTemuReportImport: (req, scope, actor, metadata) => queueTemuSettlementReportImport(req, scope, actor, metadata),
   enrichOrder: order => enrichOrderDetail(order), parseBody, sendJson, sendCsv, can: userCan
 });
-const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt } = require("./lib/return-workflow");
+const { ebayReturnEnvelope, reconcileOrderReturns, validateReturnReceipt, returnChangeSnapshot, appendReturnChangeHistory } = require("./lib/return-workflow");
 const { normalizeSequentialReturnNumbers, returnSlugBase, returnsWithPublicSlugs } = require("./lib/return-identifiers");
 const { veeqoShipmentServiceSelections } = require("./lib/veeqo-shipping-options");
 const { addVeeqoCustomsFields, normalizeVeeqoAddressCountry, productCountryOfOrigin } = require("./lib/veeqo-customs");
@@ -61481,6 +61481,7 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "returns" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    const actingUser = currentAuthUser(req)?.name || currentAuthUser(req)?.username || body.user || "System";
     const order = await postgres.readOrderByKey(parts[2]);
     if (!order) return notFound(res);
     const db = await readDbFast({ skipInventory: true });
@@ -61514,7 +61515,7 @@ async function handleApi(req, res) {
     if (!items.length) return sendJson(res, 400, { error: "Select at least one returned line item." });
     const attachmentError = validateReturnAttachments(body.attachments || []);
     if (attachmentError) return sendJson(res, 400, { error: attachmentError });
-    const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReturnAttachment(file, body.user || "Luis"));
+    const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReturnAttachment(file, actingUser));
     const returnAmount = Number(body.amount || order.total || 0);
     const policyFields = returnPolicyFields(body, returnAmount, readSystemSettingsStore(db.systemSettings || {}));
     const record = {
@@ -61540,7 +61541,8 @@ async function handleApi(req, res) {
       returnLabelStatus: body.returnLabelPolicy === "merchant_provided" ? "quote_needed" : "not_required",
       returnShippingQuotes: [],
       createdAt: String(body.createdAt || new Date().toISOString().slice(0, 10)),
-      createdBy: body.user || "Luis",
+      createdBy: actingUser,
+      updatedBy: actingUser,
       receivedAt: "",
       receivedBy: "",
       binLocation: "",
@@ -61553,6 +61555,7 @@ async function handleApi(req, res) {
       resolvedBy: "",
       restockedAt: ""
     };
+    appendReturnChangeHistory(record, {}, { user: actingUser, action: "created", title: "Return created", createdAt: record.createdAt, force: true });
     order.returnWarehouseId = warehouse.id;
     order.returnWarehouseName = warehouse.name;
     order.updatedAt = new Date().toISOString();
@@ -61560,7 +61563,7 @@ async function handleApi(req, res) {
       type: "return",
       title: "Return created",
       message: `${record.returnNumber} created for ${warehouse.name}.${record.reason ? ` ${record.reason}` : ""}${attachments.length ? ` ${attachments.length} attachment${attachments.length === 1 ? "" : "s"} saved.` : ""}`,
-      user: body.user || "Luis"
+      user: actingUser
     });
     await postgres.saveReturn(record);
     await postgres.saveOrder(order);
@@ -62730,6 +62733,7 @@ async function handleApi(req, res) {
       const record = await postgres.readReturnByKey(parts[2]);
       if (!record) return notFound(res);
       const actor = currentAuthUser(req)?.name || currentAuthUser(req)?.username || "Manager";
+      const beforeAudit = returnChangeSnapshot(record);
       const now = new Date().toISOString();
       const note = sourceTextValue(body.note || "").slice(0, 1000);
       record.approvalHistory = Array.isArray(record.approvalHistory) ? record.approvalHistory : [];
@@ -62741,6 +62745,8 @@ async function handleApi(req, res) {
       record.approvedBy = action === "approve" ? actor : record.approvedBy || "";
       record.managerReviewReason = note || record.managerReviewReason || "";
       record.updatedAt = now;
+      record.updatedBy = actor;
+      appendReturnChangeHistory(record, beforeAudit, { user: actor, action: "approval", title: action === "approve" ? "Return approved" : action === "reject" ? "Return rejected" : "Return revision requested", createdAt: now });
       await postgres.saveReturn(record);
       const order = record.orderId ? await postgres.readOrderByKey(String(record.orderId)) : null;
       if (order) {
@@ -62760,6 +62766,8 @@ async function handleApi(req, res) {
     try {
     const record = await postgres.readReturnByKey(parts[2]);
     if (!record) return notFound(res);
+    const actingUser = currentAuthUser(req)?.name || currentAuthUser(req)?.username || "System";
+    const beforeAudit = returnChangeSnapshot(record);
     if (body.expectedUpdatedAt && String(body.expectedUpdatedAt) !== String(record.updatedAt || "")) {
       return sendJson(res, 409, { error: "This return changed after you opened it. Reload the latest return before saving." });
     }
@@ -62817,7 +62825,7 @@ async function handleApi(req, res) {
     if (Array.isArray(body.attachments) && body.attachments.length) {
       const attachmentError = validateReturnAttachments(body.attachments);
       if (attachmentError) return sendJson(res, 400, { error: attachmentError });
-      const nextAttachments = body.attachments.map((file) => normalizeReturnAttachment(file, body.user || "Luis"));
+      const nextAttachments = body.attachments.map((file) => normalizeReturnAttachment(file, actingUser));
       const existing = new Map(record.attachments.map((file) => [file.id, file]));
       nextAttachments.forEach((file) => existing.set(file.id, file));
       record.attachments = Array.from(existing.values());
@@ -62833,7 +62841,6 @@ async function handleApi(req, res) {
         record.warehouseName = warehouse.name;
       }
     }
-    const actingUser = currentAuthUser(req)?.name || currentAuthUser(req)?.username || "System";
     if (record.approvalStatus === "pending" && !["needs_revision", "canceled", "cancelled"].includes(String(record.status || "").toLowerCase())) {
       record.status = "needs_revision";
       record.receivingStatus = "needs_revision";
@@ -62915,10 +62922,12 @@ async function handleApi(req, res) {
       await postgres.upsertInventoryLevelsFromProducts(touchedProducts);
     }
     record.updatedAt = new Date().toISOString();
+    record.updatedBy = actingUser;
     if (body.receiptOnly) {
       const receiptAttachments = Array.isArray(body.attachments) ? body.attachments.map((file) => String(file.id || "")).filter(Boolean) : [];
-      record.receiptHistory = [...(record.receiptHistory || []), { id: crypto.randomUUID(), at: record.updatedAt, user: actingUser, warehouseId: record.warehouseId, binLocation: record.binLocation, condition: record.condition, disposition: record.disposition, items: record.items.map(line => ({ sku: line.sku, receivedQty: line.receivedQty })), attachmentIds: receiptAttachments, attachmentCount: receiptAttachments.length }];
+      record.receiptHistory = [...(record.receiptHistory || []), { id: crypto.randomUUID(), at: record.updatedAt, user: actingUser, warehouseId: record.warehouseId, warehouseName: record.warehouseName, binLocation: record.binLocation, condition: record.condition, disposition: record.disposition, items: record.items.map(line => ({ sku: line.sku, receivedQty: line.receivedQty })), attachmentIds: receiptAttachments, attachmentCount: receiptAttachments.length }];
     }
+    appendReturnChangeHistory(record, beforeAudit, { user: actingUser, receiptOnly: body.receiptOnly, restocked, createdAt: record.updatedAt, force: body.receiptOnly === true });
     await postgres.saveReturn(record);
     await postgres.prependInventoryLedgerEvents(db.inventoryLedger || []);
     if (order) {
@@ -62928,6 +62937,7 @@ async function handleApi(req, res) {
       await postgres.saveOrder(order);
     }
     if (order) clearOrderApiCache(order.id);
+    void recordUserActivity(req, authUser, { eventType: "returns", action: body.receiptOnly ? "Received return" : restocked ? "Restocked return" : "Updated return", entityType: "return", entityId: record.id, metadata: { returnNumber: record.returnNumber || "", warehouseId: record.warehouseId || "", attachmentCount: Array.isArray(body.attachments) ? body.attachments.length : 0 } });
     return sendJson(res, 200, { return: record, vendorReturnLinks });
     } finally { await releaseReturnLock(); }
   }
@@ -73509,6 +73519,7 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[3] === "returns") {
     const body = await parseBody(req);
+    const actingUser = currentAuthUser(req)?.name || currentAuthUser(req)?.username || body.user || "System";
     const order = db.orders.find((row) => row.id === parts[2]);
     if (!order) return notFound(res);
     const warehouseValue = String(
@@ -73541,7 +73552,7 @@ async function handleApi(req, res) {
     if (!items.length) return sendJson(res, 400, { error: "Select at least one returned line item." });
     const attachmentError = validateReturnAttachments(body.attachments || []);
     if (attachmentError) return sendJson(res, 400, { error: attachmentError });
-    const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReturnAttachment(file, body.user || "Luis"));
+    const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReturnAttachment(file, actingUser));
     const returnAmount = Number(body.amount || order.total || 0);
     const policyFields = returnPolicyFields(body, returnAmount, readSystemSettingsStore(db.systemSettings || {}));
     const record = {
@@ -73567,7 +73578,8 @@ async function handleApi(req, res) {
       returnLabelStatus: body.returnLabelPolicy === "merchant_provided" ? "quote_needed" : "not_required",
       returnShippingQuotes: [],
       createdAt: String(body.createdAt || new Date().toISOString().slice(0, 10)),
-      createdBy: body.user || "Luis",
+      createdBy: actingUser,
+      updatedBy: actingUser,
       receivedAt: "",
       receivedBy: "",
       binLocation: "",
@@ -73580,6 +73592,7 @@ async function handleApi(req, res) {
       resolvedBy: "",
       restockedAt: ""
     };
+    appendReturnChangeHistory(record, {}, { user: actingUser, action: "created", title: "Return created", createdAt: record.createdAt, force: true });
     db.returns = Array.isArray(db.returns) ? db.returns : [];
     db.returns.unshift(record);
     order.returnWarehouseId = warehouse.id;
@@ -73588,7 +73601,7 @@ async function handleApi(req, res) {
       type: "return",
       title: "Return created",
       message: `${record.returnNumber} created for ${warehouse.name}.${record.reason ? ` ${record.reason}` : ""}${attachments.length ? ` ${attachments.length} attachment${attachments.length === 1 ? "" : "s"} saved.` : ""}`,
-      user: body.user || "Luis"
+      user: actingUser
     });
     await writeDb(db);
     return sendJson(res, 200, { return: record, state: publicState(db) });
@@ -73657,6 +73670,8 @@ async function handleApi(req, res) {
     if (body.receiptOnly) return sendJson(res, 503, { error: "Return receiving requires PostgreSQL." });
     const record = (db.returns || []).find((row) => row.id === parts[2]);
     if (!record) return notFound(res);
+    const actingUser = currentAuthUser(req)?.name || currentAuthUser(req)?.username || body.user || "System";
+    const beforeAudit = returnChangeSnapshot(record);
     const order = (db.orders || []).find((row) => row.id === record.orderId);
     const normalizedStatus = body.status !== undefined
       ? (["resolved", "done"].includes(String(body.status || "").trim().toLowerCase()) ? "done" : String(body.status || record.status).trim())
@@ -73693,7 +73708,7 @@ async function handleApi(req, res) {
     if (Array.isArray(body.attachments) && body.attachments.length) {
       const attachmentError = validateReturnAttachments(body.attachments);
       if (attachmentError) return sendJson(res, 400, { error: attachmentError });
-      const nextAttachments = body.attachments.map((file) => normalizeReturnAttachment(file, body.user || "Luis"));
+      const nextAttachments = body.attachments.map((file) => normalizeReturnAttachment(file, actingUser));
       const existing = new Map(record.attachments.map((file) => [file.id, file]));
       nextAttachments.forEach((file) => existing.set(file.id, file));
       record.attachments = Array.from(existing.values());
@@ -73705,7 +73720,6 @@ async function handleApi(req, res) {
         record.warehouseName = warehouse.name;
       }
     }
-    const actingUser = body.user || "Luis";
     if (record.status === "received" && !record.receivedAt) {
       record.receivedAt = new Date().toISOString().slice(0, 10);
     }
@@ -73770,6 +73784,9 @@ async function handleApi(req, res) {
         user: actingUser
       });
     }
+    record.updatedAt = new Date().toISOString();
+    record.updatedBy = actingUser;
+    appendReturnChangeHistory(record, beforeAudit, { user: actingUser, restocked, createdAt: record.updatedAt });
     await writeDb(db);
     return sendJson(res, 200, { return: record, state: publicState(db) });
   }

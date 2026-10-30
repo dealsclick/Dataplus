@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { findReturnReceipts } = require('../lib/return-receiving-lookup');
-const { validateReturnReceipt, returnNeedsAttention } = require('../lib/return-workflow');
+const { validateReturnReceipt, returnNeedsAttention, returnChangeSnapshot, appendReturnChangeHistory } = require('../lib/return-workflow');
 test('receiving lookup route is registered before the generic return detail route', () => {
   const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const receivingLookupRoute = serverSource.indexOf('url.pathname === "/api/returns/receiving-lookup"');
@@ -73,5 +73,19 @@ test('receiving requires every expected line, bounded quantities and physical lo
   assert.match(validateReturnReceipt(record, { ...body, receiptOnly: true, status: 'done' }, [warehouse]), /separate/);
   assert.match(validateReturnReceipt({ ...record, restockedAt: 'today' }, { ...body, receiptOnly: true }, [warehouse]), /restocked/);
   assert.match(validateReturnReceipt(record, { ...body, receiptOnly: true, attachments: [{ dataUrl: 'data:text/html;base64,AAAA' }] }, [warehouse]), /photos/);
+  assert.match(validateReturnReceipt(record, { ...body, receiptOnly: true, condition: 'New', disposition: 'restock', attachments: [] }, [warehouse]), /one photo/);
+  assert.equal(validateReturnReceipt(record, { ...body, receiptOnly: true, condition: 'New', disposition: 'restock', attachments: [{ dataUrl: 'data:image/jpeg;base64,AAAA' }] }, [warehouse]), '');
   assert.match(validateReturnReceipt({ items: [{ sku: 'A', qty: 2, receivedQty: 2 }, record.items[1]] }, { ...body, receiptOnly: true }, [warehouse]), /reduced/);
+});
+test('return activity records the authenticated user and changed fields', () => {
+  const record = { status: 'requested', items: [{ sku: 'A', qty: 2, receivedQty: 0 }], attachments: [] };
+  const before = returnChangeSnapshot(record);
+  record.status = 'received';
+  record.receivedBy = 'Warehouse User';
+  record.items[0].receivedQty = 1;
+  const event = appendReturnChangeHistory(record, before, { user: 'Warehouse User', receiptOnly: true, createdAt: '2026-10-30T12:00:00.000Z' });
+  assert.equal(event.user, 'Warehouse User');
+  assert.equal(event.action, 'received');
+  assert.deepEqual(event.changes.map(change => change.field), ['status', 'receivedBy', 'items']);
+  assert.equal(record.changeHistory[0].createdAt, '2026-10-30T12:00:00.000Z');
 });
