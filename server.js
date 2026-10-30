@@ -20517,10 +20517,15 @@ async function runShippingReportFactsRefreshWorkerJob(job = {}) {
   const batchSize = Math.max(25, Math.min(1000, Number(payload.batchSize || 250) || 250));
   let status = await postgres.shippingReportingFactsStatus();
   const requestedRebuild = payload.rebuild === true;
-  const rebuild = requestedRebuild || status.status !== "complete";
+  const requestedAt = Date.parse(String(job.createdAt || job.queuedAt || ""));
+  const completedAt = Date.parse(String(status.lastCompletedAt || ""));
+  const staleRebuildRequest = requestedRebuild
+    && status.status === "complete"
+    && (!Number.isFinite(requestedAt) || !Number.isFinite(completedAt) || requestedAt <= completedAt);
+  const rebuild = status.status !== "complete" || (requestedRebuild && !staleRebuildRequest);
   let reset = payload.reset === true
     || status.status === "pending"
-    || (requestedRebuild && status.status === "complete");
+    || (requestedRebuild && !staleRebuildRequest && status.status === "complete");
   let processedOrders = 0;
   let rowsWritten = 0;
   let current = await persistWorkerImportJob(job, {
@@ -20603,6 +20608,8 @@ async function queueShippingReportFactsRefreshJob(db = {}, options = {}) {
     workerTask: shouldRunJobsInline() ? "" : "shipping-report-facts-refresh",
     workerPayload: { rebuild: options.rebuild === true, reset: options.reset === true, batchSize: Number(options.batchSize || 250), scheduled: options.scheduled === true, background: true }
   };
+  const activeTaskJob = await findActiveImportJobByWorkerTask(db, "shipping-report-facts-refresh");
+  if (activeTaskJob) return normalizeImportJob({ ...activeTaskJob, duplicateOfActiveJob: true });
   const duplicate = await findActiveDuplicateImportJob(db, attrs);
   if (duplicate) return normalizeImportJob({ ...duplicate, duplicateOfActiveJob: true });
   const job = createImportJob(db, {

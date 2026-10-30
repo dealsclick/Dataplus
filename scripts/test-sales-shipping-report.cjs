@@ -102,6 +102,8 @@ test("shipping reporting uses rebuildable indexed facts after an atomic backfill
   assert.match(db, /shippingReportingFactsReady/);
   assert.match(db, /factSource: useFacts \? "shipping_report_facts" : "live_projection"/);
   assert.match(server, /async function runShippingReportFactsRefreshWorkerJob/);
+  assert.match(server, /const staleRebuildRequest = requestedRebuild[\s\S]*requestedAt <= completedAt/);
+  assert.match(server, /findActiveImportJobByWorkerTask\(db, "shipping-report-facts-refresh"\)/);
   assert.match(server, /async function maybeQueueShippingReportFactsRefresh/);
   assert.match(worker, /"shipping-report-facts-refresh"/);
   assert.match(worker, /dataplus\.runShippingReportFactsRefreshWorkerJob\(job\)/);
