@@ -1427,34 +1427,6 @@ async function initRelationalSchema() {
     values ('shipping-report', 'pending')
     on conflict (fact_name) do nothing;
 
-    create or replace function mark_shipping_report_fact_dirty() returns trigger as $$
-    declare
-      affected_order_id text;
-    begin
-      affected_order_id := case when tg_op = 'DELETE' then old.order_id else new.order_id end;
-      if nullif(affected_order_id, '') is not null then
-        insert into reporting_fact_dirty_orders (fact_name, order_id, reason, enqueued_at)
-        values ('shipping-report', affected_order_id, tg_table_name, now())
-        on conflict (fact_name, order_id) do update set reason = excluded.reason, enqueued_at = excluded.enqueued_at;
-      end if;
-      if tg_op = 'DELETE' then return old; end if;
-      return new;
-    end;
-    $$ language plpgsql;
-
-    do $$
-    declare
-      table_name text;
-      trigger_name text;
-    begin
-      foreach table_name in array array['order_records', 'order_line_items', 'order_shipment_financials', 'order_shipping_revenue', 'order_shipment_tracking', 'shipping_settlement_lines'] loop
-        trigger_name := table_name || '_shipping_report_dirty';
-        if not exists (select 1 from pg_trigger where tgname = trigger_name and not tgisinternal) then
-          execute format('create trigger %I after insert or update or delete on %I for each row execute function mark_shipping_report_fact_dirty()', trigger_name, table_name);
-        end if;
-      end loop;
-    end $$;
-
     create table if not exists shipping_dispute_batches (
       batch_id text primary key,
       batch_number bigserial unique,
@@ -1893,6 +1865,34 @@ async function initRelationalSchema() {
     );
     create index if not exists order_line_items_order_idx on order_line_items (order_id, line_index);
     create index if not exists order_line_items_sku_idx on order_line_items (lower(sku));
+
+    create or replace function mark_shipping_report_fact_dirty() returns trigger as $$
+    declare
+      affected_order_id text;
+    begin
+      affected_order_id := case when tg_op = 'DELETE' then old.order_id else new.order_id end;
+      if nullif(affected_order_id, '') is not null then
+        insert into reporting_fact_dirty_orders (fact_name, order_id, reason, enqueued_at)
+        values ('shipping-report', affected_order_id, tg_table_name, now())
+        on conflict (fact_name, order_id) do update set reason = excluded.reason, enqueued_at = excluded.enqueued_at;
+      end if;
+      if tg_op = 'DELETE' then return old; end if;
+      return new;
+    end;
+    $$ language plpgsql;
+
+    do $$
+    declare
+      table_name text;
+      trigger_name text;
+    begin
+      foreach table_name in array array['order_records', 'order_line_items', 'order_shipment_financials', 'order_shipping_revenue', 'order_shipment_tracking', 'shipping_settlement_lines'] loop
+        trigger_name := table_name || '_shipping_report_dirty';
+        if not exists (select 1 from pg_trigger where tgname = trigger_name and not tgisinternal) then
+          execute format('create trigger %I after insert or update or delete on %I for each row execute function mark_shipping_report_fact_dirty()', trigger_name, table_name);
+        end if;
+      end loop;
+    end $$;
 
     create table if not exists purchase_order_records (
       po_id text primary key,
