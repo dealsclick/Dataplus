@@ -32,4 +32,6 @@ assert.match(serverSource, /url\.pathname === "\/api\/orders\/tracking-lookup"[\
 const returnReceivingSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'return-receiving.tsx'), 'utf8');
 assert.match(returnReceivingSource, /TrackingCameraLookup[\s\S]*scope="returns"/, 'return receiving must use the shared tracking scanner');
 assert.doesNotMatch(returnReceivingSource, /BrowserMultiFormatReader|decodeFromConstraints/, 'return receiving must not create a separate camera scanner');
+const returnsWorkspaceSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'returns-workspace.tsx'), 'utf8');
+assert.match(returnsWorkspaceSource, /TrackingCameraLookup scope="all" label="Scan tracking"/, 'the main returns toolbar must expose tracking scans for both returns and linked orders');
 console.log('tracking barcode lookup tests passed');
