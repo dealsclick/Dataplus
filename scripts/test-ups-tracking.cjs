@@ -2,7 +2,7 @@ const assert = require("node:assert/strict")
 
 const { parseTrackingResponse } = require("../lib/ups-rating")
 
-function response(currentStatus, activities = []) {
+function response(currentStatus, activities = [], packagePatch = {}) {
   return {
     trackResponse: {
       shipment: [{
@@ -10,6 +10,7 @@ function response(currentStatus, activities = []) {
           trackingNumber: "1Z999AA10123456784",
           currentStatus: { description: currentStatus },
           activity: activities,
+          ...packagePatch,
         }],
       }],
     },
@@ -44,8 +45,25 @@ const delivered = parseTrackingResponse(response("Delivered", [{
   gmtTime: "151500",
   gmtOffset: "-04:00",
   status: { description: "Delivered" },
-}]), "1Z999AA10123456784")
+}], {
+  service: { description: "UPS Ground" },
+  deliveryInformation: {
+    location: "Front Door",
+    receivedBy: "J SMITH",
+    signature: { image: Buffer.from("signature").toString("base64") },
+    deliveryPhoto: { photo: Buffer.from("photo").toString("base64"), photoDispositionCode: "V" },
+    pod: { content: Buffer.from("%PDF-proof").toString("base64") },
+  },
+}), "1Z999AA10123456784")
 assert.equal(delivered.status, "delivered")
 assert.equal(delivered.physicalScan, true)
+assert.equal(delivered.service, "UPS Ground")
+assert.equal(delivered.deliveryEvidence.location, "Front Door")
+assert.equal(delivered.deliveryEvidence.receivedBy, "J SMITH")
+assert.equal(delivered.deliveryEvidence.hasProofOfDelivery, true)
+assert.equal(delivered.deliveryEvidence.hasDeliveryPhoto, true)
+assert.equal(delivered.deliveryEvidence.hasSignatureImage, true)
+assert.equal(delivered.deliveryEvidence.artifacts.length, 3)
+assert.equal(delivered.activities[0].description, "Delivered")
 
 console.log("UPS tracking parser tests passed")

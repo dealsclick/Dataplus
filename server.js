@@ -106,6 +106,7 @@ const { createCarrierCredentials } = require("./lib/carrier-credentials");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
 const shippingDisputeStore = createShippingDisputeStore(() => postgres.getPool(), { ensureSchema: () => postgres.initRelationalSchema() });
 const outboundAuditStore = createOutboundAuditStore(() => postgres.getPool(), { ensureSchema: () => postgres.initRelationalSchema() });
+const { storeUpsDeliveryEvidence } = require("./lib/ups-delivery-evidence");
 const { createAccountingHandler, accountingPermission } = require("./lib/accounting-http");
 const accountingHandler = createAccountingHandler({
   store: createAccountingStore(() => postgres.getPool()),
@@ -19575,15 +19576,15 @@ function safeOrderAttachmentName(fileName, fallback = "attachment") {
 
 function orderAttachmentMimeType(value = "") {
   const mime = String(value || "").toLowerCase().trim();
-  const allowed = new Set(["application/pdf", "text/plain", "text/csv", "image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
+  const allowed = new Set(["application/json", "application/pdf", "text/plain", "text/csv", "image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"]);
   return allowed.has(mime) ? mime : "application/octet-stream";
 }
 
 function orderAttachmentExtension(fileName = "", mimeType = "") {
   const extension = path.extname(safeOrderAttachmentName(fileName)).replace(/[^a-z0-9.]/gi, "").toLowerCase();
-  const allowedExtensions = new Set([".pdf", ".txt", ".csv", ".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"]);
+  const allowedExtensions = new Set([".json", ".pdf", ".txt", ".csv", ".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"]);
   if (allowedExtensions.has(extension)) return extension;
-  return { "application/pdf": ".pdf", "text/plain": ".txt", "text/csv": ".csv", "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/heic": ".heic", "image/heif": ".heif" }[mimeType] || ".bin";
+  return { "application/json": ".json", "application/pdf": ".pdf", "text/plain": ".txt", "text/csv": ".csv", "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/heic": ".heic", "image/heif": ".heif" }[mimeType] || ".bin";
 }
 
 function attachImportJobOriginalFile(job, content = "", fileName = "") {
@@ -29867,6 +29868,57 @@ function applyCarrierShipmentConfirmation({ order, shipment, trackingStatus, car
   return { newlyConfirmed: !previouslyConfirmed, previousStatus };
 }
 
+async function refreshUpsShipmentTracking({ order, shipment, actor = "UPS tracking refresh" }) {
+  const trackingNumber = String(shipment.trackingNumber || "").trim();
+  if (!trackingNumber) throw new Error("The UPS tracking number is missing.");
+  const previousTrackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
+  const previousPhysicalScanAt = String(shipment.carrierPhysicalScanAt || "");
+  const tracking = await upsRating.trackShipment(trackingNumber, process.env, carrierCredentials.getUps());
+  const now = new Date().toISOString();
+  const effectiveTrackingStatus = tracking.physicalScan && tracking.status === "delayed" ? "in_transit" : tracking.status;
+  const confirmed = tracking.physicalScan || carrierStatusConfirmsShipment(tracking.status);
+  const confirmation = applyCarrierShipmentConfirmation({
+    order,
+    shipment,
+    trackingStatus: effectiveTrackingStatus,
+    carrierStatus: tracking.statusDescription,
+    carrier: shipment.carrierName || shipment.carrier || "UPS",
+    trackingNumber,
+    confirmed,
+    occurredAt: tracking.physicalScanAt || tracking.latestActivityAt,
+    actor
+  });
+  shipment.carrierName = shipment.carrierName || shipment.carrier || "UPS";
+  shipment.carrier = shipment.carrier || "UPS";
+  shipment.carrierStatus = tracking.statusDescription;
+  shipment.trackingStatus = effectiveTrackingStatus;
+  shipment.carrierTrackingSource = tracking.source;
+  shipment.carrierTrackingSourceLabel = "Direct UPS";
+  shipment.carrierLatestActivity = tracking.latestActivity;
+  shipment.carrierLatestActivityAt = tracking.latestActivityAt;
+  shipment.carrierActivityCount = Number(tracking.activityCount || 0);
+  if (tracking.physicalScanAt) shipment.carrierPhysicalScanAt = tracking.physicalScanAt;
+  shipment.trackingCheckedAt = now;
+  shipment.trackingRefreshError = "";
+  shipment.updatedAt = now;
+  let storedEvidence = null;
+  if (effectiveTrackingStatus === "delivered") {
+    storedEvidence = storeUpsDeliveryEvidence(order, shipment, tracking, {
+      attachmentDir: ORDER_ATTACHMENT_DIR,
+      attachmentUrl: (documentId) => `/api/orders/${encodeURIComponent(order.id)}/attachments/${documentId}`,
+      capturedAt: now,
+    });
+  }
+  return {
+    tracking,
+    effectiveTrackingStatus,
+    confirmation,
+    storedEvidence,
+    statusChanged: effectiveTrackingStatus !== previousTrackingStatus,
+    physicalScanAdded: !previousPhysicalScanAt && Boolean(tracking.physicalScanAt),
+  };
+}
+
 async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, actor = "Scheduled carrier refresh", allowLabelFallback = true, includeLegacyRecovery = true, checkedBefore = "", trackingOnly = false } = {}) {
   if (!postgres.isPostgresEnabled()) return { checked: 0, updated: 0, confirmed: 0, failed: 0 };
   if (fulfillmentTrackingRefreshPromise) return fulfillmentTrackingRefreshPromise;
@@ -30032,7 +30084,8 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
       const upsTracking = Boolean(trackingNumber && (/^1z/i.test(trackingNumber) || /\bups\b/i.test(carrier) || provider === "ups" || provider === "ups_direct"));
       if (upsTracking && shipment.voidStatus !== "voided") {
         const normalizedStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
-        if (normalizedStatus !== "delivered") candidates.push({ order, shipment, provider: "ups", sourceProvider: provider, packageSnList: [], checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0 });
+        const needsDeliveryEvidence = normalizedStatus === "delivered" && !shipment.deliveryEvidence?.trackingReportAvailable;
+        if (normalizedStatus !== "delivered" || needsDeliveryEvidence) candidates.push({ order, shipment, provider: "ups", sourceProvider: provider, packageSnList: [], checkedAt: Number.isFinite(checkedAt) ? checkedAt : 0 });
         continue;
       }
       if (provider !== "veeqo" || shipment.voidStatus === "voided") continue;
@@ -30111,45 +30164,18 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
         const trackingNumber = String(shipment.trackingNumber || "").trim();
         const apiPath = `/api/track/v1/details/${encodeURIComponent(trackingNumber)}`;
         try {
-          const previousTrackingStatus = normalizeCarrierTrackingStatus(shipment.trackingStatus || shipment.carrierStatus || shipment.status);
-          const previousPhysicalScanAt = String(shipment.carrierPhysicalScanAt || "");
-          const tracking = await upsRating.trackShipment(trackingNumber, process.env, carrierCredentials.getUps());
-          const now = new Date().toISOString();
-          const effectiveTrackingStatus = tracking.physicalScan && tracking.status === "delayed" ? "in_transit" : tracking.status;
-          const confirmed = tracking.physicalScan || carrierStatusConfirmsShipment(tracking.status);
-          const confirmation = applyCarrierShipmentConfirmation({
-            order,
-            shipment,
-            trackingStatus: effectiveTrackingStatus,
-            carrierStatus: tracking.statusDescription,
-            carrier: shipment.carrierName || shipment.carrier || "UPS",
-            trackingNumber,
-            confirmed,
-            occurredAt: tracking.physicalScanAt || tracking.latestActivityAt,
-            actor
-          });
-          shipment.carrierName = shipment.carrierName || shipment.carrier || "UPS";
-          shipment.carrier = shipment.carrier || "UPS";
-          shipment.carrierStatus = tracking.statusDescription;
-          shipment.trackingStatus = effectiveTrackingStatus;
-          shipment.carrierTrackingSource = tracking.source;
-          shipment.carrierLatestActivity = tracking.latestActivity;
-          shipment.carrierLatestActivityAt = tracking.latestActivityAt;
-          shipment.carrierActivityCount = Number(tracking.activityCount || 0);
-          if (tracking.physicalScanAt) shipment.carrierPhysicalScanAt = tracking.physicalScanAt;
-          shipment.trackingCheckedAt = now;
-          shipment.trackingRefreshError = "";
-          shipment.updatedAt = now;
+          const result = await refreshUpsShipmentTracking({ order, shipment, actor });
+          const { tracking, effectiveTrackingStatus, confirmation } = result;
           summary.checked += 1;
-          if (effectiveTrackingStatus !== previousTrackingStatus || (!previousPhysicalScanAt && tracking.physicalScanAt)) summary.updated += 1;
+          if (result.statusChanged || result.physicalScanAdded || result.storedEvidence) summary.updated += 1;
           if (confirmation.newlyConfirmed) summary.confirmed += 1;
           const needsWalmartTrackingSync = String(order.source || "").trim().toLowerCase() === "walmart" && walmartShipmentNeedsTrackingSync(shipment);
           if (shouldSyncRecoveredTracking(shipment) || needsWalmartTrackingSync) await syncDropshipShipmentToChannel(db, order, shipment, actor);
-          order.updatedAt = now;
+          order.updatedAt = shipment.updatedAt;
           await postgres.saveOrder(order);
           clearOrderApiCache(order.id);
           invalidateFulfillmentConsoleSnapshot([order.id]);
-          appendChannelApiLog({ channel: "UPS", transport: "HTTP", method: "GET", path: apiPath, operation: "Check carrier scan", statusCode: 200, ok: true, entityType: "order", entityId: order.id, message: `${trackingNumber}: ${tracking.statusDescription}${tracking.physicalScan ? " (physical scan)" : ""}.`, details: { sourceProvider: sourceProvider || "", transactionId: tracking.transactionId } });
+          appendChannelApiLog({ channel: "UPS", transport: "HTTP", method: "GET", path: apiPath, operation: "Check carrier scan", statusCode: 200, ok: true, entityType: "order", entityId: order.id, message: `${trackingNumber}: ${tracking.statusDescription}${tracking.physicalScan ? " (physical scan)" : ""}.`, details: { sourceProvider: sourceProvider || "", transactionId: tracking.transactionId, deliveryEvidenceDocuments: result.storedEvidence?.documents?.length || 0 } });
         } catch (error) {
           summary.failed += 1;
           summary.errors.push({ orderId: order.id, shipmentId: shipment.id, message: error.message || "UPS carrier scan check failed." });
@@ -32126,7 +32152,7 @@ let fulfillmentConsoleProjectionReconciliationPromise = null;
 const fulfillmentConsoleProjectionPendingOrderIds = new Set();
 const FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS = 30 * 60_000;
 const FULFILLMENT_CONSOLE_SNAPSHOT_DIRTY_COOLDOWN_MS = 30_000;
-const FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 5;
+const FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 6;
 const SYSTEM_PERFORMANCE_RETENTION_MS = 60 * 60_000;
 const SYSTEM_PERFORMANCE_MAX_SERVER_SAMPLES = 600;
 const SYSTEM_PERFORMANCE_MAX_CLIENT_SAMPLES = 300;
@@ -32988,7 +33014,8 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
         documentType: document.documentType || "",
         name: document.name || "",
         url: document.url || "",
-        format: document.format || ""
+        format: document.format || "",
+        mimeType: document.mimeType || ""
       })),
       orderId: order.id,
       orderNumber: order.orderNumber || order.id,
@@ -33012,6 +33039,11 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
       destination: order.address || order.shippingAddress || order.shipping_address || {},
       trackingStatus,
       carrierStatus: shipment.carrierStatus || "",
+      carrierTrackingSource: shipment.carrierTrackingSource || "",
+      carrierTrackingSourceLabel: shipment.carrierTrackingSourceLabel || (shipment.carrierTrackingSource === "ups_api" ? "Direct UPS" : shipment.carrierTrackingSource === "veeqo" ? "Veeqo" : ""),
+      carrierLatestActivity: shipment.carrierLatestActivity || "",
+      carrierLatestActivityAt: shipment.carrierLatestActivityAt || "",
+      deliveryEvidence: shipment.deliveryEvidence && typeof shipment.deliveryEvidence === "object" ? shipment.deliveryEvidence : null,
       trackingCheckedAt: shipment.trackingCheckedAt || "",
       trackingRefreshError: shipment.trackingRefreshError || "",
       labelPrintedAt: shipment.labelPrintedAt || (String(printJob?.status || "").toLowerCase() === "printed" ? printJob?.printedAt || "" : ""),
@@ -59286,6 +59318,52 @@ async function handleApi(req, res) {
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
     return sendJson(res, 201, { order, document });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipments" && parts[4] && parts[5] === "ups-tracking" && parts[6] === "refresh" && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    const shipment = (Array.isArray(order.shipments) ? order.shipments : []).find((entry) => String(entry.id || "") === String(parts[4]));
+    if (!shipment) return notFound(res);
+    const trackingNumber = String(shipment.trackingNumber || "").trim();
+    const carrier = String(shipment.carrierName || shipment.carrier || "").trim();
+    if (!/^1z[0-9a-z]{16}$/i.test(trackingNumber.replace(/\s+/g, "")) && !/\bups\b/i.test(carrier)) {
+      return sendJson(res, 400, { error: "This shipment is not identified as UPS." });
+    }
+    try {
+      const actor = String(authUser?.name || authUser?.username || "DataPlus user");
+      const hadEvidence = Boolean(shipment.deliveryEvidence?.trackingReportAvailable);
+      const result = await refreshUpsShipmentTracking({ order, shipment, actor });
+      order.updatedAt = shipment.updatedAt;
+      if (result.storedEvidence && !hadEvidence) {
+        addOrderTimeline(order, { type: "document", title: "UPS delivery evidence saved", message: `${result.storedEvidence.documents.length} UPS tracking and delivery evidence file${result.storedEvidence.documents.length === 1 ? "" : "s"} saved for ${trackingNumber}.`, user: actor });
+      }
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      invalidateFulfillmentConsoleSnapshot([order.id]);
+      appendChannelApiLog({ channel: "UPS", transport: "HTTP", method: "GET", path: `/api/track/v1/details/${encodeURIComponent(trackingNumber)}`, operation: "Refresh UPS tracking and delivery evidence", statusCode: 200, ok: true, entityType: "order", entityId: order.id, message: `${trackingNumber}: ${result.tracking.statusDescription}.`, details: { transactionId: result.tracking.transactionId, deliveryEvidenceDocuments: result.storedEvidence?.documents?.length || 0 } });
+      const evidenceCount = result.storedEvidence?.documents?.length || 0;
+      return sendJson(res, 200, {
+        message: result.effectiveTrackingStatus === "delivered"
+          ? `UPS delivery confirmed. ${evidenceCount} evidence file${evidenceCount === 1 ? "" : "s"} saved.`
+          : `UPS tracking refreshed: ${result.tracking.statusDescription}.`,
+        tracking: {
+          status: result.effectiveTrackingStatus,
+          statusDescription: result.tracking.statusDescription,
+          checkedAt: shipment.trackingCheckedAt,
+          source: "ups_api",
+        },
+        deliveryEvidence: shipment.deliveryEvidence || null,
+      });
+    } catch (error) {
+      shipment.trackingCheckedAt = new Date().toISOString();
+      shipment.trackingRefreshError = error.message || "UPS tracking refresh failed.";
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      invalidateFulfillmentConsoleSnapshot([order.id]);
+      appendChannelApiLog({ channel: "UPS", transport: "HTTP", method: "GET", path: `/api/track/v1/details/${encodeURIComponent(trackingNumber)}`, operation: "Refresh UPS tracking and delivery evidence failed", statusCode: 502, ok: false, entityType: "order", entityId: order.id, message: shipment.trackingRefreshError });
+      return sendJson(res, 502, { error: shipment.trackingRefreshError });
+    }
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "attachments" && parts[4] && postgres.isPostgresEnabled()) {
