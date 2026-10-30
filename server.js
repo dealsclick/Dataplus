@@ -8612,6 +8612,30 @@ function productImageUrls(item = {}) {
   return [...new Set(images.map((image) => String(image || "").trim()).filter((image) => /^https?:\/\//i.test(image)))];
 }
 
+async function enrichReturnItemCatalogImages(records = []) {
+  const source = Array.isArray(records) ? records : [];
+  const skus = [...new Set(source.flatMap((record) => (record.items || [])
+    .map((line) => String(line.sku || "").trim())).filter(Boolean))];
+  const products = postgres.isPostgresEnabled() && skus.length
+    ? await postgres.readProductsByKeys(skus, { includeMarketplaceIds: false }).catch(() => [])
+    : [];
+  const imageBySku = new Map(products.map((product) => [
+    String(product.sku || "").trim().toLowerCase(),
+    compactCatalogImageUrl(product)
+  ]));
+  return source.map((record) => ({
+    ...record,
+    items: (record.items || []).map((line) => {
+      const sku = String(line.sku || "").trim();
+      const storedImage = String(line.defaultImage || line.productImage || line.imageUrl || line.image || "").trim();
+      const defaultImage = /^data:image\//i.test(storedImage) && sku
+        ? `/api/inventory/${encodeURIComponent(sku)}/image`
+        : storedImage || imageBySku.get(sku.toLowerCase()) || "";
+      return { ...line, defaultImage };
+    })
+  }));
+}
+
 function auditProductImageUrl(product = {}, sourceItem = {}) {
   product = product && typeof product === "object" ? product : {};
   sourceItem = sourceItem && typeof sourceItem === "object" ? sourceItem : {};
@@ -61690,22 +61714,7 @@ async function handleApi(req, res) {
     const matches = postgres.isPostgresEnabled()
       ? await postgres.findReturnsForReceiving(query, { limit: 50, trackingCandidates: trackingLookupCandidates(query) })
       : findReturnReceipts((await readDb()).returns || [], query).slice(0, 50);
-    const skus = [...new Set(matches.flatMap((record) => (record.items || []).map((line) => String(line.sku || "").trim())).filter(Boolean))];
-    const products = postgres.isPostgresEnabled() && skus.length
-      ? await postgres.readProductsByKeys(skus, { includeMarketplaceIds: false }).catch(() => [])
-      : [];
-    const imageBySku = new Map(products.map((product) => [String(product.sku || "").trim().toLowerCase(), compactCatalogImageUrl(product)]));
-    const enriched = matches.map((record) => ({
-      ...record,
-      items: (record.items || []).map((line) => {
-        const sku = String(line.sku || "").trim();
-        const storedImage = String(line.defaultImage || line.productImage || line.imageUrl || line.image || "").trim();
-        const defaultImage = /^data:image\//i.test(storedImage) && sku
-          ? `/api/inventory/${encodeURIComponent(sku)}/image`
-          : storedImage || imageBySku.get(sku.toLowerCase()) || "";
-        return { ...line, defaultImage };
-      })
-    }));
+    const enriched = await enrichReturnItemCatalogImages(matches);
     return sendJson(res, 200, { returns: enriched, total: enriched.length });
   }
 
@@ -62617,7 +62626,7 @@ async function handleApi(req, res) {
         ? postgres.findReturnsForReceiving(canonicalTrackingValue(query) || query, { limit: 20, trackingCandidates: candidates, exactOnly: true })
         : Promise.resolve([])
     ]);
-    const returnMatches = returnsWithPublicSlugs(rawReturnMatches).slice(0, 20);
+    const returnMatches = returnsWithPublicSlugs(await enrichReturnItemCatalogImages(rawReturnMatches)).slice(0, 20);
     const orders = orderMatches.map(({ order, shipmentId, trackingNumber, provider }) => ({
       id: String(order.id || ""),
       orderNumber: String(order.orderNumber || order.internalOrderNumber || order.id || ""),

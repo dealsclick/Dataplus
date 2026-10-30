@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Camera, CheckCircle2, ExternalLink, Flashlight, Keyboard, Loader2, PackageCheck, RotateCcw, Search, XCircle } from "lucide-react"
+import { Camera, CheckCircle2, ExternalLink, Flashlight, Keyboard, Loader2, MapPin, Package, PackageCheck, RotateCcw, Search, UserRound, XCircle } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -28,6 +28,36 @@ type TrackingCameraLookupProps = {
 }
 
 function value(row: Row, key: string) { return String(row[key] || "").trim() }
+function objectValue(row: Row, key: string): Row {
+  const candidate = row[key]
+  return candidate && typeof candidate === "object" && !Array.isArray(candidate) ? candidate as Row : {}
+}
+function rowList(row: Row, key: string): Row[] { return Array.isArray(row[key]) ? row[key] as Row[] : [] }
+function firstValue(...values: unknown[]) { return values.map((entry) => String(entry || "").trim()).find(Boolean) || "" }
+
+function returnCustomer(record: Row) {
+  const customer = objectValue(record, "customer")
+  const address = objectValue(record, "shippingAddress")
+  return firstValue(record.customerName, record.buyer, customer.name, address.name)
+}
+
+function returnLocation(record: Row) {
+  const shippingAddress = objectValue(record, "shippingAddress")
+  const address = Object.keys(shippingAddress).length ? shippingAddress : objectValue(record, "address")
+  const city = firstValue(address.city, address.town)
+  const state = firstValue(address.state, address.province, address.region)
+  const postalCode = firstValue(address.postalCode, address.zip, address.postcode)
+  return [city, [state, postalCode].filter(Boolean).join(" ")].filter(Boolean).join(", ")
+}
+
+function returnLineItems(record: Row) {
+  return rowList(record, "items").map((item) => ({
+    sku: firstValue(item.sku, item.originalSku, item.channelSku),
+    title: firstValue(item.title, item.productName, item.description),
+    image: firstValue(item.defaultImage, item.productImage, item.imageUrl, item.image, rowList(item, "images")[0]),
+    qty: Math.max(1, Number(item.qty || item.quantity || 1))
+  }))
+}
 
 export function TrackingCameraLookup({ scope = "all", label = "Scan tracking", className, onReturnSelected }: TrackingCameraLookupProps) {
   const [open, setOpen] = useState(false)
@@ -179,7 +209,7 @@ export function TrackingCameraLookup({ scope = "all", label = "Scan tracking", c
           </div> : <div className="min-h-full bg-background p-4 text-foreground">
             <div className={`mb-4 flex items-start gap-3 rounded-md border p-3 ${Number(result.total || 0) ? "border-emerald-500/40 bg-emerald-500/5" : "border-destructive/40 bg-destructive/5"}`}>{Number(result.total || 0) ? <CheckCircle2 className="mt-0.5 size-5 text-emerald-600" /> : <XCircle className="mt-0.5 size-5 text-destructive" />}<div className="min-w-0"><p className="font-medium">{message}</p><p className="mt-1 break-all font-mono text-xs text-muted-foreground">Tracking {result.normalizedTracking || result.scannedValue || manualValue}</p>{result.ambiguous ? <p className="mt-1 text-xs text-amber-600">More than one record uses this tracking reference. Choose the correct record.</p> : null}</div></div>
             {orders.length ? <section className="grid gap-2"><h3 className="text-sm font-semibold">Orders</h3>{orders.map((order) => <div key={value(order, "id")} className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-semibold">Order {value(order, "orderNumber")}</span><Badge variant="outline">{value(order, "channel") || "Order"}</Badge><Badge variant="secondary">{value(order, "status") || "Unknown"}</Badge></div><p className="mt-1 truncate text-sm text-muted-foreground">{[value(order, "buyer"), value(order, "channelOrderNumber") && `Channel ${value(order, "channelOrderNumber")}`].filter(Boolean).join(" · ")}</p><p className="mt-1 break-all font-mono text-xs">{value(order, "carrier")} {value(order, "trackingNumber")}</p>{value(order, "orderDate") ? <p className="mt-1 text-xs text-muted-foreground">Ordered {dateLabel(value(order, "orderDate"))}</p> : null}</div><Button size="sm" asChild><a href={value(order, "href")}><ExternalLink className="size-4" /> Open order</a></Button></div>)}</section> : null}
-            {returns.length ? <section className={`grid gap-2 ${orders.length ? "mt-5" : ""}`}><h3 className="text-sm font-semibold">Returns</h3>{returns.map((record) => <div key={value(record, "id")} className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{value(record, "returnNumber") || value(record, "channelReturnId") || "Return"}</span><Badge variant="outline">{value(record, "source") || "Return"}</Badge><Badge variant="secondary">{value(record, "receivingStatus") || value(record, "status") || "Not received"}</Badge></div><p className="mt-1 text-sm text-muted-foreground">Order {value(record, "orderNumber") || value(record, "channelOrderId") || "Unmatched"}</p></div>{onReturnSelected ? <Button size="sm" onClick={() => { closeScanner(); onReturnSelected(record) }}><PackageCheck className="size-4" /> Receive return</Button> : <Button size="sm" asChild><a href={value(record, "receivingHref") || value(record, "href")}><PackageCheck className="size-4" /> Receive return</a></Button>}</div>)}</section> : null}
+            {returns.length ? <section className={`grid gap-2 ${orders.length ? "mt-5" : ""}`}><h3 className="text-sm font-semibold">Returns</h3>{returns.map((record) => { const customer = returnCustomer(record); const location = returnLocation(record); const items = returnLineItems(record); const channelRma = firstValue(record.channelReturnReference, record.channelReturnId, record.marketplaceReturnId); const dataPlusOrder = firstValue(record.orderNumber, record.orderId); const channelOrder = firstValue(record.channelOrderId, record.channelOrderNumber, record.marketplaceOrderId); return <article key={value(record, "id")} className="grid gap-3 rounded-md border p-3"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{value(record, "returnNumber") || channelRma || "Return"}</span><Badge variant="outline">{value(record, "source") || value(record, "channel") || "Return"}</Badge><Badge variant="secondary">{value(record, "receivingStatus") || value(record, "status") || "Not received"}</Badge></div></div>{onReturnSelected ? <Button size="sm" className="shrink-0" onClick={() => { closeScanner(); onReturnSelected(record) }}><PackageCheck className="size-4" /> Receive</Button> : <Button size="sm" className="shrink-0" asChild><a href={value(record, "receivingHref") || value(record, "href")}><PackageCheck className="size-4" /> Receive</a></Button>}</div><dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs"><div><dt className="text-muted-foreground">DataPlus order</dt><dd className="truncate font-medium">{dataPlusOrder || "Unmatched"}</dd></div><div><dt className="text-muted-foreground">Channel order</dt><dd className="truncate font-medium">{channelOrder || "Not provided"}</dd></div><div className="col-span-2"><dt className="text-muted-foreground">Channel RMA</dt><dd className="truncate font-medium">{channelRma || "Not provided"}</dd></div></dl>{customer ? <p className="flex min-w-0 items-center gap-2 text-sm"><UserRound className="size-4 shrink-0 text-muted-foreground" /><span className="truncate">{customer}</span></p> : null}{location ? <p className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground"><MapPin className="size-4 shrink-0" /><span className="truncate">{location}</span></p> : null}{items.length ? <div className="grid gap-2 border-t pt-3">{items.map((item, index) => <div key={`${item.sku}-${index}`} className="flex min-w-0 items-center gap-3">{item.image ? <a href={item.image} target="_blank" rel="noopener noreferrer" className="shrink-0"><img src={item.image} alt={item.title || item.sku} className="size-14 rounded-md border bg-background object-contain" /></a> : <span className="grid size-14 shrink-0 place-items-center rounded-md border bg-muted"><Package className="size-5 text-muted-foreground" /></span>}<div className="min-w-0"><p className="truncate font-mono text-xs font-semibold">{item.sku || "Unmatched SKU"}{item.qty > 1 ? ` × ${item.qty}` : ""}</p>{item.title ? <p className="truncate text-xs text-muted-foreground">{item.title}</p> : null}</div></div>)}</div> : null}</article> })}</section> : null}
           </div>}
         </div>
         <DialogFooter className="!m-0 shrink-0 !flex-col gap-2 rounded-none border-t bg-background px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 sm:!flex-row sm:items-center sm:justify-between">{result ? <Button className="w-full sm:w-auto" onClick={resetScanner}><RotateCcw className="size-4" /> Scan another</Button> : <span className="w-full text-xs text-muted-foreground sm:min-w-0 sm:flex-1 sm:truncate">{message}</span>}<Button className="w-full sm:w-auto" variant="outline" onClick={closeScanner}>Done</Button></DialogFooter>

@@ -48,6 +48,10 @@ assert.match(serverSource, /url\.pathname === "\/api\/orders\/tracking-lookup"[\
 assert.match(serverSource, /normalizedTracking: canonicalTrackingValue\(query\)/, 'tracking lookup must display the printed carrier number for composite barcodes');
 assert.match(serverSource, /Promise\.all\([\s\S]*readOrdersByTrackingCandidates\(candidates[\s\S]*findReturnsForReceiving\(canonicalTrackingValue\(query\)[\s\S]*exactOnly: true/, 'tracking lookup must query orders and returns once in parallel');
 assert.doesNotMatch(serverSource, /for \(const candidate of candidates\)[\s\S]*findReturnsForReceiving\(candidate/, 'tracking lookup must not repeat the return query for every barcode suffix');
+assert.match(serverSource, /enrichReturnItemCatalogImages\(rawReturnMatches\)/, 'tracking lookup must include catalog images for matched return SKUs');
+const trackingLookupSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'tracking-camera-lookup.tsx'), 'utf8');
+for (const label of ['Channel RMA', 'DataPlus order', 'Channel order']) assert.match(trackingLookupSource, new RegExp(label), `tracking result must show ${label}`);
+assert.match(trackingLookupSource, /returnCustomer\(record\)[\s\S]*returnLocation\(record\)[\s\S]*returnLineItems\(record\)/, 'tracking result must show customer, location and return items');
 const returnReceivingSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'return-receiving.tsx'), 'utf8');
 assert.match(returnReceivingSource, /TrackingCameraLookup[\s\S]*scope="all"/, 'return receiving must scan return tracking across linked returns and orders');
 assert.doesNotMatch(returnReceivingSource, /BrowserMultiFormatReader|decodeFromConstraints/, 'return receiving must not create a separate camera scanner');
