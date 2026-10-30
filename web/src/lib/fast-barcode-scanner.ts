@@ -25,7 +25,7 @@ export function trackingBarcodeConfidence(value: string, format = "") {
   if (!compact) return 0
   if (/^(?:1Z[A-Z0-9]{16}|TB[AMCD]\d{8,}|(?:GM|JVGL|JJD|JD)[A-Z0-9]{8,}|(?:SPX|SPD)[A-Z0-9]{8,}|(?:GF\d{10,}|GOFO[A-Z0-9]{6,})|SWIFTX[A-Z0-9]{6,})$/.test(compact)) return 180
   if (/^420\d{5,9}\d{18,34}$/.test(compact)) return 170
-  if (/^\d{34}$/.test(compact) && /^0{10,13}$/.test(compact.slice(9, 22))) return 165
+  if (/^(?:86|96)\d{32}$/.test(compact)) return 165
   if (/^\d{12}$/.test(compact) || /^\d{15}$/.test(compact)) return 155
   if (/^\d{20}$/.test(compact) || /^\d{22}$/.test(compact) || /^\d{26}$/.test(compact) || /^\d{30}$/.test(compact) || /^\d{34}$/.test(compact)) return 145
   // Pure 18-digit values on marketplace return labels are commonly RMA/SSCC

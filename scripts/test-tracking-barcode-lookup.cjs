@@ -23,10 +23,13 @@ assert.equal(canonicalTrackingValue('https://www.ups.com/track?tracknum=1Z999AA1
 // to the printed tracking number, including a structured scanner payload.
 const fedexReturnOne = '9632013760000000000000528864433447';
 const fedexReturnTwo = '8622013700000000000000797998753958';
+const fedexReturnLiveScan = '9632013760211031021200528867080771';
 assert.equal(canonicalTrackingValue(fedexReturnOne), '528864433447');
 assert.equal(canonicalTrackingValue(fedexReturnTwo), '797998753958');
 assert(trackingLookupCandidates(fedexReturnOne).includes('528864433447'));
 assert(trackingLookupCandidates(fedexReturnTwo).includes('797998753958'));
+assert.equal(canonicalTrackingValue(fedexReturnLiveScan), '528867080771');
+assert.deepEqual(trackingLookupCandidates(fedexReturnLiveScan), [fedexReturnLiveScan, '528867080771']);
 assert(trackingLookupCandidates(`\u001eFDX\u001d${fedexReturnOne}\u001dRMA173225136766794525`).includes('528864433447'));
 
 const returns = [
@@ -43,6 +46,8 @@ const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'u
 assert.match(serverSource, /parts\[2\] !== "tracking-lookup"[\s\S]*readOrderByKey\(parts\[2\]\)/, 'tracking lookup must bypass the generic order-detail route');
 assert.match(serverSource, /url\.pathname === "\/api\/orders\/tracking-lookup"[\s\S]*readOrdersByTrackingCandidates\(candidates/, 'tracking lookup must resolve normalized candidates through the relational tracking index');
 assert.match(serverSource, /normalizedTracking: canonicalTrackingValue\(query\)/, 'tracking lookup must display the printed carrier number for composite barcodes');
+assert.match(serverSource, /Promise\.all\([\s\S]*readOrdersByTrackingCandidates\(candidates[\s\S]*findReturnsForReceiving\(canonicalTrackingValue\(query\)[\s\S]*exactOnly: true/, 'tracking lookup must query orders and returns once in parallel');
+assert.doesNotMatch(serverSource, /for \(const candidate of candidates\)[\s\S]*findReturnsForReceiving\(candidate/, 'tracking lookup must not repeat the return query for every barcode suffix');
 const returnReceivingSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'return-receiving.tsx'), 'utf8');
 assert.match(returnReceivingSource, /TrackingCameraLookup[\s\S]*scope="all"/, 'return receiving must scan return tracking across linked returns and orders');
 assert.doesNotMatch(returnReceivingSource, /BrowserMultiFormatReader|decodeFromConstraints/, 'return receiving must not create a separate camera scanner');

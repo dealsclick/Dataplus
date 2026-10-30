@@ -62609,16 +62609,15 @@ async function handleApi(req, res) {
     const candidates = trackingLookupCandidates(query);
     if (!candidates.length) return sendJson(res, 400, { error: "The scanned barcode does not contain a usable tracking reference." });
 
-    const orderMatches = canViewOrders && scope !== "returns"
-      ? await postgres.readOrdersByTrackingCandidates(candidates, { limit: 20 }) : [];
-    let returnMatches = [];
-    if (canViewReturns && scope !== "orders") {
-      const byId = new Map();
-      for (const candidate of candidates) {
-        for (const record of await postgres.findReturnsForReceiving(candidate, { limit: 20, trackingCandidates: [candidate] })) byId.set(String(record.id || record.returnNumber), record);
-      }
-      returnMatches = returnsWithPublicSlugs([...byId.values()]).slice(0, 20);
-    }
+    const [orderMatches, rawReturnMatches] = await Promise.all([
+      canViewOrders && scope !== "returns"
+        ? postgres.readOrdersByTrackingCandidates(candidates, { limit: 20 })
+        : Promise.resolve([]),
+      canViewReturns && scope !== "orders"
+        ? postgres.findReturnsForReceiving(canonicalTrackingValue(query) || query, { limit: 20, trackingCandidates: candidates, exactOnly: true })
+        : Promise.resolve([])
+    ]);
+    const returnMatches = returnsWithPublicSlugs(rawReturnMatches).slice(0, 20);
     const orders = orderMatches.map(({ order, shipmentId, trackingNumber, provider }) => ({
       id: String(order.id || ""),
       orderNumber: String(order.orderNumber || order.internalOrderNumber || order.id || ""),

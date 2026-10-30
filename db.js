@@ -11478,14 +11478,16 @@ async function readOrdersByTrackingCandidates(values = [], options = {}) {
         coalesce(tracking.provider, '') as provider,
         0 as priority
       from order_shipment_tracking tracking
-      where regexp_replace(lower(coalesce(tracking.tracking_number, '')), '[^a-z0-9]', '', 'g') = any($1::text[])
+      where nullif(tracking.tracking_number, '') is not null
+        and regexp_replace(lower(tracking.tracking_number), '[^a-z0-9]', '', 'g') = any($1::text[])
       union all
       select orders.order_id, '' as shipment_id,
         coalesce(orders.tracking_number, '') as tracking_number,
         '' as provider,
         1 as priority
       from order_records orders
-      where regexp_replace(lower(coalesce(orders.tracking_number, '')), '[^a-z0-9]', '', 'g') = any($1::text[])
+      where nullif(orders.tracking_number, '') is not null
+        and regexp_replace(lower(orders.tracking_number), '[^a-z0-9]', '', 'g') = any($1::text[])
     ), ranked as (
       select distinct on (matches.order_id)
         matches.order_id, matches.shipment_id, matches.tracking_number, matches.provider
@@ -12332,8 +12334,10 @@ async function findReturnsForReceiving(query = "", options = {}) {
   const limit = Math.max(1, Math.min(100, Number(options.limit || 50)));
   const candidates = [...new Set((Array.isArray(options.trackingCandidates) ? options.trackingCandidates : [])
     .map((value) => nullableString(value)?.toLowerCase()).filter(Boolean))];
-  const phoneKey = key.replace(/\D/g, "");
-  const searchPattern = key.length >= 2 ? `%${key}%` : "";
+  const exactOnly = options.exactOnly === true;
+  const phoneKey = exactOnly ? "" : key.replace(/\D/g, "");
+  const searchPattern = !exactOnly && key.length >= 2 ? `%${key}%` : "";
+  const orderPrefixPattern = !exactOnly && key.length >= 2 ? `${key}%` : "";
   const trackingKeys = candidates.length ? candidates : [key];
   const returnResult = await client.query(`
     with source as (
@@ -12412,10 +12416,12 @@ async function findReturnsForReceiving(query = "", options = {}) {
         or lower(coalesce(channel_order_id, '')) = $1
         or lower(coalesce(tracking_number, '')) = any($2::text[])
         or regexp_replace(lower(coalesce(tracking_number, '')), '[^a-z0-9]', '', 'g') = any($2::text[])
-        or lower(coalesce(order_number, '')) like $3
-        or lower(coalesce(internal_order_number, '')) like $3
-        or lower(coalesce(marketplace_order_id, '')) like $3
-        or lower(coalesce(channel_order_id, '')) like $3
+        or ($3 <> '' and (
+          lower(coalesce(order_number, '')) like $3
+          or lower(coalesce(internal_order_number, '')) like $3
+          or lower(coalesce(marketplace_order_id, '')) like $3
+          or lower(coalesce(channel_order_id, '')) like $3
+        ))
         or ($4 <> '' and (
           lower(coalesce(buyer, '')) like $4
           or lower(coalesce(buyer_email, '')) like $4
@@ -12429,7 +12435,7 @@ async function findReturnsForReceiving(query = "", options = {}) {
       )
       order by match_rank, updated_at desc, order_id desc
       limit 100
-    `, [key, trackingKeys, `${key}%`, searchPattern, phoneKey, likelyZip]);
+    `, [key, trackingKeys, orderPrefixPattern, searchPattern, phoneKey, likelyZip]);
     orderCandidates = orderResult.rows;
 
     if (orderCandidates.length) {
