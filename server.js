@@ -102,6 +102,7 @@ const { createShippingDisputeStore } = require("./lib/shipping-disputes");
 const { createOutboundAuditStore, publicEvidence } = require("./lib/outbound-audit-store");
 const ebayOperations = require("./lib/ebay-operations");
 const upsRating = require("./lib/ups-rating");
+const { dailyScheduleKey } = require("./lib/carrier-tracking-schedule");
 const { createCarrierCredentials } = require("./lib/carrier-credentials");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
 const shippingDisputeStore = createShippingDisputeStore(() => postgres.getPool(), { ensureSchema: () => postgres.initRelationalSchema() });
@@ -30299,6 +30300,7 @@ async function queueFulfillmentTrackingRefreshJob(options = {}) {
   const force = options.force === true;
   const trackingOnly = options.trackingOnly === true;
   const scanStartedAt = new Date().toISOString();
+  const scheduleKey = String(options.scheduleKey || "").trim();
   const requestedLimit = Math.max(1, Number(options.limit || (scheduled ? 50 : Number.MAX_SAFE_INTEGER)));
   const candidateCount = await postgres.countShipmentTrackingCandidates({ force, trackingOnly, checkedBefore: scanStartedAt });
   const totalRows = Math.min(candidateCount, requestedLimit);
@@ -30306,7 +30308,7 @@ async function queueFulfillmentTrackingRefreshJob(options = {}) {
   const job = createImportJob(queueDb, {
     section: "Fulfillment",
     category: "Shipping",
-    operation: scheduled ? "Scheduled carrier scan check" : "Check carrier scans",
+    operation: String(options.operation || (scheduled ? "Scheduled carrier scan check" : "Check carrier scans")),
     direction: "sync",
     status: "queued",
     startedAt: "",
@@ -30315,7 +30317,8 @@ async function queueFulfillmentTrackingRefreshJob(options = {}) {
     progressPercent: 0,
     phase: "queued",
     workerTask: "fulfillment-tracking-refresh",
-    workerPayload: { scheduled, background: true, force, trackingOnly, scanStartedAt, limit: totalRows, batchSize: Math.min(50, Number(options.batchSize || 50)), requestedBy: options.requestedBy || "" },
+    scheduleKey,
+    workerPayload: { scheduled, background: true, force, trackingOnly, scanStartedAt, limit: totalRows, batchSize: Math.min(50, Number(options.batchSize || 50)), requestedBy: options.requestedBy || "", scheduleKey },
     rowLabel: "shipping labels",
     progressLabel: scheduled ? "Carrier scan check queued" : "Checking carrier scans",
     message: totalRows
@@ -30328,6 +30331,38 @@ async function queueFulfillmentTrackingRefreshJob(options = {}) {
 
 async function queueScheduledFulfillmentTrackingRefreshJob(options = {}) {
   return queueFulfillmentTrackingRefreshJob({ ...options, scheduled: true, force: false, trackingOnly: false, limit: Math.max(1, Math.min(Number(options.limit || 50), 50)) });
+}
+
+const NIGHTLY_CARRIER_TRACKING_TIMEZONE = "America/New_York";
+const NIGHTLY_CARRIER_TRACKING_HOUR = 23;
+let nightlyCarrierTrackingSchedulePromise = null;
+
+async function maybeQueueNightlyCarrierTrackingRefresh(now = new Date()) {
+  if (!postgres.isPostgresEnabled()) return null;
+  const scheduleKey = dailyScheduleKey(now, {
+    timeZone: NIGHTLY_CARRIER_TRACKING_TIMEZONE,
+    hour: NIGHTLY_CARRIER_TRACKING_HOUR,
+    minute: 0,
+    prefix: "carrier-tracking-nightly",
+  });
+  if (!scheduleKey) return null;
+  if (nightlyCarrierTrackingSchedulePromise) return nightlyCarrierTrackingSchedulePromise;
+  nightlyCarrierTrackingSchedulePromise = (async () => {
+    const jobs = await postgres.readOperationJobs(500).catch(() => []);
+    const existing = jobs.find((job) => String(job.scheduleKey || job.workerPayload?.scheduleKey || "") === scheduleKey);
+    if (existing) return existing;
+    return queueFulfillmentTrackingRefreshJob({
+      scheduled: true,
+      force: true,
+      trackingOnly: true,
+      limit: Number.MAX_SAFE_INTEGER,
+      batchSize: 50,
+      requestedBy: "Nightly carrier tracking sweep",
+      operation: "Nightly carrier tracking sweep (11 PM ET)",
+      scheduleKey,
+    });
+  })().finally(() => { nightlyCarrierTrackingSchedulePromise = null; });
+  return nightlyCarrierTrackingSchedulePromise;
 }
 
 async function runFulfillmentTrackingRefreshWorkerJob(job = {}) {
@@ -75022,6 +75057,12 @@ function startServer() {
     fulfillmentTrackingStart.unref?.();
     const fulfillmentTrackingInterval = setInterval(() => void queueScheduledFulfillmentTrackingRefreshJob({ limit: 50 }).catch((error) => console.warn(`Fulfillment tracking refresh queue failed: ${error.message}`)), FULFILLMENT_TRACKING_REFRESH_INTERVAL_MS);
     fulfillmentTrackingInterval.unref?.();
+    const nightlyCarrierTrackingSweep = () => void maybeQueueNightlyCarrierTrackingRefresh()
+      .catch((error) => console.warn(`Nightly carrier tracking sweep queue failed: ${error.message}`));
+    const nightlyCarrierTrackingStart = setTimeout(nightlyCarrierTrackingSweep, 90_000);
+    nightlyCarrierTrackingStart.unref?.();
+    const nightlyCarrierTrackingInterval = setInterval(nightlyCarrierTrackingSweep, 60_000);
+    nightlyCarrierTrackingInterval.unref?.();
     const fulfillmentSnapshotStart = setTimeout(() => void initializeFulfillmentConsoleProjection().catch((error) => console.warn(`Fulfillment projection startup failed: ${error.message}`)), 3_000);
     fulfillmentSnapshotStart.unref?.();
     const fulfillmentSnapshotInterval = setInterval(() => {
