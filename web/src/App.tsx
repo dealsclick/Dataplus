@@ -2690,7 +2690,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   if (warehouseMobile && !authUser.passwordChangeRequired && !passwordOpen) return <TooltipProvider>
     <Suspense fallback={<div className="p-4"><LoadingState /></div>}>
     {userCan(authUser, "warehouse", "view") ? <WarehouseMobileRoute canPurchase={userCan(authUser, "purchasing.po", "view") && userCan(authUser, "purchasing.queue", "view")}
-      returns={userCan(authUser, "orders", "view") ? <OperationsPage mobileReturns /> : <p>Returns access is required.</p>}
+      canReturn={userCan(authUser, "orders.returns", "view") || userCan(authUser, "orders", "view")}
       fulfillment={userCan(authUser, "fulfillment", "view") ? <FulfillmentPage /> : <p>Fulfillment access is required.</p>}
       inventory={userCan(authUser, "warehouse.inventory", "view") ? <InventoryWorkspace /> : <p>Inventory access is required.</p>}
       brand={<><SystemBrandMark settings={state.systemSettings} className="size-8" /><span className="truncate font-semibold">Warehouse</span></>}

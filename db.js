@@ -12332,33 +12332,85 @@ async function findReturnsForReceiving(query = "", options = {}) {
   const limit = Math.max(1, Math.min(100, Number(options.limit || 50)));
   const candidates = [...new Set((Array.isArray(options.trackingCandidates) ? options.trackingCandidates : [])
     .map((value) => nullableString(value)?.toLowerCase()).filter(Boolean))];
+  const phoneKey = key.replace(/\D/g, "");
+  const searchPattern = key.length >= 2 ? `%${key}%` : "";
   const result = await client.query(`
-    select data
-    from entity_documents
-    where collection = 'returns' and (
-      entity_id = $1
-      or lower(coalesce(data->>'id', '')) = $1
-      or lower(coalesce(data->>'returnNumber', '')) = $1
-      or lower(coalesce(data->>'channelReturnId', '')) = $1
-      or lower(coalesce(data->>'orderId', '')) = $1
-      or lower(coalesce(data->>'orderNumber', '')) = $1
-      or lower(coalesce(data->>'channelOrderId', '')) = $1
-      or lower(coalesce(data->>'trackingNumber', '')) = any($2::text[])
-      or lower(coalesce(data->'returnLabel'->>'trackingNumber', '')) = any($2::text[])
-      or exists (
-        select 1
-        from jsonb_array_elements(case when jsonb_typeof(data->'returnTracking') = 'array' then data->'returnTracking' else '[]'::jsonb end) tracking
-        where lower(coalesce(tracking->>'trackingNumber', tracking->>'tracking', tracking->>'trackingNo', tracking->>'trackingCode', '')) = any($2::text[])
-      )
-      or exists (
-        select 1
-        from jsonb_array_elements(case when jsonb_typeof(data->'returnLabelHistory') = 'array' then data->'returnLabelHistory' else '[]'::jsonb end) tracking
-        where lower(coalesce(tracking->>'trackingNumber', tracking->>'tracking', tracking->>'trackingNo', tracking->>'trackingCode', '')) = any($2::text[])
-      )
+    with source as (
+      select returns.entity_id, returns.data, returns.updated_at,
+        linked.buyer as order_buyer, linked.buyer_email as order_email,
+        linked.phone as order_phone, linked.customer_id as order_customer_id,
+        linked.raw as order_raw,
+        (
+          lower(returns.entity_id) = $1
+          or lower(coalesce(returns.data->>'id', '')) = $1
+          or lower(coalesce(returns.data->>'returnNumber', '')) = $1
+          or lower(coalesce(returns.data->>'channelReturnId', '')) = $1
+          or lower(coalesce(returns.data->>'orderId', '')) = $1
+          or lower(coalesce(returns.data->>'orderNumber', '')) = $1
+          or lower(coalesce(returns.data->>'channelOrderId', '')) = $1
+          or lower(coalesce(returns.data->>'trackingNumber', '')) = any($2::text[])
+          or regexp_replace(lower(coalesce(returns.data->>'trackingNumber', '')), '[^a-z0-9]', '', 'g') = any($2::text[])
+          or lower(coalesce(returns.data->'returnLabel'->>'trackingNumber', '')) = any($2::text[])
+          or regexp_replace(lower(coalesce(returns.data->'returnLabel'->>'trackingNumber', '')), '[^a-z0-9]', '', 'g') = any($2::text[])
+          or exists (
+            select 1
+            from jsonb_array_elements(case when jsonb_typeof(returns.data->'returnTracking') = 'array' then returns.data->'returnTracking' else '[]'::jsonb end) tracking
+            where lower(coalesce(tracking->>'trackingNumber', tracking->>'tracking', tracking->>'trackingNo', tracking->>'trackingCode', tracking->>'waybillNumber', tracking->>'mailNo', '')) = any($2::text[])
+              or regexp_replace(lower(coalesce(tracking->>'trackingNumber', tracking->>'tracking', tracking->>'trackingNo', tracking->>'trackingCode', tracking->>'waybillNumber', tracking->>'mailNo', '')), '[^a-z0-9]', '', 'g') = any($2::text[])
+          )
+          or exists (
+            select 1
+            from jsonb_array_elements(case when jsonb_typeof(returns.data->'returnLabelHistory') = 'array' then returns.data->'returnLabelHistory' else '[]'::jsonb end) tracking
+            where lower(coalesce(tracking->>'trackingNumber', tracking->>'tracking', tracking->>'trackingNo', tracking->>'trackingCode', tracking->>'waybillNumber', tracking->>'mailNo', '')) = any($2::text[])
+              or regexp_replace(lower(coalesce(tracking->>'trackingNumber', tracking->>'tracking', tracking->>'trackingNo', tracking->>'trackingCode', tracking->>'waybillNumber', tracking->>'mailNo', '')), '[^a-z0-9]', '', 'g') = any($2::text[])
+          )
+        ) as exact_match
+      from entity_documents returns
+      left join lateral (
+        select orders.buyer, orders.buyer_email, orders.phone, orders.customer_id, orders.raw
+        from order_records orders
+        where orders.order_id = returns.data->>'orderId'
+          or (coalesce(returns.data->>'orderNumber', '') <> '' and lower(coalesce(orders.order_number, '')) = lower(returns.data->>'orderNumber'))
+        order by (orders.order_id = returns.data->>'orderId') desc, orders.updated_at desc
+        limit 1
+      ) linked on true
+      where returns.collection = 'returns'
+    ), matched as (
+      select *, case when exact_match then 0 else 1 end as match_rank
+      from source
+      where exact_match or ($4 <> '' and (
+        lower(concat_ws(' ',
+          data->>'customerName', data->>'buyer', data->'customer'->>'name', order_buyer,
+          data->>'customerEmail', data->>'buyerEmail', data->'customer'->>'email', order_email,
+          data->>'customerId', data->>'customerAccount', data->'customer'->>'id', order_customer_id,
+          data->'shippingAddress'->>'name', data->'shippingAddress'->>'line1', data->'shippingAddress'->>'line2',
+          data->'shippingAddress'->>'city', data->'shippingAddress'->>'state', data->'shippingAddress'->>'postalCode', data->'shippingAddress'->>'zip',
+          data->'address'->>'name', data->'address'->>'line1', data->'address'->>'line2',
+          data->'address'->>'city', data->'address'->>'state', data->'address'->>'postalCode', data->'address'->>'zip',
+          order_raw->'address'->>'name', order_raw->'address'->>'line1', order_raw->'address'->>'line2',
+          order_raw->'address'->>'city', order_raw->'address'->>'state', order_raw->'address'->>'postalCode', order_raw->'address'->>'zip',
+          order_raw->'shippingAddress'->>'name', order_raw->'shippingAddress'->>'line1', order_raw->'shippingAddress'->>'line2',
+          order_raw->'shippingAddress'->>'city', order_raw->'shippingAddress'->>'state', order_raw->'shippingAddress'->>'postalCode', order_raw->'shippingAddress'->>'zip'
+        )) like $4
+        or ($3 <> '' and length($3) >= 4 and regexp_replace(concat_ws(' ', data->>'customerPhone', data->>'phone', data->'customer'->>'phone', data->'shippingAddress'->>'phone', data->'address'->>'phone', order_phone), '\\D', '', 'g') like '%' || $3 || '%')
+        or exists (
+          select 1
+          from jsonb_array_elements(case when jsonb_typeof(data->'items') = 'array' then data->'items' else '[]'::jsonb end) item
+          where lower(concat_ws(' ', item->>'sku', item->>'upc', item->>'gtin', item->>'barcode', item->>'vendorSku', item->>'manufacturerPartNumber', item->>'mpn', item->>'title', coalesce(item->'sourceSkus', '[]'::jsonb)::text)) like $4
+        )
+      ))
     )
-    order by updated_at desc, entity_id desc
-    limit $3
-  `, [key, candidates.length ? candidates : [key], limit]);
+    select data || jsonb_strip_nulls(jsonb_build_object(
+      'customerName', coalesce(nullif(data->>'customerName', ''), nullif(data->>'buyer', ''), nullif(data->'customer'->>'name', ''), order_buyer),
+      'customerEmail', coalesce(nullif(data->>'customerEmail', ''), nullif(data->>'buyerEmail', ''), nullif(data->'customer'->>'email', ''), order_email),
+      'customerPhone', coalesce(nullif(data->>'customerPhone', ''), nullif(data->>'phone', ''), nullif(data->'customer'->>'phone', ''), order_phone),
+      'customerId', coalesce(nullif(data->>'customerId', ''), nullif(data->'customer'->>'id', ''), order_customer_id),
+      'shippingAddress', coalesce(nullif(data->'shippingAddress', '{}'::jsonb), nullif(data->'address', '{}'::jsonb), nullif(order_raw->'address', '{}'::jsonb), nullif(order_raw->'shippingAddress', '{}'::jsonb))
+    )) as data
+    from matched
+    order by match_rank, updated_at desc, entity_id desc
+    limit $5
+  `, [key, candidates.length ? candidates : [key], phoneKey, searchPattern, limit]);
   return result.rows.map((row) => ({ ...row.data, returnSlug: returnSlugBase(row.data) }));
 }
 

@@ -62410,7 +62410,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/returns/receiving-lookup") {
     if (!userCan(authUser, "orders.returns", "view")) return sendJson(res, 403, { error: "Returns view permission is required." });
     const query = String(url.searchParams.get("q") || "").trim();
-    if (!query || query.length > 300) return sendJson(res, 400, { error: "Enter a return, order or tracking reference (up to 300 characters)." });
+    if (!query || query.length > 300) return sendJson(res, 400, { error: "Enter a return, order, tracking, customer, address, or item reference (up to 300 characters)." });
     const matches = postgres.isPostgresEnabled()
       ? await postgres.findReturnsForReceiving(query, { limit: 50, trackingCandidates: trackingLookupCandidates(query) })
       : findReturnReceipts((await readDb()).returns || [], query).slice(0, 50);

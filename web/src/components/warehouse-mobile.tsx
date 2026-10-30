@@ -1,12 +1,12 @@
 import { useEffect, type ReactNode } from "react"
-import { Archive, Boxes, CheckCircle2, Package, Menu, ScanBarcode } from "lucide-react"
+import { Archive, Boxes, CheckCircle2, Package, Menu, RotateCcw, ScanBarcode } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { MobileTables } from "@/components/ui/table"
 
 const base = "/warehouse/mobile"
 const sections = [
   { id: "receiving", label: "Receive POs", icon: Package },
-  { id: "manual", label: "Other stock", icon: Archive },
+  { id: "returns", label: "Returns", icon: RotateCcw },
   { id: "outbound", label: "Outbound", icon: ScanBarcode },
   { id: "audits", label: "Audits", icon: CheckCircle2 },
   { id: "more", label: "More", icon: Menu },
@@ -29,7 +29,7 @@ export function WarehouseMobile({ canPurchase, account, brand, receiving, manual
 }) {
   const parts = window.location.pathname.slice(base.length).split("/").filter(Boolean)
   const section = parts[0] || "receiving"
-  const activeSection = ["bins", "returns", "fulfillment", "inventory"].includes(section) ? "more" : section
+  const activeSection = ["bins", "manual", "fulfillment", "inventory"].includes(section) ? "more" : section
   const id = parts[1] ? decodeURIComponent(parts[1]) : ""
   useEffect(() => {
     document.body.classList.add("warehouse-mobile-mode")
@@ -44,11 +44,11 @@ export function WarehouseMobile({ canPurchase, account, brand, receiving, manual
       {section === "outbound" && outbound}
       {section === "audits" && (id ? audit(id) : audits)}
       {section === "bins" && bins}
-      {section === "more" && <><h1 className="text-xl font-semibold">More warehouse tasks</h1><Button asChild variant="outline"><a href={`${base}/bins`}><Boxes className="size-4" /> Bins and locations</a></Button><Button asChild variant="outline"><a href={`${base}/returns`}>Customer returns / inspections</a></Button><Button asChild variant="outline"><a href={`${base}/fulfillment`}>Picking and fulfillment</a></Button><Button asChild variant="outline"><a href={`${base}/inventory`}>Inventory and transfers</a></Button></>}
+      {section === "more" && <><h1 className="text-xl font-semibold">More warehouse tasks</h1><Button asChild variant="outline"><a href={`${base}/manual`}><Archive className="size-4" /> Other stock receiving</a></Button><Button asChild variant="outline"><a href={`${base}/bins`}><Boxes className="size-4" /> Bins and locations</a></Button><Button asChild variant="outline"><a href={`${base}/fulfillment`}>Picking and fulfillment</a></Button><Button asChild variant="outline"><a href={`${base}/inventory`}>Inventory and transfers</a></Button></>}
       {section === "returns" && returns}
       {section === "fulfillment" && fulfillment}
       {section === "inventory" && inventory}
-      {!["bins", "returns", "fulfillment", "inventory"].includes(section) && !sections.some(item => item.id === section) && <p>Page not found. Choose a warehouse task below.</p>}
+      {!["bins", "manual", "fulfillment", "inventory"].includes(section) && !sections.some(item => item.id === section) && <p>Page not found. Choose a warehouse task below.</p>}
     </main>
     <nav aria-label="Warehouse tasks" className="fixed inset-x-0 bottom-0 z-40 border-t bg-background pb-[env(safe-area-inset-bottom)]"><div className="mx-auto grid max-w-3xl grid-cols-5 gap-1 p-2">{sections.map(({ id: key, label, icon: Icon }) => <a key={key} href={`${base}/${key}`} aria-current={activeSection === key ? "page" : undefined} className={`flex min-h-14 min-w-0 flex-col items-center justify-center gap-1 rounded-md px-1 text-center text-xs font-medium ${activeSection === key ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}><Icon className="size-5" />{label}</a>)}</div></nav>
   </div></MobileTables>

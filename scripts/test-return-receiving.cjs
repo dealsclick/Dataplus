@@ -28,6 +28,20 @@ test('carrier label scans use shared normalization across channel tracking field
   assert.equal(findReturnReceipts(records, 'JJD000225478000123456')[0].id, 'label-history');
   assert.equal(findReturnReceipts(records, 'routing-0000012345').length, 0);
 });
+test('warehouse receiving searches linked customer, address and item details', () => {
+  const records = [
+    { id: 'older', returnNumber: 'RET-1', customerName: 'Jamie Rivera', customerPhone: '(718) 555-0123', customerEmail: 'jamie@example.com', shippingAddress: { city: 'Brooklyn', state: 'NY', postalCode: '11220' }, items: [{ sku: 'BUS-100', upc: '044476133466', sourceSkus: ['TV-900'] }] },
+    { id: 'exact', returnNumber: 'JAMIE', customerName: 'Someone Else' },
+  ];
+  assert.deepEqual(findReturnReceipts(records, 'rivera').map(row => row.id), ['older']);
+  assert.deepEqual(findReturnReceipts(records, '5550123').map(row => row.id), ['older']);
+  assert.deepEqual(findReturnReceipts(records, '11220').map(row => row.id), ['older']);
+  assert.deepEqual(findReturnReceipts(records, 'jamie@example.com').map(row => row.id), ['older']);
+  assert.deepEqual(findReturnReceipts(records, 'BUS-100').map(row => row.id), ['older']);
+  assert.deepEqual(findReturnReceipts(records, '044476133466').map(row => row.id), ['older']);
+  assert.deepEqual(findReturnReceipts(records, 'TV-900').map(row => row.id), ['older']);
+  assert.deepEqual(findReturnReceipts(records, 'jamie').map(row => row.id), ['exact', 'older']);
+});
 test('receiving requires every expected line, bounded quantities and physical locations', () => {
   const record = { items: [{ sku: 'A', qty: 2 }, { sku: 'B', qty: 1 }] };
   const warehouse = { id: 'w', isPhysical: true, warehouseType: 'Returns Center', active: true };

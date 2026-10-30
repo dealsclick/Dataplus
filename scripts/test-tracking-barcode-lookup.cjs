@@ -30,7 +30,7 @@ const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'u
 assert.match(serverSource, /parts\[2\] !== "tracking-lookup"[\s\S]*readOrderByKey\(parts\[2\]\)/, 'tracking lookup must bypass the generic order-detail route');
 assert.match(serverSource, /url\.pathname === "\/api\/orders\/tracking-lookup"[\s\S]*readOrdersByTrackingCandidates\(candidates/, 'tracking lookup must resolve normalized candidates through the relational tracking index');
 const returnReceivingSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'return-receiving.tsx'), 'utf8');
-assert.match(returnReceivingSource, /TrackingCameraLookup[\s\S]*scope="returns"/, 'return receiving must use the shared tracking scanner');
+assert.match(returnReceivingSource, /TrackingCameraLookup[\s\S]*scope="all"/, 'return receiving must scan return tracking across linked returns and orders');
 assert.doesNotMatch(returnReceivingSource, /BrowserMultiFormatReader|decodeFromConstraints/, 'return receiving must not create a separate camera scanner');
 const returnsWorkspaceSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'returns-workspace.tsx'), 'utf8');
 assert.match(returnsWorkspaceSource, /TrackingCameraLookup scope="all" label="Scan tracking"/, 'the main returns toolbar must expose tracking scans for both returns and linked orders');

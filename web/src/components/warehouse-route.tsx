@@ -26,6 +26,7 @@ import { cn } from "@/lib/utils"
 import { BinLabelDialog } from "./bin-label-dialog"
 import { WarehouseMobile } from "./warehouse-mobile"
 import { OutboundAuditWorkspace } from "./outbound-audit-workspace"
+import { ReturnReceiving } from "./return-receiving"
 import { VendorCreateDialog } from "./vendor-create-dialog"
 import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
 import { loadAppBootstrap, loadAppReferences } from "../lib/app-state"
@@ -3265,9 +3266,9 @@ function WarehouseAuditPanel({
 
 export { WarehouseWorkspace }
 
-function WarehouseMobileRoute({ canPurchase, returns, fulfillment, inventory, account, brand, canReceive, canManageBins, canAudit, operatorName, purchaseOrder, warehouses }: {
+function WarehouseMobileRoute({ canPurchase, canReturn, fulfillment, inventory, account, brand, canReceive, canManageBins, canAudit, operatorName, purchaseOrder, warehouses }: {
   canPurchase: boolean
-  returns: ReactNode
+  canReturn: boolean
   fulfillment: ReactNode
   inventory: ReactNode
   account: ReactNode
@@ -3281,7 +3282,7 @@ function WarehouseMobileRoute({ canPurchase, returns, fulfillment, inventory, ac
 }) {
   return <WarehouseMobile
     canPurchase={canPurchase}
-    returns={returns}
+    returns={canReturn ? <div className="grid gap-3"><h1 className="text-xl font-semibold">Receive returns</h1><ReturnReceiving warehouses={warehouses} onUpdated={async () => undefined} /></div> : <p>Returns access is required.</p>}
     fulfillment={fulfillment}
     inventory={inventory}
     account={account}

@@ -1,5 +1,6 @@
 import { useState } from "react"
-import { ScanLine, Trash2 } from "lucide-react"
+import { Mail, MapPin, Phone, ScanLine, Trash2, UserRound } from "lucide-react"
+import { Badge } from "./ui/badge"
 import { Button } from "./ui/button"
 import { Input } from "./ui/input"
 import { Label } from "./ui/label"
@@ -12,6 +13,21 @@ import { TrackingCameraLookup } from "./tracking-camera-lookup"
 type Row = Record<string, unknown>
 type Photo = { id: string; name: string; size: number; mimeType: string; dataUrl: string; stage: string }
 const rows = (value: unknown): Row[] => Array.isArray(value) ? value : []
+const object = (value: unknown): Row => value && typeof value === "object" && !Array.isArray(value) ? value as Row : {}
+const text = (...values: unknown[]) => values.map(value => String(value || "").trim()).find(Boolean) || ""
+function customerDetails(record: Row) {
+  const customer = object(record.customer)
+  const address = object(record.shippingAddress || record.address || customer.address)
+  return {
+    name: text(record.customerName, record.buyer, customer.name),
+    phone: text(record.customerPhone, record.phone, customer.phone, address.phone),
+    email: text(record.customerEmail, record.buyerEmail, customer.email),
+    postalCode: text(address.postalCode, address.zip, address.zipCode, record.postalCode, record.zip),
+  }
+}
+function returnSkus(record: Row) {
+  return [...new Set(rows(record.items).flatMap((line) => [line.sku, line.upc, line.vendorSku, ...rows(line.sourceSkus)]).map(value => String(value || "").trim()).filter(Boolean))].slice(0, 4)
+}
 async function json(path: string, body?: unknown) {
   const response = await fetch(path, body ? { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : undefined)
   const result = await response.json()
@@ -60,13 +76,13 @@ export function ReturnReceiving({ warehouses, onUpdated }: { warehouses: Row[]; 
     } catch (e) { setError(e instanceof Error ? e.message : "Unable to save receipt") }
     finally { setBusy(false) }
   }
-  return <section aria-label="Return receiving" className="grid min-w-0 gap-3 border-y py-4">
-    <h2 className="font-semibold">Receive a return</h2>
-    <form className="flex flex-wrap items-end gap-2" onSubmit={event => { event.preventDefault(); if (!busy) void lookup() }}><Label className="grid min-w-0 flex-1 gap-2">Return, order or tracking number<Input value={query} maxLength={300} onChange={event => setQuery(event.target.value)} autoComplete="off" enterKeyHint="search" placeholder="Scan a return label or enter its reference" /></Label><TrackingCameraLookup scope="returns" label="Scan return label" onReturnSelected={open} /><Button disabled={busy || !query.trim()}><ScanLine className="size-4" />Find return</Button></form>
+  return <section aria-label="Return receiving" className="grid min-w-0 gap-3">
+    <TrackingCameraLookup scope="all" label="Scan return tracking" className="h-12 w-full justify-center text-base sm:w-auto" onReturnSelected={open} />
+    <form className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end" onSubmit={event => { event.preventDefault(); if (!busy) void lookup() }}><Label className="grid min-w-0 gap-2">Search returns<Input value={query} maxLength={300} onChange={event => setQuery(event.target.value)} autoComplete="off" enterKeyHint="search" placeholder="Return, order, tracking, name, phone, ZIP, email, SKU or UPC" /></Label><Button className="h-10" disabled={busy || !query.trim()}><ScanLine className="size-4" />Find return</Button></form>
     {!record && error && <p role="alert" className="text-sm text-destructive">{error}</p>}{message && <p role="status" className="text-sm">{message}</p>}
-    {total === 0 && <p className="text-sm text-muted-foreground">No exact match in saved returns.</p>}
-    {total !== null && total > 50 && <p className="text-sm text-muted-foreground">Showing 50 of {total} matches. Use the return number to narrow the search.</p>}
-    <div className="divide-y">{matches.map(row => <div key={String(row.id)} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm"><div className="min-w-0 break-words"><p className="font-medium">{String(row.returnNumber || row.channelReturnId || row.id)} / {String(row.source || "Local")}</p><p>Order {String(row.orderNumber || row.channelOrderId || "Unmatched")} / Channel: {String(row.channelStatus || row.channelLifecycleStatus || "Unknown")} / Receiving: {String(row.receivingStatus || "Not received")}</p></div><Button variant="outline" disabled={busy || Boolean(row.restockedAt)} onClick={() => open(row)}>{row.restockedAt ? "Already restocked" : "Receive"}</Button></div>)}</div>
+    {total === 0 && <p className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">No saved return matches this search.</p>}
+    {total !== null && total >= 50 && <p className="text-sm text-muted-foreground">Showing the newest 50 matches. Add another customer, order, or item detail to narrow the search.</p>}
+    <div className="grid gap-2">{matches.map(row => { const customer = customerDetails(row); const skus = returnSkus(row); return <article key={String(row.id)} className="grid gap-3 rounded-md border bg-card p-3 text-sm"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="font-semibold">{String(row.returnNumber || row.channelReturnId || row.id)}</p><Badge variant="outline">{String(row.source || row.channelSource || "Local")}</Badge><Badge variant={row.restockedAt ? "success" : "secondary"}>{row.restockedAt ? "Restocked" : String(row.receivingStatus || "Not received")}</Badge></div><p className="mt-1 text-muted-foreground">Order {String(row.orderNumber || row.channelOrderId || "Unmatched")}</p></div><Button size="sm" disabled={busy || Boolean(row.restockedAt)} onClick={() => open(row)}>{row.restockedAt ? "Received" : "Receive"}</Button></div>{customer.name && <p className="flex min-w-0 items-center gap-2"><UserRound className="size-4 shrink-0 text-muted-foreground" /><span className="truncate">{customer.name}</span></p>}<div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-muted-foreground">{customer.phone && <span className="flex items-center gap-1.5"><Phone className="size-3.5" />{customer.phone}</span>}{customer.email && <span className="flex min-w-0 items-center gap-1.5"><Mail className="size-3.5 shrink-0" /><span className="truncate">{customer.email}</span></span>}{customer.postalCode && <span className="flex items-center gap-1.5"><MapPin className="size-3.5" />{customer.postalCode}</span>}</div>{skus.length > 0 && <div className="flex flex-wrap gap-1.5">{skus.map(sku => <Badge key={sku} variant="outline" className="font-mono text-[11px]">{sku}</Badge>)}</div>}</article> })}</div>
     <Dialog open={Boolean(record)} onOpenChange={value => { if (!value && !busy) setRecord(null) }}><DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle className="break-all">Receive {String(record?.returnNumber || record?.channelReturnId || "return")}</DialogTitle></DialogHeader>
       <p className="text-sm text-muted-foreground">Channel status: {String(record?.channelStatus || record?.channelLifecycleStatus || "Unknown")} / Local receiving only</p>
       <ReturnReceiptFields record={record} warehouses={warehouses} draft={draft} setDraft={setDraft} />
