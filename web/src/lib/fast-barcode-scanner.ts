@@ -5,7 +5,8 @@ type ScannerControls = {
   engine: "native" | "zxing"
 }
 
-type NativeBarcode = { rawValue?: string }
+type BarcodeScanType = "general" | "tracking"
+type NativeBarcode = { rawValue?: string; format?: string }
 type NativeDetector = { detect: (source: CanvasImageSource) => Promise<NativeBarcode[]> }
 type NativeDetectorConstructor = {
   new (options?: { formats?: string[] }): NativeDetector
@@ -13,6 +14,26 @@ type NativeDetectorConstructor = {
 }
 
 const nativeFormats = ["code_128", "code_39", "codabar", "itf", "ean_13", "ean_8", "upc_a", "upc_e", "data_matrix", "qr_code", "pdf417"]
+
+function compactBarcodeValue(value: string) {
+  return String(value || "").trim().replace(/^\][A-Z0-9]{2}/i, "").replace(/[^a-z0-9]/gi, "").toUpperCase()
+}
+
+export function trackingBarcodeConfidence(value: string, format = "") {
+  const compact = compactBarcodeValue(value)
+  const normalizedFormat = String(format || "").toLowerCase()
+  if (!compact) return 0
+  if (/^(?:1Z[A-Z0-9]{16}|TB[AMCD]\d{8,}|(?:GM|JVGL|JJD|JD)[A-Z0-9]{8,}|(?:SPX|SPD)[A-Z0-9]{8,}|(?:GF\d{10,}|GOFO[A-Z0-9]{6,})|SWIFTX[A-Z0-9]{6,})$/.test(compact)) return 180
+  if (/^420\d{5,9}\d{18,34}$/.test(compact)) return 170
+  if (/^\d{34}$/.test(compact) && /^0{10,13}$/.test(compact.slice(9, 22))) return 165
+  if (/^\d{12}$/.test(compact) || /^\d{15}$/.test(compact)) return 155
+  if (/^\d{20}$/.test(compact) || /^\d{22}$/.test(compact) || /^\d{26}$/.test(compact) || /^\d{30}$/.test(compact) || /^\d{34}$/.test(compact)) return 145
+  // Pure 18-digit values on marketplace return labels are commonly RMA/SSCC
+  // references. Keep them usable, but wait for a carrier barcode first.
+  if (/^\d{18}$/.test(compact)) return 25
+  if (normalizedFormat.includes("pdf") || normalizedFormat.includes("data_matrix") || normalizedFormat.includes("qr")) return 35
+  return /\d/.test(compact) ? 65 : 30
+}
 
 function cameraCapabilities(track: MediaStreamTrack) {
   return typeof track.getCapabilities === "function" ? track.getCapabilities() as MediaTrackCapabilities & { torch?: boolean } : {}
@@ -26,7 +47,7 @@ async function applyCameraDefaults(track: MediaStreamTrack) {
   if (advanced.length) await track.applyConstraints({ advanced } as unknown as MediaTrackConstraints).catch(() => {})
 }
 
-export async function startFastBarcodeScanner(video: HTMLVideoElement, onDecode: (value: string) => void, options: { deviceId?: string } = {}): Promise<ScannerControls> {
+export async function startFastBarcodeScanner(video: HTMLVideoElement, onDecode: (value: string) => void, options: { deviceId?: string; scanType?: BarcodeScanType } = {}): Promise<ScannerControls> {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: false,
     video: {
@@ -45,6 +66,22 @@ export async function startFastBarcodeScanner(video: HTMLVideoElement, onDecode:
   let stopped = false
   let timer = 0
   let fallbackControls: { stop: () => void } | null = null
+  let candidate = ""
+  let candidateCount = 0
+  const considerDecoded = (value: string, format: string, engine: "native" | "zxing") => {
+    const decoded = String(value || "").trim()
+    if (!decoded || stopped) return
+    const confidence = options.scanType === "tracking" ? trackingBarcodeConfidence(decoded, format) : 100
+    const requiredReads = options.scanType === "tracking"
+      ? confidence >= 100 ? (engine === "native" ? 2 : 1) : (engine === "native" ? 7 : 3)
+      : engine === "native" ? 2 : 1
+    candidateCount = candidate === decoded ? candidateCount + 1 : 1
+    candidate = decoded
+    if (candidateCount < requiredReads) return
+    candidate = ""
+    candidateCount = 0
+    onDecode(decoded)
+  }
   const capabilities = cameraCapabilities(track)
   const setTorch = async (enabled: boolean) => {
     if (!capabilities.torch) return
@@ -77,7 +114,9 @@ export async function startFastBarcodeScanner(video: HTMLVideoElement, onDecode:
     ]
     fallbackControls = await reader.decodeFromStream(stream, video, (result) => {
       const value = String(result?.getText() || "").trim()
-      if (!stopped && value) onDecode(value)
+      const formatValue = result?.getBarcodeFormat()
+      const format = formatValue == null ? "" : String(BarcodeFormat[formatValue] || formatValue)
+      if (!stopped && value) considerDecoded(value, format, "zxing")
     })
   }
 
@@ -103,8 +142,6 @@ export async function startFastBarcodeScanner(video: HTMLVideoElement, onDecode:
   }
   let running = false
   let failures = 0
-  let candidate = ""
-  let candidateCount = 0
   const detect = async () => {
     if (stopped || running) return
     running = true
@@ -119,15 +156,13 @@ export async function startFastBarcodeScanner(video: HTMLVideoElement, onDecode:
         canvas.height = Math.max(1, Math.round(sourceHeight * scale))
         context.drawImage(video, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, canvas.width, canvas.height)
         const found = await detector.detect(canvas)
-        const value = String(found[0]?.rawValue || "").trim()
+        const ranked = found
+          .map((barcode, index) => ({ barcode, index, score: options.scanType === "tracking" ? trackingBarcodeConfidence(String(barcode.rawValue || ""), barcode.format) : -index }))
+          .sort((left, right) => right.score - left.score || left.index - right.index)
+        const selected = ranked[0]?.barcode
+        const value = String(selected?.rawValue || "").trim()
         if (value) {
-          candidateCount = candidate === value ? candidateCount + 1 : 1
-          candidate = value
-          if (candidateCount >= 2) {
-            candidate = ""
-            candidateCount = 0
-            onDecode(value)
-          }
+          considerDecoded(value, String(selected?.format || ""), "native")
         } else {
           candidate = ""
           candidateCount = 0

@@ -179,7 +179,7 @@ function AuditCamera({ open, onOpenChange, onScan, onPhoto, pendingUploads }: { 
           if (modeRef.current !== "scan" || !tracking || scanBusyRef.current || canceled || (lastScanRef.current.value === tracking && now - lastScanRef.current.at < 2500)) return
           lastScanRef.current = { value: tracking, at: now }
           void submit(tracking)
-        })
+        }, { scanType: "tracking" })
         controlsRef.current = controls
         setTorchAvailable(controls.torchAvailable)
         setScannerEngine(controls.engine)

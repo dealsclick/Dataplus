@@ -12,6 +12,7 @@ import { startFastBarcodeScanner } from "../lib/fast-barcode-scanner"
 type Row = Record<string, unknown>
 type LookupResponse = {
   scannedValue?: string
+  normalizedTracking?: string
   normalizedCandidates?: string[]
   orders?: Row[]
   returns?: Row[]
@@ -69,7 +70,7 @@ export function TrackingCameraLookup({ scope = "all", label = "Scan tracking", c
     try {
       const response = await api<LookupResponse>(`/api/orders/tracking-lookup?q=${encodeURIComponent(tracking)}&scope=${scope}`)
       setResult(response)
-      setManualValue(tracking)
+      setManualValue(String(response.normalizedTracking || tracking))
       pausedRef.current = true
       setMessage(Number(response.total || 0) ? `${Number(response.total || 0)} matching record${Number(response.total || 0) === 1 ? "" : "s"} found.` : "No order or return matches this tracking barcode.")
       if (navigator.vibrate) navigator.vibrate(Number(response.total || 0) ? 80 : [60, 50, 60])
@@ -106,7 +107,7 @@ export function TrackingCameraLookup({ scope = "all", label = "Scan tracking", c
           if (canceled || pausedRef.current || scanBusyRef.current || !tracking || (lastScanRef.current.value === tracking && now - lastScanRef.current.at < 1800)) return
           lastScanRef.current = { value: tracking, at: now }
           void lookup(tracking)
-        }, { deviceId: selectedCameraId || undefined })
+        }, { deviceId: selectedCameraId || undefined, scanType: "tracking" })
         controlsRef.current = controls
         setScannerEngine(controls.engine)
         setTorchAvailable(controls.torchAvailable)
@@ -176,7 +177,7 @@ export function TrackingCameraLookup({ scope = "all", label = "Scan tracking", c
             {cameraState === "ready" && !busy ? <div className="pointer-events-none absolute inset-x-[10%] top-1/2 -translate-y-1/2" aria-hidden="true"><div className="h-28 rounded-md border-2 border-emerald-400/90 shadow-[0_0_18px_rgba(74,222,128,.55)]"><div className="mt-14 h-0.5 bg-emerald-400" /></div><p className="mx-auto mt-3 w-fit rounded-full bg-black/75 px-3 py-1.5 text-xs font-medium text-white">Align one tracking barcode inside the frame · {scannerEngine === "native" ? "Fast scan" : "Compatible scan"}</p></div> : null}
             {busy ? <div className="absolute inset-x-4 top-4 flex items-center gap-3 rounded-md border border-sky-300 bg-sky-600 p-3 text-white shadow-xl"><Loader2 className="size-5 animate-spin" /><span className="truncate">{message}</span></div> : null}
           </div> : <div className="min-h-full bg-background p-4 text-foreground">
-            <div className={`mb-4 flex items-start gap-3 rounded-md border p-3 ${Number(result.total || 0) ? "border-emerald-500/40 bg-emerald-500/5" : "border-destructive/40 bg-destructive/5"}`}>{Number(result.total || 0) ? <CheckCircle2 className="mt-0.5 size-5 text-emerald-600" /> : <XCircle className="mt-0.5 size-5 text-destructive" />}<div className="min-w-0"><p className="font-medium">{message}</p><p className="mt-1 break-all font-mono text-xs text-muted-foreground">{result.scannedValue || manualValue}</p>{result.ambiguous ? <p className="mt-1 text-xs text-amber-600">More than one record uses this tracking reference. Choose the correct record.</p> : null}</div></div>
+            <div className={`mb-4 flex items-start gap-3 rounded-md border p-3 ${Number(result.total || 0) ? "border-emerald-500/40 bg-emerald-500/5" : "border-destructive/40 bg-destructive/5"}`}>{Number(result.total || 0) ? <CheckCircle2 className="mt-0.5 size-5 text-emerald-600" /> : <XCircle className="mt-0.5 size-5 text-destructive" />}<div className="min-w-0"><p className="font-medium">{message}</p><p className="mt-1 break-all font-mono text-xs text-muted-foreground">Tracking {result.normalizedTracking || result.scannedValue || manualValue}</p>{result.ambiguous ? <p className="mt-1 text-xs text-amber-600">More than one record uses this tracking reference. Choose the correct record.</p> : null}</div></div>
             {orders.length ? <section className="grid gap-2"><h3 className="text-sm font-semibold">Orders</h3>{orders.map((order) => <div key={value(order, "id")} className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-semibold">Order {value(order, "orderNumber")}</span><Badge variant="outline">{value(order, "channel") || "Order"}</Badge><Badge variant="secondary">{value(order, "status") || "Unknown"}</Badge></div><p className="mt-1 truncate text-sm text-muted-foreground">{[value(order, "buyer"), value(order, "channelOrderNumber") && `Channel ${value(order, "channelOrderNumber")}`].filter(Boolean).join(" · ")}</p><p className="mt-1 break-all font-mono text-xs">{value(order, "carrier")} {value(order, "trackingNumber")}</p>{value(order, "orderDate") ? <p className="mt-1 text-xs text-muted-foreground">Ordered {dateLabel(value(order, "orderDate"))}</p> : null}</div><Button size="sm" asChild><a href={value(order, "href")}><ExternalLink className="size-4" /> Open order</a></Button></div>)}</section> : null}
             {returns.length ? <section className={`grid gap-2 ${orders.length ? "mt-5" : ""}`}><h3 className="text-sm font-semibold">Returns</h3>{returns.map((record) => <div key={value(record, "id")} className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="font-semibold">{value(record, "returnNumber") || value(record, "channelReturnId") || "Return"}</span><Badge variant="outline">{value(record, "source") || "Return"}</Badge><Badge variant="secondary">{value(record, "receivingStatus") || value(record, "status") || "Not received"}</Badge></div><p className="mt-1 text-sm text-muted-foreground">Order {value(record, "orderNumber") || value(record, "channelOrderId") || "Unmatched"}</p></div>{onReturnSelected ? <Button size="sm" onClick={() => { closeScanner(); onReturnSelected(record) }}><PackageCheck className="size-4" /> Receive return</Button> : <Button size="sm" asChild><a href={value(record, "receivingHref") || value(record, "href")}><PackageCheck className="size-4" /> Receive return</a></Button>}</div>)}</section> : null}
           </div>}

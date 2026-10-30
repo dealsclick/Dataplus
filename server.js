@@ -62623,6 +62623,7 @@ async function handleApi(req, res) {
     }));
     return sendJson(res, 200, {
       scannedValue: query,
+      normalizedTracking: canonicalTrackingValue(query),
       normalizedCandidates: candidates,
       orders,
       returns,
