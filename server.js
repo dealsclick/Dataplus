@@ -61690,7 +61690,23 @@ async function handleApi(req, res) {
     const matches = postgres.isPostgresEnabled()
       ? await postgres.findReturnsForReceiving(query, { limit: 50, trackingCandidates: trackingLookupCandidates(query) })
       : findReturnReceipts((await readDb()).returns || [], query).slice(0, 50);
-    return sendJson(res, 200, { returns: matches, total: matches.length });
+    const skus = [...new Set(matches.flatMap((record) => (record.items || []).map((line) => String(line.sku || "").trim())).filter(Boolean))];
+    const products = postgres.isPostgresEnabled() && skus.length
+      ? await postgres.readProductsByKeys(skus, { includeMarketplaceIds: false }).catch(() => [])
+      : [];
+    const imageBySku = new Map(products.map((product) => [String(product.sku || "").trim().toLowerCase(), compactCatalogImageUrl(product)]));
+    const enriched = matches.map((record) => ({
+      ...record,
+      items: (record.items || []).map((line) => {
+        const sku = String(line.sku || "").trim();
+        const storedImage = String(line.defaultImage || line.productImage || line.imageUrl || line.image || "").trim();
+        const defaultImage = /^data:image\//i.test(storedImage) && sku
+          ? `/api/inventory/${encodeURIComponent(sku)}/image`
+          : storedImage || imageBySku.get(sku.toLowerCase()) || "";
+        return { ...line, defaultImage };
+      })
+    }));
+    return sendJson(res, 200, { returns: enriched, total: enriched.length });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "returns" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
@@ -62886,7 +62902,10 @@ async function handleApi(req, res) {
       await postgres.upsertInventoryLevelsFromProducts(touchedProducts);
     }
     record.updatedAt = new Date().toISOString();
-    if (body.receiptOnly) record.receiptHistory = [...(record.receiptHistory || []), { id: crypto.randomUUID(), at: record.updatedAt, user: actingUser, warehouseId: record.warehouseId, binLocation: record.binLocation, condition: record.condition, disposition: record.disposition, items: record.items.map(line => ({ sku: line.sku, receivedQty: line.receivedQty })) }];
+    if (body.receiptOnly) {
+      const receiptAttachments = Array.isArray(body.attachments) ? body.attachments.map((file) => String(file.id || "")).filter(Boolean) : [];
+      record.receiptHistory = [...(record.receiptHistory || []), { id: crypto.randomUUID(), at: record.updatedAt, user: actingUser, warehouseId: record.warehouseId, binLocation: record.binLocation, condition: record.condition, disposition: record.disposition, items: record.items.map(line => ({ sku: line.sku, receivedQty: line.receivedQty })), attachmentIds: receiptAttachments, attachmentCount: receiptAttachments.length }];
+    }
     await postgres.saveReturn(record);
     await postgres.prependInventoryLedgerEvents(db.inventoryLedger || []);
     if (order) {

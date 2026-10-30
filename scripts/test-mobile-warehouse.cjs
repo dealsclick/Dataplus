@@ -16,6 +16,12 @@ assert.match(warehouseRouteSource, /returns=\{canReturn \? [\s\S]*<ReturnReceivi
 assert.match(warehouseRouteSource, /manual=\{canReceive \? <ManualReceivingPanel mobile/, 'Other stock must remain available as a secondary manual receipt flow');
 assert.match(returnReceivingSource, /scope="all" label="Scan return tracking"/, 'Mobile return receiving must scan both return and linked order tracking');
 assert.match(returnReceivingSource, /Return, order, tracking, name, phone, ZIP, email, SKU or UPC/, 'Mobile return receiving must expose warehouse-standard lookup fields');
+assert.match(returnReceivingSource, /DataPlus order[\s\S]*Channel order[\s\S]*Channel return/, 'Return results must show internal and channel identities');
+assert.doesNotMatch(returnReceivingSource, /<Phone|<Mail/, 'Return results must not display customer phone or email');
+assert.match(returnReceivingSource, /customer\.city[\s\S]*customer\.state[\s\S]*customer\.postalCode/, 'Return results must show city, state, and ZIP');
+assert.match(returnReceivingSource, /defaultImage[\s\S]*<img src=\{item\.image\}/, 'Return results must render catalog product images');
+assert.match(returnReceivingSource, /compressEvidenceImage\(file\)[\s\S]*capture="environment"[\s\S]*Save receipt\{photos\.length/, 'Return receiving must compress, preview, and explicitly save mobile photos');
+assert.match(returnReceivingSource, /savedPhotoIds[\s\S]*one or more photos were not returned as saved evidence/, 'Return receiving must verify photo persistence before reporting success');
 assert.match(warehouseRouteSource, /const beginQuickCreate = \(draft\?[\s\S]*quickCreatePhotoInputRef\.current\?\.click\(\)/, 'Warehouse quick create must open the product camera directly');
 assert.match(warehouseRouteSource, /<DialogTitle>Quick create product<\/DialogTitle>[\s\S]*\{manualPhotoUrls\.length\}\/8 photos[\s\S]*Take another[\s\S]*Create draft SKU/, 'Warehouse quick create must support a compact multi-photo capture flow');
 assert.match(warehouseRouteSource, /Quick create unit of measure[\s\S]*Quick create case pack/, 'Warehouse quick create must collect UOM and case pack');

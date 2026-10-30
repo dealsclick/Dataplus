@@ -1,5 +1,5 @@
-import { useState } from "react"
-import { Mail, MapPin, Phone, ScanLine, Trash2, UserRound } from "lucide-react"
+import { useRef, useState } from "react"
+import { Camera, ImagePlus, MapPin, Package, ScanLine, Trash2, UserRound } from "lucide-react"
 import { Badge } from "./ui/badge"
 import { Button } from "./ui/button"
 import { Input } from "./ui/input"
@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select"
 import { ReturnReceiptFields } from "./order-return-details"
 import { TrackingCameraLookup } from "./tracking-camera-lookup"
+import { compressEvidenceImage } from "../lib/fast-barcode-scanner"
 
 type Row = Record<string, unknown>
 type Photo = { id: string; name: string; size: number; mimeType: string; dataUrl: string; stage: string }
@@ -20,13 +21,22 @@ function customerDetails(record: Row) {
   const address = object(record.shippingAddress || record.address || customer.address)
   return {
     name: text(record.customerName, record.buyer, customer.name),
-    phone: text(record.customerPhone, record.phone, customer.phone, address.phone),
-    email: text(record.customerEmail, record.buyerEmail, customer.email),
+    city: text(address.city, record.city),
+    state: text(address.state, address.stateCode, record.state),
     postalCode: text(address.postalCode, address.zip, address.zipCode, record.postalCode, record.zip),
   }
 }
-function returnSkus(record: Row) {
-  return [...new Set(rows(record.items).flatMap((line) => [line.sku, line.upc, line.vendorSku, ...rows(line.sourceSkus)]).map(value => String(value || "").trim()).filter(Boolean))].slice(0, 4)
+function customerLocation(record: Row) {
+  const customer = customerDetails(record)
+  return [customer.city, [customer.state, customer.postalCode].filter(Boolean).join(" ")].filter(Boolean).join(", ")
+}
+function returnItems(record: Row) {
+  return rows(record.items).slice(0, 4).map((line) => ({
+    sku: text(line.sku, line.upc, line.vendorSku),
+    title: text(line.title, line.name),
+    image: text(line.defaultImage, line.productImage, line.imageUrl, line.image, rows(line.images)[0]),
+    qty: Number(line.qty || line.qtySelected || 0),
+  }))
 }
 async function json(path: string, body?: unknown) {
   const response = await fetch(path, body ? { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : undefined)
@@ -39,6 +49,7 @@ export function ReturnReceiving({ warehouses, onUpdated }: { warehouses: Row[]; 
   const [query, setQuery] = useState(""), [matches, setMatches] = useState<Row[]>([]), [total, setTotal] = useState<number | null>(null)
   const [busy, setBusy] = useState(false), [error, setError] = useState(""), [message, setMessage] = useState("")
   const [record, setRecord] = useState<Row | null>(null), [draft, setDraft] = useState<Record<string, string>>({}), [photos, setPhotos] = useState<Photo[]>([])
+  const photoInputRef = useRef<HTMLInputElement>(null)
   async function lookup() {
     setBusy(true); setError(""); setMessage(""); setMatches([]); setTotal(null)
     try { const result = await json(`/api/returns/receiving-lookup?q=${encodeURIComponent(query.trim())}`); setMatches(result.returns || []); setTotal(result.total) }
@@ -47,7 +58,7 @@ export function ReturnReceiving({ warehouses, onUpdated }: { warehouses: Row[]; 
   }
   function open(row: Row) {
     setRecord(row); setError(""); setPhotos([])
-    setDraft({ warehouseId: String(row.warehouseId || ""), binLocation: String(row.binLocation || ""), condition: String(row.condition || "Unknown"), disposition: String(row.disposition === "restock" ? "restock" : "quarantine"), inspectionNotes: String(row.inspectionNotes || ""), ...Object.fromEntries(rows(row.items).map((line, index) => [`received-${index}`, String(line.receivedQty || 0)])) })
+    setDraft({ warehouseId: String(row.warehouseId || ""), binLocation: String(row.binLocation || ""), condition: String(row.condition || "Unknown"), disposition: String(row.disposition === "restock" ? "restock" : "quarantine"), inspectionNotes: String(row.inspectionNotes || ""), ...Object.fromEntries(rows(row.items).map((line, index) => [`received-${index}`, String(Number(line.receivedQty || 0) || Number(line.qty || line.qtySelected || 0))])) })
   }
   async function addPhotos(files: FileList | null) {
     if (!files) return
@@ -56,9 +67,9 @@ export function ReturnReceiving({ warehouses, onUpdated }: { warehouses: Row[]; 
       if (files.length + photos.length > 3) throw new Error("Add up to 3 photos per receipt.")
       const next: Photo[] = []
       for (const file of Array.from(files)) {
-        if (!["image/jpeg", "image/png", "image/webp"].includes(file.type) || file.size > 1024 * 1024) throw new Error("Use JPEG, PNG or WebP photos up to 1 MB each.")
-        const dataUrl = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(new Error("Unable to read photo")); reader.readAsDataURL(file) })
-        next.push({ id: crypto.randomUUID(), name: file.name, size: file.size, mimeType: file.type, dataUrl, stage: "received" })
+        const compressed = await compressEvidenceImage(file)
+        const dataUrl = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(new Error("Unable to read photo")); reader.readAsDataURL(compressed) })
+        next.push({ id: crypto.randomUUID(), name: compressed.name, size: compressed.size, mimeType: compressed.type, dataUrl, stage: "received" })
       }
       setPhotos(current => [...current, ...next])
     } catch (e) { setError(e instanceof Error ? e.message : "Unable to add photos") }
@@ -70,8 +81,11 @@ export function ReturnReceiving({ warehouses, onUpdated }: { warehouses: Row[]; 
     try {
       const items = rows(record.items).map((line, index) => ({ ...line, receivedQty: Number(draft[`received-${index}`] || 0) }))
       if (!items.length || !items.some(line => line.receivedQty > 0)) throw new Error("Enter the quantities physically received.")
-      await json(`/api/returns/${encodeURIComponent(String(record.id))}`, { ...draft, status: "received", inspectionStatus: "pending", receiptOnly: true, expectedUpdatedAt: String(record.updatedAt || ""), items, attachments: photos })
-      setRecord(null); setMatches([]); setTotal(null); setQuery(""); setMessage("Receipt saved. Stock remains unavailable until inspection and restock approval.")
+      const result = await json(`/api/returns/${encodeURIComponent(String(record.id))}`, { ...draft, status: "received", inspectionStatus: "pending", receiptOnly: true, expectedUpdatedAt: String(record.updatedAt || ""), items, attachments: photos })
+      const savedAttachments = rows(object(result.return).attachments)
+      const savedPhotoIds = new Set(savedAttachments.map(file => String(file.id || "")))
+      if (photos.some(photo => !savedPhotoIds.has(photo.id))) throw new Error("The receipt was recorded, but one or more photos were not returned as saved evidence. Reopen this return before continuing.")
+      setRecord(null); setMatches([]); setTotal(null); setQuery(""); setMessage(`Receipt saved${photos.length ? ` with ${photos.length} photo${photos.length === 1 ? "" : "s"}` : ""}. Stock remains unavailable until inspection and restock approval.`)
       await onUpdated()
     } catch (e) { setError(e instanceof Error ? e.message : "Unable to save receipt") }
     finally { setBusy(false) }
@@ -82,17 +96,16 @@ export function ReturnReceiving({ warehouses, onUpdated }: { warehouses: Row[]; 
     {!record && error && <p role="alert" className="text-sm text-destructive">{error}</p>}{message && <p role="status" className="text-sm">{message}</p>}
     {total === 0 && <p className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">No saved return matches this search.</p>}
     {total !== null && total >= 50 && <p className="text-sm text-muted-foreground">Showing the newest 50 matches. Add another customer, order, or item detail to narrow the search.</p>}
-    <div className="grid gap-2">{matches.map(row => { const customer = customerDetails(row); const skus = returnSkus(row); return <article key={String(row.id)} className="grid gap-3 rounded-md border bg-card p-3 text-sm"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="font-semibold">{String(row.returnNumber || row.channelReturnId || row.id)}</p><Badge variant="outline">{String(row.source || row.channelSource || "Local")}</Badge><Badge variant={row.restockedAt ? "success" : "secondary"}>{row.restockedAt ? "Restocked" : String(row.receivingStatus || "Not received")}</Badge></div><p className="mt-1 text-muted-foreground">Order {String(row.orderNumber || row.channelOrderId || "Unmatched")}</p></div><Button size="sm" disabled={busy || Boolean(row.restockedAt)} onClick={() => open(row)}>{row.restockedAt ? "Received" : "Receive"}</Button></div>{customer.name && <p className="flex min-w-0 items-center gap-2"><UserRound className="size-4 shrink-0 text-muted-foreground" /><span className="truncate">{customer.name}</span></p>}<div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-muted-foreground">{customer.phone && <span className="flex items-center gap-1.5"><Phone className="size-3.5" />{customer.phone}</span>}{customer.email && <span className="flex min-w-0 items-center gap-1.5"><Mail className="size-3.5 shrink-0" /><span className="truncate">{customer.email}</span></span>}{customer.postalCode && <span className="flex items-center gap-1.5"><MapPin className="size-3.5" />{customer.postalCode}</span>}</div>{skus.length > 0 && <div className="flex flex-wrap gap-1.5">{skus.map(sku => <Badge key={sku} variant="outline" className="font-mono text-[11px]">{sku}</Badge>)}</div>}</article> })}</div>
+    <div className="grid gap-2">{matches.map(row => { const customer = customerDetails(row); const location = customerLocation(row); const items = returnItems(row); const returnNumber = text(row.returnNumber, row.id); const channelReturnNumber = text(row.channelReturnId, row.channelReturnReference); const orderNumber = text(row.orderNumber, row.orderId); const channelOrderNumber = text(row.channelOrderId, row.channelOrderNumber, row.marketplaceOrderId); return <article key={String(row.id)} className="grid gap-3 rounded-md border bg-card p-3 text-sm"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="font-semibold">{returnNumber || channelReturnNumber || "Return"}</p><Badge variant="outline">{String(row.source || row.channelSource || "Local")}</Badge><Badge variant={row.restockedAt ? "success" : "secondary"}>{row.restockedAt ? "Restocked" : String(row.receivingStatus || "Not received")}</Badge></div></div><Button size="sm" disabled={busy || Boolean(row.restockedAt)} onClick={() => open(row)}>{row.restockedAt ? "Received" : "Receive"}</Button></div><dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs"><div><dt className="text-muted-foreground">DataPlus order</dt><dd className="truncate font-medium">{orderNumber || "Unmatched"}</dd></div><div><dt className="text-muted-foreground">Channel order</dt><dd className="truncate font-medium">{channelOrderNumber || "Not provided"}</dd></div>{channelReturnNumber && channelReturnNumber !== returnNumber ? <div className="col-span-2"><dt className="text-muted-foreground">Channel return</dt><dd className="truncate font-medium">{channelReturnNumber}</dd></div> : null}</dl>{customer.name && <p className="flex min-w-0 items-center gap-2"><UserRound className="size-4 shrink-0 text-muted-foreground" /><span className="truncate">{customer.name}</span></p>}{location && <p className="flex items-center gap-1.5 text-xs text-muted-foreground"><MapPin className="size-3.5" />{location}</p>}{items.length > 0 && <div className="grid gap-2 border-t pt-2">{items.map((item, index) => <div key={`${item.sku}-${index}`} className="flex min-w-0 items-center gap-2">{item.image ? <a href={item.image} target="_blank" rel="noopener noreferrer" className="shrink-0"><img src={item.image} alt={item.title || item.sku} className="size-12 rounded object-contain" /></a> : <span className="grid size-12 shrink-0 place-items-center rounded bg-muted"><Package className="size-5 text-muted-foreground" /></span>}<div className="min-w-0"><p className="truncate font-mono text-xs font-medium">{item.sku || "Unmatched item"}{item.qty > 1 ? ` × ${item.qty}` : ""}</p>{item.title ? <p className="truncate text-xs text-muted-foreground">{item.title}</p> : null}</div></div>)}</div>}</article> })}</div>
     <Dialog open={Boolean(record)} onOpenChange={value => { if (!value && !busy) setRecord(null) }}><DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle className="break-all">Receive {String(record?.returnNumber || record?.channelReturnId || "return")}</DialogTitle></DialogHeader>
       <p className="text-sm text-muted-foreground">Channel status: {String(record?.channelStatus || record?.channelLifecycleStatus || "Unknown")} / Local receiving only</p>
+      {record && error && <p role="alert" className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">{error}</p>}
       <ReturnReceiptFields record={record} warehouses={warehouses} draft={draft} setDraft={setDraft} />
       <div className="grid gap-3 sm:grid-cols-2"><Label className="grid gap-2">Bin / receiving location<Input value={draft.binLocation || ""} onChange={event => setDraft({ ...draft, binLocation: event.target.value })} /></Label><Label className="grid gap-2">Condition<Select value={draft.condition || "Unknown"} onValueChange={condition => setDraft({ ...draft, condition })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["Unknown", "New", "Opened", "Damaged"].map(value => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></Label></div>
       <Label className="grid gap-2">Proposed disposition<Select value={draft.disposition || "quarantine"} onValueChange={disposition => setDraft({ ...draft, disposition })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="quarantine">Quarantine</SelectItem><SelectItem value="restock">Restock after inspection</SelectItem><SelectItem value="dispose">Damaged / dispose after inspection</SelectItem><SelectItem value="return_to_vendor">Return to vendor</SelectItem></SelectContent></Select></Label>
       <Label className="grid gap-2">Inspection notes<Textarea value={draft.inspectionNotes || ""} onChange={event => setDraft({ ...draft, inspectionNotes: event.target.value })} /></Label>
-      <Label className="grid gap-2">Receipt photos<Input type="file" accept="image/jpeg,image/png,image/webp" multiple disabled={busy} onChange={event => { void addPhotos(event.target.files); event.target.value = "" }} /></Label>
-      <div className="flex flex-wrap gap-3">{photos.map(photo => <div key={photo.id} className="flex items-center gap-1"><a href={photo.dataUrl} target="_blank" rel="noopener noreferrer"><img src={photo.dataUrl} alt={photo.name} className="size-16 rounded object-cover" /></a><Button size="icon" variant="ghost" title={`Remove ${photo.name}`} disabled={busy} onClick={() => setPhotos(current => current.filter(row => row.id !== photo.id))}><Trash2 className="size-4" /></Button></div>)}</div>
-      {record && error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-      <DialogFooter className="sticky bottom-0 bg-background py-2"><Button variant="outline" disabled={busy} onClick={() => setRecord(null)}>Cancel</Button><Button disabled={busy || !draft.warehouseId || Boolean(record?.restockedAt)} onClick={() => void save()}>Save receipt for inspection</Button></DialogFooter>
+      <section className="grid gap-3 border-t pt-3"><div><p className="font-medium">Receipt photos</p><p className="text-xs text-muted-foreground">{photos.length}/3 ready to save with this receipt.</p></div><Input ref={photoInputRef} className="sr-only" type="file" accept="image/*" capture="environment" multiple disabled={busy} onChange={event => { void addPhotos(event.target.files); event.target.value = "" }} /><Button type="button" variant="outline" disabled={busy || photos.length >= 3} onClick={() => photoInputRef.current?.click()}>{photos.length ? <ImagePlus className="size-4" /> : <Camera className="size-4" />}{photos.length ? "Take another photo" : "Take receipt photo"}</Button><div className="flex flex-wrap gap-3">{photos.map(photo => <div key={photo.id} className="relative"><a href={photo.dataUrl} target="_blank" rel="noopener noreferrer"><img src={photo.dataUrl} alt={photo.name} className="size-20 rounded object-cover" /></a><Button className="absolute -right-2 -top-2 size-7 rounded-full" size="icon" variant="destructive" title={`Remove ${photo.name}`} disabled={busy} onClick={() => setPhotos(current => current.filter(row => row.id !== photo.id))}><Trash2 className="size-3.5" /></Button></div>)}</div></section>
+      <DialogFooter className="sticky bottom-0 bg-background py-2"><Button variant="outline" disabled={busy} onClick={() => setRecord(null)}>Cancel</Button><Button disabled={busy || !draft.warehouseId || Boolean(record?.restockedAt)} onClick={() => void save()}>Save receipt{photos.length ? ` + ${photos.length} photo${photos.length === 1 ? "" : "s"}` : ""}</Button></DialogFooter>
     </DialogContent></Dialog>
   </section>
 }

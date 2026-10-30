@@ -11,6 +11,10 @@ test('receiving lookup route is registered before the generic return detail rout
   assert.notEqual(receivingLookupRoute, -1);
   assert.notEqual(returnDetailRoute, -1);
   assert.ok(receivingLookupRoute < returnDetailRoute, 'the generic return detail route would swallow receiving-lookup');
+  assert.match(serverSource, /receiving-lookup[\s\S]*readProductsByKeys\(skus[\s\S]*defaultImage/, 'receiving lookup must enrich returned items with compact catalog images');
+  assert.match(serverSource, /receiptAttachments[\s\S]*attachmentCount: receiptAttachments\.length/, 'receiving history must retain the photo evidence count');
+  const dbSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
+  assert.match(dbSource, /orderNumber: data\.orderNumber \|\| linked\?\.order_number[\s\S]*channelOrderId: data\.channelOrderId/, 'receiving lookup must fill linked DataPlus and channel order numbers');
 });
 test('exact scans match closed returns, order references and tracking without merging cases', () => {
   const records = [

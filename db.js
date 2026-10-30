@@ -12484,6 +12484,8 @@ async function findReturnsForReceiving(query = "", options = {}) {
       const orderRaw = linked?.raw || {};
       return {
         ...data,
+        orderNumber: data.orderNumber || linked?.order_number || orderRaw.orderNumber || orderRaw.internalOrderNumber || "",
+        channelOrderId: data.channelOrderId || data.channelOrderNumber || linked?.channel_order_id || orderRaw.channelOrderNumber || orderRaw.marketplaceOrderId || "",
         customerName: data.customerName || data.buyer || data.customer?.name || linked?.buyer || "",
         customerEmail: data.customerEmail || data.buyerEmail || data.customer?.email || linked?.buyer_email || "",
         customerPhone: data.customerPhone || data.phone || data.customer?.phone || linked?.phone || "",
