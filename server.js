@@ -8617,7 +8617,7 @@ async function enrichReturnItemCatalogImages(records = []) {
   const skus = [...new Set(source.flatMap((record) => (record.items || [])
     .map((line) => String(line.sku || "").trim())).filter(Boolean))];
   const products = postgres.isPostgresEnabled() && skus.length
-    ? await postgres.readProductsByKeys(skus, { includeMarketplaceIds: false }).catch(() => [])
+    ? await postgres.readProductsByKeys(skus, { includeMarketplaceIds: false, includeSourceEnrichment: true }).catch(() => [])
     : [];
   const imageBySku = new Map(products.map((product) => [
     String(product.sku || "").trim().toLowerCase(),
