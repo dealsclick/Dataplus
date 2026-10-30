@@ -65,6 +65,8 @@ test('receiving requires every expected line, bounded quantities and physical lo
   assert.match(validateReturnReceipt(record, { ...body, items: [{ sku: 'A', qty: 2, receivedQty: 3 }, body.items[1]] }, [warehouse]), /whole numbers/);
   assert.match(validateReturnReceipt(record, body, [{ ...warehouse, isPhysical: false }]), /physical/);
   assert.match(validateReturnReceipt(record, body, [{ ...warehouse, allowReceiving: false }]), /physical/);
+  assert.equal(validateReturnReceipt(record, { ...body, receiptOnly: true, warehouseId: "" }, []), "");
+  assert.match(validateReturnReceipt(record, { ...body, warehouseId: "" }, []), /physical/);
   assert.equal(returnNeedsAttention({ channelLifecycleStatus: 'closed', receivingStatus: 'received' }), true);
   assert.match(validateReturnReceipt(record, { ...body, status: 'done', disposition: 'restock', inspectionStatus: 'pending' }, [warehouse]), /inspection/);
   assert.match(validateReturnReceipt({ ...record, updatedAt: 'new' }, { ...body, receiptOnly: true, expectedUpdatedAt: 'old' }, [warehouse]), /changed/);

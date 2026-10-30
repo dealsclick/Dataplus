@@ -62770,8 +62770,9 @@ async function handleApi(req, res) {
     if (receiptError) return sendJson(res, 400, { error: receiptError });
     const receiptStatus = body.status || record.status;
     if (["received", "inspection"].includes(receiptStatus) || (["resolved", "done"].includes(receiptStatus) && (body.disposition || record.disposition) === "restock")) {
-      const destination = (db.warehouses || []).find((row) => row.id === (body.warehouseId || record.warehouseId));
-      if (!destination || !isPhysicalWarehouse(destination)) return sendJson(res, 400, { error: "Returns can only be received into a physical warehouse." });
+      const warehouseId = body.receiptOnly && body.warehouseId !== undefined ? body.warehouseId : (body.warehouseId || record.warehouseId);
+      const destination = (db.warehouses || []).find((row) => row.id === warehouseId);
+      if ((!body.receiptOnly || warehouseId) && (!destination || !isPhysicalWarehouse(destination))) return sendJson(res, 400, { error: "Returns can only be received into a physical warehouse." });
       for (const line of body.items || record.items || []) {
         if (Number(line.receivedQty || 0) > 0 && !await postgres.readProductByKey(line.sku)) return sendJson(res, 400, { error: `Match ${line.sku || "each returned item"} to a catalog SKU before receiving.` });
       }
@@ -62821,7 +62822,11 @@ async function handleApi(req, res) {
       nextAttachments.forEach((file) => existing.set(file.id, file));
       record.attachments = Array.from(existing.values());
     }
-    if (body.warehouseId) {
+    if (body.receiptOnly && body.warehouseId === "") {
+      record.warehouseId = "";
+      record.warehouseName = "";
+      record.binLocation = "";
+    } else if (body.warehouseId) {
       const warehouse = (db.warehouses || []).find((item) => item.id === body.warehouseId);
       if (warehouse) {
         record.warehouseId = warehouse.id;

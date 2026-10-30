@@ -20,8 +20,10 @@ assert.match(returnReceivingSource, /DataPlus order[\s\S]*Channel order[\s\S]*Ch
 assert.doesNotMatch(returnReceivingSource, /<Phone|<Mail/, 'Return results must not display customer phone or email');
 assert.match(returnReceivingSource, /customer\.city[\s\S]*customer\.state[\s\S]*customer\.postalCode/, 'Return results must show city, state, and ZIP');
 assert.match(returnReceivingSource, /defaultImage[\s\S]*<img src=\{item\.image\}/, 'Return results must render catalog product images');
-assert.match(returnReceivingSource, /compressEvidenceImage\(file\)[\s\S]*capture="environment"[\s\S]*Save receipt\{photos\.length/, 'Return receiving must compress, preview, and explicitly save mobile photos');
+assert.match(returnReceivingSource, /compressEvidenceImage\(file,[\s\S]*maxBytes: 900_000[\s\S]*capture="environment"[\s\S]*Save receipt\{photos\.length/, 'Return receiving must compress, preview, and explicitly save mobile photos');
 assert.match(returnReceivingSource, /savedPhotoIds[\s\S]*one or more photos were not returned as saved evidence/, 'Return receiving must verify photo persistence before reporting success');
+assert.match(returnReceivingSource, /selectedWarehouse[\s\S]*activeBins[\s\S]*Choose a bin/, 'Selecting a return warehouse must load its active bins');
+assert.doesNotMatch(returnReceivingSource, /disabled=\{busy \|\| !draft\.warehouseId/, 'Warehouse selection must remain optional for a receipt-only return');
 assert.match(warehouseRouteSource, /const beginQuickCreate = \(draft\?[\s\S]*quickCreatePhotoInputRef\.current\?\.click\(\)/, 'Warehouse quick create must open the product camera directly');
 assert.match(warehouseRouteSource, /<DialogTitle>Quick create product<\/DialogTitle>[\s\S]*\{manualPhotoUrls\.length\}\/8 photos[\s\S]*Take another[\s\S]*Create draft SKU/, 'Warehouse quick create must support a compact multi-photo capture flow');
 assert.match(warehouseRouteSource, /Quick create unit of measure[\s\S]*Quick create case pack/, 'Warehouse quick create must collect UOM and case pack');
