@@ -49017,6 +49017,20 @@ function prepareHistoricalBackfillOrder(order = {}, options = {}) {
   return next;
 }
 
+async function readShopifyOrderImportContext() {
+  if (!postgres.isPostgresEnabled()) return normalizeDb(await readDbFast({ skipInventory: true }));
+  const [sequence, connections] = await Promise.all([
+    postgres.readStateField("sequence"),
+    postgres.readStateField("connections")
+  ]);
+  return {
+    sequence: sequence && typeof sequence === "object" ? sequence : {},
+    connections: Array.isArray(connections) ? connections : [],
+    inventory: [],
+    orders: []
+  };
+}
+
 async function importShopifyOrders(limit = 250, filters = {}) {
   const query = `query DataPlusOrders($first: Int!, $after: String, $query: String) { orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } fulfillments { id status createdAt updatedAt trackingInfo { company number url } fulfillmentLineItems(first: 250) { nodes { quantity lineItem { id sku } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } } } }`;
   const collectResults = filters.collectResults !== false;
@@ -49034,9 +49048,7 @@ async function importShopifyOrders(limit = 250, filters = {}) {
   const orderQuery = `created_at:>=${since}`;
   const sources = String(filters.sources || "Native Shopify sources");
   const includeCanceled = filters.includeCanceled === true || String(filters.includeCanceled).toLowerCase() === "true";
-  const db = filters.historicalBackfill === true && postgres.isPostgresEnabled()
-    ? normalizeDb({ orders: [], sequence: await postgres.readStateField("sequence") || {} })
-    : normalizeDb(await readDbFast({ skipInventory: true }));
+  const db = await readShopifyOrderImportContext();
   let skipped = 0;
   while (processed < maxOrders) {
     const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(pageSize, maxOrders - processed), after, query: orderQuery }, { operation: "Import Shopify orders" });
@@ -49113,7 +49125,7 @@ async function refreshShopifyOrderFromWebhook(orderId = "", settings = {}, webho
   if (!incoming.id) throw new Error("Shopify could not load the order referenced by this webhook.");
   if (!shopifySourceIsAllowed(incoming, settings.shopifyOrderImportSources)) return { skipped: true, reason: `Sales channel ${incoming.channelSource || "Unknown"} is not enabled for Shopify order imports.` };
   const existing = await postgres.readOrderByKey(incoming.id);
-  const db = normalizeDb(await readDbFast({ skipInventory: true }));
+  const db = await readShopifyOrderImportContext();
   const merged = assignImportedOrderInternalNumber(db, preserveMarketplaceOrderOperations(incoming, existing), existing);
   merged.updatedAt = new Date().toISOString();
   merged.importedAt = new Date().toISOString();
