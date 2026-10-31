@@ -48856,9 +48856,9 @@ function shopifySourceIsAllowed(order = {}, configuredSources = "Native Shopify 
   if (!allowed.length || allowed.some((value) => ["all", "*", "all sources", "all shopify sources"].includes(value))) return true;
   const raw = String(order.shopifySourceName || "").trim().toLowerCase();
   const display = String(order.channelSource || "").trim().toLowerCase();
-  if (allowed.some((value) => ["native", "native shopify", "native shopify sources"].includes(value))) {
-    return ["web", "shop", "pos", "draft_order", "shopify_draft_order", "mobile_app", "api"].includes(raw);
-  }
+  const nativeAliases = ["native", "native shopify", "native shopify sources"];
+  if (allowed.some((value) => nativeAliases.includes(value))
+    && ["web", "shop", "pos", "draft_order", "shopify_draft_order", "mobile_app", "api"].includes(raw)) return true;
   return allowed.includes(raw) || allowed.includes(display);
 }
 
@@ -75463,6 +75463,7 @@ module.exports = {
   attachExportManifestFile,
   productShippingClassification,
   exportManifestPayload,
+  shopifySourceIsAllowed,
   importShopifyOrders,
   appendChannelApiLog,
   IMPORT_JOB_FILE_DIR,
