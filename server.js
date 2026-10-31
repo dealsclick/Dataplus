@@ -43381,12 +43381,28 @@ function ebayPublishBlockDetails(error = {}) {
       publishRetryable: true
     };
   }
+  if (/item\s+specific\s+(?:type|model).*missing/.test(haystack)) {
+    return {
+      publishBlockCode: "auto_fillable_item_specific",
+      publishBlockField: "aspects",
+      publishSuggestedFix: "Retry with Type derived from the mapped category or Model derived from the product MPN/SKU.",
+      publishRetryable: true
+    };
+  }
   if (/aspect|item specific|specifics|required field/.test(haystack)) {
     return {
       publishBlockCode: "missing_required_item_specific",
       publishBlockField: "aspects",
       publishSuggestedFix: "Load required item specifics for the mapped eBay category and fill the missing values.",
       publishRetryable: false
+    };
+  }
+  if (/\b(?:upc|ean|isbn)\b.*invalid\s+value\s+of.*\b0+\b/.test(haystack)) {
+    return {
+      publishBlockCode: "invalid_product_identifier_placeholder",
+      publishBlockField: "identifier",
+      publishSuggestedFix: "Remove the all-zero placeholder identifier and publish without it when the category permits.",
+      publishRetryable: true
     };
   }
   if (/identifier|\bupc\b|\bean\b|\bisbn\b|\bmpn\b|product identifier|brand.*mpn/.test(haystack)) {
@@ -43443,6 +43459,14 @@ function ebayPublishBlockDetails(error = {}) {
       publishBlockField: "condition",
       publishSuggestedFix: "Use a condition supported by the selected eBay category.",
       publishRetryable: false
+    };
+  }
+  if (/25016|below\s+the\s+minimum\s+price|minimum\s+price\s+of\s+0\.99/.test(haystack)) {
+    return {
+      publishBlockCode: "price_below_marketplace_minimum",
+      publishBlockField: "price",
+      publishSuggestedFix: "Recalculate the offer at or above eBay's $0.99 fixed-price minimum, then publish again.",
+      publishRetryable: true
     };
   }
   if (/price|pricing|currency/.test(haystack)) {
@@ -43563,7 +43587,7 @@ function ebayListingPublishBlockSummary(item = {}) {
     code,
     field: classified.publishBlockField || "",
     suggestedFix: classified.publishSuggestedFix || "",
-    retryable: classified.publishRetryable === true || ["prepared_not_live", "published_identity_missing", "inventory_item_not_ready", "missing_or_invalid_package_weight", "invalid_shipping_package_type", "invalid_or_missing_image"].includes(code),
+    retryable: classified.publishRetryable === true || ["prepared_not_live", "published_identity_missing", "inventory_item_not_ready", "auto_fillable_item_specific", "invalid_product_identifier_placeholder", "price_below_marketplace_minimum", "missing_or_invalid_package_weight", "invalid_shipping_package_type", "invalid_or_missing_image"].includes(code),
     error: String(listing.publishError || "").trim(),
     errorAt: String(listing.publishErrorAt || listing.updatedAt || "").trim(),
     packageWeight: Number(ebayMeasurementValue(item, "packageWeight", "itemWeight") || 0),

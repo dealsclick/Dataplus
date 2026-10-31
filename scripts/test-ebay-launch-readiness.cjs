@@ -40,12 +40,15 @@ async function main() {
   assert.equal(unavailableEbayProductIdentifier('UPC', '8236089395'), false);
   assert.equal(validEbayProductIdentifier('EAN', '4006381333931'), true);
   assert.equal(blockerContext.ebayPublishBlockDetails({ message: '{"category":"REQUEST","message":"Invalid UPC value"}' }).publishBlockCode, 'missing_product_identifier');
+  assert.equal(blockerContext.ebayPublishBlockDetails({ message: 'UPC has an invalid value of "000000000000".' }).publishBlockCode, 'invalid_product_identifier_placeholder');
   assert.equal(blockerContext.ebayPublishBlockDetails({ message: '{"category":"REQUEST","message":"Category ID is invalid"}' }).publishBlockCode, 'invalid_or_missing_category');
   assert.equal(blockerContext.ebayPublishBlockDetails({ message: 'The offer has already been published.' }).publishBlockCode, 'published_identity_missing');
   assert.equal(blockerContext.ebayPublishBlockDetails({ message: 'Package dimensions exceed the carrier service limit.' }).publishBlockCode, 'shipping_service_limit_exceeded');
   assert.equal(blockerContext.ebayPublishBlockDetails({ message: 'ShippableUnit exceeds the limit of 130.' }).publishBlockCode, 'shipping_service_limit_exceeded');
   assert.equal(blockerContext.ebayPublishBlockDetails({ message: 'Error 25019: title contains improper words.' }).publishBlockCode, 'listing_content_or_policy_restriction');
   assert.equal(blockerContext.ebayPublishBlockDetails({ message: 'Error 25604: Inventory item product not found.' }).publishBlockCode, 'inventory_item_not_ready');
+  assert.equal(blockerContext.ebayPublishBlockDetails({ message: 'The item specific Model is missing.' }).publishBlockCode, 'auto_fillable_item_specific');
+  assert.equal(blockerContext.ebayPublishBlockDetails({ message: 'Error 25016: price is below the minimum price of 0.99.' }).publishBlockCode, 'price_below_marketplace_minimum');
   assert.match(source, /publishedWithoutIdentity[\s\S]*: listing\.publishError\s*\? ebayPublishBlockDetails\(\{ message: listing\.publishError \}\)[\s\S]*: listing\.publishBlockCode/);
   assert.equal(priceContext.ebayMinimumOfferPrice(0), 0);
   assert.equal(priceContext.ebayMinimumOfferPrice(0.95), 0.99);
