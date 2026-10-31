@@ -1451,8 +1451,8 @@ export function walmartOrderIdentifiers(order: Record<string, unknown>, referenc
 
 export function channelOrderNumberFor(order: Record<string, unknown>, references: Array<Record<string, unknown>> = []) {
   const external = (order.external || {}) as Record<string, unknown>
-  return marketplaceReferenceValue(references, "parent_order", "order")
-    || String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.channelOrderNumber || order.externalOrderId || external.parentOrderSn || external.orderId || "")
+  return marketplaceReferenceValue(references, "source_order", "channel_order", "third_party_order", "parent_order")
+    || String(order.channelOrderNumber || marketplaceReferenceValue(references, "order") || order.marketplaceOrderNumber || order.marketplaceOrderId || order.externalOrderId || external.parentOrderSn || external.orderId || "")
 }
 
 export function channelOrderUrlFor(order: Record<string, unknown>, channelOrderNumber = "", shopifyAdminUrl = "") {

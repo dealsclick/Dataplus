@@ -48862,8 +48862,38 @@ function shopifySourceIsAllowed(order = {}, configuredSources = "Native Shopify 
   return allowed.includes(raw) || allowed.includes(display);
 }
 
+function shopifyOrderAttributes(node = {}) {
+  return (Array.isArray(node.customAttributes) ? node.customAttributes : [])
+    .map((attribute) => ({
+      key: String(attribute?.key || "").trim(),
+      value: String(attribute?.value || "").trim()
+    }))
+    .filter((attribute) => attribute.key && attribute.value);
+}
+
+function shopifyOriginatingOrderNumber(node = {}, source = shopifyOrderSource(node.sourceName)) {
+  const sourceIdentifier = String(node.sourceIdentifier || "").trim();
+  if (sourceIdentifier) return sourceIdentifier;
+  if (source.type !== "third_party") return "";
+  const sourceKey = String(source.sourceKey || "").toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  const attributes = shopifyOrderAttributes(node);
+  const preferredKeys = new Set([
+    `${sourceKey}_order_id`,
+    `${sourceKey}_order_number`,
+    "marketplace_order_id",
+    "marketplace_order_number",
+    "external_order_id",
+    "external_order_number"
+  ]);
+  const preferred = attributes.find((attribute) => preferredKeys.has(attribute.key.toLowerCase().replace(/[^a-z0-9]+/g, "_")));
+  return preferred?.value || "";
+}
+
 function shopifyOrderToDataPlusOrder(node = {}) {
   const source = shopifyOrderSource(node.sourceName);
+  const sourceIdentifier = String(node.sourceIdentifier || "").trim();
+  const originatingOrderNumber = shopifyOriginatingOrderNumber(node, source);
+  const customAttributes = shopifyOrderAttributes(node);
   const customer = node.customer || {};
   const shipping = node.shippingAddress || {};
   const billing = node.billingAddress || {};
@@ -48933,8 +48963,12 @@ function shopifyOrderToDataPlusOrder(node = {}) {
     orderNumber: "",
     marketplaceOrderNumber: node.name || "",
     marketplaceOrderId: String(node.id || ""),
+    channelOrderNumber: originatingOrderNumber,
+    shopifyOrderNumber: node.name || "",
+    shopifySourceIdentifier: sourceIdentifier,
     marketplaceReferences: [
-      { source: "Shopify", type: "order", value: node.name || "", primary: true },
+      { source: source.channel, type: "source_order", value: originatingOrderNumber, primary: Boolean(originatingOrderNumber) },
+      { source: "Shopify", type: "order", value: node.name || "", primary: !originatingOrderNumber },
       { source: "Shopify", type: "gid", value: String(node.id || ""), primary: false }
     ].filter((reference) => reference.value),
     source: "Shopify",
@@ -48970,6 +49004,7 @@ function shopifyOrderToDataPlusOrder(node = {}) {
     shipments: sourceShipments,
     items,
     payments: (node.transactions || []).map((transaction) => ({ id: transaction?.id || crypto.randomUUID(), provider: transaction?.gateway || "Shopify", transactionId: transaction?.authorizationCode || transaction?.id || "", amount: Number(transaction?.amountSet?.shopMoney?.amount || 0), currency: transaction?.amountSet?.shopMoney?.currencyCode || node.currencyCode || "USD", status: String(transaction?.status || "").toLowerCase(), kind: String(transaction?.kind || "").toLowerCase(), manuallyCapturable: Boolean(transaction?.manuallyCapturable), parentTransactionId: transaction?.parentTransaction?.id || "", createdAt: transaction?.createdAt || "" })),
+    shopifyCustomAttributes: customAttributes,
     shopifyAdminUrl: node.legacyResourceId ? `https://admin.shopify.com/store/${shopifyAdminConfig().shop.split(".")[0]}/orders/${node.legacyResourceId}` : "",
     orderDate,
     orderedAt: orderDate,
@@ -49032,7 +49067,7 @@ async function readShopifyOrderImportContext() {
 }
 
 async function importShopifyOrders(limit = 250, filters = {}) {
-  const query = `query DataPlusOrders($first: Int!, $after: String, $query: String) { orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } fulfillments { id status createdAt updatedAt trackingInfo { company number url } fulfillmentLineItems(first: 250) { nodes { quantity lineItem { id sku } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } } } }`;
+  const query = `query DataPlusOrders($first: Int!, $after: String, $query: String) { orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) { pageInfo { hasNextPage endCursor } edges { node { id legacyResourceId name sourceName sourceIdentifier customAttributes { key value } email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } fulfillments { id status createdAt updatedAt trackingInfo { company number url } fulfillmentLineItems(first: 250) { nodes { quantity lineItem { id sku } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } } } }`;
   const collectResults = filters.collectResults !== false;
   const filtered = []; let after = null;
   let processed = 0;
@@ -49115,7 +49150,7 @@ async function importShopifyOrders(limit = 250, filters = {}) {
 }
 
 function shopifyOrderWebhookQuery() {
-  return `query DataPlusOrderWebhook($id: ID!) { order(id: $id) { id legacyResourceId name sourceName email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } fulfillments { id status createdAt updatedAt trackingInfo { company number url } fulfillmentLineItems(first: 250) { nodes { quantity lineItem { id sku } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } }`;
+  return `query DataPlusOrderWebhook($id: ID!) { order(id: $id) { id legacyResourceId name sourceName sourceIdentifier customAttributes { key value } email currencyCode createdAt updatedAt cancelledAt displayFinancialStatus displayFulfillmentStatus customer { id displayName email phone } subtotalPriceSet { shopMoney { amount } } totalPriceSet { shopMoney { amount } } totalTaxSet { shopMoney { amount } } totalShippingPriceSet { shopMoney { amount } } totalDiscountsSet { shopMoney { amount } } shippingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } billingAddress { firstName lastName company address1 address2 city province zip country countryCodeV2 phone } discountCodes shippingLines(first: 20) { edges { node { title code originalPriceSet { shopMoney { amount } } } } } lineItems(first: 250) { edges { node { id sku title quantity taxable vendor variantTitle variant { id sku } originalUnitPriceSet { shopMoney { amount } } } } } fulfillments { id status createdAt updatedAt trackingInfo { company number url } fulfillmentLineItems(first: 250) { nodes { quantity lineItem { id sku } } } } transactions(first: 50) { id kind status gateway authorizationCode createdAt manuallyCapturable parentTransaction { id } amountSet { shopMoney { amount currencyCode } } } } }`;
 }
 
 async function refreshShopifyOrderFromWebhook(orderId = "", settings = {}, webhook = {}) {
@@ -75463,6 +75498,7 @@ module.exports = {
   attachExportManifestFile,
   productShippingClassification,
   exportManifestPayload,
+  shopifyOrderToDataPlusOrder,
   shopifySourceIsAllowed,
   importShopifyOrders,
   appendChannelApiLog,
