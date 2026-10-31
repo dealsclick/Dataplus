@@ -5679,6 +5679,7 @@ async function queueShopifyOrderImportJob(db, body = {}, options = {}) {
   const workerPayload = {
     lookbackDays,
     limit,
+    pageSize: Math.max(10, Math.min(100, Number(body.pageSize || 50) || 50)),
     fetchAll,
     historicalBackfill: body.historicalBackfill === true,
     sources,
@@ -26889,6 +26890,7 @@ async function runShopifyOrderImportWorkerJob(job = {}, attrs = {}) {
   const payload = { ...(job.workerPayload || {}), ...(attrs || {}) };
   const fetchAll = payload.fetchAll === true || String(payload.fetchAll).toLowerCase() === "true" || String(payload.limit || "").toLowerCase() === "all";
   const limit = fetchAll ? 0 : Math.max(1, Math.min(5000, Number(payload.limit || job.totalRows || 250)));
+  const pageSize = Math.max(10, Math.min(100, Number(payload.pageSize || 50) || 50));
   const lookbackDays = Math.max(1, Math.min(365, Number(payload.lookbackDays || 30) || 30));
   const sources = String(payload.sources || "Native Shopify sources");
   const startedAt = job.startedAt || new Date().toISOString();
@@ -26920,6 +26922,7 @@ async function runShopifyOrderImportWorkerJob(job = {}, attrs = {}) {
       includeCanceled: Boolean(payload.includeCanceled),
       lookbackDays,
       fetchAll,
+      pageSize,
       historicalBackfill: payload.historicalBackfill === true,
       collectResults: false,
       jobId: job.id,
@@ -49022,6 +49025,10 @@ async function importShopifyOrders(limit = 250, filters = {}) {
   let saved = 0;
   const fetchAll = filters.fetchAll === true || String(filters.fetchAll).toLowerCase() === "true" || String(limit || "").toLowerCase() === "all";
   const maxOrders = fetchAll ? Number.MAX_SAFE_INTEGER : Math.max(1, Math.min(5000, Number(limit || 250) || 250));
+  // Shopify order nodes include addresses, line items, fulfillments, and transactions.
+  // Keep each API page bounded so large reconciliations commit incrementally without
+  // exhausting the dedicated order worker's memory budget.
+  const pageSize = Math.max(10, Math.min(100, Number(filters.pageSize || 50) || 50));
   const lookbackDays = Math.max(1, Math.min(365, Number(filters.lookbackDays || 30) || 30));
   const since = new Date(Date.now() - lookbackDays * 24 * 3600 * 1000).toISOString().slice(0, 10);
   const orderQuery = `created_at:>=${since}`;
@@ -49032,7 +49039,7 @@ async function importShopifyOrders(limit = 250, filters = {}) {
     : normalizeDb(await readDbFast({ skipInventory: true }));
   let skipped = 0;
   while (processed < maxOrders) {
-    const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(250, maxOrders - processed), after, query: orderQuery }, { operation: "Import Shopify orders" });
+    const data = await shopifyGraphqlRequestAuto(query, { first: Math.min(pageSize, maxOrders - processed), after, query: orderQuery }, { operation: "Import Shopify orders" });
     const connection = data?.orders || {};
     const pageOrders = (connection.edges || []).map((edge) => shopifyOrderToDataPlusOrder(edge.node)).filter((order) => order.id);
     processed += pageOrders.length;
