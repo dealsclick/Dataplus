@@ -40,7 +40,10 @@ async function main() {
   assert.equal(blockerContext.ebayPublishBlockDetails({ message: '{"category":"REQUEST","message":"Category ID is invalid"}' }).publishBlockCode, 'invalid_or_missing_category');
   assert.equal(blockerContext.ebayPublishBlockDetails({ message: 'The offer has already been published.' }).publishBlockCode, 'published_identity_missing');
   assert.equal(blockerContext.ebayPublishBlockDetails({ message: 'Package dimensions exceed the carrier service limit.' }).publishBlockCode, 'shipping_service_limit_exceeded');
+  assert.equal(blockerContext.ebayPublishBlockDetails({ message: 'ShippableUnit exceeds the limit of 130.' }).publishBlockCode, 'shipping_service_limit_exceeded');
   assert.equal(blockerContext.ebayPublishBlockDetails({ message: 'Error 25019: title contains improper words.' }).publishBlockCode, 'listing_content_or_policy_restriction');
+  assert.equal(blockerContext.ebayPublishBlockDetails({ message: 'Error 25604: Inventory item product not found.' }).publishBlockCode, 'inventory_item_not_ready');
+  assert.match(source, /publishedWithoutIdentity[\s\S]*: listing\.publishError\s*\? ebayPublishBlockDetails\(\{ message: listing\.publishError \}\)[\s\S]*: listing\.publishBlockCode/);
   assert.match(source, /ebayPublishedOfferListing\(db, offerId\)/);
   assert.match(source, /Recovered the published eBay listing identity from its offer/);
   assert.match(source, /categoryId must be a leaf category/);

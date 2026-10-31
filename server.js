@@ -43343,7 +43343,7 @@ function ebayPublishBlockDetails(error = {}) {
       publishRetryable: true
     };
   }
-  if (/exceed(?:s|ed)?\s+(?:the\s+)?(?:maximum|service|carrier).*limit|package.*(?:too\s+large|oversize)|not\s+available\s+for\s+this\s+package|ground\s+saver.*(?:limit|eligible)/.test(haystack)) {
+  if (/exceed(?:s|ed)?\s+(?:the\s+)?(?:maximum|service|carrier).*limit|(?:package|dimensions?|girth|shippableunit).*exceed(?:s|ed)?.*limit|package.*(?:too\s+large|oversize)|not\s+available\s+for\s+this\s+package|ground\s+saver.*(?:limit|eligible)/.test(haystack)) {
     return {
       publishBlockCode: "shipping_service_limit_exceeded",
       publishBlockField: "packageWeightAndSize",
@@ -43397,6 +43397,14 @@ function ebayPublishBlockDetails(error = {}) {
       publishBlockField: "listingContent",
       publishSuggestedFix: "Review the title, description, product type, and eBay selling restrictions shown in the raw error.",
       publishRetryable: false
+    };
+  }
+  if (/25604|product\s+not\s+found|inventory\s+item\s+not\s+found|availability\s+not\s+found/.test(haystack)) {
+    return {
+      publishBlockCode: "inventory_item_not_ready",
+      publishBlockField: "inventoryItem",
+      publishSuggestedFix: "Recreate or update the eBay inventory item and offer, then publish again.",
+      publishRetryable: true
     };
   }
   if (/category\s*(?:id)?\s*(?:is|was|must|not|invalid|missing)|invalid\s+(?:ebay\s+)?category|categoryid|leaf\s+category|25005/.test(haystack)) {
@@ -43523,15 +43531,15 @@ function ebayListingPublishBlockSummary(item = {}) {
       publishSuggestedFix: "Reconcile the published offer from eBay and restore its listing ID in DataPlus.",
       publishRetryable: true
     }
-    : listing.publishBlockCode
-    ? {
-      publishBlockCode: String(listing.publishBlockCode || ""),
-      publishBlockField: String(listing.publishBlockField || ""),
-      publishSuggestedFix: String(listing.publishSuggestedFix || ""),
-      publishRetryable: listing.publishRetryable === true
-    }
     : listing.publishError
       ? ebayPublishBlockDetails({ message: listing.publishError })
+      : listing.publishBlockCode
+        ? {
+          publishBlockCode: String(listing.publishBlockCode || ""),
+          publishBlockField: String(listing.publishBlockField || ""),
+          publishSuggestedFix: String(listing.publishSuggestedFix || ""),
+          publishRetryable: listing.publishRetryable === true
+        }
       : {
         publishBlockCode: "prepared_not_live",
         publishBlockField: "offerId",
@@ -43549,7 +43557,7 @@ function ebayListingPublishBlockSummary(item = {}) {
     code,
     field: classified.publishBlockField || "",
     suggestedFix: classified.publishSuggestedFix || "",
-    retryable: classified.publishRetryable === true || ["prepared_not_live", "published_identity_missing", "missing_or_invalid_package_weight", "invalid_shipping_package_type", "invalid_or_missing_image"].includes(code),
+    retryable: classified.publishRetryable === true || ["prepared_not_live", "published_identity_missing", "inventory_item_not_ready", "missing_or_invalid_package_weight", "invalid_shipping_package_type", "invalid_or_missing_image"].includes(code),
     error: String(listing.publishError || "").trim(),
     errorAt: String(listing.publishErrorAt || listing.updatedAt || "").trim(),
     packageWeight: Number(ebayMeasurementValue(item, "packageWeight", "itemWeight") || 0),
