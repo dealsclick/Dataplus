@@ -295,7 +295,7 @@ const { freightAllowance, priceIncludingFreight } = require("./lib/shopify-freig
 const { sourcePriceFloors, variantPriceFloor } = require("./lib/product-price-floors");
 const { validatePriceMode, resolvePricePolicy, applyPricePolicy } = require("./lib/channel-price-policy");
 const { calculateChannelPrice, variableFeeAmount, normalizeMode: normalizeChannelPricingMode, normalizeRoundingRule: normalizeChannelRoundingRule } = require("./lib/channel-price-formula");
-const { EBAY_LAUNCH_READINESS_VERSION, normalizeEbayProductIdentifier, validEbayProductIdentifier } = require("./lib/ebay-launch-readiness");
+const { EBAY_LAUNCH_READINESS_VERSION, normalizeEbayProductIdentifier, unavailableEbayProductIdentifier, validEbayProductIdentifier } = require("./lib/ebay-launch-readiness");
 const SHOPIFY_MULTIPACK_DISCOUNT_PERCENT = 5;
 const SHOPIFY_DUMP_FIELD_METAFIELDS = {
   shortDescription: { key: "custom.short_description", type: "multi_line_text_field" },
@@ -41256,7 +41256,7 @@ function ebayAspectSourceValue(item = {}, attribute = {}) {
     color: ["color", "colour"],
     material: ["material"],
     size: ["size"],
-    type: ["type", "productType", "product_type"],
+    type: ["type", "productType", "product_type", "mainCategory", "sourceCategory", "category"],
     countryoforigin: ["countryOfOrigin", "country_of_origin", "originCountry"],
     numberinpack: ["packQty", "packageQty", "uomQty", "uom_qty", "quantityIncrements"],
     unitquantity: ["uomQty", "uom_qty", "unitQuantity", "qty"],
@@ -41270,6 +41270,7 @@ function ebayAspectSourceValue(item = {}, attribute = {}) {
   }[key] || [];
   const value = sourceDataValue(item, [...candidates, name, attribute.handle, attribute.id]);
   if (!value) return "";
+  if (key === "type") return ebayCategoryPathLeaf(value) || value;
   if (/^item(length|width|height)$/.test(key) && /^-?\d+(\.\d+)?$/.test(value)) return `${value} in`;
   return value;
 }
@@ -41404,8 +41405,10 @@ function ebayListingConfig(db, item, body = {}) {
   const identifierType = String(body.identifierType ?? productSettings.ebayIdentifierType ?? saved.identifierType ?? "").trim().toUpperCase();
   const rawIdentifierValue = String(body.identifierValue ?? productSettings.ebayIdentifierValue ?? saved.identifierValue ?? "").trim()
     || sourceDataValue(item, identifierType === "EAN" ? ["ean"] : identifierType === "ISBN" ? ["isbn"] : identifierType === "MPN" ? ["mfrPartNumber", "mpn", "vendorSku"] : ["upc", "upcCode", "gtin"]);
-  const identifierValue = normalizeEbayProductIdentifier(identifierType || "UPC", rawIdentifierValue) || rawIdentifierValue;
-  const identifierUnavailable = explicitBoolean("identifierUnavailable", "ebayIdentifierUnavailable", false);
+  const normalizedIdentifierValue = normalizeEbayProductIdentifier(identifierType || "UPC", rawIdentifierValue);
+  const identifierValue = normalizedIdentifierValue || (identifierType === "MPN" ? rawIdentifierValue : "");
+  const identifierUnavailable = explicitBoolean("identifierUnavailable", "ebayIdentifierUnavailable", false)
+    || unavailableEbayProductIdentifier(identifierType || "UPC", rawIdentifierValue);
   const identifierUnavailableText = String(body.identifierUnavailableText ?? productSettings.ebayIdentifierUnavailableText ?? saved.identifierUnavailableText ?? "Does not apply").trim();
   const ePid = String(body.ePid ?? productSettings.ebayEPid ?? saved.ePid ?? "").trim();
   const mpn = String((body.mpn ?? productSettings.ebayMpn ?? saved.mpn ?? item.mfrPartNumber ?? item.vendorSku ?? "")).trim();
@@ -42075,6 +42078,16 @@ function ebayOfferStatus(offer = {}) {
     || offer.listing?.status
     || (ebayOfferListingId(offer) ? "PUBLISHED" : "OFFER")
   ).trim();
+}
+
+async function ebayPublishedOfferListing(db, offerId) {
+  const id = String(offerId || "").trim();
+  if (!id) return null;
+  const offer = await ebayRequest(db, `/sell/inventory/v1/offer/${encodeURIComponent(id)}`, { method: "GET" });
+  const listingId = ebayOfferListingId(offer);
+  const status = ebayOfferStatus(offer);
+  if (!listingId && !/published|active|listed/i.test(status)) return null;
+  return { listingId, status, offer };
 }
 
 function ebayOfferPrice(offer = {}) {
@@ -43303,7 +43316,7 @@ function ebayPackageType(value) {
 }
 
 function ebayPublishBlockDetails(error = {}) {
-  const message = String(error.message || "");
+  const message = String(error.message || "").replace(/"category"\s*:\s*"request"/gi, "");
   const errors = Array.isArray(error.ebayData?.errors) ? error.ebayData.errors : [];
   const haystack = [
     message,
@@ -43322,6 +43335,22 @@ function ebayPublishBlockDetails(error = {}) {
     publishSuggestedFix: "Review the eBay error, update the listing data or channel default, then publish again.",
     publishRetryable: false
   };
+  if (/already\s+(?:been\s+)?published|offer\s+is\s+published/.test(haystack)) {
+    return {
+      publishBlockCode: "published_identity_missing",
+      publishBlockField: "listingId",
+      publishSuggestedFix: "Reconcile the published offer from eBay and restore its listing ID in DataPlus.",
+      publishRetryable: true
+    };
+  }
+  if (/exceed(?:s|ed)?\s+(?:the\s+)?(?:maximum|service|carrier).*limit|package.*(?:too\s+large|oversize)|not\s+available\s+for\s+this\s+package|ground\s+saver.*(?:limit|eligible)/.test(haystack)) {
+    return {
+      publishBlockCode: "shipping_service_limit_exceeded",
+      publishBlockField: "packageWeightAndSize",
+      publishSuggestedFix: "Use a fulfillment policy that supports this package or correct the package measurements before publishing.",
+      publishRetryable: false
+    };
+  }
   if (/weight|package weight|packageweight|25020/.test(haystack)) {
     return {
       publishBlockCode: "missing_or_invalid_package_weight",
@@ -43354,7 +43383,23 @@ function ebayPublishBlockDetails(error = {}) {
       publishRetryable: false
     };
   }
-  if (/category|categoryid/.test(haystack)) {
+  if (/identifier|\bupc\b|\bean\b|\bisbn\b|\bmpn\b|product identifier|brand.*mpn/.test(haystack)) {
+    return {
+      publishBlockCode: "missing_product_identifier",
+      publishBlockField: "identifier",
+      publishSuggestedFix: "Send a valid UPC/EAN/ISBN, brand plus MPN, or omit an unavailable placeholder identifier when the category permits it.",
+      publishRetryable: false
+    };
+  }
+  if (/25019|improper\s+words?|prohibited|restricted\s+(?:product|item|listing)|listing\s+policy\s+violation/.test(haystack)) {
+    return {
+      publishBlockCode: "listing_content_or_policy_restriction",
+      publishBlockField: "listingContent",
+      publishSuggestedFix: "Review the title, description, product type, and eBay selling restrictions shown in the raw error.",
+      publishRetryable: false
+    };
+  }
+  if (/category\s*(?:id)?\s*(?:is|was|must|not|invalid|missing)|invalid\s+(?:ebay\s+)?category|categoryid|leaf\s+category|25005/.test(haystack)) {
     return {
       publishBlockCode: "invalid_or_missing_category",
       publishBlockField: "categoryId",
@@ -43399,14 +43444,6 @@ function ebayPublishBlockDetails(error = {}) {
       publishBlockCode: "invalid_or_missing_quantity",
       publishBlockField: "quantity",
       publishSuggestedFix: "Set a positive eBay launch quantity or adjust the channel quantity rule.",
-      publishRetryable: false
-    };
-  }
-  if (/identifier|upc|ean|isbn|mpn|brand/.test(haystack)) {
-    return {
-      publishBlockCode: "missing_product_identifier",
-      publishBlockField: "identifier",
-      publishSuggestedFix: "Send a UPC/EAN/ISBN, brand plus MPN, or the configured identifier-unavailable value when allowed.",
       publishRetryable: false
     };
   }
@@ -43478,7 +43515,15 @@ function ebayListingPublishBlockSummary(item = {}) {
   const offerId = String(listing.offerId || "").trim();
   if (listingId || !offerId) return null;
   const status = String(listing.status || "").trim().toLowerCase();
-  const classified = listing.publishBlockCode
+  const publishedWithoutIdentity = /published|active|listed/.test(status) && !listingId;
+  const classified = publishedWithoutIdentity
+    ? {
+      publishBlockCode: "published_identity_missing",
+      publishBlockField: "listingId",
+      publishSuggestedFix: "Reconcile the published offer from eBay and restore its listing ID in DataPlus.",
+      publishRetryable: true
+    }
+    : listing.publishBlockCode
     ? {
       publishBlockCode: String(listing.publishBlockCode || ""),
       publishBlockField: String(listing.publishBlockField || ""),
@@ -43504,7 +43549,7 @@ function ebayListingPublishBlockSummary(item = {}) {
     code,
     field: classified.publishBlockField || "",
     suggestedFix: classified.publishSuggestedFix || "",
-    retryable: classified.publishRetryable === true || ["prepared_not_live", "missing_or_invalid_package_weight", "invalid_shipping_package_type", "invalid_or_missing_image"].includes(code),
+    retryable: classified.publishRetryable === true || ["prepared_not_live", "published_identity_missing", "missing_or_invalid_package_weight", "invalid_shipping_package_type", "invalid_or_missing_image"].includes(code),
     error: String(listing.publishError || "").trim(),
     errorAt: String(listing.publishErrorAt || listing.updatedAt || "").trim(),
     packageWeight: Number(ebayMeasurementValue(item, "packageWeight", "itemWeight") || 0),
@@ -43549,7 +43594,7 @@ async function ebayListingBlockerReport(payload = {}) {
     retryableTotal: blockers.filter((row) => row.retryable).length,
     generatedAt: new Date().toISOString(),
     groups,
-    rows: blockers.slice(0, Math.min(250, blockers.length))
+    rows: blockers.slice(0, Math.min(limit, 5000, blockers.length))
   };
 }
 
@@ -44047,45 +44092,67 @@ async function createOrUpdateEbayListing(db, item, body = {}, options = {}) {
 
   let published = null;
   const offerId = offer.offerId || config.offerId;
-  if (publish) {
+  const existingListing = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+  const localOfferLooksPublished = /published|active|listed/i.test(String(existingListing.status || existingListing.ebayStatus || ""));
+  if (publish && offerId && !config.listingId && !existingListing.listingId && localOfferLooksPublished) {
+    try {
+      const reconciled = await ebayPublishedOfferListing(db, offerId);
+      if (reconciled?.listingId) published = { listingId: reconciled.listingId, reconciled: true };
+    } catch {
+      // Fall through to eBay publish, whose error path performs one final reconciliation attempt.
+    }
+  }
+  if (publish && !published) {
     try {
       published = await ebayRequest(db, `/sell/inventory/v1/offer/${encodeURIComponent(offerId)}/publish`, { method: "POST" });
     } catch (error) {
-      const now = new Date().toISOString();
-      const previous = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
-      const listingId = previous.listingId || config.listingId || "";
-      const message = error.message || "eBay publish failed.";
-      const blockDetails = ebayPublishBlockDetails(error);
-      item.ebayListing = {
-        ...previous,
-        ...config,
-        offerId,
-        listingId,
-        listingUrl: ebayListingUrl(listingId, config.marketplaceId),
-        status: listingId ? "published" : "publish_blocked",
-        publishBlocked: !listingId,
-        publishError: message,
-        publishErrorAt: now,
-        publishBlockCode: blockDetails.publishBlockCode,
-        publishBlockField: blockDetails.publishBlockField,
-        publishSuggestedFix: blockDetails.publishSuggestedFix,
-        publishRetryable: blockDetails.publishRetryable,
-        updatedAt: now,
-        lastLifecycleAction: "publish_failed",
-        history: appendEbayListingHistory(previous, {
-          action: "publish_failed",
-          message,
-          at: now,
+      let reconciled = null;
+      if (/already\s+(?:been\s+)?published|offer\s+is\s+published/i.test(String(error.message || ""))) {
+        try {
+          reconciled = await ebayPublishedOfferListing(db, offerId);
+        } catch {
+          reconciled = null;
+        }
+      }
+      if (reconciled?.listingId) {
+        published = { listingId: reconciled.listingId, reconciled: true };
+      } else {
+        const now = new Date().toISOString();
+        const previous = item.ebayListing && typeof item.ebayListing === "object" ? item.ebayListing : {};
+        const listingId = previous.listingId || config.listingId || "";
+        const message = error.message || "eBay publish failed.";
+        const blockDetails = ebayPublishBlockDetails(error);
+        item.ebayListing = {
+          ...previous,
+          ...config,
           offerId,
-          listingId
-        })
-      };
-      item.ebayId = item.ebayListing.listingId || item.ebayId || "";
-      item.sources = { ...(item.sources || {}), eBay: item.ebayListing.listingId || item.ebayListing.offerId || item.sku };
-      item.updatedAt = now;
-      error.ebayListingSaved = true;
-      error.ebayOfferId = offerId;
-      throw error;
+          listingId,
+          listingUrl: ebayListingUrl(listingId, config.marketplaceId),
+          status: listingId ? "published" : "publish_blocked",
+          publishBlocked: !listingId,
+          publishError: message,
+          publishErrorAt: now,
+          publishBlockCode: blockDetails.publishBlockCode,
+          publishBlockField: blockDetails.publishBlockField,
+          publishSuggestedFix: blockDetails.publishSuggestedFix,
+          publishRetryable: blockDetails.publishRetryable,
+          updatedAt: now,
+          lastLifecycleAction: "publish_failed",
+          history: appendEbayListingHistory(previous, {
+            action: "publish_failed",
+            message,
+            at: now,
+            offerId,
+            listingId
+          })
+        };
+        item.ebayId = item.ebayListing.listingId || item.ebayId || "";
+        item.sources = { ...(item.sources || {}), eBay: item.ebayListing.listingId || item.ebayListing.offerId || item.sku };
+        item.updatedAt = now;
+        error.ebayListingSaved = true;
+        error.ebayOfferId = offerId;
+        throw error;
+      }
     }
   }
 
@@ -44102,14 +44169,14 @@ async function createOrUpdateEbayListing(db, item, body = {}, options = {}) {
     ebayStatus: listingId ? "PUBLISHED" : (previous.ebayStatus || "OFFER"),
     liveState: listingId ? "live" : "not_live",
     liveVerifiedAt: published?.listingId ? now : previous.liveVerifiedAt || "",
-    liveVerificationSource: published?.listingId ? "eBay publish response" : previous.liveVerificationSource || "",
+    liveVerificationSource: published?.listingId ? (published.reconciled ? "eBay offer reconciliation" : "eBay publish response") : previous.liveVerificationSource || "",
     lastActiveAt: published?.listingId ? now : previous.lastActiveAt || "",
     updatedAt: now,
     publishedAt: published?.listingId ? now : config.publishedAt || previous.publishedAt || "",
-    lastLifecycleAction: published?.listingId ? "published" : previous.offerId ? "revised" : "offer_created",
+    lastLifecycleAction: published?.listingId ? (published.reconciled ? "publish_reconciled" : "published") : previous.offerId ? "revised" : "offer_created",
     history: appendEbayListingHistory(previous, {
-      action: published?.listingId ? "published" : previous.offerId ? "revised" : "offer_created",
-      message: published?.listingId ? "eBay listing published." : previous.offerId ? "eBay offer revised." : "eBay offer created.",
+      action: published?.listingId ? (published.reconciled ? "publish_reconciled" : "published") : previous.offerId ? "revised" : "offer_created",
+      message: published?.listingId ? (published.reconciled ? "Recovered the published eBay listing identity from its offer." : "eBay listing published.") : previous.offerId ? "eBay offer revised." : "eBay offer created.",
       at: now,
       offerId,
       listingId
