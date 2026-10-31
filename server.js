@@ -41081,6 +41081,12 @@ function marketplaceSuggestedPrice(item = {}, settings = {}, basis = {}) {
   });
 }
 
+function ebayMinimumOfferPrice(value) {
+  const price = Number(value);
+  if (!Number.isFinite(price) || !(price > 0)) return 0;
+  return Math.max(0.99, Math.round(price * 100) / 100);
+}
+
 function marketplaceListingQuantity(item = {}, settings = {}, vendors = []) {
   if (productIsMasterInactive(item) || productChannelInactive(item, 'ebay')) return 0;
   if (retiredSupplier(item)) item = { ...item, qty: retirementPhysicalQty(item), stockQty: retirementPhysicalQty(item), reserved: 0 };
@@ -41332,7 +41338,7 @@ function ebayListingConfig(db, item, body = {}) {
     : !useDefaultPricingFormula && manualPrice > 0
       ? manualPrice
       : Number(marketplaceSuggestedPrice(item, effectiveSettings));
-  const price = applyPricePolicy(candidatePrice, item, db, findChannelByName(db, "eBay") || { name: "eBay", settings: effectiveSettings }, productUomQty(item), productUsesSellUnitPricing(item, db) ? productUomQty(item) : 1);
+  const price = ebayMinimumOfferPrice(applyPricePolicy(candidatePrice, item, db, findChannelByName(db, "eBay") || { name: "eBay", settings: effectiveSettings }, productUomQty(item), productUsesSellUnitPricing(item, db) ? productUomQty(item) : 1));
   const actualAvailableQuantity = Math.max(0, Math.floor(Number(item.qty ?? item.stockQty ?? 0)) - Math.max(0, Math.floor(Number(item.reserved || 0))));
   const useChannelDefaultQuantity = productSettings.ebayUseChannelDefaultQuantity !== false;
   const useChannelDefaultSafetyQty = productSettings.ebayUseChannelDefaultSafetyQty !== false;

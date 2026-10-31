@@ -24,6 +24,9 @@ vm.runInContext(source.slice(source.indexOf('async function ebayListingLaunchCan
 const blockerContext = {};
 vm.createContext(blockerContext);
 vm.runInContext(source.slice(source.indexOf('function ebayPublishBlockDetails('), source.indexOf('function ebayPackageWeightAndSize(')), blockerContext);
+const priceContext = {};
+vm.createContext(priceContext);
+vm.runInContext(source.slice(source.indexOf('function ebayMinimumOfferPrice('), source.indexOf('function marketplaceListingQuantity(')), priceContext);
 async function main() {
   assert.equal(EBAY_LAUNCH_READINESS_VERSION, '2026-10-31-v5');
   assert.equal(validEbayProductIdentifier('UPC', '036000291452'), true);
@@ -44,6 +47,11 @@ async function main() {
   assert.equal(blockerContext.ebayPublishBlockDetails({ message: 'Error 25019: title contains improper words.' }).publishBlockCode, 'listing_content_or_policy_restriction');
   assert.equal(blockerContext.ebayPublishBlockDetails({ message: 'Error 25604: Inventory item product not found.' }).publishBlockCode, 'inventory_item_not_ready');
   assert.match(source, /publishedWithoutIdentity[\s\S]*: listing\.publishError\s*\? ebayPublishBlockDetails\(\{ message: listing\.publishError \}\)[\s\S]*: listing\.publishBlockCode/);
+  assert.equal(priceContext.ebayMinimumOfferPrice(0), 0);
+  assert.equal(priceContext.ebayMinimumOfferPrice(0.95), 0.99);
+  assert.equal(priceContext.ebayMinimumOfferPrice(0.999), 1);
+  assert.equal(priceContext.ebayMinimumOfferPrice(12.345), 12.35);
+  assert.match(source, /const price = ebayMinimumOfferPrice\(applyPricePolicy\(/);
   assert.match(source, /ebayPublishedOfferListing\(db, offerId\)/);
   assert.match(source, /Recovered the published eBay listing identity from its offer/);
   assert.match(source, /categoryId must be a leaf category/);
