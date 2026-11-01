@@ -44,6 +44,17 @@ test("catalog sync exposes GetMyeBaySelling progress and guarded reconciliation"
   assert.match(uiSource, /Last verified live/);
 });
 
+test("catalog sync persists only eBay-owned state in PostgreSQL", () => {
+  const start = serverSource.indexOf("async function persistEbayCatalogImportState(");
+  const end = serverSource.indexOf("\nasync function ebayListingLaunchCandidateKeys(", start);
+  const persistence = serverSource.slice(start, end);
+  assert.match(persistence, /postgres\.upsertProductsFromState\(normalized\.inventory\)/);
+  assert.match(persistence, /postgres\.writeStateDocuments\(\{[\s\S]*syncRuns:[\s\S]*connections:[\s\S]*catalogImportReviews:/);
+  assert.doesNotMatch(persistence, /returns:/);
+  assert.match(serverSource, /startEbayCatalogImportJob[\s\S]*await persistEbayCatalogImportState\(workDb\)/);
+  assert.match(serverSource, /runEbayCatalogImportWorkerJob[\s\S]*await persistEbayCatalogImportState\(workDb\)/);
+});
+
 test("offers and live-status sync is scheduled and deduplicated", () => {
   assert.match(serverSource, /ebayCatalogSyncScheduleEnabled: true/);
   assert.match(serverSource, /ebayCatalogSyncScheduleEveryHours: 6/);

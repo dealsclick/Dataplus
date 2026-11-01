@@ -21498,8 +21498,7 @@ function startEbayCatalogImportJob(jobId) {
       };
       const isCanceled = () => !["queued", "running"].includes(String(activeJobProgress.get(jobId)?.status || workJob.status || job.status || "").toLowerCase());
       const result = await importEbayCatalog(workDb, { job: workJob, progress, isCanceled });
-      const normalized = normalizeDb(workDb);
-      await writeDb(normalized);
+      await persistEbayCatalogImportState(workDb);
       activeJobProgress.delete(jobId);
       activeJobRecords.delete(jobId);
       upsertImportJobStore(result.job || workJob);
@@ -25009,8 +25008,7 @@ async function runEbayCatalogImportWorkerJob(job = {}) {
     },
     isCanceled: () => false
   });
-  const normalized = normalizeDb(workDb);
-  await writeDb(normalized);
+  await persistEbayCatalogImportState(workDb);
   publicStateJsonCache = null;
   const finalJob = normalizeImportJob({
     ...(result.job || job),
@@ -25019,6 +25017,20 @@ async function runEbayCatalogImportWorkerJob(job = {}) {
   });
   await postgres.upsertOperationJob(finalJob);
   return finalJob;
+}
+
+async function persistEbayCatalogImportState(workDb = {}) {
+  const normalized = normalizeDb(workDb);
+  if (!postgres.isPostgresEnabled()) {
+    await writeDb(normalized);
+    return;
+  }
+  if (normalized.inventory?.length) await postgres.upsertProductsFromState(normalized.inventory);
+  await postgres.writeStateDocuments({
+    syncRuns: normalized.syncRuns || [],
+    connections: normalized.connections || [],
+    catalogImportReviews: normalized.catalogImportReviews || []
+  });
 }
 
 async function ebayListingLaunchCandidateKeys(payload = {}, options = {}) {
