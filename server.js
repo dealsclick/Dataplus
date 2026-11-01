@@ -22877,6 +22877,7 @@ async function persistWorkerImportJob(job = {}, attrs = {}) {
     ...attrs,
     currentFile: attrs.currentFile || job.currentFile || job.originalFileName || job.fileName || "",
     processRssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+    workerLastSeenAt: job.workerId ? updatedAt : (attrs.workerLastSeenAt || job.workerLastSeenAt || ""),
     updatedAt
   }));
   await postgres.upsertOperationJob(job);
