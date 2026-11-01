@@ -69724,7 +69724,7 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/ebay/listings/blockers" && postgres.isPostgresEnabled()) {
     try {
-      const report = await ebayListingBlockerReport({ limit: url.searchParams.get("limit") || 5000 });
+      const report = await ebayListingBlockerReport({ limit: url.searchParams.get("limit") || 500 });
       return sendJson(res, 200, report);
     } catch (error) {
       return sendJson(res, error.statusCode || 500, { error: error.message || "Unable to load eBay listing blockers." });
@@ -69792,7 +69792,7 @@ async function handleApi(req, res) {
       const requestedCodes = new Set((Array.isArray(body.codes) ? body.codes : String(body.codes || "").split("|"))
         .map((value) => String(value || "").trim())
         .filter(Boolean));
-      const report = await ebayListingBlockerReport({ limit: Math.max(5000, limit) });
+      const report = await ebayListingBlockerReport({ limit: Math.max(500, limit) });
       const rows = (report.rows || []).filter((row) => {
         if (requestedCodes.size && !requestedCodes.has(row.code)) return false;
         return row.retryable === true || body.includeUnclassified === true;

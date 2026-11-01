@@ -61,6 +61,8 @@ async function main() {
   assert.match(source, /category requirements unavailable/);
   assert.match(source, /package weight or complete package dimensions/);
   assert.match(source, /validatorVersion: EBAY_LAUNCH_READINESS_VERSION/);
+  assert.match(source, /ebayListingBlockerReport\(\{ limit: url\.searchParams\.get\("limit"\) \|\| 500 \}\)/);
+  assert.match(source, /ebayListingBlockerReport\(\{ limit: Math\.max\(500, limit\) \}\)/);
   const db = { categorySettings: [] };
   const item = { id: 'a', sku: 'A', category: 'Old catalog category', sourceCategory: saved.name };
   await context.loadEbayLaunchCategorySettings(db, [item]);

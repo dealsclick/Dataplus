@@ -1933,7 +1933,7 @@ function EbayBlockersPage() {
   const load = async () => {
     setLoading(true)
     try {
-      const result = await api<EbayListingBlockerReport>("/api/ebay/listings/blockers?limit=5000")
+      const result = await api<EbayListingBlockerReport>("/api/ebay/listings/blockers?limit=500")
       setReport(result)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load eBay blockers.")
