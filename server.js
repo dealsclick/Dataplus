@@ -23649,31 +23649,27 @@ function shopifyPricePushUsesLiveVariantTotal(filters = {}) {
   return values.includes("shopify-live") || values.includes("live");
 }
 
-async function shopifyProductCreateCandidateProducts(db, payload = {}, options = {}) {
+async function shopifyProductCreateCandidateKeys(payload = {}, options = {}) {
   const requestedSkus = [...new Set((Array.isArray(payload.skus) ? payload.skus : [])
     .map((sku) => String(sku || "").trim())
     .filter(Boolean))];
-  const batchSize = Math.max(1, Math.min(25000, Number(payload.batchSize || payload.limit || 1000) || 1000));
+  const batchSize = Math.max(1, Math.min(1000, Number(payload.batchSize || payload.limit || 1000) || 1000));
   if (requestedSkus.length) {
-    const products = [];
-    for (let offset = 0; offset < requestedSkus.length; offset += batchSize) {
-      products.push(...await postgres.readProductsByKeys(requestedSkus.slice(offset, offset + batchSize)));
-      if (typeof options.onProgress === "function") await options.onProgress(products.length, requestedSkus.length);
-    }
-    return products;
+    if (typeof options.onProgress === "function") await options.onProgress(requestedSkus.length, requestedSkus.length);
+    return requestedSkus;
   }
   const filters = Object.keys(payload.filters || {}).length
     ? payload.filters
     : (payload.allowDraftIncomplete ? { channelStatus: "shopify-missing" } : { channelStatusAll: "shopify-missing|shopify-ready" });
   const maximum = Math.max(1, Math.min(1000000, Number(payload.maximumSelection || 1000000) || 1000000));
-  const products = [];
+  const productKeys = [];
   const seen = new Set();
-  for (let page = 1; products.length < maximum; page += 1) {
+  for (let page = 1; productKeys.length < maximum; page += 1) {
     const result = await postgres.listProducts({
       q: payload.query || "",
       filters,
       page,
-      limit: Math.min(batchSize, maximum - products.length),
+      limit: Math.min(batchSize, maximum - productKeys.length),
       fastPage: true,
       sort: "sku",
       sortDirection: "asc"
@@ -23681,17 +23677,28 @@ async function shopifyProductCreateCandidateProducts(db, payload = {}, options =
     const rows = result?.items || result?.inventory || [];
     if (!rows.length) break;
     for (const item of rows) {
-      const key = sourceTextValue(item.id || item.sku).toLowerCase();
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      products.push(item);
+      const key = sourceTextValue(item.sku || item.id);
+      const normalizedKey = key.toLowerCase();
+      if (!normalizedKey || seen.has(normalizedKey)) continue;
+      seen.add(normalizedKey);
+      productKeys.push(key);
     }
     if (typeof options.onProgress === "function") {
-      await options.onProgress(products.length, Math.max(products.length, Number(payload.selectionTotal || 0) || 0));
+      await options.onProgress(productKeys.length, Math.max(productKeys.length, Number(payload.selectionTotal || 0) || 0));
     }
     if (!result.hasMore) break;
   }
-  return products;
+  return productKeys;
+}
+
+function appendFixedCsvRows(filePath, headers = [], rows = []) {
+  if (!Array.isArray(rows) || !rows.length) return;
+  const writeHeader = !fs.existsSync(filePath) || fs.statSync(filePath).size === 0;
+  const text = [
+    ...(writeHeader ? [`${headers.map(escapeCsv).join(",")}\n`] : []),
+    ...rows.map((row) => `${headers.map((header) => escapeCsv(row?.[header] ?? "")).join(",")}\n`)
+  ].join("");
+  fs.appendFileSync(filePath, text);
 }
 
 async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
@@ -23709,9 +23716,8 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
   });
   const db = normalizeDb(await readDbFast({ skipInventory: true }));
   db.exportMappings = await readExportMappingsApiStore();
-  const shopifyStatusMap = await readShopifyStatusMapStore(Array.isArray(payload.skus) ? payload.skus : []);
   const sourceEnrichmentMap = readProductSourceEnrichmentSync();
-  const rawItems = await shopifyProductCreateCandidateProducts(db, payload, {
+  const candidateKeys = await shopifyProductCreateCandidateKeys(payload, {
     onProgress: async (loaded, expected) => {
       job = await persistWorkerImportJob(job, {
         status: "running",
@@ -23723,134 +23729,113 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
       });
     }
   });
-  const sourceFallbackMap = await sourceCatalogExportFallbackMap(rawItems);
-  const prepared = [];
+  const batchSize = Math.max(1, Math.min(1000, Number(payload.batchSize || payload.limit || 1000) || 1000));
+  const jobDir = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(job.id || crypto.randomUUID(), "shopify-product-create"));
+  fs.mkdirSync(jobDir, { recursive: true });
+  const skippedPath = path.join(jobDir, "shopify-product-create-skipped.csv");
+  const createdPath = path.join(jobDir, "shopify-product-create-created.csv");
+  const errorsPath = path.join(jobDir, "shopify-product-create-errors.csv");
   let preparedCount = 0;
   let variantsPrepared = 0;
   const preparedSample = [];
   const skipped = [];
   let skippedCount = 0;
-  const existingLinked = [];
   let existingLinkedCount = 0;
-  const addSkipped = (row) => {
+  let evaluatedCount = 0;
+  let apiErrorCount = 0;
+  let createdRowCount = 0;
+  const createdSample = [];
+  const apiErrorSample = [];
+  const addSkipped = (row, batchRows) => {
+    const normalized = {
+      sku: row.sku || "",
+      issue: row.issue || "",
+      shopifyId: row.shopifyId || "",
+      shopifyVariantId: row.shopifyVariantId || ""
+    };
     skippedCount += 1;
-    if (skipped.length < 1000) skipped.push(row);
+    if (skipped.length < 1000) skipped.push(normalized);
+    batchRows.push(normalized);
   };
-  const reportEvaluation = async (rawIndex) => {
-    const evaluated = rawIndex + 1;
-    if (evaluated !== rawItems.length && evaluated % 500 !== 0) return;
-    job = await persistWorkerImportJob(job, {
-      status: "running",
-      phase: "evaluating_shopify_readiness",
-      totalRows: rawItems.length,
-      processedRows: evaluated,
-      changed: preparedCount,
-      missingCount: skippedCount,
-      progressPercent: 8 + Math.round((evaluated / Math.max(rawItems.length, 1)) * 62),
-      message: `Evaluated ${evaluated.toLocaleString()} of ${rawItems.length.toLocaleString()} Shopify launch candidates.`
-    });
+  const addApiError = (row, batchRows) => {
+    const normalized = {
+      sku: row.sku || "",
+      field: row.field || "",
+      message: row.message || "Shopify rejected this product."
+    };
+    apiErrorCount += 1;
+    if (apiErrorSample.length < 1000) apiErrorSample.push(normalized);
+    batchRows.push(normalized);
   };
-  for (let rawIndex = 0; rawIndex < rawItems.length; rawIndex += 1) {
-    const rawItem = rawItems[rawIndex];
-    const item = shopifyPricedExportItem(withShopifyStatus(sourceEnrichedItem(rawItem, sourceEnrichmentMap), shopifyStatusMap, db), sourceFallbackMap, db);
-    const variantMatch = shopifyExistingVariantMatch(item);
-    const linked = sourceTextValue(item.shopifyId || item.shopifyProductId || variantMatch?.shopifyId);
-    const readiness = shopifyProductCreateReadiness(db, item);
-    if (linked) {
-      existingLinkedCount += 1;
-      if (!dryRun && !item.shopifyId && variantMatch?.shopifyId) existingLinked.push(applyShopifyVariantMatchToProduct(item, variantMatch));
-      addSkipped({
-        sku: item.sku || rawItem.sku || "",
-        issue: variantMatch?.matchedVariantSku ? `Already on Shopify via variant ${variantMatch.matchedVariantSku}` : "Already linked to Shopify",
-        shopifyId: linked,
-        shopifyVariantId: variantMatch?.shopifyVariantId || item.shopifyVariantId || ""
-      });
-      await reportEvaluation(rawIndex);
-      continue;
-    }
-    const draftMinimum = allowDraftIncomplete ? shopifyProductCreateDraftMinimumReadiness(db, item) : { ready: true, missing: [] };
-    if (!readiness.ready && !allowDraftIncomplete) {
-      addSkipped({ sku: item.sku || rawItem.sku || "", issue: `Not ready: ${readiness.missing.join(", ")}` });
-      await reportEvaluation(rawIndex);
-      continue;
-    }
-    if (!draftMinimum.ready) {
-      addSkipped({ sku: item.sku || rawItem.sku || "", issue: `Draft create blocked: ${draftMinimum.missing.join(", ")}` });
-      await reportEvaluation(rawIndex);
-      continue;
-    }
-    const createPayload = shopifyProductCreatePayload(db, item, { forceDraft: allowDraftIncomplete && !readiness.ready });
-    if (!createPayload.variantInputs.length) {
-      addSkipped({ sku: item.sku || rawItem.sku || "", issue: "No Shopify variants could be built" });
-      await reportEvaluation(rawIndex);
-      continue;
-    }
-    preparedCount += 1;
-    variantsPrepared += createPayload.variantInputs.length;
-    if (preparedSample.length < 100) preparedSample.push({ item, createPayload });
-    if (!dryRun) prepared.push({ item, createPayload });
-    await reportEvaluation(rawIndex);
-  }
   const report = {
     dryRun,
-    productsLoaded: rawItems.length,
-    productsPrepared: preparedCount,
+    productsLoaded: candidateKeys.length,
+    productsPrepared: 0,
     productsCreated: 0,
-    existingLinked: existingLinkedCount,
-    skippedCount,
-    notReady: Math.max(0, skippedCount - existingLinkedCount),
-    variantsPrepared,
+    existingLinked: 0,
+    skippedCount: 0,
+    notReady: 0,
+    variantsPrepared: 0,
     variantsCreated: 0,
     skipped,
-    userErrors: [],
-    created: [],
-    sample: preparedSample.map(({ item, createPayload }) => ({
-      sku: item.sku,
-      title: createPayload.product.title,
-      handle: createPayload.product.handle,
-      status: createPayload.product.status,
-      vendor: createPayload.product.vendor,
-      productType: createPayload.product.productType,
-      tags: createPayload.product.tags,
-      shippingClass: createPayload.shippingClass,
-      shippingMethod: createPayload.shippingMethod,
-      dimensionalWeight: createPayload.dimensionalWeight,
-      shippingMetafields: createPayload.shippingMetafieldCount,
-      imageCount: createPayload.media.length,
-      variants: createPayload.variantInputs.map((variant) => ({
-        sku: variant.inventoryItem?.sku,
-        price: variant.price,
-        compareAtPrice: variant.compareAtPrice || "",
-        option: variant.optionValues?.[0]?.name || ""
-      }))
-    }))
+    userErrors: apiErrorSample,
+    created: createdSample,
+    sample: []
   };
-  if (!dryRun && existingLinked.length) await postgres.upsertProductsFromState(existingLinked);
-  await persistWorkerImportJob(job, {
-    status: "running",
-    phase: dryRun ? "writing_report" : "creating_shopify_products",
-    totalRows: rawItems.length,
-    processedRows: skippedCount,
-    changed: preparedCount,
-    missingCount: skippedCount,
-    progressPercent: dryRun ? 80 : 10,
-    message: dryRun
-      ? `Dry run prepared ${preparedCount.toLocaleString()} Shopify product create payload${preparedCount === 1 ? "" : "s"}.`
-      : `Creating ${preparedCount.toLocaleString()} Shopify product${preparedCount === 1 ? "" : "s"}...`
-  });
-  const touched = [];
-  const statusPatch = {};
-  if (!dryRun) {
-    let processed = 0;
-    for (const { item, createPayload } of prepared) {
+  for (let offset = 0; offset < candidateKeys.length; offset += batchSize) {
+    const batchKeys = candidateKeys.slice(offset, offset + batchSize);
+    const rawItems = await postgres.readProductsByKeys(batchKeys);
+    const shopifyStatusMap = await readShopifyStatusMapStore(batchKeys);
+    const sourceFallbackMap = await sourceCatalogExportFallbackMap(rawItems);
+    const existingLinkedBatch = [];
+    const touchedBatch = [];
+    const statusPatchBatch = {};
+    const skippedBatch = [];
+    const createdBatch = [];
+    const errorsBatch = [];
+    for (const rawItem of rawItems) {
+      const item = shopifyPricedExportItem(withShopifyStatus(sourceEnrichedItem(rawItem, sourceEnrichmentMap), shopifyStatusMap, db), sourceFallbackMap, db);
+      const variantMatch = shopifyExistingVariantMatch(item);
+      const linked = sourceTextValue(item.shopifyId || item.shopifyProductId || variantMatch?.shopifyId);
+      const readiness = shopifyProductCreateReadiness(db, item);
+      evaluatedCount += 1;
+      if (linked) {
+        existingLinkedCount += 1;
+        if (!dryRun && !item.shopifyId && variantMatch?.shopifyId) existingLinkedBatch.push(applyShopifyVariantMatchToProduct(item, variantMatch));
+        addSkipped({
+          sku: item.sku || rawItem.sku || "",
+          issue: variantMatch?.matchedVariantSku ? `Already on Shopify via variant ${variantMatch.matchedVariantSku}` : "Already linked to Shopify",
+          shopifyId: linked,
+          shopifyVariantId: variantMatch?.shopifyVariantId || item.shopifyVariantId || ""
+        }, skippedBatch);
+        continue;
+      }
+      const draftMinimum = allowDraftIncomplete ? shopifyProductCreateDraftMinimumReadiness(db, item) : { ready: true, missing: [] };
+      if (!readiness.ready && !allowDraftIncomplete) {
+        addSkipped({ sku: item.sku || rawItem.sku || "", issue: `Not ready: ${readiness.missing.join(", ")}` }, skippedBatch);
+        continue;
+      }
+      if (!draftMinimum.ready) {
+        addSkipped({ sku: item.sku || rawItem.sku || "", issue: `Draft create blocked: ${draftMinimum.missing.join(", ")}` }, skippedBatch);
+        continue;
+      }
+      const createPayload = shopifyProductCreatePayload(db, item, { forceDraft: allowDraftIncomplete && !readiness.ready });
+      if (!createPayload.variantInputs.length) {
+        addSkipped({ sku: item.sku || rawItem.sku || "", issue: "No Shopify variants could be built" }, skippedBatch);
+        continue;
+      }
+      preparedCount += 1;
+      variantsPrepared += createPayload.variantInputs.length;
+      if (preparedSample.length < 100) preparedSample.push({ item, createPayload });
+      if (dryRun) continue;
       try {
         const result = await createShopifyProductFromPayload(createPayload, { jobId: job.id });
         if (result.userErrors.length) {
-          report.userErrors.push(...result.userErrors.map((error) => ({
+          for (const error of result.userErrors) addApiError({
             sku: item.sku,
             field: Array.isArray(error.field) ? error.field.join(".") : String(error.field || ""),
             message: error.message || "Shopify rejected this product."
-          })));
+          }, errorsBatch);
         }
         if (result.product?.id && result.variants.length) {
           report.productsCreated += 1;
@@ -23869,80 +23854,114 @@ async function runShopifyProductCreateWorkerJob(job = {}, attrs = {}) {
           item.shopifyOnlineStoreUrl = result.product.onlineStoreUrl || "";
           item.shopifyVariantId = normalizeShopifyVariantGid(firstVariant.id);
           item.shopifyVariantSku = firstPayload.shopifyVariantSku || "";
-          touched.push(item);
-          if (item.sku) statusPatch[sourceTextValue(item.sku).toLowerCase()] = { ...firstPayload, sku: item.sku };
+          touchedBatch.push(item);
+          if (item.sku) statusPatchBatch[sourceTextValue(item.sku).toLowerCase()] = { ...firstPayload, sku: item.sku };
           for (const expected of createPayload.variants) {
             const createdVariant = variantBySku.get(sourceTextValue(expected.sku).toLowerCase());
             if (!createdVariant) continue;
             const variantPayload = shopifyStatusPayloadFromCreatedVariant(result.product, createdVariant);
-            if (variantPayload.sku) statusPatch[variantPayload.sku.toLowerCase()] = variantPayload;
+            if (variantPayload.sku) statusPatchBatch[variantPayload.sku.toLowerCase()] = variantPayload;
           }
-          report.created.push({
+          const createdSummary = {
             sku: item.sku,
             productId: item.shopifyId,
             handle: item.shopifyHandle,
             variants: result.variants.map((variant) => ({ sku: variant.sku, variantId: normalizeShopifyVariantGid(variant.id), price: variant.price }))
-          });
+          };
+          if (createdSample.length < 100) createdSample.push(createdSummary);
+          for (const variant of createdSummary.variants) {
+            createdBatch.push({
+              sku: variant.sku || item.sku || "",
+              parent_sku: item.sku || "",
+              shopify_product_id: item.shopifyId || "",
+              shopify_variant_id: variant.variantId || "",
+              shopify_handle: item.shopifyHandle || "",
+              live_price: variant.price || ""
+            });
+            createdRowCount += 1;
+          }
         }
       } catch (error) {
-        report.userErrors.push({ sku: item.sku, message: error.message || String(error) });
+        addApiError({ sku: item.sku, message: error.message || String(error) }, errorsBatch);
       }
-      processed += 1;
-      await persistWorkerImportJob(job, {
-        status: "running",
-        phase: "creating_shopify_products",
-        totalRows: rawItems.length,
-        processedRows: skippedCount + processed,
-        changed: report.productsCreated,
-        missingCount: skippedCount + report.userErrors.length,
-        progressPercent: 10 + Math.min(85, Math.round(((skippedCount + processed) / Math.max(1, rawItems.length)) * 85)),
-        estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, skippedCount + processed, rawItems.length),
-        message: `Created ${report.productsCreated.toLocaleString()} of ${prepared.length.toLocaleString()} prepared Shopify product${prepared.length === 1 ? "" : "s"}.`
-      });
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
-    if (touched.length) await postgres.upsertProductsFromState(touched);
-    if (Object.keys(statusPatch).length) mergeShopifyStatusMapSync(statusPatch);
+    if (existingLinkedBatch.length) await postgres.upsertProductsFromState(existingLinkedBatch);
+    if (touchedBatch.length) await postgres.upsertProductsFromState(touchedBatch);
+    if (Object.keys(statusPatchBatch).length) mergeShopifyStatusMapSync(statusPatchBatch);
+    appendFixedCsvRows(skippedPath, ["sku", "issue", "shopifyId", "shopifyVariantId"], skippedBatch);
+    appendFixedCsvRows(createdPath, ["sku", "parent_sku", "shopify_product_id", "shopify_variant_id", "shopify_handle", "live_price"], createdBatch);
+    appendFixedCsvRows(errorsPath, ["sku", "field", "message"], errorsBatch);
+    job = await persistWorkerImportJob(job, {
+      status: "running",
+      phase: dryRun ? "evaluating_shopify_readiness" : "creating_shopify_products",
+      totalRows: candidateKeys.length,
+      processedRows: evaluatedCount,
+      changed: dryRun ? preparedCount : report.productsCreated,
+      missingCount: skippedCount + apiErrorCount,
+      progressPercent: 8 + Math.min(87, Math.round((evaluatedCount / Math.max(candidateKeys.length, 1)) * 87)),
+      estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, evaluatedCount, candidateKeys.length),
+      message: dryRun
+        ? `Evaluated ${evaluatedCount.toLocaleString()} of ${candidateKeys.length.toLocaleString()} Shopify launch candidates.`
+        : `Evaluated ${evaluatedCount.toLocaleString()} of ${candidateKeys.length.toLocaleString()} candidates; created ${report.productsCreated.toLocaleString()} Shopify product${report.productsCreated === 1 ? "" : "s"}.`
+    });
   }
-  const jobDir = path.join(IMPORT_JOB_FILE_DIR, safeImportFileName(job.id || crypto.randomUUID(), "shopify-product-create"));
-  fs.mkdirSync(jobDir, { recursive: true });
+  report.productsLoaded = evaluatedCount;
+  report.productsPrepared = preparedCount;
+  report.existingLinked = existingLinkedCount;
+  report.skippedCount = skippedCount;
+  report.notReady = Math.max(0, skippedCount - existingLinkedCount);
+  report.variantsPrepared = variantsPrepared;
+  report.skipped = skipped;
+  report.userErrors = apiErrorSample;
+  report.created = createdSample;
+  report.sample = preparedSample.map(({ item, createPayload }) => ({
+    sku: item.sku,
+    title: createPayload.product.title,
+    handle: createPayload.product.handle,
+    status: createPayload.product.status,
+    vendor: createPayload.product.vendor,
+    productType: createPayload.product.productType,
+    tags: createPayload.product.tags,
+    shippingClass: createPayload.shippingClass,
+    shippingMethod: createPayload.shippingMethod,
+    dimensionalWeight: createPayload.dimensionalWeight,
+    shippingMetafields: createPayload.shippingMetafieldCount,
+    imageCount: createPayload.media.length,
+    variants: createPayload.variantInputs.map((variant) => ({
+      sku: variant.inventoryItem?.sku,
+      price: variant.price,
+      compareAtPrice: variant.compareAtPrice || "",
+      option: variant.optionValues?.[0]?.name || ""
+    }))
+  }));
   const reportPath = path.join(jobDir, safeImportFileName(dryRun ? "shopify-product-create-dry-run.json" : "shopify-product-create-report.json", "shopify-product-create-report.json"));
   fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
   job.artifacts = Array.isArray(job.artifacts) ? job.artifacts : [];
-  const addArtifact = (kind, fileName, rows) => {
-    if (!rows.length) return;
-    const filePath = path.join(jobDir, fileName);
-    fs.writeFileSync(filePath, csvRecordsToText(rows));
-    job.artifacts.push({ kind, fileName, filePath, contentType: "text/csv; charset=utf-8", rowCount: rows.length, byteSize: fs.statSync(filePath).size });
+  const addArtifact = (kind, filePath, rowCount) => {
+    if (!rowCount || !fs.existsSync(filePath)) return;
+    job.artifacts.push({ kind, fileName: path.basename(filePath), filePath, contentType: "text/csv; charset=utf-8", rowCount, byteSize: fs.statSync(filePath).size });
   };
-  const createdRows = report.created.flatMap((product) => (product.variants || []).map((variant) => ({
-    sku: variant.sku || product.sku || "",
-    parent_sku: product.sku || "",
-    shopify_product_id: product.productId || "",
-    shopify_variant_id: variant.variantId || "",
-    shopify_handle: product.handle || "",
-    live_price: variant.price || ""
-  })));
-  addArtifact("shopify-created-skus", "shopify-product-create-created.csv", createdRows);
-  addArtifact("shopify-skipped-skus", "shopify-product-create-skipped.csv", skipped);
-  addArtifact("shopify-api-errors", "shopify-product-create-errors.csv", report.userErrors);
+  addArtifact("shopify-created-skus", createdPath, createdRowCount);
+  addArtifact("shopify-skipped-skus", skippedPath, skippedCount);
+  addArtifact("shopify-api-errors", errorsPath, apiErrorCount);
   job.originalFilePath = reportPath;
   job.originalFileName = path.basename(reportPath);
   job.fileName = path.basename(reportPath);
   finishImportJob(job, {
-    status: report.userErrors.length || skippedCount ? "warning" : "success",
+    status: apiErrorCount || skippedCount ? "warning" : "success",
     phase: "complete",
     message: dryRun
       ? `Shopify product create dry run prepared ${preparedCount.toLocaleString()} product${preparedCount === 1 ? "" : "s"} and ${report.variantsPrepared.toLocaleString()} variant${report.variantsPrepared === 1 ? "" : "s"}; ${skippedCount.toLocaleString()} skipped.`
       : `Shopify product create made ${report.productsCreated.toLocaleString()} product${report.productsCreated === 1 ? "" : "s"} and ${report.variantsCreated.toLocaleString()} variant${report.variantsCreated === 1 ? "" : "s"}; ${skippedCount.toLocaleString()} skipped.`,
-    details: `${skippedCount.toLocaleString()} product${skippedCount === 1 ? "" : "s"} skipped; ${existingLinkedCount.toLocaleString()} existing Shopify link${existingLinkedCount === 1 ? "" : "s"} ${dryRun ? "found" : "backfilled"}; ${report.userErrors.length.toLocaleString()} Shopify API error${report.userErrors.length === 1 ? "" : "s"}.`,
-    totalRows: rawItems.length,
-    processedRows: dryRun ? rawItems.length : preparedCount,
+    details: `${skippedCount.toLocaleString()} product${skippedCount === 1 ? "" : "s"} skipped; ${existingLinkedCount.toLocaleString()} existing Shopify link${existingLinkedCount === 1 ? "" : "s"} ${dryRun ? "found" : "backfilled"}; ${apiErrorCount.toLocaleString()} Shopify API error${apiErrorCount === 1 ? "" : "s"}.`,
+    totalRows: candidateKeys.length,
+    processedRows: evaluatedCount,
     changed: dryRun ? preparedCount : report.productsCreated,
-    missingCount: skippedCount + report.userErrors.length,
+    missingCount: skippedCount + apiErrorCount,
     errors: [
       ...skipped.slice(0, 25).map((row) => `${row.sku || "blank sku"}: ${row.issue}`),
-      ...report.userErrors.slice(0, 25).map((row) => `${row.sku || "Shopify"}: ${row.message}`)
+      ...apiErrorSample.slice(0, 25).map((row) => `${row.sku || "Shopify"}: ${row.message}`)
     ].slice(0, 50),
     progressPercent: 100,
     estimatedSecondsRemaining: 0,
