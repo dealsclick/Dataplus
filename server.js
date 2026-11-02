@@ -152,7 +152,7 @@ const { applyPrintedShipmentFulfillment } = require("./lib/printed-shipment-fulf
 const { mergeImportedShipments } = require("./lib/imported-shipment-merge");
 const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, packageFor: fulfillmentPackageFor, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
 const shipmentConsolidation = require("./lib/shipment-consolidation");
-const { ebayLiveLineContext } = require("./lib/ebay-live-order");
+const { ebayLiveLineContext, ebayLiveOrderUsesCommittedStock } = require("./lib/ebay-live-order");
 const { packageDimensionsChanged, applyManualPackageDimensions, applyShippingPreferences } = require("./lib/product-dimensions");
 const { canonicalCarrierName, carrierTrackingUrl, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
 const { buildPrintPreview, attachmentFilePath, restorePurchasedLabelReferences, printJobsByBatchId } = require("./lib/fulfillment-print");
@@ -31555,7 +31555,7 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
         purchaseOrderNumber: purchaseOrder?.poNumber || route.purchaseOrderNumber || "",
         purchaseOrderStatus: purchaseOrder?.status || "",
         supplierId: route.vendorId || purchaseOrder?.vendorId || "",
-        supplierName: route.vendorName || purchaseOrder?.supplier || purchaseOrder?.vendorName || (route.type === "warehouse" ? "Internal stock" : "Unassigned supplier"),
+        supplierName: route.vendorName || purchaseOrder?.supplier || purchaseOrder?.vendorName || route.inventorySourceLabel || (route.type === "warehouse" ? "Internal stock" : "Unassigned supplier"),
         allocationStatus,
         allocatedQty,
         productTitle: routeProduct?.marketplaceTitle || routeProduct?.title || routeProduct?.name || route.title || route.sku || "",
@@ -38558,6 +38558,51 @@ async function routeOrderForFulfillment(db, order, body = {}) {
       explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "routed", routeType: "warehouse", qty, reason: plan.matchedRule ? `Matched routing rule ${plan.matchedRule.name}.` : "Selected by channel warehouse priority and available stock." });
       addInventoryLedger(db, product, { type: "workflow_reservation", source: "order_workflow", referenceId: order.id, referenceNumber: order.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name, quantityChange: 0, reservedChange: inventoryQty, reason: `Workflow allocation for ${order.orderNumber}: ${qty} sell unit${qty === 1 ? "" : "s"} (${inventoryQty} piece${inventoryQty === 1 ? "" : "s"})`, user: body.user || "System" });
       remaining -= qty;
+    }
+    if (remaining > 0 && product && ebayLiveOrderUsesCommittedStock(order, line)) {
+      const warehouse = warehouses[0] || null;
+      if (!warehouse) {
+        const message = "Choose an active physical warehouse for this eBay Live sold item.";
+        explanation.decisions.push({ status: "blocked", reason: message });
+        createOrderException(order, {
+          type: "ebay_live_warehouse_required", severity: "blocking", owner: "Fulfillment", lineIndex,
+          sku: line.sku, title: line.title || line.sku, source: "eBay Live", description: message
+        });
+        continue;
+      }
+      const inventoryQty = remaining * inventoryMultiplier;
+      const stock = ensureInventoryWarehouseStock(product, warehouse);
+      const qtyBefore = Number(stock.qty || 0);
+      const reservedBefore = Number(stock.reserved || 0);
+      stock.qty = qtyBefore + inventoryQty;
+      stock.reserved = reservedBefore + inventoryQty;
+      stock.updatedAt = new Date().toISOString();
+      syncInventoryTotalsFromWarehouses(product);
+      product.updatedAt = stock.updatedAt;
+      touchedProducts.push(product);
+      created.push(createWorkflowRoute(order, {
+        type: "warehouse", status: "allocated", lineIndex, sku: line.sku, title: line.title || line.sku,
+        qty: remaining, inventoryQty, inventoryMultiplier,
+        warehouseId: warehouse.id, warehouseName: warehouse.name, productId: product.id,
+        inventoryOrigin: "ebay_live_committed_stock", inventorySourceLabel: "eBay Live committed stock",
+        ebayLiveEventId: line.ebayLiveEventId || line.ebayLiveContext?.eventId || order.ebayLive?.eventIds?.[0] || ""
+      }));
+      order.fulfillmentWarehouseId = order.fulfillmentWarehouseId || warehouse.id;
+      order.fulfillmentWarehouseName = order.fulfillmentWarehouseName || warehouse.name;
+      addInventoryLedger(db, product, {
+        type: "ebay_live_committed_stock", source: "ebay_live_order", referenceId: order.id,
+        referenceNumber: order.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name,
+        qtyBefore, qtyAfter: stock.qty, reservedBefore, reservedAfter: stock.reserved,
+        quantityChange: inventoryQty, reservedChange: inventoryQty,
+        reason: `Recognized and reserved ${inventoryQty} physical piece${inventoryQty === 1 ? "" : "s"} sold through eBay Live. Original supplier provenance is not required for fulfillment.`,
+        user: body.user || "System"
+      });
+      explanation.decisions.push({
+        warehouseId: warehouse.id, warehouseName: warehouse.name, status: "routed", routeType: "warehouse",
+        qty: remaining, reason: "The eBay Live sale confirms this physical item exists; recognized as event-committed warehouse stock."
+      });
+      resolveOrderRoutingExceptions(order, lineIndex, ["no_fulfillment_source", "supplier_unavailable", "supplier_assignment_required", "ebay_live_warehouse_required"]);
+      remaining = 0;
     }
     if (remaining > 0 && plan.shadowWarehouseId) {
       const shadowWarehouse = (db.warehouses || []).find((warehouse) => String(warehouse.id || "") === plan.shadowWarehouseId);
@@ -75730,6 +75775,7 @@ module.exports = {
   splitPurchaseOrderIntoDropshipPos,
   consolidateDropshipPurchaseOrders,
   routingSupplierOffers,
+  readOrderRoutingContext,
   routeOrderForFulfillment,
   updateOrderLineSku,
   recordDropshipPurchaseOrderTracking,
