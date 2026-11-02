@@ -483,7 +483,7 @@ export function VendorCatalogRefreshDialog({ vendor, open, onOpenChange }: { ven
     <DialogHeader><DialogTitle>Refresh catalog from stored records</DialogTitle><DialogDescription className="break-words">Create eligible new catalog SKUs for {vendor.name} using source records already stored in DataPlus.</DialogDescription></DialogHeader>
     <div className="min-h-0 space-y-3 overflow-y-auto text-sm">
       <p>No FTP download or full datadump scan. Existing catalog products are skipped. This action does not publish listings or push prices or inventory.</p>
-      <p>Inactive and discontinued records are excluded. Possible identifier matches and records missing their original active status require review in the job results.</p>
+      <p>Active, inactive, and discontinued source records are created with their saved source status. Possible identifier matches and records missing their original active status require review in the job results.</p>
       {loading && <p role="status">Checking stored records…</p>}
       {summary && <p><strong>{numberLabel(summary.total)}</strong> stored source records. {summary.unknownstatus > 0 && <span>{numberLabel(summary.unknownstatus)} have no saved active status and may need review.</span>}</p>}
       {error && <p role="alert" className="text-destructive">{error}</p>}
