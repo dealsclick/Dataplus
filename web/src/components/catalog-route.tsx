@@ -585,21 +585,23 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
       setEbayLaunchSaving(false)
     }
   }
-  async function runShopifyLaunch(apply: boolean, requestedSkus?: string[]) {
+  async function runShopifyLaunch(apply: boolean, requestedSkus?: string[], allowDraftIncomplete = false) {
     const skus = requestedSkus || rows.filter((item) => selectedIds.has(String(item.id || item.sku || ""))).map((item) => String(item.sku || "")).filter(Boolean)
     const isFilteredBatch = allFiltered && !requestedSkus
     if (!isFilteredBatch && !skus.length) return
     const count = isFilteredBatch ? total : skus.length
     const scope = `${numberLabel(count)} selected product${count === 1 ? "" : "s"}`
-    if (apply && !window.confirm(`Create ${scope} in live Shopify? DataPlus will automatically process the complete selection. Zero-stock products can be created with inventory at zero; discontinued, linked, and otherwise not-ready SKUs are skipped. Review the dry-run job first.`)) return
+    if (apply && !window.confirm(allowDraftIncomplete
+      ? `Create ${scope} in Shopify as drafts? DataPlus will process the complete selection without publishing it. Products missing the minimum SKU, title, price, selling-unit, or shipping requirements are skipped. Review the dry-run job first.`
+      : `Create ${scope} in live Shopify? DataPlus will automatically process the complete selection. Zero-stock products can be created with inventory at zero; discontinued, linked, and otherwise not-ready SKUs are skipped. Review the dry-run job first.`)) return
     try {
       const result = await api<{ job?: ImportJob; message?: string }>("/api/shopify/product-create", {
         method: "POST",
         body: JSON.stringify(isFilteredBatch
-          ? { allFiltered: true, selectionTotal: count, query, filters, apply, dryRun: !apply }
-          : { skus, selectionTotal: skus.length, apply, dryRun: !apply }),
+          ? { allFiltered: true, selectionTotal: count, query, filters, apply, dryRun: !apply, allowDraftIncomplete }
+          : { skus, selectionTotal: skus.length, apply, dryRun: !apply, allowDraftIncomplete }),
       })
-      toast.success(result.message || `Shopify ${apply ? "product creation" : "create dry run"} queued.`)
+      toast.success(result.message || `Shopify ${allowDraftIncomplete ? "draft " : ""}${apply ? "product creation" : "create dry run"} queued.`)
       if (apply) { setSelectedIds(new Set()); setAllFiltered(false) }
       if (result.job?.id) window.setTimeout(() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }, 500)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to queue Shopify product creation.") }
@@ -1234,6 +1236,8 @@ function AdvancedMainCatalogPage({ channels = [] }: { totalSkuCount?: number; ch
                 } },
                 { id: "review-shopify", label: "Review Shopify", description: "Create a review job before launching selected SKUs.", icon: <ShoppingBag className="size-4" />, onSelect: () => void runShopifyLaunch(false) },
                 { id: "launch-shopify", label: "Launch Shopify", description: "Create selected ready SKUs in Shopify.", icon: <ShoppingBag className="size-4" />, onSelect: () => void runShopifyLaunch(true) },
+                { id: "review-shopify-drafts", label: "Review Shopify drafts", description: "Check which incomplete products meet Shopify's minimum draft requirements without publishing.", icon: <ShoppingBag className="size-4" />, onSelect: () => void runShopifyLaunch(false, undefined, true) },
+                { id: "create-shopify-drafts", label: "Create Shopify drafts", description: "Create eligible incomplete products as unpublished Shopify drafts.", icon: <ShoppingBag className="size-4" />, onSelect: () => void runShopifyLaunch(true, undefined, true) },
                 { id: "review-links", label: "Review Shopify links", description: "Find existing Shopify variants that may match this selection.", icon: <Link2 className="size-4" />, group: "Utilities", onSelect: () => void runShopifyLink(false) },
                 { id: "link-existing", label: "Link existing Shopify", description: "Connect selected records to matching Shopify variants.", icon: <Link2 className="size-4" />, group: "Utilities", onSelect: () => void runShopifyLink(true) },
                 { id: "validate-ebay", label: "Validate eBay readiness", description: "Run the full eBay launch validator without publishing and save the result for 24 hours.", icon: <CheckCircle2 className="size-4" />, onSelect: () => openEbayLaunch(undefined, "review") },

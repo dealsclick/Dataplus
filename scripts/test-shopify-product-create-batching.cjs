@@ -47,6 +47,9 @@ const persistWorkerEnd = serverSource.indexOf("\nasync function runShopifyStatus
 const persistWorkerSource = serverSource.slice(persistWorkerStart, persistWorkerEnd);
 assert.match(persistWorkerSource, /workerLastSeenAt:\s*job\.workerId\s*\?\s*updatedAt/, "active external worker progress must refresh the job heartbeat");
 assert.match(catalogSource, /label: "Launch Shopify"/, "catalog action must use the concise Shopify launch label");
+assert.match(catalogSource, /label: "Review Shopify drafts"/, "catalog actions must expose a safe incomplete-product draft review");
+assert.match(catalogSource, /label: "Create Shopify drafts"/, "catalog actions must expose unpublished Shopify draft creation");
+assert.match(catalogSource, /allowDraftIncomplete \}/, "catalog draft actions must pass the incomplete-draft scope to the worker");
 for (const [name, next] of [["writeStateDocuments", "registerDatadumpSuppliers"], ["upsertShopifyStatusMap", "replaceProductQualityRows"]]) {
   const transactionSource = dbSource.slice(dbSource.indexOf(`async function ${name}`), dbSource.indexOf(`async function ${next}`, dbSource.indexOf(`async function ${name}`)));
   assert.match(transactionSource, /const client = await pool\.connect\(\)/, `${name} must reserve one PostgreSQL client for its transaction`);
