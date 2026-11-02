@@ -49802,6 +49802,31 @@ async function syncEbayShipmentTracking(db, order, shipment) {
     const response = await ebayTradingRequest(db, "CompleteSale", payload);
     if (!/^(success|warning)$/i.test(ebayTradingText(response.Ack))) throw new Error("eBay did not confirm the tracking update.");
   }
+  return verifyEbayShipmentTracking(db, orderId, shipment.trackingNumber);
+}
+
+function ebayShipmentTrackingEvidence(fulfillments = [], trackingNumber = "") {
+  const sought = normalizeTrackingNumber(trackingNumber);
+  if (!sought) return null;
+  const match = (Array.isArray(fulfillments) ? fulfillments : []).find((fulfillment) =>
+    normalizeTrackingNumber(fulfillment?.shipmentTrackingNumber || fulfillment?.trackingNumber) === sought
+  );
+  if (!match) return null;
+  return {
+    fulfillmentId: String(match.fulfillmentId || ""),
+    trackingNumber: sought,
+    carrier: String(match.shippingCarrierCode || match.carrierCode || ""),
+    verifiedAt: new Date().toISOString()
+  };
+}
+
+async function verifyEbayShipmentTracking(db, orderId, trackingNumber) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, attempt * 750));
+    const evidence = ebayShipmentTrackingEvidence(await ebayShippingFulfillments(db, orderId), trackingNumber);
+    if (evidence) return evidence;
+  }
+  throw new Error(`eBay accepted the tracking request, but fulfillment readback did not include ${normalizeTrackingNumber(trackingNumber)}. The shipment remains unconfirmed and can be retried.`);
 }
 
 function temuTrackingCarrierName(shipment = {}) {
@@ -49907,8 +49932,8 @@ async function syncDropshipShipmentToChannel(db, order, shipment, actor = "Syste
     } else if (source === "ebay") {
       const settings = findChannelByName(db, "eBay")?.settings || DEFAULT_CHANNEL_SETTINGS;
       if (settings.channelEnabled === false || settings.ebayTrackingUploadEnabled === false) throw Object.assign(new Error("eBay tracking upload is disabled."), { syncDisabled: true });
-      await syncEbayShipmentTracking(db, order, shipment);
-      shipment.channelSync = { status: "sent", channel: "eBay", updatedAt: now, message: "eBay confirmed the tracking update." };
+      const confirmation = await syncEbayShipmentTracking(db, order, shipment);
+      shipment.channelSync = { status: "sent", channel: "eBay", fulfillmentId: confirmation.fulfillmentId || "", verifiedAt: confirmation.verifiedAt, updatedAt: now, message: "eBay fulfillment readback confirmed the tracking update." };
     } else if (source === "temu") {
       const settings = findChannelByName(db, "Temu")?.settings || DEFAULT_CHANNEL_SETTINGS;
       if (settings.channelEnabled === false || !settings.temuTrackingUploadEnabled || !settings.temuFulfillmentSyncEnabled) throw Object.assign(new Error("Temu tracking and fulfillment sync are disabled."), { syncDisabled: true });
@@ -59727,8 +59752,8 @@ async function handleApi(req, res) {
         } else if (source === "ebay") {
           const settings = findChannelByName(db, "eBay")?.settings || DEFAULT_CHANNEL_SETTINGS;
           if (settings.channelEnabled === false || settings.ebayTrackingUploadEnabled === false) throw new Error("eBay tracking sync is disabled.");
-          await syncEbayShipmentTracking(db, order, shipment);
-          shipment.channelSync = { status: "sent", channel: "eBay", updatedAt: new Date().toISOString(), message: "Shared shipment tracking was sent to eBay." };
+          const confirmation = await syncEbayShipmentTracking(db, order, shipment);
+          shipment.channelSync = { status: "sent", channel: "eBay", fulfillmentId: confirmation.fulfillmentId || "", verifiedAt: confirmation.verifiedAt, updatedAt: new Date().toISOString(), message: "Shared shipment tracking was confirmed by eBay fulfillment readback." };
         } else if (source === "walmart") {
           const settings = findChannelByName(db, "Walmart")?.settings || DEFAULT_CHANNEL_SETTINGS;
           if (settings.channelEnabled === false || !settings.walmartOrderUpdatesEnabled) throw new Error("Walmart order acknowledgement and tracking updates are disabled.");
