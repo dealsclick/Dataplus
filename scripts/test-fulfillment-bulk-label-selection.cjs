@@ -18,8 +18,12 @@ assert.match(appSource, /disabled=\{busy \|\| rateRefreshProgress\.active \|\| !
 assert.match(appSource, /Refresh rates before buying/, "the disabled bulk purchase control must explain the required next step");
 assert.match(appSource, /Get latest rates for \$\{selectedRateReadyPackages\.length\}/, "the purchase dialog must offer the same latest-rate step for a single shipment");
 assert.doesNotMatch(appSource, /ratedRows\.length !== selectedRows\.length/, "an ineligible row must not block every selected label");
+assert.match(appSource, /Grouped · \{shipmentGroupSize \|\| 1\}/, "group members must remain visibly grouped in the fulfillment table");
+assert.match(appSource, /Get rates & open label purchase/, "the shipment-group modal must continue directly into the reviewed label workflow");
+assert.match(appSource, /rateRefreshOpenLabelOnCompleteRef\.current = true/, "shipment-group rate completion must open label purchase when requested");
 
 assert.match(serverSource, /activeFulfillmentLabelBatchAssignments\(state\.batches\)/, "the server must exclude routes already assigned to an active label batch");
+assert.match(serverSource, /primaryOrderId: order\.id, primaryRouteIds/, "shipment-group creation must return only the primary combined package routes");
 assert.match(serverSource, /rows = rows\.filter\(\(row\) => row\.status === "rated"\)/, "the server must retain only rated rows when creating a purchase batch");
 assert.match(serverSource, /routeIds: eligibleRouteIds/, "the purchase worker must receive only routes still eligible in the saved batch");
 

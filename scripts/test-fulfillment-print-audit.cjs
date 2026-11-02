@@ -56,6 +56,9 @@ assert.doesNotMatch(appSource, /Did the labels print successfully\?|browserPrint
 assert.match(appSource, /const printInBrowser = async \(\) => \{[\s\S]*\/printed`/, "browser printing must record the document print action directly")
 assert.match(appSource, /const printCompletion = api<[\s\S]*print\(\)[\s\S]*await printCompletion/, "purchased-label completion must start before the mobile print dialog can suspend the page")
 assert.match(serverSource, /completePrintedPurchasedShipment\(db, order, shipment, actor, printedAt\)[\s\S]*syncDropshipShipmentToChannel/, "printing must complete local fulfillment before marketplace tracking sync")
+const directPrintRoute = serverSource.slice(serverSource.indexOf('parts[5] === "printed"'), serverSource.indexOf('url.pathname === "/api/fulfillment/pack/scan"'))
+assert.match(directPrintRoute, /completePrintedShipmentGroup\(db, order, shipment, directPrintJob, actor, printedAt\)/, "browser printing must mark every grouped order fulfilled")
+assert.match(serverSource.slice(serverSource.indexOf("async function reconcilePrintedShipmentFulfillment"), serverSource.indexOf("async function markPrintJobShipmentsPrinted")), /completePrintedShipmentGroup/, "printed-shipment repair must recover grouped child orders")
 assert.match(serverSource, /qtyFulfilled \|\| localShipmentLine\?\.qtyAllocated \|\| localShipmentLine\?\.qty/, "Shopify fulfillment must support purchased-label lines that store qty")
 
 console.log("Fulfillment print audit tests passed.")

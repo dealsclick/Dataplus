@@ -510,9 +510,11 @@ function FulfillmentPackageTableRow({
   const statusRow = rows.find((entry) => String(entry.status || "") === "exception") || row
   const suppliers = [...new Set(rows.map((entry) => String(entry.supplierName || "Internal stock")))]
   const supplies = [...new Set(rows.map((entry) => String(entry.supplyLabel || "No PO")))]
+  const shipmentGroupId = String(row.shipmentGroupId || "").trim()
+  const shipmentGroupSize = new Set((Array.isArray(row.shipmentGroupOrderIds) ? row.shipmentGroupOrderIds : []).map(String).filter(Boolean)).size
   return <TableRow className="group align-top hover:bg-muted/30">
     <TableCell><Checkbox aria-label={`Select shipment for ${String(row.orderNumber || row.orderId)}`} checked={selected} onCheckedChange={(checked) => onToggleSelection(routeIds, checked === true)} /></TableCell>
-    {showColumn("order") && <TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId))}`}>{String(row.orderNumber || row.orderId)}</a><p className="max-w-40 truncate text-xs text-muted-foreground">{String(row.customer || "Customer")}</p><p className="text-xs text-muted-foreground">{row.orderDate ? dateLabel(String(row.orderDate)) : "Order date unavailable"}</p>{rows.length > 1 ? <Badge variant="secondary" className="mt-1">{rows.length} items · 1 shipment</Badge> : null}{Number(row.shipmentConsolidation?.candidateCount || 0) > 0 ? <button type="button" className="mt-1 block" onClick={() => onShipTogether(row)}><Badge variant="outline" className={row.isEbayLive ? "border-pink-500/50 text-pink-700 dark:text-pink-300" : "border-blue-500/40 text-blue-700 dark:text-blue-300"}><PackageCheck className="mr-1 size-3" /> {row.isEbayLive ? "Live combine" : "Ship together"} · {Number(row.shipmentConsolidation.candidateCount) + 1}</Badge></button> : null}</TableCell>}
+    {showColumn("order") && <TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId))}`}>{String(row.orderNumber || row.orderId)}</a><p className="max-w-40 truncate text-xs text-muted-foreground">{String(row.customer || "Customer")}</p><p className="text-xs text-muted-foreground">{row.orderDate ? dateLabel(String(row.orderDate)) : "Order date unavailable"}</p>{rows.length > 1 ? <Badge variant="secondary" className="mt-1">{rows.length} items · 1 shipment</Badge> : null}{shipmentGroupId ? <button type="button" className="mt-1 block" title={`Shipment group ${shipmentGroupId}`} onClick={() => onShipTogether(row)}><Badge variant="success"><PackageCheck className="mr-1 size-3" /> Grouped · {shipmentGroupSize || 1}</Badge></button> : Number(row.shipmentConsolidation?.candidateCount || 0) > 0 ? <button type="button" className="mt-1 block" onClick={() => onShipTogether(row)}><Badge variant="outline" className={row.isEbayLive ? "border-pink-500/50 text-pink-700 dark:text-pink-300" : "border-blue-500/40 text-blue-700 dark:text-blue-300"}><PackageCheck className="mr-1 size-3" /> {row.isEbayLive ? "Live combine" : "Ship together"} · {Number(row.shipmentConsolidation.candidateCount) + 1}</Badge></button> : null}</TableCell>}
     {showColumn("item") && <TableCell><div className="grid min-w-56 gap-2">{rows.map((item) => <div key={String(item.id)} className="flex items-center gap-2"><a className="shrink-0" href={`/products/${encodeURIComponent(String(item.parentSku || item.catalogSku || item.sku || ""))}`}>{item.productImage ? <img src={String(item.productImage)} alt="" className="size-10 rounded border bg-background object-contain" /> : <span className="grid size-10 place-items-center rounded border bg-muted"><Package className="size-4 text-muted-foreground" /></span>}</a><div className="min-w-0"><a className="block truncate font-medium hover:underline" href={`/products/${encodeURIComponent(String(item.parentSku || item.catalogSku || item.sku || ""))}`}>{String(item.sku || "Missing SKU")}</a>{item.parentSku ? <p className="truncate text-xs text-muted-foreground">Parent {String(item.parentSku)}</p> : null}<div className="flex flex-wrap items-center gap-1"><span className="text-xs text-muted-foreground">{numberLabel(Number(item.qty || 0))} units</span>{item.shipAlone === true ? <Badge variant="outline" className="border-blue-500/30 text-[10px] text-blue-700 dark:text-blue-300">Ships alone</Badge> : null}</div></div></div>)}</div></TableCell>}
     {showColumn("shipTo") && <TableCell><p className="max-w-40 truncate font-medium" title={String(row.destination?.name || row.customer || "")}>{String(row.destination?.city || row.destination?.town || "Unknown city")}</p><p className="max-w-40 truncate text-xs text-muted-foreground">{[row.destination?.state, row.destination?.postalCode || row.destination?.zip || row.destination?.postcode].filter(Boolean).join(" ") || "Address unavailable"}</p></TableCell>}
     {showColumn("channel") && <TableCell><div className="flex max-w-36 flex-wrap gap-1"><Badge variant="outline">{String(row.channel || "Unassigned")}</Badge>{row.isEbayLive === true || String(row.salesOrigin || "") === "ebay_live" ? <Badge className="bg-pink-600 text-white hover:bg-pink-600">eBay Live</Badge> : null}</div></TableCell>}
@@ -523,7 +525,7 @@ function FulfillmentPackageTableRow({
     {showColumn("rate") && <TableCell><FulfillmentRateCell review={row.rateReview} busy={busy} onOpen={onOpenBatches} onProcess={() => onProcessRates(row)} onSelectRate={(rateId) => onSelectRate(row, rateId)} /></TableCell>}
     {showColumn("shipBy") && <TableCell><FulfillmentShipBy row={row} /></TableCell>}
     {showColumn("status") && <TableCell><Badge variant={statusRow.status === "exception" ? "destructive" : statusRow.status === "ready_to_ship" ? "success" : "outline"}>{statusRow.status === "ready_to_ship" ? "Ready for label" : String(statusRow.status || "new").replace(/_/g, " ")}</Badge>{row.rateReview?.batchNumber ? <p className="mt-1 text-xs text-blue-700 dark:text-blue-300">{String(row.rateReview.batchNumber)}</p> : null}</TableCell>}
-    <TableCell className="text-right"><div className="flex justify-end gap-1"><Button size="icon" variant="ghost" title="Quick view" aria-label={`Quick view order ${String(row.orderNumber || row.orderId)}`} onClick={() => onQuickView(rows)}><Eye className="size-4" /></Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" aria-label={`Actions for order ${String(row.orderNumber || row.orderId)}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => onEditPackage(rows)}><Pencil className="size-4" /> Edit shipment package</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => onSplitShipment(rows)}><Boxes className="size-4" /> Set number of labels</DropdownMenuItem>{rows.map((item) => <DropdownMenuItem key={String(item.id)} disabled={busy} onClick={() => onSetShipAlone(item, item.shipAlone !== true)}><Package className="size-4" /> {item.shipAlone === true ? `Rejoin ${String(item.sku || "item")}` : `Ship ${String(item.sku || "item")} separately`}</DropdownMenuItem>)}{Number(row.shipmentConsolidation?.candidateCount || 0) > 0 ? <DropdownMenuItem disabled={busy} onClick={() => onShipTogether(row)}><PackageCheck className="size-4" /> {row.isEbayLive ? "Combine eBay Live orders" : "Ship orders together"}</DropdownMenuItem> : null}<DropdownMenuSeparator /><DropdownMenuItem disabled={busy || !readiness.ready} onClick={() => onCreateLabel(rows)}><Truck className="size-4" /> Create shipping label</DropdownMenuItem>{row.rateReview?.batchId ? <DropdownMenuItem onClick={onOpenBatches}><ExternalLink className="size-4" /> Open rate review</DropdownMenuItem> : null}{next && <DropdownMenuItem onClick={() => onAdvance(row, next)}><ArrowRight className="size-4" /> Mark {next.replace(/_/g, " ")}</DropdownMenuItem>}<DropdownMenuItem asChild><a href={`/orders/${encodeURIComponent(String(row.orderId))}`}><ExternalLink className="size-4" /> Open order</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></TableCell>
+    <TableCell className="text-right"><div className="flex justify-end gap-1"><Button size="icon" variant="ghost" title="Quick view" aria-label={`Quick view order ${String(row.orderNumber || row.orderId)}`} onClick={() => onQuickView(rows)}><Eye className="size-4" /></Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" aria-label={`Actions for order ${String(row.orderNumber || row.orderId)}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => onEditPackage(rows)}><Pencil className="size-4" /> Edit shipment package</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => onSplitShipment(rows)}><Boxes className="size-4" /> Set number of labels</DropdownMenuItem>{rows.map((item) => <DropdownMenuItem key={String(item.id)} disabled={busy} onClick={() => onSetShipAlone(item, item.shipAlone !== true)}><Package className="size-4" /> {item.shipAlone === true ? `Rejoin ${String(item.sku || "item")}` : `Ship ${String(item.sku || "item")} separately`}</DropdownMenuItem>)}{shipmentGroupId || Number(row.shipmentConsolidation?.candidateCount || 0) > 0 ? <DropdownMenuItem disabled={busy} onClick={() => onShipTogether(row)}><PackageCheck className="size-4" /> {shipmentGroupId ? "Review shipment group" : row.isEbayLive ? "Combine eBay Live orders" : "Ship orders together"}</DropdownMenuItem> : null}<DropdownMenuSeparator /><DropdownMenuItem disabled={busy || !readiness.ready} onClick={() => onCreateLabel(rows)}><Truck className="size-4" /> Create shipping label</DropdownMenuItem>{row.rateReview?.batchId ? <DropdownMenuItem onClick={onOpenBatches}><ExternalLink className="size-4" /> Open rate review</DropdownMenuItem> : null}{next && <DropdownMenuItem onClick={() => onAdvance(row, next)}><ArrowRight className="size-4" /> Mark {next.replace(/_/g, " ")}</DropdownMenuItem>}<DropdownMenuItem asChild><a href={`/orders/${encodeURIComponent(String(row.orderId))}`}><ExternalLink className="size-4" /> Open order</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></TableCell>
   </TableRow>
 }
 
@@ -578,10 +580,11 @@ export function ShippingBatchesPage() {
 
   const printInBrowser = async () => {
     if (!printJob?.id) return
-    printFrameRef.current?.contentWindow?.print()
     setBusyId(String(printJob.id))
+    const printCompletion = api<{ message?: string }>(`/api/fulfillment/print-queue/${encodeURIComponent(String(printJob.id))}/printed`, { method: "POST", body: "{}" })
+    printFrameRef.current?.contentWindow?.print()
     try {
-      const result = await api<{ message?: string }>(`/api/fulfillment/print-queue/${encodeURIComponent(String(printJob.id))}/printed`, { method: "POST", body: "{}" })
+      const result = await printCompletion
       toast.success(result.message || "Print activity recorded.")
       await load(true)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to record this print activity.") }
@@ -685,6 +688,7 @@ export function FulfillmentPage() {
   const [rateRefreshProgress, setRateRefreshProgress] = useState<{ active: boolean; items: FulfillmentRateRefreshItem[]; jobNumber?: number; message?: string }>({ active: false, items: [] })
   const [rateStatusOpen, setRateStatusOpen] = useState(false)
   const rateRefreshSelectionKeyRef = useRef("")
+  const rateRefreshOpenLabelOnCompleteRef = useRef(false)
   const [latestRateAuthorization, setLatestRateAuthorization] = useState<{ selectionKey: string; routeIds: Set<string> }>({ selectionKey: "", routeIds: new Set() })
   const [rateRefreshJobId, setRateRefreshJobId] = useState(() => window.localStorage.getItem("dataplus:fulfillment-rate-refresh-job") || "")
   const [carrierScanJobId, setCarrierScanJobId] = useState(() => window.localStorage.getItem("dataplus:fulfillment-carrier-scan-job") || "")
@@ -743,6 +747,7 @@ export function FulfillmentPage() {
   const [consolidationPreviewLoading, setConsolidationPreviewLoading] = useState(false)
   const [consolidationCartonization, setConsolidationCartonization] = useState<Record<string, any> | null>(null)
   const [consolidationPackageDraft, setConsolidationPackageDraft] = useState({ packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "" })
+  const [consolidationSaved, setConsolidationSaved] = useState<{ groupId: string; orderNumbers: string[]; primaryRouteIds: string[] } | null>(null)
   const [quickViewRows, setQuickViewRows] = useState<Array<Record<string, any>>>([])
   const printPreviewFrameRef = useRef<HTMLIFrameElement>(null)
   const [printJobPreview, setPrintJobPreview] = useState<Record<string, any> | null>(null)
@@ -1044,6 +1049,7 @@ export function FulfillmentPage() {
 
   const openShipmentConsolidation = async (row: Record<string, any>, preferredOrderIds: string[] = []) => {
     setConsolidationOrder(row)
+    setConsolidationSaved(null)
     setConsolidationCandidates([])
     setConsolidationSelection(new Set())
     setConsolidationCartonization(null)
@@ -1072,8 +1078,17 @@ export function FulfillmentPage() {
     if (!consolidationOrder || !consolidationSelection.size) return
     setConsolidationLoading(true)
     try {
-      const result = await api<{ message?: string }>(`/api/orders/${encodeURIComponent(String(consolidationOrder.orderId || ""))}/shipment-group`, { method: "POST", body: JSON.stringify({ orderIds: [...consolidationSelection], ...consolidationPackageDraft }) })
-      setConsolidationOrder(null)
+      const result = await api<{ groupId?: string; primaryOrderId?: string; primaryRouteIds?: string[]; orders?: Array<Record<string, any>>; message?: string }>(`/api/orders/${encodeURIComponent(String(consolidationOrder.orderId || ""))}/shipment-group`, { method: "POST", body: JSON.stringify({ orderIds: [...consolidationSelection], ...consolidationPackageDraft }) })
+      const primaryOrderId = String(result.primaryOrderId || consolidationOrder.orderId || "")
+      const primaryOrder = (result.orders || []).find((order) => String(order.id || "") === primaryOrderId)
+      const primaryRouteIds = (Array.isArray(result.primaryRouteIds) && result.primaryRouteIds.length
+        ? result.primaryRouteIds
+        : Array.isArray(primaryOrder?.fulfillmentRoutes)
+          ? primaryOrder.fulfillmentRoutes.map((route: Record<string, any>) => String(route.id || "")).filter(Boolean)
+          : []).map(String)
+      const orderNumbers = (result.orders || []).map((order) => String(order.orderNumber || order.id || "")).filter(Boolean)
+      setSelectedRouteIds(new Set(primaryRouteIds))
+      setConsolidationSaved({ groupId: String(result.groupId || "Shipment group"), orderNumbers, primaryRouteIds })
       await load(false, true)
       toast.success(result.message || "Orders grouped for one shipment.")
     } catch (error) {
@@ -1182,6 +1197,10 @@ export function FulfillmentPage() {
             })
           }
           await load(false, true)
+          const openLabelPurchase = rateRefreshOpenLabelOnCompleteRef.current
+          rateRefreshOpenLabelOnCompleteRef.current = false
+          if (openLabelPurchase && items.some((item) => item.status === "rated")) window.setTimeout(() => setBatchOpen(true), 0)
+          else if (openLabelPurchase) window.setTimeout(() => setRateStatusOpen(true), 0)
           if (["failed", "warning"].includes(String(job.status || "").toLowerCase())) toast.warning(job.message || "Rate check finished with items needing attention.")
           else toast.success(job.message || "Shipping rates are ready.")
         }
@@ -1716,6 +1735,33 @@ export function FulfillmentPage() {
     await refreshRatesForRows(selectedRateReadyRows)
   }
 
+  const continueShipmentGroup = async (getRatesNow: boolean) => {
+    const routeIds = consolidationSaved?.primaryRouteIds || []
+    const selectedIds = new Set(routeIds)
+    const targetRows = rows.filter((row) => selectedIds.has(String(row.id || "")))
+    setSelectedRouteIds(selectedIds)
+    setConsolidationOrder(null)
+    setConsolidationSaved(null)
+    setConsolidationCartonization(null)
+    if (!getRatesNow) {
+      toast.info(routeIds.length ? "The combined shipment is selected in the bulk toolbar." : "The shipment group was saved. Refresh the table to continue with rates.")
+      return
+    }
+    if (!targetRows.length) {
+      toast.error("The shipment group was saved, but its primary package is not visible in this table view. Clear the filters and use the Grouped filter to continue.")
+      return
+    }
+    const readyRows = targetRows.filter((row) => readinessFor(row).ready === true)
+    if (!readyRows.length) {
+      toast.error("The shipment group was saved, but its package still needs review before rates can be requested.")
+      return
+    }
+    rateRefreshSelectionKeyRef.current = [...selectedIds].sort().join("|")
+    rateRefreshOpenLabelOnCompleteRef.current = true
+    setLatestRateAuthorization({ selectionKey: "", routeIds: new Set() })
+    await refreshRatesForRows(readyRows)
+  }
+
   const updateRateChoice = async (row: Record<string, any>, patch: Record<string, unknown>): Promise<boolean> => {
     const selectedRateId = String(patch.selectedRateId || "")
     const selectedRate = (Array.isArray(row.rateReview?.rates) ? row.rateReview.rates : []).find((rate: Record<string, unknown>) => String(rate.id || "") === selectedRateId)
@@ -1887,6 +1933,12 @@ export function FulfillmentPage() {
     if (!job || !printPacketUrl) return
     setBusy(true)
     try {
+      const printCompletion = job.id
+        ? api<{ message?: string; printJob?: { channelSyncResults?: Array<{ status?: string; error?: string }> }; channelResults?: Array<{ status?: string; error?: string }>; channelResult?: { status?: string; error?: string } }>(`/api/fulfillment/print-queue/${encodeURIComponent(String(job.id))}/printed`, { method: "POST", body: "{}" })
+        : job.orderId && job.shipmentId
+          ? api<{ message?: string; printJob?: { channelSyncResults?: Array<{ status?: string; error?: string }> }; channelResults?: Array<{ status?: string; error?: string }>; channelResult?: { status?: string; error?: string } }>(`/api/orders/${encodeURIComponent(String(job.orderId))}/shipments/${encodeURIComponent(String(job.shipmentId))}/printed`, { method: "POST", body: "{}" })
+          : null
+      if (!printCompletion) return
       if (printPacketPreviewOpen && printPacketFrameRef.current) {
         printPacketFrameRef.current.contentWindow?.focus()
         printPacketFrameRef.current.contentWindow?.print()
@@ -1925,10 +1977,7 @@ export function FulfillmentPage() {
           document.body.appendChild(frame)
         })
       }
-      let result: { message?: string; printJob?: { channelSyncResults?: Array<{ status?: string; error?: string }> }; channelResults?: Array<{ status?: string; error?: string }>; channelResult?: { status?: string; error?: string } }
-      if (job.id) result = await api(`/api/fulfillment/print-queue/${encodeURIComponent(String(job.id))}/printed`, { method: "POST", body: "{}" })
-      else if (job.orderId && job.shipmentId) result = await api(`/api/orders/${encodeURIComponent(String(job.orderId))}/shipments/${encodeURIComponent(String(job.shipmentId))}/printed`, { method: "POST", body: "{}" })
-      else return
+      const result = await printCompletion
       const channelResults = result.printJob?.channelSyncResults || result.channelResults || (result.channelResult ? [result.channelResult] : [])
       const failed = channelResults.filter((entry) => !["sent", "already_synced"].includes(String(entry.status || "").toLowerCase()))
       if (failed.length) toast.warning(`${result.message || "Print activity recorded."} ${failed.length} marketplace tracking update${failed.length === 1 ? "" : "s"} need attention.`)
@@ -2677,10 +2726,14 @@ export function FulfillmentPage() {
           })()}
         </SheetContent>
       </Sheet>
-      <Dialog open={Boolean(consolidationOrder)} onOpenChange={(open) => { if (!open && !consolidationLoading) { setConsolidationOrder(null); setConsolidationCartonization(null) } }}>
+      <Dialog open={Boolean(consolidationOrder)} onOpenChange={(open) => { if (!open && !consolidationLoading) { setConsolidationOrder(null); setConsolidationSaved(null); setConsolidationCartonization(null) } }}>
         <DialogContent className="flex max-h-[92dvh] w-[calc(100%-2rem)] max-w-2xl flex-col overflow-hidden">
-          <DialogHeader><DialogTitle>{consolidationOrder?.isEbayLive ? "Combine eBay Live orders" : "Ship orders together"}</DialogTitle><DialogDescription>One physical package and tracking number can serve these orders. Each marketplace order, payment, and channel reference remains separate.</DialogDescription></DialogHeader>
-          {consolidationLoading && !consolidationCandidates.length ? <div className="grid gap-2"><Skeleton className="h-14" /><Skeleton className="h-14" /></div> : <div className="min-h-0 space-y-3 overflow-y-auto">
+          <DialogHeader><DialogTitle>{consolidationSaved ? "Shipment group created" : consolidationOrder?.isEbayLive ? "Combine eBay Live orders" : "Ship orders together"}</DialogTitle><DialogDescription>{consolidationSaved ? "The table now marks every member as grouped. Continue with one rate and one label for the primary combined package." : "One physical package and tracking number can serve these orders. Each marketplace order, payment, and channel reference remains separate."}</DialogDescription></DialogHeader>
+          {consolidationSaved ? <div className="min-h-0 space-y-4 overflow-y-auto">
+            <Alert className="border-emerald-500/40 bg-emerald-500/5"><CheckCircle2 className="size-4 text-emerald-600" /><AlertTitle>{consolidationSaved.orderNumbers.length} orders grouped successfully</AlertTitle><AlertDescription>Group {consolidationSaved.groupId} will use one shipping rate, one label, and one packing slip packet. Printing that label will mark every member order shipped.</AlertDescription></Alert>
+            <div className="rounded-md border p-4"><p className="text-xs font-semibold uppercase text-muted-foreground">Grouped orders</p><div className="mt-3 flex flex-wrap gap-2">{consolidationSaved.orderNumbers.map((orderNumber) => <Badge key={orderNumber} variant="secondary">{orderNumber}</Badge>)}</div></div>
+            {!consolidationSaved.primaryRouteIds.length ? <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Primary package needs review</AlertTitle><AlertDescription>The group was saved, but no warehouse package is ready for rates. Clear table filters and open the group from its green badge after the package is ready.</AlertDescription></Alert> : null}
+          </div> : consolidationLoading && !consolidationCandidates.length ? <div className="grid gap-2"><Skeleton className="h-14" /><Skeleton className="h-14" /></div> : <div className="min-h-0 space-y-3 overflow-y-auto">
             <Alert><PackageCheck className="size-4" /><AlertTitle>{consolidationOrder?.isEbayLive ? "eBay Live shipment match" : "Cartonization preview"}</AlertTitle><AlertDescription>{consolidationOrder?.isEbayLive ? "DataPlus requires the same buyer, exact delivery address, and warehouse. Enter the final carton below even when temporary Live SKUs have no catalog dimensions." : "DataPlus tests the selected orders against the configured package catalog. Confirm the physical carton before purchase."}</AlertDescription></Alert>
             <div className="rounded-md border p-3 text-sm"><div className="flex items-center justify-between gap-3"><div><p className="font-medium">Order {String(consolidationOrder?.orderNumber || consolidationOrder?.orderId || "")}</p><p className="text-xs text-muted-foreground">{String(consolidationOrder?.customer || "Customer")} · {String(consolidationOrder?.warehouseName || "Warehouse")}</p></div><Badge>Primary</Badge></div></div>
             <div className="rounded-md border"><Table><TableHeader><TableRow><TableHead className="w-10" /><TableHead>Order</TableHead><TableHead>Created</TableHead><TableHead>Match</TableHead></TableRow></TableHeader><TableBody>{consolidationCandidates.map((candidate) => { const id = String(candidate.id || ""); const liveWindowMatch = String(candidate.matchSource || "") === "ebay_live_shipping_window"; return <TableRow key={id}><TableCell><Checkbox checked={consolidationSelection.has(id)} onCheckedChange={(checked) => updateConsolidationSelection(id, checked === true)} /></TableCell><TableCell><a className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(id)}`}>{String(candidate.orderNumber || id)}</a><p className="text-xs text-muted-foreground">{String(candidate.buyer || "Customer")}</p></TableCell><TableCell className="text-xs">{candidate.createdAt ? dateLabel(String(candidate.createdAt)) : "-"}</TableCell><TableCell><Badge variant="outline" className={liveWindowMatch ? "border-pink-500/50 text-pink-700 dark:text-pink-300" : ""}>{liveWindowMatch ? "eBay Live window" : "Customer + address + warehouse"}</Badge></TableCell></TableRow> })}{!consolidationCandidates.length && <TableRow><TableCell colSpan={4} className="h-20 text-center text-muted-foreground">No compatible orders remain.</TableCell></TableRow>}</TableBody></Table></div>
@@ -2691,7 +2744,7 @@ export function FulfillmentPage() {
             <div className="grid gap-3 rounded-md border border-blue-500/30 bg-blue-500/5 p-3"><div><p className="text-sm font-medium">Final combined package</p><p className="text-xs text-muted-foreground">These are the dimensions used to request the rate and buy one label for the group.</p></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><Field label="Weight (lb)"><Input type="number" min="0.01" step="0.01" value={consolidationPackageDraft.packageWeight} onChange={(event) => setConsolidationPackageDraft((current) => ({ ...current, packageWeight: event.target.value }))} /></Field><Field label="Length (in)"><Input type="number" min="0.01" step="0.01" value={consolidationPackageDraft.packageLength} onChange={(event) => setConsolidationPackageDraft((current) => ({ ...current, packageLength: event.target.value }))} /></Field><Field label="Width (in)"><Input type="number" min="0.01" step="0.01" value={consolidationPackageDraft.packageWidth} onChange={(event) => setConsolidationPackageDraft((current) => ({ ...current, packageWidth: event.target.value }))} /></Field><Field label="Height (in)"><Input type="number" min="0.01" step="0.01" value={consolidationPackageDraft.packageHeight} onChange={(event) => setConsolidationPackageDraft((current) => ({ ...current, packageHeight: event.target.value }))} /></Field></div></div>
             <p className="text-xs text-muted-foreground">Orders are not excluded because of age. Picked, packed, held, shipped, labeled, or mismatched-warehouse orders remain excluded.</p>
           </div>}
-          <DialogFooter><Button variant="outline" disabled={consolidationLoading} onClick={() => setConsolidationOrder(null)}>Cancel</Button><Button disabled={consolidationLoading || consolidationPreviewLoading || !consolidationSelection.size || !consolidationPackageComplete} onClick={() => void saveShipmentConsolidation()}>{consolidationLoading ? <Loader2 className="size-4 animate-spin" /> : <PackageCheck className="size-4" />} Create one shipment group</Button></DialogFooter>
+          {consolidationSaved ? <DialogFooter><Button variant="outline" onClick={() => { setConsolidationOrder(null); setConsolidationSaved(null); setConsolidationCartonization(null) }}>Done</Button><Button variant="outline" disabled={!consolidationSaved.primaryRouteIds.length} onClick={() => void continueShipmentGroup(false)}><ListChecks className="size-4" /> Use bulk workflow</Button><Button disabled={!consolidationSaved.primaryRouteIds.length || rateRefreshProgress.active} onClick={() => void continueShipmentGroup(true)}>{rateRefreshProgress.active ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Get rates & open label purchase</Button></DialogFooter> : <DialogFooter><Button variant="outline" disabled={consolidationLoading} onClick={() => setConsolidationOrder(null)}>Cancel</Button><Button disabled={consolidationLoading || consolidationPreviewLoading || !consolidationSelection.size || !consolidationPackageComplete} onClick={() => void saveShipmentConsolidation()}>{consolidationLoading ? <Loader2 className="size-4 animate-spin" /> : <PackageCheck className="size-4" />} Create one shipment group</Button></DialogFooter>}
         </DialogContent>
       </Dialog>
       <Dialog open={Boolean(testPrintStation)} onOpenChange={(open) => !open && setTestPrintStation(null)}>

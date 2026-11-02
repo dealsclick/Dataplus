@@ -33111,17 +33111,17 @@ async function reconcilePrintedShipmentFulfillment(orderKey, shipmentKey = "", a
   if (!shipment) throw new Error(`A purchased shipment${shipmentKey ? ` matching ${shipmentKey}` : ""} was not found on order ${order.orderNumber || order.id}.`);
 
   const completedAt = new Date().toISOString();
+  const repairPrintJob = {
+    id: `repair-${shipment.id}`,
+    printNumber: `Label ${order.orderNumber || order.id}`,
+    printedAt: completedAt,
+    printedBy: actor,
+    lastPrintedAt: completedAt,
+    lastPrintedBy: actor,
+    lastPrintStation: "DataPlus repair",
+    lastPrintAttemptId: crypto.randomUUID()
+  };
   if (shipment.printFulfillment?.status !== "completed" && !["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase())) {
-    const repairPrintJob = {
-      id: `repair-${shipment.id}`,
-      printNumber: `Label ${order.orderNumber || order.id}`,
-      printedAt: completedAt,
-      printedBy: actor,
-      lastPrintedAt: completedAt,
-      lastPrintedBy: actor,
-      lastPrintStation: "DataPlus repair",
-      lastPrintAttemptId: crypto.randomUUID()
-    };
     const printAudit = recordShipmentLabelPrint(shipment, repairPrintJob, actor);
     if (printAudit.recorded) addOrderTimeline(order, {
       type: "shipping_label",
@@ -33135,6 +33135,7 @@ async function reconcilePrintedShipmentFulfillment(orderKey, shipmentKey = "", a
   const channelResult = fulfillmentResult.status !== "failed" && shipment.trackingNumber
     ? await syncDropshipShipmentToChannel(db, order, shipment, actor)
     : null;
+  const groupResult = await completePrintedShipmentGroup(db, order, shipment, repairPrintJob, actor, completedAt);
   order.updatedAt = completedAt;
   await postgres.saveOrder(order);
   clearOrderApiCache(order.id);
@@ -33147,6 +33148,7 @@ async function reconcilePrintedShipmentFulfillment(orderKey, shipmentKey = "", a
     shipmentStatus: shipment.status || "",
     trackingNumber: shipment.trackingNumber || "",
     fulfillmentResult,
+    groupResult,
     channelResult,
     channelSync: shipment.channelSync || null
   };
@@ -58042,6 +58044,8 @@ async function handleApi(req, res) {
       channelResult = await syncDropshipShipmentToChannel(db, order, shipment, actor);
       channelResults.push(channelResult);
     }
+    const groupResult = await completePrintedShipmentGroup(db, order, shipment, directPrintJob, actor, printedAt);
+    channelResults.push(...groupResult.channelResults);
     order.updatedAt = printedAt;
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
@@ -58058,7 +58062,13 @@ async function handleApi(req, res) {
       : fulfillmentResult.status === "already_completed"
         ? " Order was already fulfilled."
         : "";
-    return sendJson(res, 200, { shipment, fulfillmentResult, channelResult, channelResults, message: `${firstPrint ? "Shipping label marked printed." : `Shipping label reprinted. Total prints: ${shipment.labelPrintCount}.`}${fulfillmentMessage}${fulfillmentWarning}${syncWarning}` });
+    const groupedFulfillmentFailures = groupResult.fulfillmentResults.filter((result) => result.status === "failed");
+    const groupMessage = groupResult.updated
+      ? ` ${groupResult.updated} grouped order${groupResult.updated === 1 ? "" : "s"} marked fulfilled.`
+      : groupedFulfillmentFailures.length
+        ? ` ${groupedFulfillmentFailures.length} grouped order${groupedFulfillmentFailures.length === 1 ? "" : "s"} still need fulfillment review.`
+        : "";
+    return sendJson(res, 200, { shipment, fulfillmentResult, groupResult, channelResult, channelResults, message: `${firstPrint ? "Shipping label marked printed." : `Shipping label reprinted. Total prints: ${shipment.labelPrintCount}.`}${fulfillmentMessage}${groupMessage}${fulfillmentWarning}${syncWarning}` });
   }
 
   if (req.method === "POST" && url.pathname === "/api/fulfillment/pack/scan" && postgres.isPostgresEnabled()) {
@@ -59564,7 +59574,11 @@ async function handleApi(req, res) {
       clearOrderApiCache(candidate.id);
     }
     invalidateFulfillmentConsoleSnapshot([...existingMembers, ...groupOrders].map((candidate) => candidate.id));
-    return sendJson(res, 200, { groupId, orders: groupOrders, packageAssessment, cartonizationPreview, message: `${groupOrders.length} orders grouped for one shipment. ${cartonizationPreview.reason || "Review the final carton before buying the label."}` });
+    const primaryRouteIds = (Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [])
+      .filter((route) => String(route.type || "warehouse").toLowerCase() === "warehouse" && !["shipped", "fulfilled", "delivered", "canceled", "cancelled"].includes(String(route.status || "").toLowerCase()))
+      .map((route) => String(route.id || "").trim())
+      .filter(Boolean);
+    return sendJson(res, 200, { groupId, primaryOrderId: order.id, primaryRouteIds, orders: groupOrders, packageAssessment, cartonizationPreview, message: `${groupOrders.length} orders grouped for one shipment. ${cartonizationPreview.reason || "Review the final carton before buying the label."}` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && parts[4] === "apply-shipment" && postgres.isPostgresEnabled()) {
