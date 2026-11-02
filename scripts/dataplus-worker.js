@@ -1426,6 +1426,7 @@ async function runSourcePerformanceIndexesJob(job) {
 }
 
 async function runSourceFacetsRefreshJob(job) {
+  let canceled = false;
   let current = await persistJob(job, {
     status: "running",
     phase: "starting",
@@ -1435,9 +1436,14 @@ async function runSourceFacetsRefreshJob(job) {
   const heartbeatTimer = setInterval(() => {
     writeHeartbeat("running", current).catch((error) => console.error("Unable to refresh facet refresh heartbeat:", error.message || error));
   }, 10000);
+  const cancellationTimer = setInterval(() => {
+    postgres.readOperationJob(job.id).then((saved) => {
+      canceled = saved && !["queued", "running"].includes(String(saved.status || "").toLowerCase());
+    }).catch((error) => console.error("Unable to check facet refresh cancellation:", error.message || error));
+  }, 1000);
   try {
     const result = await postgres.refreshVendorCatalogFacets({
-      isCanceled: () => false,
+      isCanceled: () => canceled,
       onProgress: (patch = {}) => {
         current = normalizeJobPatch(current, {
           ...patch,
@@ -1461,6 +1467,7 @@ async function runSourceFacetsRefreshJob(job) {
     });
   } finally {
     clearInterval(heartbeatTimer);
+    clearInterval(cancellationTimer);
   }
 }
 

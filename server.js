@@ -19335,8 +19335,9 @@ async function queueSourceCatalogFacetsRefreshJob(db = {}, options = {}) {
     processedRows: 0,
     progressPercent: 0,
     phase: "queued",
+    background: true,
     workerTask: shouldRunJobsInline() ? "" : "source-facets-refresh",
-    workerPayload: shouldRunJobsInline() ? {} : { vendorName, sourceCodes, reason },
+    workerPayload: shouldRunJobsInline() ? {} : { vendorName, sourceCodes, reason, background: true },
     message: vendorName
       ? `Vendor ${vendorName} is active and included in the catalog. Refresh queued.`
       : "Source catalog facet refresh queued.",

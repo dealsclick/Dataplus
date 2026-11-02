@@ -40,6 +40,10 @@ assert.match(databaseSource, /dataplus-worker-resource-scheduler/);
 assert.match(databaseSource, /workerResourceClass/);
 assert.match(databaseSource, /workerWorkloadLane/);
 assert.match(databaseSource, /WORKLOAD_LIMITS/);
+const serverSource = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'server.js'), 'utf8');
+const workerSource = require('node:fs').readFileSync(require('node:path').join(__dirname, 'dataplus-worker.js'), 'utf8');
+assert.match(serverSource, /workerPayload: shouldRunJobsInline\(\) \? \{\} : \{ vendorName, sourceCodes, reason, background: true \}/, 'supplier activation maintenance must use the background lane');
+assert.match(workerSource, /isCanceled: \(\) => canceled/, 'source facet refresh must honor persisted stop requests');
 if (!process.argv.includes('--sql')) { console.log('PASS independent worker heartbeat ownership and replacement'); process.exit(); }
 // Temp tables only; explicit local database required for queue routing checks.
 const {Pool}=require('pg');const url=process.env.WORKER_TEST_DATABASE_URL;
