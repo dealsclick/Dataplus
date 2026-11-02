@@ -9707,7 +9707,10 @@ function orderRowToSummary(row = {}, lines = []) {
       status: shipment.status,
       trackingNumber: shipment.trackingNumber,
       carrier: shipment.carrier,
-      service: shipment.service
+      service: shipment.service,
+      shipmentGroupId: shipment.shipmentGroupId,
+      masterOrderId: shipment.masterOrderId,
+      sharedLabel: shipment.sharedLabel === true
     })) : []),
     backorderLines: Array.isArray(row.backorder_lines) ? row.backorder_lines : (Array.isArray(raw.backorderLines) ? raw.backorderLines : []),
     fulfillmentRoutes,
@@ -10907,6 +10910,9 @@ async function listOrders(options = {}) {
           'shippedAt', shipment->'shippedAt',
           'fulfillmentBatchId', shipment->'fulfillmentBatchId',
           'fulfillmentBatchNumber', shipment->'fulfillmentBatchNumber',
+          'shipmentGroupId', shipment->'shipmentGroupId',
+          'masterOrderId', shipment->'masterOrderId',
+          'sharedLabel', shipment->'sharedLabel',
           'documents', case when jsonb_typeof(shipment->'documents') = 'array' then (
             select coalesce(jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
               'id', document->'id',

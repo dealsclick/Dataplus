@@ -13,6 +13,8 @@ test("order summaries preserve consolidation identity and label evidence", () =>
   assert.match(dbSource, /'customerId', summary_raw\.external->>'customerId'/);
   assert.match(dbSource, /'buyerId', summary_raw\.external->>'buyerId'/);
   assert.match(dbSource, /'documents', case when jsonb_typeof\(shipment->'documents'\) = 'array'/);
+  assert.match(dbSource, /'shipmentGroupId', shipment->'shipmentGroupId'/);
+  assert.match(dbSource, /'sharedLabel', shipment->'sharedLabel'/);
 });
 
 test("candidate lookup uses stable buyer identity without an age cutoff", () => {
