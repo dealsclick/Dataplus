@@ -33111,6 +33111,7 @@ async function reconcilePrintedShipmentFulfillment(orderKey, shipmentKey = "", a
   if (!shipment) throw new Error(`A purchased shipment${shipmentKey ? ` matching ${shipmentKey}` : ""} was not found on order ${order.orderNumber || order.id}.`);
 
   const completedAt = new Date().toISOString();
+  const existingPrintAttemptId = String(shipment.labelPrintHistory?.[0]?.attemptId || "").trim();
   const repairPrintJob = {
     id: `repair-${shipment.id}`,
     printNumber: `Label ${order.orderNumber || order.id}`,
@@ -33119,7 +33120,7 @@ async function reconcilePrintedShipmentFulfillment(orderKey, shipmentKey = "", a
     lastPrintedAt: completedAt,
     lastPrintedBy: actor,
     lastPrintStation: "DataPlus repair",
-    lastPrintAttemptId: crypto.randomUUID()
+    lastPrintAttemptId: existingPrintAttemptId || `repair-${shipment.id}`
   };
   if (shipment.printFulfillment?.status !== "completed" && !["fulfilled", "shipped", "delivered"].includes(String(shipment.status || "").toLowerCase())) {
     const printAudit = recordShipmentLabelPrint(shipment, repairPrintJob, actor);
@@ -49782,7 +49783,11 @@ async function syncEbayShipmentTracking(db, order, shipment) {
   const requests = plan.map(({ lineIndex }) => {
     const line = lines[lineIndex];
     const sku = String(line.originalSku || line.channelVariantSku || line.sku || "");
-    const matches = transactions.filter((row) => String(ebayTradingText(row.OrderLineItemID)) === String(line.lineId || line.id || "") || (sku && [row.Variation?.SKU, row.Item?.SKU].some((value) => ebayTradingText(value) === sku)));
+    const sourceLineIds = [line.marketplaceLineItemId, line.channelLineItemId, line.orderLineItemId, line.lineItemId, line.lineId, line.id].map((value) => String(value || "").trim()).filter(Boolean);
+    const legacyItemId = String(line.legacyItemId || line.itemId || "").trim();
+    const matches = transactions.filter((row) => sourceLineIds.includes(String(ebayTradingText(row.OrderLineItemID)).trim())
+      || (legacyItemId && String(ebayTradingText(row.Item?.ItemID)).trim() === legacyItemId)
+      || (sku && [row.Variation?.SKU, row.Item?.SKU].some((value) => ebayTradingText(value) === sku)));
     if (matches.length !== 1) throw new Error(`Cannot uniquely match eBay transaction for ${sku}. Refresh and review the line mapping.`);
     const transaction = matches[0];
     const itemId = ebayTradingText(transaction.Item?.ItemID);

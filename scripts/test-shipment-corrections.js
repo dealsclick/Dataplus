@@ -130,6 +130,23 @@ test("eBay correction retains other package tracking and escapes XML", async () 
   assert.doesNotMatch(writes[0], /<Paid>|<Shipped>|>old</);
 });
 
+test("eBay Live tracking matches the marketplace line or legacy item when the listing has no seller SKU", async () => {
+  const writes = [];
+  const sync = loadServerFunction("syncEbayShipmentTracking", {
+    XMLBuilder, shipmentReopenPlan, canonicalCarrierName, normalizeTrackingNumber, orderLineItems: (order) => order.items,
+    ebayTradingText: (value) => String(value ?? ""), ebayTradingArray: (value) => Array.isArray(value) ? value : value ? [value] : [],
+    ebayTradingRequest: async (_db, name, payload) => {
+      if (name === "GetOrders") return { OrderArray: { Order: { TransactionArray: { Transaction: { OrderLineItemID: "10088989041018", Item: { ItemID: "117493123780" }, TransactionID: "live-tx" } } } } };
+      writes.push(payload);
+      return { Ack: "Success" };
+    }
+  });
+  await sync({}, { marketplaceOrderId: "18-15346-37578", items: [{ lineId: "internal-hash", marketplaceLineItemId: "10088989041018", legacyItemId: "117493123780", sku: "117493123780", qty: 1 }] }, { trackingNumber: "879601127269", carrierName: "FedEx", lines: [{ sku: "117493123780", lineIndex: 0, qty: 1 }] });
+  assert.equal(writes.length, 1);
+  assert.match(writes[0], /<ItemID>117493123780<\/ItemID>/);
+  assert.match(writes[0], /<TransactionID>live-tx<\/TransactionID>/);
+});
+
 test("unship endpoint preserves a second shipped line, cost and actual operator", async () => {
   const order = { id: "order", status: "shipped", shippingCost: 12, items: [{ sku: "A", qty: 1 }, { sku: "A", qty: 1 }], shipments: [
     { id: "one", status: "shipped", trackingNumber: "first", shippingCost: 5, lines: [{ lineIndex: 0, sku: "A", qty: 1 }] },
