@@ -34687,12 +34687,15 @@ async function queueFulfillmentRateRefreshJob(options = {}) {
     progressPercent: 0,
     rowLabel: "orders",
     progressLabel: background ? "Queued automatic carrier rate refresh" : "Queued carrier rate refresh",
+    queuePriority: background ? 80 : 130,
     workerTask: inline ? "" : "fulfillment-rate-refresh",
     workerPayload: {
       routeIds,
       selectionMode: options.selectionMode === "rules" ? "rules" : "cheapest",
       requestedBy: options.actor || "DataPlus",
-      background,
+      // Carrier work belongs on the background worker even when a user starts it.
+      // `scheduled` remains the source of truth for Manual vs Automated in Jobs.
+      background: true,
       scheduled: options.scheduled === true
     },
     rateRefreshTargets: suppliedTargets,

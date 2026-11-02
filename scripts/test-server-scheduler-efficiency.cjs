@@ -65,6 +65,8 @@ assert.doesNotMatch(labelPurchase, /writeStateDocuments\(\{ fulfillmentLabelBatc
 
 const rateQueue = functionBody('queueFulfillmentRateRefreshJob');
 assert.match(rateQueue, /postgres\.isPostgresEnabled\(\)[\s\S]*?\{ importJobs: \[\] \}/, 'rate queueing must use a compact PostgreSQL job context');
+assert.match(rateQueue, /queuePriority: background \? 80 : 130/, 'operator rate refreshes must outrank ordinary background work');
+assert.match(rateQueue, /workerPayload:[\s\S]*?background: true,[\s\S]*?scheduled: options\.scheduled === true/, 'rate refreshes must use the background carrier worker without changing their manual or automated trigger');
 const labelQueue = functionBody('queueFulfillmentLabelPurchaseJob');
 assert.match(labelQueue, /postgres\.isPostgresEnabled\(\)[\s\S]*?\{ importJobs: \[\] \}/, 'label queueing must use a compact PostgreSQL job context');
 
