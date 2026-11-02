@@ -31971,9 +31971,32 @@ function fulfillmentTestPrintEntry(stationName, printerName) {
   };
 }
 
+async function fulfillmentPrintGroupOrders(order = {}, shipment = {}) {
+  const groupId = String(shipment.shipmentGroupId || order.shipmentGroupId || "").trim();
+  const groupOrderIds = [...new Set([
+    order.id,
+    ...(Array.isArray(shipment.groupOrderIds) ? shipment.groupOrderIds : []),
+    ...(Array.isArray(order.shipmentGroupOrderIds) ? order.shipmentGroupOrderIds : [])
+  ].map((value) => String(value || "").trim()).filter(Boolean))];
+  if (!groupId || groupOrderIds.length < 2) return [order];
+  const groupedOrders = await postgres.readOrdersByIds(groupOrderIds);
+  const matchingOrders = groupedOrders.filter((candidate) => String(candidate.shipmentGroupId || "").trim() === groupId);
+  if (matchingOrders.length < 2) return [order];
+  const orderById = new Map(matchingOrders.map((candidate) => [String(candidate.id || ""), candidate]));
+  return groupOrderIds.map((id) => orderById.get(id)).filter(Boolean);
+}
+
 async function fulfillmentPrintEntry(order, document, shipment = {}, prefetchedProducts = null, context = {}) {
-  const lines = orderLineItems(order);
-  const products = Array.isArray(prefetchedProducts)
+  const groupedOrders = Array.isArray(context.groupOrders) && context.groupOrders.length
+    ? context.groupOrders
+    : await fulfillmentPrintGroupOrders(order, shipment);
+  const lines = groupedOrders.flatMap((groupOrder) => orderLineItems(groupOrder).map((line) => ({
+    ...line,
+    packingSlipOrderId: groupOrder.id,
+    packingSlipOrderNumber: groupOrder.orderNumber || groupOrder.id,
+    packingSlipChannelOrderId: groupOrder.marketplaceOrderNumber || groupOrder.marketplaceOrderId || groupOrder.channelOrderNumber || groupOrder.externalOrderId || groupOrder.external?.parentOrderSn || ""
+  })));
+  const products = Array.isArray(prefetchedProducts) && groupedOrders.length === 1
     ? prefetchedProducts
     : await postgres.readProductsByKeys(lines.flatMap((line) => [line.sku, line.originalSku, line.parentSku]).filter(Boolean), { includeMarketplaceIds: false });
   const productByKey = new Map();
@@ -31986,7 +32009,9 @@ async function fulfillmentPrintEntry(order, document, shipment = {}, prefetchedP
   return {
     orderId: order.id,
     orderNumber: order.orderNumber || order.id,
+    orderNumbers: groupedOrders.map((groupOrder) => groupOrder.orderNumber || groupOrder.id),
     channelOrderId: order.marketplaceOrderNumber || order.marketplaceOrderId || order.channelOrderNumber || order.externalOrderId || order.external?.parentOrderSn || "",
+    channelOrderIds: groupedOrders.map((groupOrder) => groupOrder.marketplaceOrderNumber || groupOrder.marketplaceOrderId || groupOrder.channelOrderNumber || groupOrder.externalOrderId || groupOrder.external?.parentOrderSn || "").filter(Boolean),
     orderDate: String(order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "").slice(0, 10),
     customer: order.buyer || order.customerName || "",
     channel: order.channelSource || order.source || "Manual",
@@ -31999,6 +32024,9 @@ async function fulfillmentPrintEntry(order, document, shipment = {}, prefetchedP
       const originalChannelTitle = String(line.external?.raw?.originalGoodsName || "").trim();
       return {
         ...line,
+        orderId: line.packingSlipOrderId,
+        orderNumber: line.packingSlipOrderNumber,
+        channelOrderId: line.packingSlipChannelOrderId,
         title: originalChannelTitle || line.title || line.name || product.marketplaceTitle || product.title || line.sku || "Item",
         manufacturerSku: line.manufacturerSku || line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || product.mfrPartNumber || product.manufacturerPartNumber || product.mpn || "",
         brand: line.brand || product.brand || product.sourceBrand || ""
@@ -32876,6 +32904,182 @@ async function completePrintedPurchasedShipment(db, order, shipment, actor = "Wa
   }
 }
 
+function shipmentGroupMemberIds(order = {}, shipment = {}) {
+  return [...new Set([
+    order.id,
+    ...(Array.isArray(shipment.groupOrderIds) ? shipment.groupOrderIds : []),
+    ...(Array.isArray(order.shipmentGroupOrderIds) ? order.shipmentGroupOrderIds : [])
+  ].map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+async function loadPurchasedShipmentGroup(masterOrder = {}, masterShipment = {}) {
+  const groupId = String(masterShipment.shipmentGroupId || masterOrder.shipmentGroupId || "").trim();
+  const memberIds = shipmentGroupMemberIds(masterOrder, masterShipment);
+  if (!groupId || memberIds.length < 2 || !masterShipment.id) return { groupId: "", orders: [masterOrder] };
+  const loadedOrders = await postgres.readOrdersByIds(memberIds);
+  const orderById = new Map(loadedOrders
+    .filter((candidate) => String(candidate.shipmentGroupId || "").trim() === groupId)
+    .map((candidate) => [String(candidate.id || ""), candidate]));
+  orderById.set(String(masterOrder.id || ""), masterOrder);
+  const orders = memberIds.map((id) => orderById.get(id)).filter(Boolean);
+  return orders.length > 1 ? { groupId, orders } : { groupId: "", orders: [masterOrder] };
+}
+
+function sharedShipmentCostAllocation(totalCost, orderCount, orderIndex) {
+  const cents = Math.max(0, Math.round(Number(totalCost || 0) * 100));
+  const count = Math.max(1, Number(orderCount || 1));
+  return (Math.floor(cents / count) + (orderIndex < cents % count ? 1 : 0)) / 100;
+}
+
+async function linkPurchasedShipmentToGroup(masterOrder, masterShipment, actor = "DataPlus", options = {}) {
+  const loaded = await loadPurchasedShipmentGroup(masterOrder, masterShipment);
+  if (!loaded.groupId || loaded.orders.length < 2 || !masterShipment.trackingNumber) return { ...loaded, linked: [] };
+  const now = String(options.at || new Date().toISOString());
+  const totalShippingCost = Number(masterShipment.shipmentGroupTotalShippingCost ?? masterShipment.shippingCost ?? masterOrder.shippingCost ?? 0);
+  const memberIds = loaded.orders.map((candidate) => candidate.id);
+  masterShipment.shipmentGroupId = loaded.groupId;
+  masterShipment.groupOrderIds = memberIds;
+  masterShipment.sharedLabel = true;
+  masterShipment.sharedLabelMaster = true;
+  masterShipment.shipmentGroupTotalShippingCost = totalShippingCost;
+  masterShipment.shippingCost = sharedShipmentCostAllocation(totalShippingCost, loaded.orders.length, 0);
+  masterOrder.shippingCost = masterShipment.shippingCost;
+
+  const masterDocumentReference = (masterShipment.documents || []).find((entry) => entry.documentType === "shipping_label" || entry.documentId) || null;
+  const masterDocument = masterDocumentReference
+    ? (masterOrder.documents || []).find((entry) => String(entry.id || "") === String(masterDocumentReference.documentId || masterDocumentReference.id || ""))
+    : null;
+  const linked = [];
+  for (let index = 1; index < loaded.orders.length; index += 1) {
+    const childOrder = loaded.orders[index];
+    const packageRecord = childOrder.shipmentGroupPackage || masterOrder.shipmentGroupPackage || masterShipment.package || {};
+    if (packageRecord && Object.keys(packageRecord).length) {
+      persistFulfillmentPackage(childOrder, packageRecord, {
+        user: actor,
+        source: "shipment_group",
+        warehouseId: masterShipment.warehouseId || masterOrder.shipmentGroupWarehouseId || childOrder.shipmentGroupWarehouseId || ""
+      });
+    }
+    const costAllocation = sharedShipmentCostAllocation(totalShippingCost, loaded.orders.length, index);
+    const shipmentLines = orderLineItems(childOrder).map((line, lineIndex) => ({
+      lineIndex,
+      sku: String(line.sku || "").trim(),
+      qty: Math.max(0, Number(line.qty || line.quantity || 0)),
+      qtyAllocated: Math.max(0, Number(line.qty || line.quantity || 0))
+    }));
+    let sharedShipment = (childOrder.shipments || []).find((entry) => String(entry.masterShipmentId || "") === String(masterShipment.id || ""));
+    const firstLink = !sharedShipment;
+    if (!sharedShipment) {
+      sharedShipment = { id: crypto.randomUUID(), createdAt: now };
+      childOrder.shipments = [sharedShipment, ...(Array.isArray(childOrder.shipments) ? childOrder.shipments : [])];
+    }
+    Object.assign(sharedShipment, {
+      reference: sharedShipment.reference || `${String(childOrder.orderNumber || childOrder.id).replace(/^#/, "")}-SG`,
+      status: ["fulfilled", "shipped", "in_transit", "delivered"].includes(String(sharedShipment.status || "").toLowerCase()) ? sharedShipment.status : "label_purchased",
+      provider: masterShipment.provider || "shared_shipment",
+      labelProvider: masterShipment.labelProvider || masterShipment.provider || "Shared shipment",
+      purchaseOrigin: masterShipment.purchaseOrigin || "unknown",
+      carrier: masterShipment.carrier || masterShipment.carrierName || "Carrier",
+      carrierName: masterShipment.carrierName || masterShipment.carrier || "Carrier",
+      service: masterShipment.service || "",
+      trackingNumber: masterShipment.trackingNumber,
+      trackingUrl: masterShipment.trackingUrl || trackingUrlForCarrier(masterShipment.carrierName || masterShipment.carrier, masterShipment.trackingNumber),
+      shipDate: masterShipment.shipDate || now.slice(0, 10),
+      warehouseId: masterShipment.warehouseId || masterOrder.shipmentGroupWarehouseId || childOrder.shipmentGroupWarehouseId || "",
+      warehouseName: masterShipment.warehouseName || masterOrder.fulfillmentWarehouseName || "",
+      shippingCost: costAllocation,
+      package: masterShipment.package || packageRecord,
+      packages: masterShipment.packages || [],
+      lines: shipmentLines,
+      shipmentGroupId: loaded.groupId,
+      groupOrderIds: memberIds,
+      masterOrderId: masterOrder.id,
+      masterShipmentId: masterShipment.id,
+      sharedLabel: true,
+      sharedLabelMaster: false,
+      sharedLabelDocumentId: masterDocumentReference?.documentId || masterDocumentReference?.id || "",
+      fulfillmentBatchId: masterShipment.fulfillmentBatchId || "",
+      labelSource: masterShipment.labelSource || "",
+      labelSourceLabel: masterShipment.labelSourceLabel || "Shared shipment label",
+      updatedAt: now
+    });
+    if (masterDocumentReference) {
+      sharedShipment.documents = [{ ...masterDocumentReference, sharedLabel: true, masterOrderId: masterOrder.id, masterShipmentId: masterShipment.id }];
+    }
+    if (masterDocument && !(childOrder.documents || []).some((entry) => String(entry.id || "") === String(masterDocument.id || ""))) {
+      childOrder.documents = [{ ...masterDocument, sharedLabel: true, masterOrderId: masterOrder.id, masterShipmentId: masterShipment.id }, ...(childOrder.documents || [])];
+    }
+    childOrder.shippingCost = costAllocation;
+    childOrder.shippingCarrier = sharedShipment.carrierName;
+    childOrder.carrierName = sharedShipment.carrierName;
+    childOrder.shippingService = sharedShipment.service;
+    childOrder.trackingNumber = sharedShipment.trackingNumber;
+    childOrder.trackingUrl = sharedShipment.trackingUrl;
+    childOrder.fulfillmentWarehouseId = sharedShipment.warehouseId || childOrder.fulfillmentWarehouseId || "";
+    childOrder.fulfillmentWarehouseName = sharedShipment.warehouseName || childOrder.fulfillmentWarehouseName || "";
+    for (const route of childOrder.fulfillmentRoutes || []) {
+      if (["shipped", "fulfilled", "delivered", "canceled", "cancelled"].includes(String(route.status || "").toLowerCase())) continue;
+      route.labelPurchasedAt = route.labelPurchasedAt || now;
+      route.labelBatchId = masterShipment.fulfillmentBatchId || route.labelBatchId || "";
+      route.labelSource = masterShipment.labelSource || route.labelSource || "shared_shipment";
+      route.trackingNumber = masterShipment.trackingNumber;
+      route.updatedAt = now;
+    }
+    sharedShipment.channelSync = sharedShipment.channelSync || {
+      status: "pending",
+      channel: orderSourceChannelName(childOrder, "Channel"),
+      updatedAt: now,
+      message: `Shared shipment ${loaded.groupId} is linked and will send tracking when the label is printed.`
+    };
+    if (firstLink) addOrderTimeline(childOrder, {
+      type: "shipping_label",
+      title: "Shared shipping label purchased",
+      message: `${masterShipment.carrierName || masterShipment.carrier || "Carrier"} tracking ${masterShipment.trackingNumber} was linked from order ${masterOrder.orderNumber || masterOrder.id} for combined shipment ${loaded.groupId}.`,
+      user: actor
+    });
+    childOrder.updatedAt = now;
+    if (options.saveChildren !== false) {
+      await postgres.saveOrder(childOrder);
+      clearOrderApiCache(childOrder.id);
+    }
+    linked.push({ order: childOrder, shipment: sharedShipment, firstLink });
+  }
+  return { ...loaded, linked, totalShippingCost };
+}
+
+async function completePrintedShipmentGroup(db, masterOrder, masterShipment, printJob, actor = "Warehouse", printedAt = new Date().toISOString()) {
+  if (masterShipment.sharedLabel === true && masterShipment.masterShipmentId && masterShipment.sharedLabelMaster !== true) {
+    return { updated: 0, channelResults: [], fulfillmentResults: [] };
+  }
+  const linkedGroup = await linkPurchasedShipmentToGroup(masterOrder, masterShipment, actor, { at: printedAt, saveChildren: false });
+  const channelResults = [];
+  const fulfillmentResults = [];
+  let updated = 0;
+  for (const linked of linkedGroup.linked || []) {
+    const { order, shipment } = linked;
+    const printAudit = recordShipmentLabelPrint(shipment, printJob, actor);
+    if (printAudit.recorded) addOrderTimeline(order, {
+      type: "shipping_label",
+      title: printAudit.firstPrint ? "Shared shipping label printed" : "Shared shipping label reprinted",
+      message: `${printJob.printNumber || printJob.batchNumber || "Label packet"} includes combined shipment ${linkedGroup.groupId}. Print count: ${shipment.labelPrintCount}.`,
+      user: actor
+    });
+    const fulfillmentResult = await completePrintedPurchasedShipment(db, order, shipment, actor, printedAt);
+    fulfillmentResults.push({ orderId: order.id, shipmentId: shipment.id, ...fulfillmentResult });
+    const needsTemuPrintSync = String(order.source || order.channelSource || "").toLowerCase() === "temu"
+      && (printAudit.firstPrint || !["sent", "unsupported"].includes(String(shipment.temuPrintSync?.status || "").toLowerCase()));
+    if (needsTemuPrintSync) channelResults.push({ orderId: order.id, shipmentId: shipment.id, ...(await syncTemuLabelPrintedStatus(order, shipment, db, actor)) });
+    if (fulfillmentResult.status !== "failed" && shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) {
+      channelResults.push({ orderId: order.id, shipmentId: shipment.id, ...(await syncDropshipShipmentToChannel(db, order, shipment, actor)) });
+    }
+    order.updatedAt = printedAt;
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    updated += 1;
+  }
+  return { updated, channelResults, fulfillmentResults };
+}
+
 async function reconcilePrintedShipmentFulfillment(orderKey, shipmentKey = "", actor = "DataPlus repair") {
   const order = await postgres.readOrderByKey(orderKey);
   if (!order) throw new Error(`Order ${orderKey} was not found.`);
@@ -32949,12 +33153,14 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
     if (needsTrackingSync && fulfillmentResult.status !== "failed") {
       channelResults.push({ orderId: order.id, shipmentId: shipment.id, ...(await syncDropshipShipmentToChannel(db, order, shipment, actor)) });
     }
+    const groupResult = await completePrintedShipmentGroup(db, order, shipment, printJob, actor, printedAt);
+    channelResults.push(...groupResult.channelResults);
     order.updatedAt = printedAt;
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
     printJob.channelSyncResults = channelResults;
-    printJob.fulfillmentResults = [{ orderId: order.id, shipmentId: shipment.id, ...fulfillmentResult }];
-    return 1;
+    printJob.fulfillmentResults = [{ orderId: order.id, shipmentId: shipment.id, ...fulfillmentResult }, ...groupResult.fulfillmentResults];
+    return 1 + groupResult.updated;
   }
   if (!printJob?.batchId) return 0;
   const batch = (operationsState?.batches || []).find((row) => String(row.id || "") === String(printJob.batchId));
@@ -32986,6 +33192,10 @@ async function markPrintJobShipmentsPrinted(printJob, operationsState, actor = "
       if (fulfillmentResult.status !== "failed" && shipment.trackingNumber && !["sent", "synced"].includes(String(shipment.channelSync?.status || "").toLowerCase())) {
         channelResults.push({ orderId: order.id, shipmentId: shipment.id, ...(await syncDropshipShipmentToChannel(db, order, shipment, actor)) });
       }
+      const groupResult = await completePrintedShipmentGroup(db, order, shipment, printJob, actor, printedAt);
+      channelResults.push(...groupResult.channelResults);
+      fulfillmentResults.push(...groupResult.fulfillmentResults);
+      updated += groupResult.updated;
     }
     if (!orderChanged) continue;
     order.updatedAt = printedAt;
@@ -33951,13 +34161,23 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
       result.shipment.packageInferred = row.packageInferred === true;
       result.shipment.labelSource = effectiveLabelSource;
       result.shipment.labelSourceLabel = effectiveLabelSource === "temu" ? "Temu marketplace label" : effectiveLabelSource === "outsourced" ? "Outsourced label" : "Purchased from DataPlus";
+      try {
+        const groupLink = await linkPurchasedShipmentToGroup(order, result.shipment, actor, { at: new Date().toISOString() });
+        row.shipmentGroupId = groupLink.groupId || "";
+        row.shipmentGroupOrderIds = groupLink.orders?.map((candidate) => candidate.id) || [];
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        result.shipment.shipmentGroupLink = { status: "failed", attemptedAt: new Date().toISOString(), message };
+        row.groupLinkWarning = `The label was purchased, but the combined orders need linkage review: ${message}`;
+        addOrderTimeline(order, { type: "shipping_label", title: "Combined label linkage needs review", message: row.groupLinkWarning, user: actor });
+      }
     }
     row.status = "purchased";
     row.shipmentId = result.shipment?.id || "";
     row.documentId = result.document?.id || result.shipment?.documents?.[0]?.documentId || "";
     row.trackingNumber = result.shipment?.trackingNumber || "";
     row.labelUrl = result.document?.url || result.shipment?.documents?.[0]?.url || "";
-    row.shippingCost = Number(result.shipment?.shippingCost || selection.rate.amount || 0);
+    row.shippingCost = Number(result.shipment?.shipmentGroupTotalShippingCost ?? result.shipment?.shippingCost ?? selection.rate.amount ?? 0);
     row.labelSource = result.shipment?.labelSource || labelSource;
     row.completedAt = new Date().toISOString();
     for (const current of routes) {
@@ -59311,7 +59531,7 @@ async function handleApi(req, res) {
       candidate.shipmentGroupCartonizationUpdatedAt = now;
       candidate.shipmentGroupPackage = savedGroupPackage;
       candidate.shipmentGroupMatchSource = pair.matchSource || "dataplus_window";
-      if (candidate.id === order.id && savedGroupPackage) persistFulfillmentPackage(candidate, savedGroupPackage, { user: actor, source: "shipment_group", warehouseId });
+      if (savedGroupPackage) persistFulfillmentPackage(candidate, savedGroupPackage, { user: actor, source: "shipment_group", warehouseId });
       candidate.updatedAt = now;
       addOrderTimeline(candidate, { type: "shipment_group", title: "Shipment group updated", message: `Order assigned to combined shipment group ${groupId}${savedGroupPackage ? " with the final warehouse-entered carton" : ""}.`, user: actor });
       await postgres.saveOrder(candidate);
@@ -75840,6 +76060,7 @@ module.exports = {
   fulfillmentPrintJobHasOutput,
   fulfillmentPrintJobOutstandingRows,
   fulfillmentBatchesNeedingPrintPacketRecovery,
+  linkPurchasedShipmentToGroup,
   activeFulfillmentLabelPurchaseBatchIds,
   temuLabelRecoveryRowEligible,
   createFulfillmentRecoveryBatch,
