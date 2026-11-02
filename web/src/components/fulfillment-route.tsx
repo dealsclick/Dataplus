@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertCircle, AlertTriangle, ArrowLeft, ArrowRight, Boxes, CalendarDays, CheckCircle2,
   ChevronDown, Clock3, Copy, ExternalLink, Eye, FileDown, Info, Link2, ListChecks,
-  Loader2, Monitor, MoreHorizontal, Package, PackageCheck, Pencil, Plus, Printer, RefreshCw,
+  Loader2, Monitor, MoreHorizontal, Package, PackageCheck, Pencil, Plus, Printer, RadioTower, RefreshCw,
   RotateCcw, Save, Search, SendHorizontal, ShieldAlert, ShieldCheck, SlidersHorizontal,
   Trash2, Truck, Filter, X,
 } from "lucide-react"
@@ -74,6 +74,25 @@ function RecoverySourceLabel({ record, fallback }: { record?: Record<string, any
   const sourceBatchNumber = String(record?.sourceBatchNumber || fallback?.sourceBatchNumber || "").trim()
   if (!sourceBatchNumber) return null
   return <span className="inline-flex w-fit max-w-full self-start shrink-0 items-center rounded-full border border-fuchsia-300 bg-fuchsia-500 px-1.5 py-0.5 text-[9px] font-bold uppercase leading-none text-white shadow-sm dark:border-fuchsia-400 dark:bg-fuchsia-500" title={`Recovered from ${sourceBatchNumber}`}>Recovered from {sourceBatchNumber}</span>
+}
+
+function fulfillmentBatchOrderIndicators(rows: Array<Record<string, any>>) {
+  return {
+    hasCombinedOrders: rows.some((row) => Boolean(
+      String(row.shipmentGroupId || "").trim()
+      || row.sharedLabel === true
+      || (Array.isArray(row.shipmentGroupOrderIds) && row.shipmentGroupOrderIds.length > 1)
+    )),
+    hasEbayLiveOrders: rows.some((row) => row.isEbayLive === true || String(row.salesOrigin || "").toLowerCase() === "ebay_live"),
+  }
+}
+
+function BatchOrderTypeIndicators({ hasCombinedOrders, hasEbayLiveOrders }: { hasCombinedOrders?: boolean; hasEbayLiveOrders?: boolean }) {
+  if (!hasCombinedOrders && !hasEbayLiveOrders) return null
+  return <span className="inline-flex shrink-0 items-center gap-1">
+    {hasCombinedOrders ? <span className="inline-flex size-5 items-center justify-center rounded border border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-300" title="Contains combined orders" aria-label="Contains combined orders"><PackageCheck className="size-3.5" /></span> : null}
+    {hasEbayLiveOrders ? <span className="inline-flex size-5 items-center justify-center rounded border border-pink-500/40 bg-pink-500/10 text-pink-700 dark:text-pink-300" title="Contains eBay Live orders" aria-label="Contains eBay Live orders"><RadioTower className="size-3.5" /></span> : null}
+  </span>
 }
 
 function reportFulfillmentClientPerformance(sample: Record<string, unknown>) {
@@ -741,6 +760,7 @@ export function FulfillmentPage() {
   const [printBatchSearch, setPrintBatchSearch] = useState("")
   const doNotShipFilter = "all"
   const [consolidationOrder, setConsolidationOrder] = useState<Record<string, any> | null>(null)
+  const [consolidationPrimary, setConsolidationPrimary] = useState<Record<string, any> | null>(null)
   const [consolidationCandidates, setConsolidationCandidates] = useState<Array<Record<string, any>>>([])
   const [consolidationSelection, setConsolidationSelection] = useState<Set<string>>(new Set())
   const [consolidationLoading, setConsolidationLoading] = useState(false)
@@ -880,13 +900,14 @@ export function FulfillmentPage() {
         const relatedShipments = shipmentsByPrintJob.get(String(job.id || "")) || []
         const batch = batchesById.get(String(job.batchId || ""))
         const batchRows = Array.isArray(batch?.rows) ? batch.rows as Array<Record<string, any>> : []
+        const orderTypeIndicators = fulfillmentBatchOrderIndicators([...relatedShipments, ...batchRows])
         const customers = [...new Set([...relatedShipments, ...batchRows].map((row) => String(row.customer || row.customerName || row.destination?.name || "").trim()).filter(Boolean))]
         const skus = [...new Set([...relatedShipments, ...batchRows].flatMap((row) => {
           const values = Array.isArray(row.skus) ? row.skus : [row.sku, row.catalogSku, row.parentSku, row.selectedSku]
           return values.map((value) => String(value || "").trim()).filter(Boolean)
         }))]
         const orders = [...new Set([...relatedShipments, ...batchRows].map((row) => String(row.orderNumber || row.orderId || "").trim()).filter(Boolean))]
-        const searchText = [job.batchNumber, job.printNumber, ...customers, ...skus, ...orders].join(" ").toLowerCase()
+        const searchText = [job.batchNumber, job.printNumber, orderTypeIndicators.hasCombinedOrders ? "combined orders" : "", orderTypeIndicators.hasEbayLiveOrders ? "ebay live" : "", ...customers, ...skus, ...orders].join(" ").toLowerCase()
         const pendingLabels = Number(batch?.counts?.label_pending || job.pendingDocumentCount || 0)
         const purchasing = Number(batch?.counts?.processing || 0) + Number(batch?.counts?.queued || 0)
         const printable = Number(job.documentCount || 0) > 0 && String(job.status || "") !== "waiting_for_labels"
@@ -899,7 +920,7 @@ export function FulfillmentPage() {
               : Number(batch?.counts?.failed || 0) > 0
                 ? "Needs attention"
                 : "Preparing packet"
-        return { ...job, warehouseStatus: String(batch?.warehouseStatus || "open"), batchRecord: batch, searchText, pickerStatus, printable } as Record<string, any> & { searchText: string; pickerStatus: string; printable: boolean }
+        return { ...job, ...orderTypeIndicators, warehouseStatus: String(batch?.warehouseStatus || "open"), batchRecord: batch, searchText, pickerStatus, printable } as Record<string, any> & { searchText: string; pickerStatus: string; printable: boolean }
       })
     const queuedBatchIds = new Set(printEntries.map((entry) => String(entry.batchId || "")).filter(Boolean))
     const pendingEntries: Array<Record<string, any> & { searchText: string; pickerStatus: string; printable: boolean }> = allBatches.filter((batch) => !queuedBatchIds.has(String(batch.id || ""))).map((batch) => {
@@ -907,6 +928,7 @@ export function FulfillmentPage() {
       const customers = [...new Set(rows.map((row) => String(row.customer || row.customerName || row.destination?.name || "").trim()).filter(Boolean))]
       const skus = [...new Set(rows.flatMap((row) => (Array.isArray(row.skus) ? row.skus : [row.sku, row.catalogSku, row.parentSku, row.selectedSku]).map((value) => String(value || "").trim()).filter(Boolean)))]
       const orders = [...new Set(rows.map((row) => String(row.orderNumber || row.orderId || "").trim()).filter(Boolean))]
+      const orderTypeIndicators = fulfillmentBatchOrderIndicators(rows)
       const pendingLabels = Number(batch.counts?.label_pending || 0)
       const purchasing = Number(batch.counts?.processing || 0) + Number(batch.counts?.queued || 0)
       const pickerStatus = pendingLabels > 0
@@ -918,7 +940,7 @@ export function FulfillmentPage() {
             : Number(batch.counts?.failed || 0) > 0
               ? "Needs attention"
               : String(batch.status || "Pending").replaceAll("_", " ")
-      return { ...batch, id: `batch:${String(batch.id || batch.batchNumber || "pending")}`, batchId: batch.id, batchRecord: batch, orderCount: Number(batch.counts?.total || rows.length), documentCount: 0, searchText: [batch.batchNumber, ...customers, ...skus, ...orders].join(" ").toLowerCase(), pickerStatus, printable: false } as Record<string, any> & { searchText: string; pickerStatus: string; printable: boolean }
+      return { ...batch, ...orderTypeIndicators, id: `batch:${String(batch.id || batch.batchNumber || "pending")}`, batchId: batch.id, batchRecord: batch, orderCount: Number(batch.counts?.total || rows.length), documentCount: 0, searchText: [batch.batchNumber, orderTypeIndicators.hasCombinedOrders ? "combined orders" : "", orderTypeIndicators.hasEbayLiveOrders ? "ebay live" : "", ...customers, ...skus, ...orders].join(" ").toLowerCase(), pickerStatus, printable: false } as Record<string, any> & { searchText: string; pickerStatus: string; printable: boolean }
     })
     return [...printEntries, ...pendingEntries]
       .sort((left, right) => new Date(String(right.createdAt || right.updatedAt || 0)).getTime() - new Date(String(left.createdAt || left.updatedAt || 0)).getTime())
@@ -1049,6 +1071,7 @@ export function FulfillmentPage() {
 
   const openShipmentConsolidation = async (row: Record<string, any>, preferredOrderIds: string[] = []) => {
     setConsolidationOrder(row)
+    setConsolidationPrimary(null)
     setConsolidationSaved(null)
     setConsolidationCandidates([])
     setConsolidationSelection(new Set())
@@ -1056,13 +1079,14 @@ export function FulfillmentPage() {
     setConsolidationPackageDraft({ packageWeight: "", packageLength: "", packageWidth: "", packageHeight: "" })
     setConsolidationLoading(true)
     try {
-      const result = await api<{ eligible?: boolean; reason?: string; candidates?: Array<Record<string, any>> }>(`/api/orders/${encodeURIComponent(String(row.orderId || ""))}/shipment-group-candidates`)
+      const result = await api<{ eligible?: boolean; reason?: string; primary?: Record<string, any>; candidates?: Array<Record<string, any>> }>(`/api/orders/${encodeURIComponent(String(row.orderId || ""))}/shipment-group-candidates`)
       if (result.eligible === false) throw new Error(result.reason || "This order cannot be combined yet.")
       const candidates = result.candidates || []
       const availableIds = new Set(candidates.map((candidate) => String(candidate.id || "")).filter(Boolean))
       const preferredIds = preferredOrderIds.map(String).filter((id) => id && id !== String(row.orderId || "") && availableIds.has(id))
       const candidateIds = preferredOrderIds.length ? preferredIds : [...availableIds]
       if (preferredOrderIds.length && !candidateIds.length) throw new Error("The selected eBay Live orders do not share the same buyer, address, and warehouse, or one already has a label.")
+      setConsolidationPrimary(result.primary || null)
       setConsolidationCandidates(candidates)
       setConsolidationSelection(new Set(candidateIds))
       await loadConsolidationCartonization(row, candidateIds)
@@ -1883,14 +1907,19 @@ export function FulfillmentPage() {
   }
 
   const openPrintPreview = (printJob: Record<string, any>) => {
-    const savedPrintJob = printQueue.find((row) => String(row.id || "") === String(printJob.id || "")) || printJob
+    const storedPrintJob = printQueue.find((row) => String(row.id || "") === String(printJob.id || ""))
+    const savedPrintJob = { ...(storedPrintJob || {}), ...printJob }
     const batch = allBatches.find((row) => String(row.id || "") === String(savedPrintJob.batchId || ""))
+    const orderTypeIndicators = fulfillmentBatchOrderIndicators([
+      ...shipments.filter((shipment) => String(shipment.printJobId || "") === String(savedPrintJob.id || "")),
+      ...(Array.isArray(batch?.rows) ? batch.rows : []),
+    ])
     setPurchasedPrintJobs([])
     setPrintDocumentMode("packing-4x6")
     setPackingSlipOrientation(savedPrintJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait")
     setPrintPacketPreviewOpen(false)
     setPrintPacketPreviewLoading(false)
-    setPrintJobPreview({ ...savedPrintJob, warehouseStatus: String(batch?.warehouseStatus || savedPrintJob.warehouseStatus || "open") })
+    setPrintJobPreview({ ...savedPrintJob, ...orderTypeIndicators, warehouseStatus: String(batch?.warehouseStatus || savedPrintJob.warehouseStatus || "open") })
   }
   const openBatchPickerEntry = (entry: Record<string, any>) => {
     setPrintBatchPickerOpen(false)
@@ -2406,6 +2435,17 @@ export function FulfillmentPage() {
   const consolidationPlanLabel = consolidationNeedsFinalCarton
     ? consolidationPackageComplete ? "manual carton ready" : "final carton needed"
     : consolidationPlanStatus.replaceAll("_", " ")
+  const consolidationDisplayOrders: Array<Record<string, any>> = consolidationOrder ? [{
+    id: String(consolidationPrimary?.id || consolidationOrder.orderId || ""),
+    orderNumber: consolidationPrimary?.orderNumber || consolidationOrder.orderNumber || consolidationOrder.orderId || "",
+    buyer: consolidationPrimary?.buyer || consolidationOrder.customer || "Customer",
+    skus: Array.isArray(consolidationPrimary?.skus) && consolidationPrimary.skus.length
+      ? consolidationPrimary.skus
+      : [consolidationOrder.sku, consolidationOrder.catalogSku].map((value) => String(value || "").trim()).filter(Boolean),
+    createdAt: consolidationPrimary?.createdAt || consolidationOrder.orderDate || "",
+    matchSource: "primary",
+    isPrimary: true,
+  }, ...consolidationCandidates.map((candidate) => ({ ...candidate, isPrimary: false }))] : []
   const selectedPackageGroups = selectedRows.reduce((groups, row) => {
     const key = `${String(row.orderId)}:${String(row.packageGroupKey || "combined")}`
     const packageRows = groups.get(key) || []
@@ -2645,7 +2685,10 @@ export function FulfillmentPage() {
                     <div className="relative border-b p-2"><Search className="absolute left-4 top-4 size-4 text-muted-foreground" /><Input autoFocus className="h-9 pl-9" value={printBatchSearch} onChange={(event) => setPrintBatchSearch(event.target.value)} placeholder="Filter batch, customer, order, or SKU" /></div>
                     <ScrollArea className="h-[min(18rem,45vh)]">
                       <div className="p-1">
-                        {filteredBatchPickerEntries.map((job) => <button key={String(job.id)} type="button" className="w-full rounded-sm px-2.5 py-2 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => openBatchPickerEntry(job)}><span className="flex items-center justify-between gap-2"><span className="truncate text-sm font-medium">{String(job.batchNumber || job.printNumber || "Label batch")}</span><span className="flex shrink-0 items-center gap-1"><Badge variant={job.pickerStatus === "Ready" ? "success" : job.pickerStatus === "Needs attention" ? "destructive" : "warning"}>{job.pickerStatus}</Badge><Badge variant={String(job.warehouseStatus || "open") === "closed" ? "success" : "outline"}>{String(job.warehouseStatus || "open") === "closed" ? "Closed" : "Open"}</Badge></span></span><span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground"><span>{numberLabel(Number(job.orderCount || job.batchRecord?.counts?.total || 0))} label{Number(job.orderCount || job.batchRecord?.counts?.total || 0) === 1 ? "" : "s"}{job.printable ? ` · ${String(job.lastOutputAction || "") === "saved_pdf" ? "Saved PDF" : isPrintedJob(job) ? "Printed" : "Not printed"}` : job.pickerStatus === "Pending labels" ? ` · ${numberLabel(Number(job.batchRecord?.counts?.label_pending || job.pendingDocumentCount || 0))} generating` : " · Open batch details"}</span><RecoverySourceLabel record={job} /></span></button>)}
+                        {filteredBatchPickerEntries.map((job) => <button key={String(job.id)} type="button" className="w-full rounded-sm px-2.5 py-2 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => openBatchPickerEntry(job)}>
+                          <span className="flex items-center justify-between gap-2"><span className="flex min-w-0 items-center gap-1.5"><span className="truncate text-sm font-medium">{String(job.batchNumber || job.printNumber || "Label batch")}</span><BatchOrderTypeIndicators hasCombinedOrders={job.hasCombinedOrders === true} hasEbayLiveOrders={job.hasEbayLiveOrders === true} /></span><span className="flex shrink-0 items-center gap-1"><Badge variant={job.pickerStatus === "Ready" ? "success" : job.pickerStatus === "Needs attention" ? "destructive" : "warning"}>{job.pickerStatus}</Badge><Badge variant={String(job.warehouseStatus || "open") === "closed" ? "success" : "outline"}>{String(job.warehouseStatus || "open") === "closed" ? "Closed" : "Open"}</Badge></span></span>
+                          <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground"><span>{numberLabel(Number(job.orderCount || job.batchRecord?.counts?.total || 0))} label{Number(job.orderCount || job.batchRecord?.counts?.total || 0) === 1 ? "" : "s"}{job.printable ? ` · ${String(job.lastOutputAction || "") === "saved_pdf" ? "Saved PDF" : isPrintedJob(job) ? "Printed" : "Not printed"}` : job.pickerStatus === "Pending labels" ? ` · ${numberLabel(Number(job.batchRecord?.counts?.label_pending || job.pendingDocumentCount || 0))} generating` : " · Open batch details"}</span><RecoverySourceLabel record={job} /></span>
+                        </button>)}
                         {!filteredBatchPickerEntries.length ? <div className="px-3 py-6 text-center text-sm text-muted-foreground">No batches match this filter.</div> : null}
                       </div>
                     </ScrollArea>
@@ -2733,7 +2776,7 @@ export function FulfillmentPage() {
           })()}
         </SheetContent>
       </Sheet>
-      <Dialog open={Boolean(consolidationOrder)} onOpenChange={(open) => { if (!open && !consolidationLoading) { setConsolidationOrder(null); setConsolidationSaved(null); setConsolidationCartonization(null) } }}>
+      <Dialog open={Boolean(consolidationOrder)} onOpenChange={(open) => { if (!open && !consolidationLoading) { setConsolidationOrder(null); setConsolidationPrimary(null); setConsolidationSaved(null); setConsolidationCartonization(null) } }}>
         <DialogContent className="flex max-h-[92dvh] w-[calc(100%-2rem)] flex-col overflow-hidden sm:max-w-5xl">
           <DialogHeader><DialogTitle>{consolidationSaved ? "Shipment group created" : consolidationOrder?.isEbayLive ? "Combine eBay Live orders" : "Ship orders together"}</DialogTitle><DialogDescription>{consolidationSaved ? "The table now marks every member as grouped. Continue with one rate and one label for the primary combined package." : "One physical package and tracking number can serve these orders. Each marketplace order, payment, and channel reference remains separate."}</DialogDescription></DialogHeader>
           {consolidationSaved ? <div className="min-h-0 space-y-4 overflow-y-auto">
@@ -2742,8 +2785,7 @@ export function FulfillmentPage() {
             {!consolidationSaved.primaryRouteIds.length ? <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Primary package needs review</AlertTitle><AlertDescription>The group was saved, but no warehouse package is ready for rates. Clear table filters and open the group from its green badge after the package is ready.</AlertDescription></Alert> : null}
           </div> : consolidationLoading && !consolidationCandidates.length ? <div className="grid gap-2"><Skeleton className="h-14" /><Skeleton className="h-14" /></div> : <div className="min-h-0 space-y-3 overflow-y-auto">
             <Alert><PackageCheck className="size-4" /><AlertTitle>{consolidationOrder?.isEbayLive ? "eBay Live shipment match" : "Cartonization preview"}</AlertTitle><AlertDescription>{consolidationOrder?.isEbayLive ? "DataPlus requires the same buyer, exact delivery address, and warehouse. Enter the final carton below even when temporary Live SKUs have no catalog dimensions." : "DataPlus tests the selected orders against the configured package catalog. Confirm the physical carton before purchase."}</AlertDescription></Alert>
-            <div className="rounded-md border p-3 text-sm"><div className="flex items-center justify-between gap-3"><div><p className="font-medium">Order {String(consolidationOrder?.orderNumber || consolidationOrder?.orderId || "")}</p><p className="text-xs text-muted-foreground">{String(consolidationOrder?.customer || "Customer")} · {String(consolidationOrder?.warehouseName || "Warehouse")}</p></div><Badge>Primary</Badge></div></div>
-            <div className="rounded-md border"><Table><TableHeader><TableRow><TableHead className="w-10" /><TableHead>Order</TableHead><TableHead>Created</TableHead><TableHead>Match</TableHead></TableRow></TableHeader><TableBody>{consolidationCandidates.map((candidate) => { const id = String(candidate.id || ""); const liveWindowMatch = String(candidate.matchSource || "") === "ebay_live_shipping_window"; return <TableRow key={id}><TableCell><Checkbox checked={consolidationSelection.has(id)} onCheckedChange={(checked) => updateConsolidationSelection(id, checked === true)} /></TableCell><TableCell><a className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(id)}`}>{String(candidate.orderNumber || id)}</a><p className="text-xs text-muted-foreground">{String(candidate.buyer || "Customer")}</p></TableCell><TableCell className="text-xs">{candidate.createdAt ? dateLabel(String(candidate.createdAt)) : "-"}</TableCell><TableCell><Badge variant="outline" className={liveWindowMatch ? "border-pink-500/50 text-pink-700 dark:text-pink-300" : ""}>{liveWindowMatch ? "eBay Live window" : "Customer + address + warehouse"}</Badge></TableCell></TableRow> })}{!consolidationCandidates.length && <TableRow><TableCell colSpan={4} className="h-20 text-center text-muted-foreground">No compatible orders remain.</TableCell></TableRow>}</TableBody></Table></div>
+            <div className="overflow-x-auto rounded-md border"><Table className="min-w-[880px]"><TableHeader><TableRow><TableHead className="w-10" /><TableHead>Order number</TableHead><TableHead>Customer name</TableHead><TableHead>SKU</TableHead><TableHead>Created</TableHead><TableHead>Match</TableHead><TableHead className="w-24 text-center">Parent order</TableHead></TableRow></TableHeader><TableBody>{consolidationDisplayOrders.map((candidate) => { const id = String(candidate.id || ""); const liveWindowMatch = String(candidate.matchSource || "") === "ebay_live_shipping_window"; const skus = [...new Set((Array.isArray(candidate.skus) ? candidate.skus : [candidate.sku]).map((value) => String(value || "").trim()).filter(Boolean))]; return <TableRow key={`${candidate.isPrimary ? "primary" : "candidate"}-${id}`} className={candidate.isPrimary ? "bg-blue-500/5" : undefined}><TableCell>{candidate.isPrimary ? <Checkbox checked disabled aria-label="Parent order is always included" /> : <Checkbox checked={consolidationSelection.has(id)} aria-label={`Include order ${String(candidate.orderNumber || id)}`} onCheckedChange={(checked) => updateConsolidationSelection(id, checked === true)} />}</TableCell><TableCell><a className="font-semibold text-primary hover:underline" href={`/orders/${encodeURIComponent(id)}`}>{String(candidate.orderNumber || id)}</a></TableCell><TableCell><a className="text-sm hover:underline" href={`/orders/${encodeURIComponent(id)}`}>{String(candidate.buyer || "Customer")}</a></TableCell><TableCell><a className="block max-w-52 truncate font-mono text-xs text-primary hover:underline" href={`/orders/${encodeURIComponent(id)}`} title={skus.join(", ") || "No SKU recorded"}>{skus.join(", ") || "-"}</a></TableCell><TableCell className="whitespace-nowrap text-xs">{candidate.createdAt ? dateLabel(String(candidate.createdAt)) : "-"}</TableCell><TableCell><Badge variant="outline" className={liveWindowMatch ? "border-pink-500/50 text-pink-700 dark:text-pink-300" : ""}>{candidate.isPrimary ? "Selected order" : liveWindowMatch ? "eBay Live window" : "Customer + address + warehouse"}</Badge></TableCell><TableCell className="text-center">{candidate.isPrimary ? <CheckCircle2 className="mx-auto size-5 text-emerald-600" aria-label="Parent order" /> : <span className="text-muted-foreground">-</span>}</TableCell></TableRow> })}</TableBody></Table></div>
             <div className="rounded-md border p-3">
               <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-medium">Suggested package plan</p><p className="text-xs text-muted-foreground">Uses SKU/package measurements, carton tare weight, and DIM divisor {numberLabel(Number(consolidationCartonization?.divisor || 139))}.</p></div>{consolidationPlanStatus ? <Badge variant={consolidationNeedsFinalCarton ? consolidationPackageComplete ? "success" : "secondary" : consolidationPlanStatus === "single_carton" ? "default" : consolidationPlanStatus === "blocked" ? "destructive" : "secondary"}>{consolidationPlanLabel}</Badge> : null}</div>
               {consolidationPreviewLoading ? <div className="mt-3 grid gap-2"><Skeleton className="h-20" /><Skeleton className="h-20" /></div> : consolidationCartonization ? <div className="mt-3 grid gap-3"><p className="text-sm text-muted-foreground">{consolidationNeedsFinalCarton && consolidationPackageComplete ? "Automatic cartonization was unavailable, but the complete final carton below replaces the missing source measurements." : String(consolidationCartonization.reason || "Review the suggested package plan.")}</p>{Array.isArray(consolidationCartonization.cartons) && consolidationCartonization.cartons.length ? <div className="grid gap-2 sm:grid-cols-2">{consolidationCartonization.cartons.map((carton: Record<string, any>, index: number) => <div key={`${String(carton.packageId || "carton")}-${index}`} className="rounded-md border bg-muted/20 p-3 text-sm"><div className="flex items-start justify-between gap-2"><p className="font-medium">Package {index + 1}: {String(carton.packageName || "Custom carton")}</p><Badge variant="outline">{Number(carton.placements?.length || 0)} item{Number(carton.placements?.length || 0) === 1 ? "" : "s"}</Badge></div><p className="mt-1 text-xs text-muted-foreground">{Number(carton.length || 0)} × {Number(carton.width || 0)} × {Number(carton.height || 0)} in · {Number(carton.physicalWeight || 0).toFixed(2)} lb physical</p><div className="mt-2 grid grid-cols-2 gap-2 text-xs"><span>DIM weight <strong>{Number(carton.dimensionalWeight || 0).toFixed(2)} lb</strong></span><span>Billable <strong>{Number(carton.billableWeight || 0).toFixed(2)} lb</strong></span></div></div>)}</div> : null}{consolidationNeedsFinalCarton ? <Alert className={consolidationPackageComplete ? "border-emerald-500/40 bg-emerald-500/5" : "border-amber-500/40 bg-amber-500/5"}>{consolidationPackageComplete ? <CheckCircle2 className="size-4 text-emerald-600" /> : <AlertTriangle className="size-4 text-amber-600" />}<AlertTitle>{consolidationPackageComplete ? "Final carton ready" : "Final carton required"}</AlertTitle><AlertDescription>{consolidationPackageComplete ? "The entered weight and dimensions will be used for the rate and label. Missing SKU measurements do not block this shipment group." : "The source products do not have enough measurements for an automatic suggestion. Measure the combined box and enter its final weight and dimensions below."}</AlertDescription></Alert> : consolidationHardBlocked ? <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Cannot combine these packages</AlertTitle><AlertDescription>{consolidationPlanReason}</AlertDescription></Alert> : null}</div> : <p className="mt-3 text-sm text-muted-foreground">Select at least one compatible order to calculate a package plan.</p>}
@@ -2803,7 +2845,7 @@ export function FulfillmentPage() {
       <Dialog open={Boolean(printJobPreview)} onOpenChange={(open) => !open && setPrintJobPreview(null)}>
         <DialogContent className={cn("flex max-h-[calc(100dvh-1rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-5xl sm:rounded-lg", printPacketPreviewOpen ? "h-[calc(100dvh-1rem)] sm:h-[92dvh]" : "h-auto")}>
           <DialogHeader className="border-b px-4 py-3 pr-12 text-left">
-            <div className="flex flex-wrap items-center gap-2"><DialogTitle>{String(printJobPreview?.printNumber || "Print labels")}</DialogTitle><Badge variant="outline">{numberLabel(Number(printJobPreview?.orderCount || printJobPreviewBatch?.counts?.purchased || 0))} label{Number(printJobPreview?.orderCount || printJobPreviewBatch?.counts?.purchased || 0) === 1 ? "" : "s"}</Badge>{Number(printJobPreview?.printCount || 0) > 0 ? <Badge variant="warning">Printed {numberLabel(Number(printJobPreview?.printCount || 0))}×</Badge> : <Badge variant="secondary">Not printed</Badge>}{String(printJobPreview?.lastOutputAction || "") === "saved_pdf" ? <Badge variant="secondary">Saved PDF</Badge> : null}</div>
+            <div className="flex flex-wrap items-center gap-2"><DialogTitle>{String(printJobPreview?.printNumber || "Print labels")}</DialogTitle><BatchOrderTypeIndicators hasCombinedOrders={printJobPreview?.hasCombinedOrders === true || printJobPreviewBatch?.hasCombinedOrders === true} hasEbayLiveOrders={printJobPreview?.hasEbayLiveOrders === true || printJobPreviewBatch?.hasEbayLiveOrders === true} /><Badge variant="outline">{numberLabel(Number(printJobPreview?.orderCount || printJobPreviewBatch?.counts?.purchased || 0))} label{Number(printJobPreview?.orderCount || printJobPreviewBatch?.counts?.purchased || 0) === 1 ? "" : "s"}</Badge>{Number(printJobPreview?.printCount || 0) > 0 ? <Badge variant="warning">Printed {numberLabel(Number(printJobPreview?.printCount || 0))}×</Badge> : <Badge variant="secondary">Not printed</Badge>}{String(printJobPreview?.lastOutputAction || "") === "saved_pdf" ? <Badge variant="secondary">Saved PDF</Badge> : null}</div>
             <RecoverySourceLabel record={printJobPreview} fallback={printJobPreviewBatch} />
             <DialogDescription>{Number(printJobPreview?.printCount || 0) > 0 && printJobPreview?.printedAt ? `Last printed ${dateLabel(String(printJobPreview.printedAt))}${printJobPreview?.printedBy ? ` by ${String(printJobPreview.printedBy)}` : ""}.` : "Purchased labels are ready."} Reopening this packet never buys another label.</DialogDescription>
           </DialogHeader>

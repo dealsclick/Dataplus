@@ -15,11 +15,11 @@ test("order summaries preserve consolidation identity and label evidence", () =>
   assert.match(dbSource, /'documents', case when jsonb_typeof\(shipment->'documents'\) = 'array'/);
 });
 
-test("candidate lookup uses the primary order window instead of newest-order pagination", () => {
-  assert.match(serverSource, /const dateFrom = new Date\(primaryTimestamp - windowMs\)/);
-  assert.match(serverSource, /const dateTo = new Date\(primaryTimestamp \+ windowMs\)/);
-  assert.match(serverSource, /listOrders\(\{ limit: 5000, summary: true, dateFrom, dateTo \}\)/);
-  assert.doesNotMatch(serverSource, /shipment-group-candidates[\s\S]{0,1600}listOrders\(\{ limit: 5000, summary: true \}\)/);
+test("candidate lookup uses stable buyer identity without an age cutoff", () => {
+  assert.match(serverSource, /const candidateIdentity = String\(order\.customerId[\s\S]*order\.buyer/);
+  assert.match(serverSource, /listOrders\(\{ limit: 5000, summary: true, q: candidateIdentity, openWorkOnly: true \}\)/);
+  assert.match(serverSource, /timeLimitEnforced: false/);
+  assert.doesNotMatch(serverSource, /const dateFrom = new Date\(primaryTimestamp - windowMs\)/);
 });
 
 test("active and purchased label rows are excluded from consolidation", () => {

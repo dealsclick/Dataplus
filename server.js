@@ -33453,6 +33453,9 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
       channel: order.channelSource || order.source || "",
       salesOrigin: order.salesOrigin || order.external?.salesOrigin || "",
       isEbayLive: order.isEbayLive === true || order.ebayLive?.isLive === true || order.external?.isEbayLive === true,
+      shipmentGroupId: shipment.shipmentGroupId || order.shipmentGroupId || "",
+      shipmentGroupOrderIds: Array.isArray(order.shipmentGroupOrderIds) ? order.shipmentGroupOrderIds : [],
+      sharedLabel: shipment.sharedLabel === true,
       channelSync: {
         status: shipment.channelSync?.status || "",
         channel: shipment.channelSync?.channel || order.channelSource || order.source || "",
@@ -33533,6 +33536,8 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
         channel: order.channelSource || order.source || row.channel || "",
         salesOrigin: order.salesOrigin || order.external?.salesOrigin || "",
         isEbayLive: order.isEbayLive === true || order.ebayLive?.isLive === true || order.external?.isEbayLive === true,
+        shipmentGroupId: row.shipmentGroupId || order.shipmentGroupId || "",
+        shipmentGroupOrderIds: Array.isArray(row.shipmentGroupOrderIds) && row.shipmentGroupOrderIds.length ? row.shipmentGroupOrderIds : Array.isArray(order.shipmentGroupOrderIds) ? order.shipmentGroupOrderIds : [],
         channelSync: {
           status: "pending",
           channel: order.channelSource || order.source || row.channel || "",
@@ -54113,7 +54118,7 @@ async function handleApi(req, res) {
     const grouped = new Map();
     for (const row of selected) {
       const groupId = `${String(row.orderId)}:${String(row.packageGroupKey || "combined")}`;
-      const current = grouped.get(groupId) || { id: groupId, orderId: String(row.orderId), orderNumber: row.orderNumber || row.orderId, customer: row.customer || "", channel: row.channel || "", warehouseId: row.warehouseId || "", warehouseName: row.warehouseName || "", requestedDeliveryMethod: row.shippingService || "Not specified", requestedDeliveryAt: row.deliverBy || "", packageSource: row.packageSource || "missing", packageInferred: row.packageInferred === true, packageGroupKey: row.packageGroupKey || "combined", routeIds: [], skus: [], status: "queued", attempts: 0 };
+      const current = grouped.get(groupId) || { id: groupId, orderId: String(row.orderId), orderNumber: row.orderNumber || row.orderId, customer: row.customer || "", channel: row.channel || "", salesOrigin: row.salesOrigin || "", isEbayLive: row.isEbayLive === true || row.salesOrigin === "ebay_live", shipmentGroupId: row.shipmentGroupId || "", shipmentGroupOrderIds: Array.isArray(row.shipmentGroupOrderIds) ? row.shipmentGroupOrderIds : [], warehouseId: row.warehouseId || "", warehouseName: row.warehouseName || "", requestedDeliveryMethod: row.shippingService || "Not specified", requestedDeliveryAt: row.deliverBy || "", packageSource: row.packageSource || "missing", packageInferred: row.packageInferred === true, packageGroupKey: row.packageGroupKey || "combined", routeIds: [], skus: [], status: "queued", attempts: 0 };
       for (const routeId of row.packageRouteIds || [row.id]) if (!current.routeIds.includes(String(routeId))) current.routeIds.push(String(routeId));
       if (!current.skus.includes(String(row.sku || ""))) current.skus.push(String(row.sku || ""));
       if (row.labelReadiness?.ready !== true) { current.status = "blocked"; current.error = row.labelReadiness?.blockers?.join(" · ") || "Package data is incomplete."; }
@@ -58967,6 +58972,12 @@ async function handleApi(req, res) {
     const orders = [...new Map([...(nearbyOrders || []), ...(groupedOrders || [])].map((candidate) => [String(candidate.id || candidate.orderId || ""), candidate])).values()];
     const protectedBatches = await postgres.readFulfillmentBatchesByOrderIds(orders.map((candidate) => candidate.id || candidate.orderId));
     const protectedOrderIds = protectedShipmentConsolidationOrderIds([...currentBatches, ...protectedBatches]);
+    const displaySkus = (candidate) => [...new Set([
+      candidate.sku,
+      candidate.catalogSku,
+      ...orderLineItems(candidate).flatMap((line) => [line.sku, line.originalSku, line.parentSku])
+    ].map((value) => String(value || "").trim()).filter(Boolean))];
+    const primary = { id: order.id, orderNumber: order.orderNumber, buyer: order.buyer || order.customerName || order.address?.name || "Customer", skus: displaySkus(order), createdAt: order.orderDate || order.createdAt, isEbayLive: order.isEbayLive === true || order.salesOrigin === "ebay_live" };
     const candidates = (orders || []).filter((candidate) => {
       if (candidate.id === order.id) return false;
       if (protectedOrderIds.has(String(candidate.id || candidate.orderId || ""))) return false;
@@ -58975,9 +58986,9 @@ async function handleApi(req, res) {
     }).slice(0, 25).map((candidate) => {
       const candidateEligibility = shipmentGroupEligibility(candidate, { windowHours: settings.shipmentConsolidationWindowHours });
       const pair = shipmentConsolidation.shipmentConsolidationPair(order, candidate, { windowHours: settings.shipmentConsolidationWindowHours });
-      return { id: candidate.id, orderNumber: candidate.orderNumber, status: candidate.status, fulfillmentStatus: candidate.fulfillmentStatus || "", total: candidate.total, buyer: candidate.buyer, address: candidate.address || {}, createdAt: candidate.orderDate || candidate.createdAt, shipmentGroupId: candidate.shipmentGroupId || "", warehouseId: candidateEligibility.warehouseId || "", identitySource: pair.identitySource || "recipient_address", matchSource: pair.matchSource || "customer_address_warehouse", ebayLiveShippingWindowId: pair.ebayLiveShippingWindowId || "", isEbayLive: candidate.isEbayLive === true || candidate.salesOrigin === "ebay_live", matchReasons: [pair.sameGroup ? "same_group" : "", pair.matchSource === "ebay_live_shipping_window" ? "ebay_live_shipping_window" : "", "same_customer", "same_address", "same_warehouse"].filter(Boolean) };
+      return { id: candidate.id, orderNumber: candidate.orderNumber, status: candidate.status, fulfillmentStatus: candidate.fulfillmentStatus || "", total: candidate.total, buyer: candidate.buyer || candidate.customerName || candidate.address?.name || "Customer", skus: displaySkus(candidate), address: candidate.address || {}, createdAt: candidate.orderDate || candidate.createdAt, shipmentGroupId: candidate.shipmentGroupId || "", warehouseId: candidateEligibility.warehouseId || "", identitySource: pair.identitySource || "recipient_address", matchSource: pair.matchSource || "customer_address_warehouse", ebayLiveShippingWindowId: pair.ebayLiveShippingWindowId || "", isEbayLive: candidate.isEbayLive === true || candidate.salesOrigin === "ebay_live", matchReasons: [pair.sameGroup ? "same_group" : "", pair.matchSource === "ebay_live_shipping_window" ? "ebay_live_shipping_window" : "", "same_customer", "same_address", "same_warehouse"].filter(Boolean) };
     });
-    return sendJson(res, 200, { orderId: order.id, eligible: true, warehouseId: eligibility.warehouseId, timeLimitEnforced: false, ebayLive: liveWindow, candidates });
+    return sendJson(res, 200, { orderId: order.id, eligible: true, warehouseId: eligibility.warehouseId, timeLimitEnforced: false, ebayLive: liveWindow, primary, candidates });
   }
 
   if (["GET", "POST"].includes(req.method) && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-label-readiness" && postgres.isPostgresEnabled()) {
