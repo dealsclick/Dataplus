@@ -4478,6 +4478,34 @@ async function listFulfillmentLabelBatchProjectionRows() {
           'orderNumber', batch_rows.order_number,
           'customer', batch_rows.customer,
           'channel', batch_rows.channel,
+          'salesOrigin', coalesce(
+            batch_rows.row_payload->'salesOrigin',
+            orders.raw->'salesOrigin',
+            orders.raw#>'{external,salesOrigin}'
+          ),
+          'isEbayLive', to_jsonb(
+            lower(coalesce(
+              batch_rows.row_payload->>'isEbayLive',
+              orders.raw->>'isEbayLive',
+              orders.raw#>>'{external,isEbayLive}',
+              'false'
+            )) = 'true'
+            or lower(coalesce(
+              batch_rows.row_payload->>'salesOrigin',
+              orders.raw->>'salesOrigin',
+              orders.raw#>>'{external,salesOrigin}',
+              ''
+            )) = 'ebay_live'
+          ),
+          'shipmentGroupId', coalesce(
+            batch_rows.row_payload->'shipmentGroupId',
+            orders.raw->'shipmentGroupId'
+          ),
+          'shipmentGroupOrderIds', case
+            when jsonb_typeof(batch_rows.row_payload->'shipmentGroupOrderIds') = 'array' then batch_rows.row_payload->'shipmentGroupOrderIds'
+            when jsonb_typeof(orders.raw->'shipmentGroupOrderIds') = 'array' then orders.raw->'shipmentGroupOrderIds'
+            else '[]'::jsonb
+          end,
           'routeId', batch_rows.route_id,
           'routeIds', to_jsonb(batch_rows.route_ids),
           'skus', to_jsonb(batch_rows.skus),
@@ -4523,6 +4551,7 @@ async function listFulfillmentLabelBatchProjectionRows() {
           'pickedBy', batch_rows.row_payload->'pickedBy'
         )) order by batch_rows.position, batch_rows.row_key)
         from fulfillment_label_batch_rows batch_rows
+        left join order_records orders on orders.order_id = batch_rows.order_id
         where batch_rows.batch_id = batches.batch_id
       ), '[]'::jsonb)
     )) as data
