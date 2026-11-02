@@ -1,5 +1,5 @@
 const postgres = require("../db");
-const { linkPurchasedShipmentToGroup } = require("../server");
+const { drainFulfillmentConsoleProjectionPatches, linkPurchasedShipmentToGroup } = require("../server");
 
 function text(value) {
   return String(value || "").trim();
@@ -40,6 +40,7 @@ async function main() {
   const result = await linkPurchasedShipmentToGroup(order, shipment, "Shared shipment repair");
   order.updatedAt = new Date().toISOString();
   await postgres.saveOrder(order);
+  await drainFulfillmentConsoleProjectionPatches();
   console.log(JSON.stringify({
     ...preview,
     applied: true,

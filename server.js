@@ -76087,6 +76087,7 @@ module.exports = {
   fulfillmentPrintJobOutstandingRows,
   fulfillmentBatchesNeedingPrintPacketRecovery,
   linkPurchasedShipmentToGroup,
+  drainFulfillmentConsoleProjectionPatches,
   activeFulfillmentLabelPurchaseBatchIds,
   temuLabelRecoveryRowEligible,
   createFulfillmentRecoveryBatch,
