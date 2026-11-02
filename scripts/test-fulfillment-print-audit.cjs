@@ -55,7 +55,7 @@ assert.match(appSource, /Warehouse batch status/, "the print modal must show the
 assert.doesNotMatch(appSource, /Did the labels print successfully\?|browserPrintConfirmation|printConfirmationJob/, "browser printing must not show a redundant success-confirmation dialog")
 assert.match(appSource, /const printInBrowser = async \(\) => \{[\s\S]*\/printed`/, "browser printing must record the document print action directly")
 assert.match(appSource, /const printCompletion = api<[\s\S]*print\(\)[\s\S]*await printCompletion/, "purchased-label completion must start before the mobile print dialog can suspend the page")
-assert.match(appSource, /max-w-5xl/, "the shipment-group dialog must provide enough width for order and package review")
+assert.match(appSource, /w-\[calc\(100%-2rem\)\][^\n]+sm:max-w-5xl/, "the shipment-group dialog must override the shared narrow desktop width")
 assert.match(appSource, /manual carton ready/, "complete manual package measurements must replace a blocked automatic carton suggestion")
 assert.match(appSource, /Missing SKU measurements do not block this shipment group/, "the shipment-group dialog must explain that final carton measurements override missing SKU dimensions")
 assert.match(appSource, /!consolidationPackageComplete \|\| consolidationHardBlocked/, "only incomplete final cartons or genuine shipping restrictions may disable group creation")

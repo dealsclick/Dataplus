@@ -2734,7 +2734,7 @@ export function FulfillmentPage() {
         </SheetContent>
       </Sheet>
       <Dialog open={Boolean(consolidationOrder)} onOpenChange={(open) => { if (!open && !consolidationLoading) { setConsolidationOrder(null); setConsolidationSaved(null); setConsolidationCartonization(null) } }}>
-        <DialogContent className="flex max-h-[92dvh] w-[calc(100%-2rem)] max-w-5xl flex-col overflow-hidden">
+        <DialogContent className="flex max-h-[92dvh] w-[calc(100%-2rem)] flex-col overflow-hidden sm:max-w-5xl">
           <DialogHeader><DialogTitle>{consolidationSaved ? "Shipment group created" : consolidationOrder?.isEbayLive ? "Combine eBay Live orders" : "Ship orders together"}</DialogTitle><DialogDescription>{consolidationSaved ? "The table now marks every member as grouped. Continue with one rate and one label for the primary combined package." : "One physical package and tracking number can serve these orders. Each marketplace order, payment, and channel reference remains separate."}</DialogDescription></DialogHeader>
           {consolidationSaved ? <div className="min-h-0 space-y-4 overflow-y-auto">
             <Alert className="border-emerald-500/40 bg-emerald-500/5"><CheckCircle2 className="size-4 text-emerald-600" /><AlertTitle>{consolidationSaved.orderNumbers.length} orders grouped successfully</AlertTitle><AlertDescription>Group {consolidationSaved.groupId} will use one shipping rate, one label, and one packing slip packet. Printing that label will mark every member order shipped.</AlertDescription></Alert>
