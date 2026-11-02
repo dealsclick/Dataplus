@@ -22,14 +22,17 @@ async function main() {
     product("UPC-MATCH", { barcode: "123" }), product("MPN-MATCH", { mfrPartNumber: "PART" }),
     product("VENDOR-MATCH", { vendorSku: "51173" }),
     product("CROSS-SUPPLIER-VENDOR-SKU", { supplierCode: "DIB", vendorSku: "51173" }),
-    product("DISCONTINUED", { toBeDiscontinued: true }), product("INACTIVE", { supplierCode: "OFF" }),
+    product("DISCONTINUED", { toBeDiscontinued: true }), product("SOURCE-INACTIVE", { active: false }),
+    product("INACTIVE-SUPPLIER", { supplierCode: "OFF" }),
     product("UNAPPROVED", { supplierCode: "OTHER" })
   ]);
   await run.batch([product("NEW"), product("DUPLICATE-UPC", { barcode: "999" })]);
-  assert.deepEqual(saved.map((row) => row.sku), ["NEW", "CROSS-SUPPLIER-VENDOR-SKU"]);
+  assert.deepEqual(saved.map((row) => row.sku), ["NEW", "CROSS-SUPPLIER-VENDOR-SKU", "DISCONTINUED", "SOURCE-INACTIVE"]);
+  assert.equal(saved.find((row) => row.sku === "SOURCE-INACTIVE").active, false);
+  assert.equal(saved.find((row) => row.sku === "DISCONTINUED").toBeDiscontinued, true);
   assert.equal(run.counts.needsReview, 4);
   assert.equal(run.counts.existing, 3);
-  assert.equal(run.counts.excluded, 3);
+  assert.equal(run.counts.excluded, 2);
   const disabled = createDiscovery({ ...options, settings: { catalogImportNewSkusEnabled: false } });
   await disabled.batch([product("NO-CREATE")]);
   assert.equal(disabled.counts.added, 0);
@@ -62,6 +65,6 @@ async function main() {
   assert.deepEqual(lookupSaved.map((row) => row.sku), ["LOOKUP-NEW"]);
   assert.equal(lookupRun.counts.existing, 2);
   assert.equal(lookupRun.counts.needsReview, 3);
-  console.log("Discovery: eligibility, identifier review, duplicate batches, disabled creation and retry checks passed.");
+  console.log("Discovery: supplier eligibility, inactive/discontinued creation, identifier review, duplicate batches, disabled creation and retry checks passed.");
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

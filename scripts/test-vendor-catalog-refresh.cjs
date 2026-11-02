@@ -24,14 +24,21 @@ async function main() {
     }, save: async batch => { saved.push(...batch); return { products: batch.length }; },
     report: async row => reports.push(row), progress: async counts => progress.push(counts) };
   const counts = await refreshStoredSupplier(options);
-  assert.deepEqual(saved.map(row => row.sku), ['NEW']);
-  assert.deepEqual(counts, { scanned: 8, existing: 1, added: 1, needsReview: 3, excluded: 3 });
+  assert.deepEqual(saved.map(row => row.sku), ['NEW', 'INACTIVE', 'DISCONTINUED']);
+  assert.equal(saved.find(row => row.sku === 'INACTIVE').active, false);
+  assert.equal(saved.find(row => row.sku === 'DISCONTINUED').toBeDiscontinued, true);
+  assert.deepEqual(counts, { scanned: 8, existing: 1, added: 3, needsReview: 3, excluded: 1 });
   assert(reports.some(row => row.sku === 'UNKNOWN' && row.reason.includes('status')));
   assert.equal(progress.length, 3);
   let checks = 0;
   await assert.rejects(refreshStoredSupplier({ ...options, check: async () => { if (++checks === 2) throw Error('stopped'); } }), /stopped/);
-  assert.equal(saved.length, 1, 'Cancellation before saving must not create rows');
-  const again = await refreshStoredSupplier({ ...options, identities: { products: [{ sku: 'EXISTING', barcode: '123' }, { sku: 'NEW', barcode: 'NEW-UPC' }], aliases: [] } });
+  assert.equal(saved.length, 3, 'Cancellation before saving must not create rows');
+  const again = await refreshStoredSupplier({ ...options, identities: { products: [
+    { sku: 'EXISTING', barcode: '123' },
+    { sku: 'NEW', barcode: 'NEW-UPC' },
+    { sku: 'INACTIVE' },
+    { sku: 'DISCONTINUED' }
+  ], aliases: [] } });
   assert.equal(again.added, 0);
   console.log('Stored supplier refresh: scope, status gates, keyset batches, matches, cancellation and retry passed.');
 }
