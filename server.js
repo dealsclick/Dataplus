@@ -34646,6 +34646,7 @@ async function queueFulfillmentLabelPurchaseJob(options = {}) {
     progressPercent: 0,
     rowLabel: "labels",
     progressLabel: "Queued shipping-label purchase",
+    queuePriority: 140,
     workerTask: inline ? "" : "fulfillment-label-purchase",
     workerPayload: {
       batchId,
@@ -34653,7 +34654,10 @@ async function queueFulfillmentLabelPurchaseJob(options = {}) {
       printRequestId: String(options.printRequestId || ""),
       confirmOverLimit: options.confirmOverLimit === true,
       adminPinAuthorized: options.adminPinAuthorized === true,
-      requestedBy: options.actor || "DataPlus"
+      requestedBy: options.actor || "DataPlus",
+      // Carrier purchases must not wait behind long-running manual catalog jobs.
+      // The label-purchase workload limit still serializes batches safely.
+      background: true
     },
     labelPurchaseBatchId: batchId,
     printRequestId: String(options.printRequestId || ""),

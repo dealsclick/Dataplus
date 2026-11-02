@@ -69,6 +69,8 @@ assert.match(rateQueue, /queuePriority: background \? 80 : 130/, 'operator rate 
 assert.match(rateQueue, /workerPayload:[\s\S]*?background: true,[\s\S]*?scheduled: options\.scheduled === true/, 'rate refreshes must use the background carrier worker without changing their manual or automated trigger');
 const labelQueue = functionBody('queueFulfillmentLabelPurchaseJob');
 assert.match(labelQueue, /postgres\.isPostgresEnabled\(\)[\s\S]*?\{ importJobs: \[\] \}/, 'label queueing must use a compact PostgreSQL job context');
+assert.match(labelQueue, /queuePriority: 140/, 'label purchases must outrank rate refreshes and ordinary background work');
+assert.match(labelQueue, /workerPayload:[\s\S]*?background: true/, 'label purchases must use the background carrier worker instead of waiting behind manual catalog jobs');
 
 const batchCreationState = functionBody('readFulfillmentLabelBatchCreationState');
 assert.match(batchCreationState, /listFulfillmentLabelBatchProjectionRows\(\)/, 'batch creation must inspect compact PostgreSQL projections');
