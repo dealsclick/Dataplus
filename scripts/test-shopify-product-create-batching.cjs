@@ -50,6 +50,11 @@ assert.match(catalogSource, /label: "Launch Shopify"/, "catalog action must use 
 assert.match(catalogSource, /label: "Review Shopify drafts"/, "catalog actions must expose a safe incomplete-product draft review");
 assert.match(catalogSource, /label: "Create Shopify drafts"/, "catalog actions must expose unpublished Shopify draft creation");
 assert.match(catalogSource, /allowDraftIncomplete \}/, "catalog draft actions must pass the incomplete-draft scope to the worker");
+const draftReadinessStart = serverSource.indexOf("function shopifyProductCreateDraftMinimumReadiness");
+const draftReadinessEnd = serverSource.indexOf("\nfunction shopifyProductCreatePayload", draftReadinessStart);
+const draftReadinessSource = serverSource.slice(draftReadinessStart, draftReadinessEnd);
+assert.ok(draftReadinessStart >= 0 && draftReadinessEnd > draftReadinessStart, "draft readiness helper must exist");
+assert.doesNotMatch(draftReadinessSource, /channelShippingRestriction/, "unpublished Shopify drafts must not be blocked by live shipping readiness");
 for (const [name, next] of [["writeStateDocuments", "registerDatadumpSuppliers"], ["upsertShopifyStatusMap", "replaceProductQualityRows"]]) {
   const transactionSource = dbSource.slice(dbSource.indexOf(`async function ${name}`), dbSource.indexOf(`async function ${next}`, dbSource.indexOf(`async function ${name}`)));
   assert.match(transactionSource, /const client = await pool\.connect\(\)/, `${name} must reserve one PostgreSQL client for its transaction`);

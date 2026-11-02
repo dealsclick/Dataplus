@@ -23153,8 +23153,6 @@ function shopifyProductCreateDraftMinimumReadiness(db, item = {}) {
   if (productChannelInactive(item, 'shopify')) missing.push("Inactive on Shopify");
   const retirementReason = retirementLaunchReason(item, db?.vendors || []);
   if (retirementReason) missing.push(retirementReason);
-  const restriction = channelShippingRestriction(item, findChannelByName(db, "Shopify")?.settings || {}, "launch");
-  if (restriction.blocked) missing.push(`Shipping: ${restriction.reason}`);
   if (!sourceTextValue(item.sku)) missing.push("SKU");
   if (!sourceTextValue(shopifyExportTitle(item))) missing.push("Title");
   if (!(price > 0)) missing.push("Price");
