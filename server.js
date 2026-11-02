@@ -33823,7 +33823,12 @@ function projectFulfillmentConsoleSnapshot(snapshot = {}, view = "") {
           orderId: row.orderId,
           orderNumber: row.orderNumber,
           customer: row.customer,
-          skus: Array.isArray(row.skus) ? row.skus : []
+          skus: Array.isArray(row.skus) ? row.skus : [],
+          salesOrigin: row.salesOrigin || "",
+          isEbayLive: row.isEbayLive === true || String(row.salesOrigin || "").toLowerCase() === "ebay_live",
+          shipmentGroupId: row.shipmentGroupId || "",
+          shipmentGroupOrderIds: Array.isArray(row.shipmentGroupOrderIds) ? row.shipmentGroupOrderIds : [],
+          sharedLabel: row.sharedLabel === true
         }))
       };
     });

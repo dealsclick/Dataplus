@@ -64,6 +64,7 @@ assert.match(appSource, /Order number[\s\S]*Customer name[\s\S]*SKU[\s\S]*Create
 assert.match(appSource, /BatchOrderTypeIndicators[\s\S]*Contains combined orders[\s\S]*Contains eBay Live orders/, "print batches must identify combined and eBay Live orders")
 assert.match(serverSource, /shipment-group-candidates[\s\S]*const primary = \{[\s\S]*skus: displaySkus\(order\)[\s\S]*primary, candidates/, "shipment-group candidates must include parent and candidate SKUs")
 assert.match(serverSource, /shipmentGroupId: shipment\.shipmentGroupId \|\| order\.shipmentGroupId/, "purchased shipment projections must retain combined-order identity")
+assert.match(serverSource, /rows: rows\.map\([\s\S]*?salesOrigin: row\.salesOrigin[\s\S]*?isEbayLive: row\.isEbayLive[\s\S]*?shipmentGroupId: row\.shipmentGroupId[\s\S]*?shipmentGroupOrderIds:/, "published batch summaries must retain combined and eBay Live identity")
 assert.match(dbSource, /'shipmentGroupId', coalesce\([\s\S]*?batch_rows\.row_payload->'shipmentGroupId'[\s\S]*?orders\.raw->'shipmentGroupId'/, "batch projections must retain combined-order identity")
 assert.match(dbSource, /'isEbayLive', to_jsonb\([\s\S]*?ebay_live/, "batch projections must retain eBay Live identity")
 assert.match(serverSource, /completePrintedPurchasedShipment\(db, order, shipment, actor, printedAt\)[\s\S]*syncDropshipShipmentToChannel/, "printing must complete local fulfillment before marketplace tracking sync")
