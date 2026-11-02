@@ -128,14 +128,16 @@ test("one shared label produces one packing slip containing every grouped order"
   const buffer = await buildPrintPreview([{
     orderId: "ORDER-88353",
     orderNumber: "88353",
-    orderNumbers: ["88353", "88328"],
-    channelOrderIds: ["EBAY-88353", "EBAY-88328"],
+    orderNumbers: ["88353", "88328", "88338", "88341"],
+    channelOrderIds: ["EBAY-88353", "EBAY-88328", "EBAY-88338", "EBAY-88341"],
     address: { name: "Combined Buyer", line1: "1 Main St", city: "Los Angeles", state: "CA", postalCode: "90044" },
     lines: [
       { orderId: "ORDER-88353", orderNumber: "88353", sku: "SKU-A", title: "First order item", qty: 1 },
-      { orderId: "ORDER-88328", orderNumber: "88328", sku: "SKU-B", title: "Second order item", qty: 1 }
+      { orderId: "ORDER-88328", orderNumber: "88328", sku: "SKU-B", title: "Second order item", qty: 1 },
+      { orderId: "ORDER-88338", orderNumber: "88338", sku: "SKU-C", title: "Third order item", qty: 1 },
+      { orderId: "ORDER-88341", orderNumber: "88341", sku: "SKU-D", title: "Fourth order item", qty: 1 }
     ]
   }], { size: "4x6", includePackingSlips: true, packingSlipOrientation: "portrait" });
   const pdf = await PDFDocument.load(buffer);
-  assert.equal(pdf.getPageCount(), 2);
+  assert.equal(pdf.getPageCount(), 3);
 });
