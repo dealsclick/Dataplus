@@ -38,6 +38,7 @@ const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "u
 const dbSource = fs.readFileSync(path.join(__dirname, "..", "db.js"), "utf8");
 const ordersSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "components", "orders-route.tsx"), "utf8");
 const orderDetailSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "components", "order-detail-route.tsx"), "utf8");
+const fulfillmentSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "components", "fulfillment-route.tsx"), "utf8");
 const liveMarkSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "components", "ebay-live-mark.tsx"), "utf8");
 assert.match(serverSource, /salesOrigin: isEbayLive \? "ebay_live" : "ebay"/);
 assert.match(serverSource, /inventoryOrigin: "ebay_live_committed_stock"/);
@@ -65,5 +66,11 @@ assert.match(ordersSource, /isEbayLiveOrder\(row\) && <EbayLiveMark/);
 assert.match(orderDetailSource, /Live event ID/);
 assert.match(orderDetailSource, /Sales channel: eBay/);
 assert.match(liveMarkSource, /EBAY_LIVE_FILTER_VALUE = "ebay_live"/);
+assert.match(fulfillmentSource, /<SelectItem value="ebay_live">eBay Live orders<\/SelectItem>/);
+assert.match(fulfillmentSource, /params\.set\("salesType", salesTypeFilter\)/);
+assert.match(fulfillmentSource, /matchesFulfillmentSalesType\(row, salesTypeFilter\)/);
+assert.match(serverSource, /salesType: url\.searchParams\.get\("salesType"\) \|\| "all"/);
+assert.match(serverSource, /FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 7/);
+assert.match(dbSource, /options\.salesType === "ebay_live" \? ebayLiveExpression/);
 
 console.log("eBay Live order tests passed.");

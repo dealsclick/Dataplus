@@ -4678,6 +4678,10 @@ async function readFulfillmentConsoleProjectionPage(viewKey, options = {}) {
   else if (query) filters.push(`lower(data::text) like ${bind(`%${query}%`)}`);
   const hiddenChannels = [...new Set((options.hiddenChannels || []).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))];
   if (hiddenChannels.length) filters.push(`lower(coalesce(data->>'channel', 'unassigned')) <> all(${bind(hiddenChannels)}::text[])`);
+  if (options.salesType && options.salesType !== "all") {
+    const ebayLiveExpression = `(lower(coalesce(data->>'isEbayLive', 'false')) = 'true' or lower(coalesce(data->>'salesOrigin', '')) = 'ebay_live')`;
+    filters.push(options.salesType === "ebay_live" ? ebayLiveExpression : `not ${ebayLiveExpression}`);
+  }
   if (options.allocation && options.allocation !== "all") filters.push(`coalesce(data->>'allocationStatus', 'unallocated') = ${bind(String(options.allocation))}`);
   if (options.consolidation === "candidates") filters.push(`coalesce(nullif(data->'shipmentConsolidation'->>'candidateCount', '')::int, 0) > 0`);
   if (options.consolidation === "grouped") filters.push(`coalesce(data->>'shipmentGroupId', '') <> ''`);

@@ -19,6 +19,6 @@ assert.match(app, /Number\(row\.labelPrintCount \|\| 0\) > 0 \|\| Boolean\(row\.
 
 assert.match(server, /const shipmentSupplierNames = \(order, shipmentLines = \[\]\) =>/, "the fulfillment snapshot must resolve shipment suppliers");
 assert.match(server, /supplierNames,\s*\n\s*supplierName: supplierNames\.join\(", "\)/, "shipment rows must expose supplier names to the filter bar");
-assert.match(server, /FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 3/, "the supplier projection must invalidate older stored snapshots");
+assert.match(server, /FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 7/, "the fulfillment projection must invalidate older stored snapshots");
 
 console.log("PASS Purchased labels exposes counted local filters and supplier provenance");

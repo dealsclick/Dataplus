@@ -31731,6 +31731,8 @@ function fulfillmentShipmentHistoryFallbackRows(orders = [], routedRows = [], pr
           orderDate: order.orderDate || order.orderedAt || order.placedAt || order.createdAt || "",
           customer: order.buyer || order.customerName || order.customer?.name || address.name || "",
           channel: order.channelSource || order.source || order.channel || "",
+          salesOrigin: order.salesOrigin || order.external?.salesOrigin || "",
+          isEbayLive: order.isEbayLive === true || order.ebayLive?.isLive === true || order.external?.isEbayLive === true,
           shipBy: order.shipBy || "",
           shipDeadline: order.shipDeadline || order.shipWithinDeadline || order.fulfillBy || order.requiredShipDate || order.shipBy || "",
           channelOrderLabels: Array.isArray(order.channelOrderLabels) ? order.channelOrderLabels : [],
@@ -32371,7 +32373,7 @@ let fulfillmentConsoleProjectionReconciliationPromise = null;
 const fulfillmentConsoleProjectionPendingOrderIds = new Set();
 const FULFILLMENT_CONSOLE_SNAPSHOT_MAX_AGE_MS = 30 * 60_000;
 const FULFILLMENT_CONSOLE_SNAPSHOT_DIRTY_COOLDOWN_MS = 30_000;
-const FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 6;
+const FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 7;
 const SYSTEM_PERFORMANCE_RETENTION_MS = 60 * 60_000;
 const SYSTEM_PERFORMANCE_MAX_SERVER_SAMPLES = 600;
 const SYSTEM_PERFORMANCE_MAX_CLIENT_SAMPLES = 300;
@@ -33427,6 +33429,8 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
       vergeOfLateShipment: order.vergeOfLateShipment === true,
       customer: order.buyer || order.customerName || "",
       channel: order.channelSource || order.source || "",
+      salesOrigin: order.salesOrigin || order.external?.salesOrigin || "",
+      isEbayLive: order.isEbayLive === true || order.ebayLive?.isLive === true || order.external?.isEbayLive === true,
       channelSync: {
         status: shipment.channelSync?.status || "",
         channel: shipment.channelSync?.channel || order.channelSource || order.source || "",
@@ -33505,6 +33509,8 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
         vergeOfLateShipment: order.vergeOfLateShipment === true,
         customer: order.buyer || order.customerName || row.customer || "",
         channel: order.channelSource || order.source || row.channel || "",
+        salesOrigin: order.salesOrigin || order.external?.salesOrigin || "",
+        isEbayLive: order.isEbayLive === true || order.ebayLive?.isLive === true || order.external?.isEbayLive === true,
         channelSync: {
           status: "pending",
           channel: order.channelSource || order.source || row.channel || "",
@@ -33602,7 +33608,10 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
         shipBy: entry.shipBy || order?.shipBy || "",
         shipDeadline: entry.shipDeadline || order?.shipDeadline || order?.shipWithinDeadline || order?.fulfillBy || order?.requiredShipDate || order?.shipBy || "",
         channelOrderLabels: Array.isArray(entry.channelOrderLabels) ? entry.channelOrderLabels : Array.isArray(order?.channelOrderLabels) ? order.channelOrderLabels : [],
-        vergeOfLateShipment: entry.vergeOfLateShipment === true || order?.vergeOfLateShipment === true
+        vergeOfLateShipment: entry.vergeOfLateShipment === true || order?.vergeOfLateShipment === true,
+        channel: entry.channel || entry.source || order?.channelSource || order?.source || order?.channel || "",
+        salesOrigin: entry.salesOrigin || order?.salesOrigin || order?.external?.salesOrigin || "",
+        isEbayLive: entry.isEbayLive === true || order?.isEbayLive === true || order?.ebayLive?.isLive === true || order?.external?.isEbayLive === true
       };
     });
   const doNotShip = orders.map((order) => {
@@ -33625,6 +33634,8 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
       orderId: order.id,
       orderNumber: order.orderNumber || order.id,
       channel: order.source || order.channel || order.channelSource || "Unassigned",
+      salesOrigin: order.salesOrigin || order.external?.salesOrigin || "",
+      isEbayLive: order.isEbayLive === true || order.ebayLive?.isLive === true || order.external?.isEbayLive === true,
       channelOrderNumber: order.marketplaceOrderNumber || order.channelOrderNumber || order.externalOrderNumber || "",
       customer: order.buyer || order.customerName || order.customer?.name || order.address?.name || "Customer",
       status: order.status || order.fulfillmentStatus || "",
@@ -53868,6 +53879,7 @@ async function handleApi(req, res) {
         deadline: url.searchParams.get("deadline") || "all",
         sort: url.searchParams.get("sort") || "",
         hiddenChannels: url.searchParams.getAll("hiddenChannel"),
+        salesType: url.searchParams.get("salesType") || "all",
         skus: url.searchParams.getAll("sku"),
         kind: url.searchParams.get("kind") || "all",
         printStatus: url.searchParams.get("printStatus") || "all",

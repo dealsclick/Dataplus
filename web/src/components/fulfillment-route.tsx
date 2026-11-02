@@ -221,6 +221,12 @@ function fulfillmentChannelSyncState(row: Record<string, any>) {
   return "pending"
 }
 
+function matchesFulfillmentSalesType(row: Record<string, any>, salesType: string) {
+  if (salesType === "all") return true
+  const isEbayLive = row.isEbayLive === true || fulfillmentFilterValue(row.salesOrigin) === "ebay_live"
+  return salesType === "ebay_live" ? isEbayLive : !isEbayLive
+}
+
 function fulfillmentCountedFilterOptions(rows: Array<Record<string, any>>, valuesForRow: (row: Record<string, any>) => string[]) {
   const options = new Map<string, FulfillmentCountedFilterOption>()
   for (const row of rows) {
@@ -312,7 +318,7 @@ function FulfillmentShipmentTable({ rows, onPrint, onRefresh, emptyMessage }: { 
       <TableCell className="font-mono text-xs">{row.trackingUrl ? <a className="text-primary hover:underline" href={String(row.trackingUrl)} target="_blank" rel="noreferrer">{String(row.trackingNumber || "Open tracking")}</a> : String(row.trackingNumber || "Pending")}</TableCell>
       <TableCell><div className="flex min-w-40 items-center gap-2">{row.productImage ? <img src={String(row.productImage)} alt="" className="size-9 rounded border bg-background object-contain" /> : <span className="grid size-9 shrink-0 place-items-center rounded border bg-muted"><Package className="size-4 text-muted-foreground" /></span>}<span className="font-mono text-xs">{Array.isArray(row.skus) && row.skus.length ? row.skus.join(", ") : "-"}</span></div></TableCell>
       <TableCell><p className="max-w-44 truncate whitespace-nowrap font-medium" title={[city, state].filter(Boolean).join(", ")}>{[city, state].filter(Boolean).join(", ")}</p></TableCell>
-      <TableCell>{String(row.channel || "-")}</TableCell>
+      <TableCell><div className="flex flex-wrap gap-1"><span>{String(row.channel || "-")}</span>{matchesFulfillmentSalesType(row, "ebay_live") ? <Badge className="bg-pink-600 text-white hover:bg-pink-600">eBay Live</Badge> : null}</div></TableCell>
       <TableCell><FulfillmentChannelShipmentStatus row={row} /></TableCell>
       <TableCell><p className="max-w-64 truncate whitespace-nowrap text-xs" title={`${carrier} | ${service} | ${labelSource}`}><span className="font-semibold text-foreground">{carrier}</span><span className="px-1.5 text-muted-foreground">|</span>{service}<span className="px-1.5 text-muted-foreground">|</span><span className="font-medium text-foreground">{labelSource}</span></p></TableCell>
       <TableCell><FulfillmentShipBy row={row} /></TableCell>
@@ -672,6 +678,7 @@ export function FulfillmentPage() {
   const [hiddenChannels, setHiddenChannels] = useState<Set<string>>(new Set())
   const [allocationFilter, setAllocationFilter] = useState("all")
   const [deadlineFilter, setDeadlineFilter] = useState("all")
+  const [salesTypeFilter, setSalesTypeFilter] = useState("all")
   const [consolidationFilter, setConsolidationFilter] = useState("all")
   const [selectedSkuFilters, setSelectedSkuFilters] = useState<Set<string>>(new Set())
   const [selectedRouteIds, setSelectedRouteIds] = useState<Set<string>>(new Set())
@@ -839,7 +846,7 @@ export function FulfillmentPage() {
   }
   const unprintedPurchasedLabelCount = Number(consoleCounts.unprintedPurchasedLabels ?? purchasedLabelQueue.filter((row) => !fulfillmentShipmentPrinted(row)).length)
   const displayedPurchasedLabels = purchasedLabelQueue.filter((row) => {
-    if (!matchesFulfillmentDeadlineFilter(row, deadlineFilter) || !matchesFulfillmentSearch(row, query)) return false
+    if (!matchesFulfillmentSalesType(row, salesTypeFilter) || !matchesFulfillmentDeadlineFilter(row, deadlineFilter) || !matchesFulfillmentSearch(row, query)) return false
     const printed = fulfillmentShipmentPrinted(row)
     if (purchasedLabelFilter === "printed" && !printed) return false
     if (purchasedLabelFilter === "unprinted" && printed) return false
@@ -913,15 +920,15 @@ export function FulfillmentPage() {
   }, [allBatches, printQueue, shipments])
   const filteredBatchPickerEntries = batchPickerEntries.filter((job) => job.searchText.includes(printBatchSearch.trim().toLowerCase()))
   const shippedQueue = activeShipments.filter((row) => ["in_transit", "delivered"].includes(String(row.trackingStatus || "").toLowerCase()))
-  const displayedShippedQueue = shippedQueue.filter((row) => matchesFulfillmentDeadlineFilter(row, deadlineFilter) && matchesFulfillmentSearch(row, query))
+  const displayedShippedQueue = shippedQueue.filter((row) => matchesFulfillmentSalesType(row, salesTypeFilter) && matchesFulfillmentDeadlineFilter(row, deadlineFilter) && matchesFulfillmentSearch(row, query))
   const doNotShipQueue = Array.isArray(data.doNotShip) ? data.doNotShip as Array<Record<string, any>> : []
   const displayedDoNotShipQueue = doNotShipQueue.filter((row) => {
-    if (!matchesFulfillmentDeadlineFilter(row, deadlineFilter)) return false
+    if (!matchesFulfillmentSalesType(row, salesTypeFilter) || !matchesFulfillmentDeadlineFilter(row, deadlineFilter)) return false
     if (doNotShipFilter !== "all" && String(row.kind || "") !== doNotShipFilter) return false
     return matchesFulfillmentSearch(row, query)
   })
   const exceptions = Array.isArray(data.exceptions) ? data.exceptions as Array<Record<string, any>> : []
-  const displayedExceptions = exceptions.filter((row) => matchesFulfillmentDeadlineFilter(row, deadlineFilter) && matchesFulfillmentSearch(row, query))
+  const displayedExceptions = exceptions.filter((row) => matchesFulfillmentSalesType(row, salesTypeFilter) && matchesFulfillmentDeadlineFilter(row, deadlineFilter) && matchesFulfillmentSearch(row, query))
   const trackingRefresh = data.trackingRefresh && typeof data.trackingRefresh === "object" ? data.trackingRefresh as Record<string, any> : null
   const trackingFailureCount = Number(consoleCounts.trackingFailures ?? exceptions.filter((row) => row.type === "tracking").length)
   const carrierScanActive = ["queued", "running"].includes(String(carrierScanJob?.status || "").toLowerCase())
@@ -945,6 +952,7 @@ export function FulfillmentPage() {
         params.set("pageSize", String(workPageSize))
         params.set("q", query)
         params.set("deadline", deadlineFilter)
+        params.set("salesType", salesTypeFilter)
         if (["ready", "all-shipments"].includes(requestedView)) {
           params.set("status", status)
           params.set("allocation", allocationFilter)
@@ -971,7 +979,7 @@ export function FulfillmentPage() {
       const defaultReadyFilters = status === "all" && allocationFilter === "all" && consolidationFilter === "all" && workSort === "order_date_asc" && hiddenChannels.size === 0 && selectedSkuFilters.size === 0
       const defaultPurchasedFilters = !purchasedFiltersActive
       const defaultDoNotShipFilters = doNotShipFilter === "all"
-      const cacheable = workPage === 1 && !query.trim() && deadlineFilter === "all"
+      const cacheable = workPage === 1 && !query.trim() && deadlineFilter === "all" && salesTypeFilter === "all"
         && (!["ready", "all-shipments"].includes(requestedView) || defaultReadyFilters)
         && (requestedView !== "purchased-labels" || defaultPurchasedFilters)
         && (requestedView !== "do-not-ship" || defaultDoNotShipFilters)
@@ -1118,7 +1126,7 @@ export function FulfillmentPage() {
     const cachedView = readWorkspaceCache<Record<string, any>>(`fulfillment:console:${tab}`)
     if (cachedView && workPage === 1) setData((current) => ({ ...current, ...cachedView }))
     void load(false, Boolean(cachedView && workPage === 1), tab)
-  }, [tab, workPage, workPageSize, status, query, workSort, allocationFilter, consolidationFilter, deadlineFilter, hiddenChannels, selectedSkuFilters, purchasedLabelFilter, purchasedCarrierFilter, purchasedSupplierFilter, purchasedSkuFilter, purchasedChannelFilter, purchasedLabelSourceFilter, purchasedChannelSyncFilter, doNotShipFilter])
+  }, [tab, workPage, workPageSize, status, query, workSort, allocationFilter, consolidationFilter, deadlineFilter, salesTypeFilter, hiddenChannels, selectedSkuFilters, purchasedLabelFilter, purchasedCarrierFilter, purchasedSupplierFilter, purchasedSkuFilter, purchasedChannelFilter, purchasedLabelSourceFilter, purchasedChannelSyncFilter, doNotShipFilter])
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") void load(false, true, tab)
@@ -1337,6 +1345,7 @@ export function FulfillmentPage() {
   const lateShipmentCount = rows.filter((row) => matchesFulfillmentStage(row, "late")).length
   const baseFilteredWork = rows.filter((row) =>
     matchesFulfillmentStage(row, status) &&
+    matchesFulfillmentSalesType(row, salesTypeFilter) &&
     !hiddenChannels.has(String(row.channel || "Unassigned").trim() || "Unassigned") &&
     (allocationFilter === "all" || String(row.allocationStatus || "unallocated") === allocationFilter) &&
     (consolidationFilter === "all" || (consolidationFilter === "candidates" ? Number(row.shipmentConsolidation?.candidateCount || 0) > 0 : Boolean(row.shipmentGroupId))) &&
@@ -1406,7 +1415,7 @@ export function FulfillmentPage() {
   const skuFilterGroups: FulfillmentSkuGroup[] = (fulfillmentFacets.sku || []).length
     ? fulfillmentFacets.sku.map((option) => ({ sku: option.label, image: "", title: option.label, brand: "", supplier: "", routeIds: [], orderCount: option.count, allocatedOrderCount: 0 }))
     : skuGroups
-  useEffect(() => { setWorkPage(1) }, [tab, status, query, workPageSize, workSort, allocationFilter, consolidationFilter, deadlineFilter, hiddenChannels, selectedSkuFilters, purchasedLabelFilter, purchasedCarrierFilter, purchasedSupplierFilter, purchasedSkuFilter, purchasedChannelFilter, purchasedLabelSourceFilter, purchasedChannelSyncFilter, doNotShipFilter])
+  useEffect(() => { setWorkPage(1) }, [tab, status, query, workPageSize, workSort, allocationFilter, consolidationFilter, deadlineFilter, salesTypeFilter, hiddenChannels, selectedSkuFilters, purchasedLabelFilter, purchasedCarrierFilter, purchasedSupplierFilter, purchasedSkuFilter, purchasedChannelFilter, purchasedLabelSourceFilter, purchasedChannelSyncFilter, doNotShipFilter])
   useEffect(() => { if (workPage > activeQueuePageCount) setWorkPage(activeQueuePageCount) }, [workPage, activeQueuePageCount])
   const readinessFor = (row: Record<string, unknown>) => (row.labelReadiness || {}) as Record<string, unknown>
   const showWorkColumn = (id: string) => visibleWorkColumns.has(id)
@@ -2449,7 +2458,19 @@ export function FulfillmentPage() {
           </div>
           <Button type="submit" size="sm"><Search className="size-4" /> Search</Button>
         </form>}
-        {["ready", "all-shipments", "do-not-ship", "purchased-labels", "shipments", "exceptions"].includes(tab) && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border bg-card px-3 py-2"><div><p className="text-sm font-medium">Ship deadline</p><p className="text-xs text-muted-foreground">The same urgency filter applies across every fulfillment queue.</p></div><Select value={deadlineFilter} onValueChange={setDeadlineFilter}><SelectTrigger className="h-8 w-full sm:w-64"><Clock3 className="size-4" /><SelectValue /></SelectTrigger><SelectContent><SelectItem value="all">All ship deadlines</SelectItem><SelectItem value="at_risk">Late or verge of late shipment</SelectItem><SelectItem value="late">Late orders</SelectItem><SelectItem value="due_soon">Verge of late shipment</SelectItem><SelectItem value="on_time">On time</SelectItem></SelectContent></Select></div>}
+        {["ready", "all-shipments", "do-not-ship", "purchased-labels", "shipments", "exceptions"].includes(tab) && <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-card px-3 py-2">
+          <div><p className="text-sm font-medium">Queue filters</p><p className="text-xs text-muted-foreground">Filter every fulfillment queue by order type and shipping urgency.</p></div>
+          <div className="flex w-full flex-wrap gap-2 sm:w-auto">
+            <Select value={salesTypeFilter} onValueChange={setSalesTypeFilter}>
+              <SelectTrigger className="h-8 w-full sm:w-44"><Filter className="size-4" /><SelectValue /></SelectTrigger>
+              <SelectContent><SelectItem value="all">All orders</SelectItem><SelectItem value="ebay_live">eBay Live orders</SelectItem><SelectItem value="standard">Standard orders</SelectItem></SelectContent>
+            </Select>
+            <Select value={deadlineFilter} onValueChange={setDeadlineFilter}>
+              <SelectTrigger className="h-8 w-full sm:w-64"><Clock3 className="size-4" /><SelectValue /></SelectTrigger>
+              <SelectContent><SelectItem value="all">All ship deadlines</SelectItem><SelectItem value="at_risk">Late or verge of late shipment</SelectItem><SelectItem value="late">Late orders</SelectItem><SelectItem value="due_soon">Verge of late shipment</SelectItem><SelectItem value="on_time">On time</SelectItem></SelectContent>
+            </Select>
+          </div>
+        </div>}
         {["ready", "all-shipments"].includes(tab) && <div className="mt-4 grid gap-4">
           {tab === "ready" && <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{stages.map((stage) => <Button key={stage} size="sm" variant={status === stage ? "secondary" : "ghost"} className="shrink-0" onClick={() => { setStatus(stage); if (stage === "late") setDeadlineFilter("late"); else if (deadlineFilter === "late") setDeadlineFilter("all") }}>{stage === "all" ? "Pending shipment" : stage === "late" ? "Late shipments" : stage === "label_ready" ? "Label ready" : stage.replace(/_/g, " ")} <Badge variant={stage === "late" ? "destructive" : "outline"} className="ml-1">{numberLabel(stage === "all" ? rows.length : stage === "late" ? lateShipmentCount : rows.filter((row) => row.status === stage).length)}</Badge></Button>)}</div>}
           <Card className={cn(tab === "all-shipments" ? "[&_th:first-child]:hidden [&_td:first-child]:hidden [&_th:last-child]:hidden [&_td:last-child]:hidden" : undefined, "[&>*:nth-child(3)]:hidden")}>
