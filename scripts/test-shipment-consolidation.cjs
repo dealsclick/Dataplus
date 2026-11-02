@@ -49,15 +49,18 @@ assert.deepEqual(index.get("second").candidates.map((candidate) => candidate.ord
 
 assert.equal(shipmentConsolidationPair(first, order({ id: "wrong-unit", address: { ...first.address, line2: "Apt 3" } })).eligible, false);
 assert.equal(shipmentConsolidationPair(first, order({ id: "wrong-warehouse", fulfillmentRoutes: [{ type: "warehouse", status: "allocated", warehouseId: "warehouse-3" }] })).eligible, false);
-assert.equal(shipmentConsolidationPair(first, order({ id: "too-late", orderDate: "2026-10-10T03:00:01.000Z" })).eligible, false);
+const olderCompatibleOrder = order({ id: "older-compatible", orderDate: "2026-09-10T03:00:01.000Z" });
+const olderPair = shipmentConsolidationPair(first, olderCompatibleOrder);
+assert.equal(olderPair.eligible, true, "compatible orders should not expire from shipment consolidation");
+assert.equal(olderPair.matchSource, "customer_address_warehouse");
 const liveWindow = { isLive: true, combineShippingWindows: [{ windowId: "live-window-1", status: "CLOSED", endDate: "2026-10-12T04:00:00.000Z" }] };
 const liveFirst = order({ id: "live-first", source: "eBay", isEbayLive: true, salesOrigin: "ebay_live", ebayLive: liveWindow });
 const liveSecond = order({ id: "live-second", source: "eBay", isEbayLive: true, salesOrigin: "ebay_live", ebayLive: liveWindow, orderDate: "2026-10-11T03:00:01.000Z" });
 const livePair = shipmentConsolidationPair(liveFirst, liveSecond);
-assert.equal(livePair.eligible, true, "matching eBay Live combine-shipping windows should remain eligible outside the normal time window");
+assert.equal(livePair.eligible, true, "matching eBay Live combine-shipping windows should remain eligible regardless of order age");
 assert.equal(livePair.matchSource, "ebay_live_shipping_window");
 assert.equal(livePair.ebayLiveShippingWindowId, "live-window-1");
-assert.equal(shipmentConsolidationPair(liveFirst, order({ ...liveSecond, id: "other-live-window", ebayLive: { isLive: true, combineShippingWindows: [{ windowId: "live-window-2" }] } })).eligible, false, "different eBay Live windows must not bypass the normal time limit");
+assert.equal(shipmentConsolidationPair(liveFirst, order({ ...liveSecond, id: "other-live-window", ebayLive: { isLive: true, combineShippingWindows: [{ windowId: "live-window-2" }] } })).eligible, true, "eBay Live window IDs must not impose a shipment age limit");
 assert.equal(shipmentConsolidationEligibility(order({ operationalStatus: "picked" })).eligible, false);
 assert.equal(shipmentConsolidationEligibility(order({ fulfillmentRoutes: [{ type: "drop_ship", status: "open", warehouseId: "vendor" }] })).eligible, false);
 

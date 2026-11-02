@@ -32915,9 +32915,28 @@ function shipmentGroupMemberIds(order = {}, shipment = {}) {
 }
 
 async function loadPurchasedShipmentGroup(masterOrder = {}, masterShipment = {}) {
-  const groupId = String(masterShipment.shipmentGroupId || masterOrder.shipmentGroupId || "").trim();
-  const memberIds = shipmentGroupMemberIds(masterOrder, masterShipment);
+  let groupId = String(masterShipment.shipmentGroupId || masterOrder.shipmentGroupId || "").trim();
+  let memberIds = shipmentGroupMemberIds(masterOrder, masterShipment);
+  if (masterOrder.id) {
+    const persistedOrder = await postgres.readOrderByKey(masterOrder.id).catch(() => null);
+    const persistedGroupId = String(persistedOrder?.shipmentGroupId || "").trim();
+    const persistedMemberIds = shipmentGroupMemberIds(persistedOrder || {}, masterShipment);
+    if (persistedGroupId && persistedMemberIds.length > 1) {
+      for (const key of [
+        "shipmentGroupId", "shipmentGroupOrderIds", "shipmentGroupWarehouseId",
+        "shipmentGroupPackageReviewRequired", "shipmentGroupCombinedWeight",
+        "shipmentGroupCombinedVolume", "shipmentGroupCartonizationPreview",
+        "shipmentGroupCartonizationUpdatedAt", "shipmentGroupPackage", "shipmentGroupMatchSource"
+      ]) {
+        if (persistedOrder[key] !== undefined) masterOrder[key] = persistedOrder[key];
+      }
+      groupId = persistedGroupId;
+      memberIds = persistedMemberIds;
+    }
+  }
   if (!groupId || memberIds.length < 2 || !masterShipment.id) return { groupId: "", orders: [masterOrder] };
+  masterShipment.shipmentGroupId = groupId;
+  masterShipment.groupOrderIds = memberIds;
   const loadedOrders = await postgres.readOrdersByIds(memberIds);
   const orderById = new Map(loadedOrders
     .filter((candidate) => String(candidate.shipmentGroupId || "").trim() === groupId)
@@ -58900,14 +58919,9 @@ async function handleApi(req, res) {
     if (protectedShipmentConsolidationOrderIds(currentBatches).has(String(order.id || ""))) return sendJson(res, 200, { orderId: order.id, eligible: false, reason: "A label purchase is already active or recorded for this order.", candidates: [] });
     const eligibility = shipmentGroupEligibility(order, { windowHours: settings.shipmentConsolidationWindowHours });
     if (!eligibility.eligible) return sendJson(res, 200, { orderId: order.id, eligible: false, reason: eligibility.reason, candidates: [] });
-    const windowHours = Math.max(1, Number(settings.shipmentConsolidationWindowHours || 24) || 24);
     const liveWindow = shipmentConsolidation.ebayLiveShippingWindow(order);
-    const candidateWindowHours = liveWindow.isLive && liveWindow.windowId ? Math.max(windowHours, 168) : windowHours;
-    const primaryTimestamp = Date.parse(String(order.orderDate || order.orderedAt || order.placedAt || order.createdAt || ""));
-    const windowMs = candidateWindowHours * 60 * 60 * 1000;
-    const dateFrom = new Date(primaryTimestamp - windowMs).toISOString().slice(0, 10);
-    const dateTo = new Date(primaryTimestamp + windowMs).toISOString().slice(0, 10);
-    const nearbyOrders = await postgres.listOrders({ limit: 5000, summary: true, dateFrom, dateTo });
+    const candidateIdentity = String(order.customerId || order.external?.customerId || order.external?.accountId || order.external?.buyerId || order.buyer || "").trim();
+    const nearbyOrders = await postgres.listOrders({ limit: 5000, summary: true, q: candidateIdentity, openWorkOnly: true });
     const groupedOrderIds = [...new Set((Array.isArray(order.shipmentGroupOrderIds) ? order.shipmentGroupOrderIds : []).map(String).filter((id) => id && id !== String(order.id || "")))];
     const groupedOrders = groupedOrderIds.length ? await postgres.readOrdersByIds(groupedOrderIds) : [];
     const orders = [...new Map([...(nearbyOrders || []), ...(groupedOrders || [])].map((candidate) => [String(candidate.id || candidate.orderId || ""), candidate])).values()];
@@ -58921,9 +58935,9 @@ async function handleApi(req, res) {
     }).slice(0, 25).map((candidate) => {
       const candidateEligibility = shipmentGroupEligibility(candidate, { windowHours: settings.shipmentConsolidationWindowHours });
       const pair = shipmentConsolidation.shipmentConsolidationPair(order, candidate, { windowHours: settings.shipmentConsolidationWindowHours });
-      return { id: candidate.id, orderNumber: candidate.orderNumber, status: candidate.status, fulfillmentStatus: candidate.fulfillmentStatus || "", total: candidate.total, buyer: candidate.buyer, address: candidate.address || {}, createdAt: candidate.orderDate || candidate.createdAt, shipmentGroupId: candidate.shipmentGroupId || "", warehouseId: candidateEligibility.warehouseId || "", identitySource: pair.identitySource || "recipient_address", matchSource: pair.matchSource || "dataplus_window", ebayLiveShippingWindowId: pair.ebayLiveShippingWindowId || "", isEbayLive: candidate.isEbayLive === true || candidate.salesOrigin === "ebay_live", matchReasons: [pair.sameGroup ? "same_group" : "", pair.matchSource === "ebay_live_shipping_window" ? "ebay_live_shipping_window" : "within_window", "same_customer", "same_address", "same_warehouse"].filter(Boolean) };
+      return { id: candidate.id, orderNumber: candidate.orderNumber, status: candidate.status, fulfillmentStatus: candidate.fulfillmentStatus || "", total: candidate.total, buyer: candidate.buyer, address: candidate.address || {}, createdAt: candidate.orderDate || candidate.createdAt, shipmentGroupId: candidate.shipmentGroupId || "", warehouseId: candidateEligibility.warehouseId || "", identitySource: pair.identitySource || "recipient_address", matchSource: pair.matchSource || "customer_address_warehouse", ebayLiveShippingWindowId: pair.ebayLiveShippingWindowId || "", isEbayLive: candidate.isEbayLive === true || candidate.salesOrigin === "ebay_live", matchReasons: [pair.sameGroup ? "same_group" : "", pair.matchSource === "ebay_live_shipping_window" ? "ebay_live_shipping_window" : "", "same_customer", "same_address", "same_warehouse"].filter(Boolean) };
     });
-    return sendJson(res, 200, { orderId: order.id, eligible: true, warehouseId: eligibility.warehouseId, windowHours: settings.shipmentConsolidationWindowHours, ebayLive: liveWindow, candidates });
+    return sendJson(res, 200, { orderId: order.id, eligible: true, warehouseId: eligibility.warehouseId, timeLimitEnforced: false, ebayLive: liveWindow, candidates });
   }
 
   if (["GET", "POST"].includes(req.method) && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipping-label-readiness" && postgres.isPostgresEnabled()) {
