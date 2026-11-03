@@ -10,7 +10,7 @@ assert.match(appSource, /function fulfillmentRateIsCurrent[\s\S]*validUntil === 
 assert.match(appSource, /rate\.quotedAt \|\| review\?\.ratedAt \|\| review\?\.attemptedAt[\s\S]*FULFILLMENT_SAVED_RATE_TTL_MS/, "providers without an explicit expiration must use the saved quote timestamp and fallback TTL");
 assert.match(appSource, /latestRateAuthorization\.selectionKey === selectedRouteIdsKey/, "the completed-job fallback must belong to the exact current selection");
 assert.match(appSource, /selectedRateReadyPackageEntries\.every\(\(\[, packageRows\]\) => packageRows\.every\(\(row: Record<string, any>\) => Boolean\(row\.rateReview\?\.selectedRate\)\)\)/, "every ready package must have a selected quote before purchase can begin");
-assert.match(appSource, /const purchaseRouteIds = selectedPurchaseEligibleRows\.map/, "label batches must receive only eligible route IDs");
+assert.match(appSource, /const purchaseRouteIds = inlineShipmentGroup \? inlineRouteIds : purchaseRows\.map/, "label batches must receive the saved shipment-group routes or only eligible bulk route IDs");
 assert.match(appSource, /onClick=\{\(\) => setBatchOpen\(true\)\}[\s\S]*Buy \$\{selectedPurchaseEligiblePackages\.length\}/, "the bulk button must open a confirmation summary before purchasing");
 assert.match(appSource, /Ready to buy[\s\S]*Skipped[\s\S]*selectedPurchaseSkippedCount/, "the purchase summary must show eligible and skipped counts");
 assert.match(appSource, /labelPurchaseProgress\?\.total \|\| selectedPurchaseEligiblePackages\.length/, "idle purchase progress must use the eligible label count");
@@ -22,6 +22,9 @@ assert.match(appSource, /Grouped · \{shipmentGroupSize \|\| 1\}/, "group member
 assert.match(appSource, /continueShipmentGroup\(true, true\)/, "the shipment-group modal must keep its inline rate workflow open");
 assert.match(appSource, /Buy & print label/, "the shipment-group modal must purchase and print its shared label directly");
 assert.match(appSource, /consolidationPurchaseInlineRef\.current = inlineShipmentGroup/, "inline shipment-group purchases must retain their print handoff context");
+assert.match(appSource, /const consolidationSelectedRate = consolidationRateReview\?\.selectedRate/, "the shipment-group modal must retain its rate independently of the visible fulfillment page");
+assert.match(appSource, /consolidationPrimaryRouteIdsRef\.current[\s\S]*reviewsByRoute\.get\(routeId\)/, "background rate results must hydrate the saved shipment group before the table reloads");
+assert.match(appSource, /const targets = packageTargetRows\.filter/, "bulk package saves must use the records captured when the editor opened");
 assert.match(appSource, /purchasedFromShipmentGroup && printJobs\.length[\s\S]*setConsolidationOrder\(null\)/, "the shipment-group dialog must close only after a print packet is ready");
 
 assert.match(serverSource, /activeFulfillmentLabelBatchAssignments\(state\.batches\)/, "the server must exclude routes already assigned to an active label batch");
