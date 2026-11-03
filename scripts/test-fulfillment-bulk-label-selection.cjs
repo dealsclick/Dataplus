@@ -12,7 +12,7 @@ assert.match(appSource, /latestRateAuthorization\.selectionKey === selectedRoute
 assert.match(appSource, /selectedRateReadyPackageEntries\.every\(\(\[, packageRows\]\) => Boolean\(fulfillmentSharedRateRow\(packageRows\)\?\.rateReview\?\.selectedRate\)\)/, "every ready physical package must have one selected quote before purchase can begin");
 assert.match(appSource, /selectedPurchaseEligibleRows = selectedPurchaseEligiblePackageEntries\.flatMap\(\(\[, packageRows\]\) => fulfillmentPackageOwnerRows\(packageRows\)\)/, "combined shipments must submit only the shared rate owner to label purchase");
 assert.match(appSource, /Shared group rate · covers \$\{memberOrders\.length\} orders/, "combined shipment rows must label the one quote as shared");
-assert.match(appSource, /Combined shipment[\s\S]*memberOrders\.length[\s\S]*1 label/, "combined shipment members must collapse beneath one master row");
+assert.match(appSource, /const clusterTitle = persistedCombinedShipment \? "Combined shipment"[\s\S]*const clusterBadge = persistedCombinedShipment \? `\$\{clusterOrderCount\} orders · 1 label`/, "combined shipment members must collapse beneath one master row");
 assert.match(appSource, /const purchaseRouteIds = inlineShipmentGroup \? inlineRouteIds : purchaseRows\.map/, "label batches must receive the saved shipment-group routes or only eligible bulk route IDs");
 assert.match(appSource, /onClick=\{\(\) => setBatchOpen\(true\)\}[\s\S]*Buy \$\{selectedPurchaseEligiblePackages\.length\}/, "the bulk button must open a confirmation summary before purchasing");
 assert.match(appSource, /Ready to buy[\s\S]*Skipped[\s\S]*selectedPurchaseSkippedCount/, "the purchase summary must show eligible and skipped counts");
@@ -21,7 +21,7 @@ assert.match(appSource, /disabled=\{busy \|\| rateRefreshProgress\.active \|\| !
 assert.match(appSource, /Refresh rates before buying/, "the disabled bulk purchase control must explain the required next step");
 assert.match(appSource, /Get latest rates for \$\{selectedRateReadyPackages\.length\}/, "the purchase dialog must offer the same latest-rate step for a single shipment");
 assert.doesNotMatch(appSource, /ratedRows\.length !== selectedRows\.length/, "an ineligible row must not block every selected label");
-assert.match(appSource, /Grouped · \{shipmentGroupSize \|\| 1\}/, "group members must remain visibly grouped in the fulfillment table");
+assert.match(appSource, /const clusterTitle = persistedCombinedShipment \? "Combined shipment" : "Suggested combination"/, "saved and suggested group members must remain visibly clustered in the fulfillment table");
 assert.match(appSource, /continueShipmentGroup\(true, true\)/, "the shipment-group modal must keep its inline rate workflow open");
 assert.match(appSource, /Buy & print label/, "the shipment-group modal must purchase and print its shared label directly");
 assert.match(appSource, /consolidationPurchaseInlineRef\.current = inlineShipmentGroup/, "inline shipment-group purchases must retain their print handoff context");

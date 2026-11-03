@@ -60,6 +60,17 @@ test("combined shipments render and paginate as one physical package", () => {
   assert.match(dbSource, /count\(distinct \(\$\{physicalGroupExpression\}\)\)/);
 });
 
+test("eligible shipment candidates render as one suggested cluster until dimensions create the group", () => {
+  assert.match(appSource, /function fulfillmentSuggestedClusterOrderIds/);
+  assert.match(appSource, /return orderIds\.length > 1 \? `suggested:\$\{orderIds\.join\("\|"\)\}` : ""/);
+  assert.match(appSource, /const suggestedCombinedShipment = !persistedCombinedShipment/);
+  assert.match(appSource, /"Suggested combination"/);
+  assert.match(appSource, /Final combined package required/);
+  assert.match(appSource, /shipment-group-candidates/);
+  assert.match(appSource, /body: JSON\.stringify\(\{ orderIds: candidateOrderIds, \.\.\.packageValues, user: "Luis" \}\)/);
+  assert.match(appSource, /!key\.startsWith\("suggested:"\)/);
+});
+
 test("shipment groups persist an explicit master order", () => {
   assert.match(serverSource, /candidate\.shipmentGroupPrimaryOrderId = order\.id/);
   assert.match(serverSource, /shipmentGroupPrimaryOrderId: order\.shipmentGroupPrimaryOrderId \|\| order\.shipmentGroupOrderIds\?\.\[0\] \|\| ""/);
