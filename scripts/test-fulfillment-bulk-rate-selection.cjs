@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const source = ["App.tsx", "components/fulfillment-route.tsx"].map((file) => fs.readFileSync(path.join(__dirname, "..", "web", "src", ...file.split("/")), "utf8")).join("\n");
+const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
 assert.match(source, /selectedRateReadyPackageEntries = \[\.\.\.selectedPackageGroups\.entries\(\)\]\.filter\(\(\[key, packageRows\]\) => !key\.startsWith\("suggested:"\) && packageRows\.every\(\(row(?:: Record<string, any>)?\) => readinessFor\(row\)\.ready === true\)\)/, "bulk rate eligibility must require every saved package row to be ready and must exclude unconfirmed suggestions");
 assert.match(source, /await refreshRatesForRows\(selectedRateReadyRows\)/, "bulk rate refresh must submit only ready package rows");
@@ -13,5 +14,7 @@ assert.match(source, /resultStatus === "blocked" \? "blocked" : resultStatus ===
 assert.match(source, /rateProgressRecorded = rateRefreshProgress\.items\.filter\(\(item\) => item\.status === "recorded"\)\.length/, "existing marketplace labels must be counted separately from carrier rates");
 assert.match(source, /existing labels recorded/, "the progress summary must name recorded marketplace labels accurately");
 assert.match(source, /break-words text-xs leading-relaxed text-destructive/, "long provider errors must wrap inside the result table");
+assert.match(serverSource, /invalidateFulfillmentConsoleSnapshot\(\[order\.id, \.\.\.\(order\.shipmentGroupOrderIds \|\| \[\]\)\]\)/, "saved rates must invalidate the primary order and every combined-shipment member");
+assert.match(serverSource, /const projectionUpdated = await drainFulfillmentConsoleProjectionPatches\(\);[\s\S]{0,100}return \{ results, total: context\.rows\.length, projectionUpdated \}/, "bulk rate refresh must finish its projection patch before reporting completion");
 
 console.log("Fulfillment bulk rate selection tests passed.");

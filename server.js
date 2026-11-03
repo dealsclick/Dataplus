@@ -34383,6 +34383,7 @@ async function refreshFulfillmentRateRow(row, context = {}) {
     order.updatedAt = attemptedAt;
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
+    invalidateFulfillmentConsoleSnapshot([order.id, ...(order.shipmentGroupOrderIds || [])]);
   }
   return {
     orderId: row.orderId,
@@ -34435,7 +34436,8 @@ async function runFulfillmentRateRefresh(routeIds = [], options = {}) {
   } else {
     await Promise.all(lanes.map(([laneName, rows]) => runLane(laneName, rows)));
   }
-  return { results, total: context.rows.length };
+  const projectionUpdated = await drainFulfillmentConsoleProjectionPatches();
+  return { results, total: context.rows.length, projectionUpdated };
 }
 
 async function runFulfillmentRateRefreshWorkerJob(job = {}) {
