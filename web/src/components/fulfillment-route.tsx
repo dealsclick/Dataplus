@@ -746,7 +746,7 @@ export function FulfillmentPage() {
   } | null>(null)
   const [bulkShipDate, setBulkShipDate] = useState(new Date().toISOString().slice(0, 10))
   const [purchasedPrintJobs, setPurchasedPrintJobs] = useState<Array<Record<string, any>>>([])
-  const [pendingPrintRecovery, setPendingPrintRecovery] = useState<{ batchId: string } | null>(null)
+  const [pendingPrintRecovery, setPendingPrintRecovery] = useState<{ batchId: string; inlineShipmentGroup?: boolean; shipmentGroupId?: string } | null>(null)
   const [labelAdminPin, setLabelAdminPin] = useState("")
   const [labelAdminPinRequest, setLabelAdminPinRequest] = useState<Record<string, any> | null>(null)
   const [settingsDraft, setSettingsDraft] = useState<Record<string, any>>({})
@@ -773,6 +773,7 @@ export function FulfillmentPage() {
   const [consolidationSaved, setConsolidationSaved] = useState<{ groupId: string; orderNumbers: string[]; primaryRouteIds: string[] } | null>(null)
   const [consolidationRouteRows, setConsolidationRouteRows] = useState<Array<Record<string, any>>>([])
   const [consolidationRateReview, setConsolidationRateReview] = useState<Record<string, any> | null>(null)
+  const [consolidationPrintJob, setConsolidationPrintJob] = useState<Record<string, any> | null>(null)
   const [quickViewRows, setQuickViewRows] = useState<Array<Record<string, any>>>([])
   const printPreviewFrameRef = useRef<HTMLIFrameElement>(null)
   const [printJobPreview, setPrintJobPreview] = useState<Record<string, any> | null>(null)
@@ -1081,6 +1082,7 @@ export function FulfillmentPage() {
     setConsolidationSaved(null)
     setConsolidationRouteRows([])
     setConsolidationRateReview(null)
+    setConsolidationPrintJob(null)
     consolidationPrimaryRouteIdsRef.current = []
     setConsolidationCandidates([])
     setConsolidationSelection(new Set())
@@ -1359,23 +1361,29 @@ export function FulfillmentPage() {
         window.localStorage.removeItem("dataplus:fulfillment-label-purchase-job")
         setLabelPurchaseJobId("")
         const refreshedData = await load(false, true)
-        const printJobs = (Array.isArray(refreshedData?.printQueue) ? refreshedData.printQueue : []).filter((entry: Record<string, any>) => String(entry.id || "") === String(job.printJobId || ""))
-        setSelectedRouteIds(new Set())
-        setPurchasedLabelFilter("unprinted")
-        setTab("purchased-labels")
+        const printJobs = (Array.isArray(refreshedData?.printQueue) ? refreshedData.printQueue : []).filter((entry: Record<string, any>) => {
+          const matchesPrintJob = Boolean(job.printJobId) && String(entry.id || "") === String(job.printJobId)
+          const matchesPrintRequest = Boolean(job.printRequestId) && String(entry.printRequestId || "") === String(job.printRequestId)
+          const matchesBatch = Boolean(job.labelPurchaseBatchId) && String(entry.batchId || "") === String(job.labelPurchaseBatchId)
+          return matchesPrintJob || matchesPrintRequest || matchesBatch
+        })
         const purchasedFromShipmentGroup = consolidationPurchaseInlineRef.current
         consolidationPurchaseInlineRef.current = false
-        if (purchasedFromShipmentGroup && printJobs.length) {
-          setConsolidationOrder(null)
-          setConsolidationPrimary(null)
-          setConsolidationSaved(null)
-          setConsolidationRouteRows([])
-          setConsolidationRateReview(null)
-          consolidationPrimaryRouteIdsRef.current = []
-          setConsolidationCartonization(null)
+        if (!purchasedFromShipmentGroup) {
+          setSelectedRouteIds(new Set())
+          setPurchasedLabelFilter("unprinted")
+          setTab("purchased-labels")
         }
-        if (Number(counts.label_pending || 0) > 0 && job.labelPurchaseBatchId) setPendingPrintRecovery({ batchId: String(job.labelPurchaseBatchId) })
-        else if (printJobs.length) showPurchasedPrintPackets(printJobs, refreshedData, String(job.labelPurchaseBatchId || ""), String(job.printRequestId || ""))
+        if (printJobs.length) {
+          if (purchasedFromShipmentGroup) {
+            setConsolidationPrintJob(printJobs[0])
+            openPrintPreview(printJobs[0])
+          } else {
+            showPurchasedPrintPackets(printJobs, refreshedData, String(job.labelPurchaseBatchId || ""), String(job.printRequestId || ""))
+          }
+        } else if (job.labelPurchaseBatchId && (Number(counts.purchased || job.changed || 0) > 0 || Number(counts.label_pending || 0) > 0)) {
+          setPendingPrintRecovery({ batchId: String(job.labelPurchaseBatchId), inlineShipmentGroup: purchasedFromShipmentGroup, shipmentGroupId: purchasedFromShipmentGroup ? String(consolidationSaved?.groupId || "") : "" })
+        }
         if (status === "failed") toast.error(job.message || "Shipping-label purchase failed.")
         else if (status === "warning") toast.warning(job.message || "Label purchase finished with items needing attention.")
         else toast.success(job.message || "Shipping labels purchased and ready to print.")
@@ -1401,8 +1409,13 @@ export function FulfillmentPage() {
         const printJob = (Array.isArray(result.printQueue) ? result.printQueue : []).find((entry: Record<string, any>) => String(entry.batchId || "") === pendingPrintRecovery.batchId)
         if (pending === 0 && printJob?.id) {
           setPendingPrintRecovery(null)
-          setPurchasedLabelFilter("unprinted")
-          setTab("purchased-labels")
+          const matchesOpenShipmentGroup = pendingPrintRecovery.inlineShipmentGroup
+            && (!pendingPrintRecovery.shipmentGroupId || pendingPrintRecovery.shipmentGroupId === String(consolidationSaved?.groupId || ""))
+          if (matchesOpenShipmentGroup) setConsolidationPrintJob(printJob)
+          else {
+            setPurchasedLabelFilter("unprinted")
+            setTab("purchased-labels")
+          }
           openPrintPreview(printJob)
           toast.success(`${String(printJob.batchNumber || "Shipping batch")} labels are ready to print.`)
           return
@@ -1410,11 +1423,11 @@ export function FulfillmentPage() {
       } catch {
         // Keep polling while Temu finishes generating an accepted package's document.
       }
-      if (!canceled) timer = window.setTimeout(check, 10000)
+      if (!canceled) timer = window.setTimeout(check, pendingPrintRecovery.inlineShipmentGroup ? 2000 : 10000)
     }
-    timer = window.setTimeout(check, 10000)
+    timer = window.setTimeout(check, pendingPrintRecovery.inlineShipmentGroup ? 2000 : 10000)
     return () => { canceled = true; window.clearTimeout(timer) }
-  }, [pendingPrintRecovery?.batchId])
+  }, [pendingPrintRecovery?.batchId, pendingPrintRecovery?.inlineShipmentGroup, pendingPrintRecovery?.shipmentGroupId, consolidationSaved?.groupId])
   useEffect(() => { window.localStorage.setItem("dataplus:fulfillment-columns:v2", JSON.stringify([...visibleWorkColumns])) }, [visibleWorkColumns])
   useEffect(() => {
     let canceled = false
@@ -2530,6 +2543,9 @@ export function FulfillmentPage() {
   })
   const selectedLiveOrders = [...selectedLiveOrderMap.values()]
   const consolidationPackageComplete = Object.values(consolidationPackageDraft).every((value) => Number(value) > 0)
+  const consolidationPrintPending = pendingPrintRecovery?.inlineShipmentGroup === true
+    && Boolean(pendingPrintRecovery.batchId)
+    && (!pendingPrintRecovery.shipmentGroupId || pendingPrintRecovery.shipmentGroupId === String(consolidationSaved?.groupId || ""))
   const consolidationIsEbayLive = consolidationOrder?.isEbayLive === true
     || String(consolidationOrder?.salesOrigin || "") === "ebay_live"
     || consolidationPrimary?.isEbayLive === true
@@ -2885,7 +2901,7 @@ export function FulfillmentPage() {
           })()}
         </SheetContent>
       </Sheet>
-      <Dialog open={Boolean(consolidationOrder)} onOpenChange={(open) => { if (!open && !consolidationLoading) { setConsolidationOrder(null); setConsolidationPrimary(null); setConsolidationSaved(null); setConsolidationRouteRows([]); setConsolidationRateReview(null); consolidationPrimaryRouteIdsRef.current = []; setConsolidationCartonization(null) } }}>
+      <Dialog open={Boolean(consolidationOrder)} onOpenChange={(open) => { if (!open && !consolidationLoading) { setConsolidationOrder(null); setConsolidationPrimary(null); setConsolidationSaved(null); setConsolidationRouteRows([]); setConsolidationRateReview(null); setConsolidationPrintJob(null); consolidationPrimaryRouteIdsRef.current = []; setConsolidationCartonization(null) } }}>
         <DialogContent className="flex max-h-[92dvh] w-[calc(100%-2rem)] flex-col overflow-hidden sm:max-w-5xl">
           <DialogHeader><DialogTitle>{consolidationSaved ? "Shipment group created" : consolidationOrder?.isEbayLive ? "Combine eBay Live orders" : "Ship orders together"}</DialogTitle><DialogDescription>{consolidationSaved ? "The table now marks every member as grouped. Continue with one rate and one label for the primary combined package." : "One physical package and tracking number can serve these orders. Each marketplace order, payment, and channel reference remains separate."}</DialogDescription></DialogHeader>
           {consolidationSaved ? <div className="min-h-0 space-y-4 overflow-y-auto">
@@ -2895,6 +2911,8 @@ export function FulfillmentPage() {
             {consolidationSaved.primaryRouteIds.length ? <div className="grid gap-4 rounded-md border p-4">
               <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-semibold uppercase text-muted-foreground">Rate and label</p><p className="mt-1 text-sm text-muted-foreground">Buy the shared label here, then DataPlus opens the finished print packet.</p></div>{consolidationSelectedRate ? <Badge variant="success">Rate ready</Badge> : rateRefreshProgress.active ? <Badge variant="secondary">Checking rates</Badge> : <Badge variant="outline">Rate needed</Badge>}</div>
               {rateRefreshProgress.active ? <div className="grid gap-2" role="status" aria-live="polite"><div className="flex items-center justify-between gap-3 text-sm"><span className="flex items-center gap-2"><Loader2 className="size-4 animate-spin text-primary" /> Requesting live carrier rates</span><span className="font-medium tabular-nums">{rateProgressProcessed}/{Math.max(1, rateRefreshProgress.items.length)}</span></div><Progress value={Math.round((rateProgressProcessed / Math.max(1, rateRefreshProgress.items.length)) * 100)} className="h-2" /></div> : consolidationSelectedRate ? <div className="flex flex-wrap items-center justify-between gap-4 rounded-md border bg-muted/20 p-3"><div><p className="font-semibold">{consolidationRateLabel}</p><p className="text-xs text-muted-foreground">One label covers all {consolidationSaved.orderNumbers.length} grouped orders.</p></div><p className="text-lg font-semibold tabular-nums">{consolidationSelectedRate.amount === null || consolidationSelectedRate.amount === undefined ? "Cost unavailable" : moneyLabel(Number(consolidationSelectedRate.amount))}</p></div> : <Alert><RefreshCw className="size-4" /><AlertTitle>Get a live rate before purchasing</AlertTitle><AlertDescription>The final combined carton is saved. Request rates below, then buy and print without leaving this dialog.</AlertDescription></Alert>}
+              {consolidationPrintJob ? <Alert className="border-emerald-500/40 bg-emerald-500/5"><CheckCircle2 className="size-4 text-emerald-600" /><AlertTitle>Label purchased and ready to print</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>{String(consolidationPrintJob.printNumber || consolidationPrintJob.batchNumber || "The print packet")} is attached to this shipment group. You do not need to refresh the page.</span><Button size="sm" onClick={() => openPrintPreview(consolidationPrintJob)}><Printer className="size-4" /> Open & print label</Button></AlertDescription></Alert> : null}
+              {consolidationPrintPending ? <Alert className="border-blue-500/40 bg-blue-500/5"><Loader2 className="size-4 animate-spin text-blue-600" /><AlertTitle>Label purchased; preparing print packet</AlertTitle><AlertDescription>Keep this modal open. DataPlus is checking every two seconds and will open the purchased label as soon as its PDF is ready.</AlertDescription></Alert> : null}
               <div className="grid gap-3 sm:grid-cols-2"><Field label="Print size"><Select disabled={busy || labelPurchaseProgress?.active} value={batchDraft.printSize} onValueChange={(printSize) => setBatchDraft((current) => ({ ...current, printSize }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="4x6">4 × 6 thermal</SelectItem><SelectItem value="letter">US Letter</SelectItem></SelectContent></Select></Field><div className="self-end"><ToggleField label="Include packing slip" checked={batchDraft.includePackingSlips} onCheckedChange={(includePackingSlips) => !busy && setBatchDraft((current) => ({ ...current, includePackingSlips }))} /></div></div>
               {consolidationPurchaseInlineRef.current && labelPurchaseProgress ? <div className="grid gap-2 rounded-md border p-3" role="status" aria-live="polite"><div className="flex items-center justify-between gap-3 text-sm"><span className="flex items-center gap-2">{labelPurchaseProgress.active ? <Loader2 className="size-4 animate-spin text-primary" /> : labelPurchaseProgress.failed ? <AlertCircle className="size-4 text-destructive" /> : <CheckCircle2 className="size-4 text-emerald-600" />} {labelPurchaseProgress.message}</span><span className="font-semibold tabular-nums">Purchased {labelPurchaseProgress.purchased}/{Math.max(1, labelPurchaseProgress.total)}</span></div><Progress value={purchaseProgressPercent} className="h-2" /></div> : null}
             </div> : null}
@@ -2908,7 +2926,7 @@ export function FulfillmentPage() {
             <div className="grid gap-3 rounded-md border border-blue-500/30 bg-blue-500/5 p-3"><div><p className="text-sm font-medium">Final combined package</p><p className="text-xs text-muted-foreground">{consolidationIsEbayLive ? "One physical package. These operator-entered measurements override automatic carton estimates; DataPlus will not split this group." : "These are the dimensions used to request the rate and buy one label for the group."}</p></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><Field label="Weight (lb)"><Input type="number" min="0.01" step="0.01" value={consolidationPackageDraft.packageWeight} onChange={(event) => setConsolidationPackageDraft((current) => ({ ...current, packageWeight: event.target.value }))} /></Field><Field label="Length (in)"><Input type="number" min="0.01" step="0.01" value={consolidationPackageDraft.packageLength} onChange={(event) => setConsolidationPackageDraft((current) => ({ ...current, packageLength: event.target.value }))} /></Field><Field label="Width (in)"><Input type="number" min="0.01" step="0.01" value={consolidationPackageDraft.packageWidth} onChange={(event) => setConsolidationPackageDraft((current) => ({ ...current, packageWidth: event.target.value }))} /></Field><Field label="Height (in)"><Input type="number" min="0.01" step="0.01" value={consolidationPackageDraft.packageHeight} onChange={(event) => setConsolidationPackageDraft((current) => ({ ...current, packageHeight: event.target.value }))} /></Field></div>{consolidationPackageComplete ? <p className="flex items-center gap-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-300"><CheckCircle2 className="size-3.5" /> {consolidationIsEbayLive ? "Ready: one combined carton will be rated and labeled for every selected Live order." : "Ready: this final carton will be used for the shipment group."}</p> : null}</div>
             <p className="text-xs text-muted-foreground">Orders are not excluded because of age. Picked, packed, held, shipped, labeled, or mismatched-warehouse orders remain excluded.</p>
           </div>}
-          {consolidationSaved ? <DialogFooter><Button variant="outline" disabled={busy || labelPurchaseProgress?.active} onClick={() => { setConsolidationOrder(null); setConsolidationSaved(null); setConsolidationRouteRows([]); setConsolidationRateReview(null); consolidationPrimaryRouteIdsRef.current = []; setConsolidationCartonization(null) }}>Done</Button><Button variant="outline" disabled={busy || labelPurchaseProgress?.active || !consolidationSaved.primaryRouteIds.length} onClick={() => void continueShipmentGroup(false)}><ListChecks className="size-4" /> Use bulk workflow</Button><Button variant={consolidationSelectedRate ? "outline" : "default"} disabled={busy || labelPurchaseProgress?.active || !consolidationSaved.primaryRouteIds.length || rateRefreshProgress.active} onClick={() => void continueShipmentGroup(true, true)}>{rateRefreshProgress.active ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {consolidationSelectedRate ? "Refresh rate" : "Get rates"}</Button>{consolidationSelectedRate ? <Button disabled={busy || labelPurchaseProgress?.active} onClick={() => void buySelectedLabels("", { inlineShipmentGroup: true })}>{busy || labelPurchaseProgress?.active ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} {labelPurchaseProgress?.active ? `Buying ${labelPurchaseProgress.purchased}/${labelPurchaseProgress.total}` : "Buy & print label"}</Button> : null}</DialogFooter> : <DialogFooter><Button variant="outline" disabled={consolidationLoading} onClick={() => setConsolidationOrder(null)}>Cancel</Button><Button disabled={consolidationLoading || consolidationPreviewLoading || !consolidationSelection.size || !consolidationPackageComplete || consolidationHardBlocked} onClick={() => void saveShipmentConsolidation()}>{consolidationLoading ? <Loader2 className="size-4 animate-spin" /> : <PackageCheck className="size-4" />} Create one shipment group</Button></DialogFooter>}
+          {consolidationSaved ? <DialogFooter><Button variant="outline" disabled={busy || labelPurchaseProgress?.active} onClick={() => { setConsolidationOrder(null); setConsolidationSaved(null); setConsolidationRouteRows([]); setConsolidationRateReview(null); setConsolidationPrintJob(null); consolidationPrimaryRouteIdsRef.current = []; setConsolidationCartonization(null) }}>Done</Button>{consolidationPrintJob ? <Button disabled={busy} onClick={() => openPrintPreview(consolidationPrintJob)}><Printer className="size-4" /> Open & print label</Button> : consolidationPrintPending ? <Button disabled><Loader2 className="size-4 animate-spin" /> Preparing print packet</Button> : <><Button variant="outline" disabled={busy || labelPurchaseProgress?.active || !consolidationSaved.primaryRouteIds.length} onClick={() => void continueShipmentGroup(false)}><ListChecks className="size-4" /> Use bulk workflow</Button><Button variant={consolidationSelectedRate ? "outline" : "default"} disabled={busy || labelPurchaseProgress?.active || !consolidationSaved.primaryRouteIds.length || rateRefreshProgress.active} onClick={() => void continueShipmentGroup(true, true)}>{rateRefreshProgress.active ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {consolidationSelectedRate ? "Refresh rate" : "Get rates"}</Button>{consolidationSelectedRate ? <Button disabled={busy || labelPurchaseProgress?.active} onClick={() => void buySelectedLabels("", { inlineShipmentGroup: true })}>{busy || labelPurchaseProgress?.active ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} {labelPurchaseProgress?.active ? `Buying ${labelPurchaseProgress.purchased}/${labelPurchaseProgress.total}` : "Buy & print label"}</Button> : null}</>}</DialogFooter> : <DialogFooter><Button variant="outline" disabled={consolidationLoading} onClick={() => setConsolidationOrder(null)}>Cancel</Button><Button disabled={consolidationLoading || consolidationPreviewLoading || !consolidationSelection.size || !consolidationPackageComplete || consolidationHardBlocked} onClick={() => void saveShipmentConsolidation()}>{consolidationLoading ? <Loader2 className="size-4 animate-spin" /> : <PackageCheck className="size-4" />} Create one shipment group</Button></DialogFooter>}
         </DialogContent>
       </Dialog>
       <Dialog open={Boolean(testPrintStation)} onOpenChange={(open) => !open && setTestPrintStation(null)}>

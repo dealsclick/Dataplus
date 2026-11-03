@@ -22,10 +22,15 @@ assert.match(appSource, /Grouped · \{shipmentGroupSize \|\| 1\}/, "group member
 assert.match(appSource, /continueShipmentGroup\(true, true\)/, "the shipment-group modal must keep its inline rate workflow open");
 assert.match(appSource, /Buy & print label/, "the shipment-group modal must purchase and print its shared label directly");
 assert.match(appSource, /consolidationPurchaseInlineRef\.current = inlineShipmentGroup/, "inline shipment-group purchases must retain their print handoff context");
+assert.match(appSource, /matchesPrintJob[\s\S]*matchesPrintRequest[\s\S]*matchesBatch/, "completed purchases must find their print packet by job, request, or batch identity");
+assert.match(appSource, /setPendingPrintRecovery\(\{ batchId: String\(job\.labelPurchaseBatchId\), inlineShipmentGroup: purchasedFromShipmentGroup, shipmentGroupId:/, "a completed purchase must keep polling when its print packet trails the carrier job");
+assert.match(appSource, /setConsolidationPrintJob\(printJobs\[0\]\)[\s\S]*openPrintPreview\(printJobs\[0\]\)/, "an inline shipment group must retain and open its purchased print packet");
+assert.match(appSource, /Label purchased and ready to print[\s\S]*Open & print label/, "the open shipment-group modal must expose its purchased label immediately");
+assert.match(appSource, /Label purchased; preparing print packet[\s\S]*checking every two seconds/, "the modal must show print-document progress without offering a duplicate purchase");
 assert.match(appSource, /const consolidationSelectedRate = consolidationRateReview\?\.selectedRate/, "the shipment-group modal must retain its rate independently of the visible fulfillment page");
 assert.match(appSource, /consolidationPrimaryRouteIdsRef\.current[\s\S]*reviewsByRoute\.get\(routeId\)/, "background rate results must hydrate the saved shipment group before the table reloads");
 assert.match(appSource, /const targets = packageTargetRows\.filter/, "bulk package saves must use the records captured when the editor opened");
-assert.match(appSource, /purchasedFromShipmentGroup && printJobs\.length[\s\S]*setConsolidationOrder\(null\)/, "the shipment-group dialog must close only after a print packet is ready");
+assert.doesNotMatch(appSource, /purchasedFromShipmentGroup && printJobs\.length[\s\S]*setConsolidationOrder\(null\)/, "the shipment-group dialog must stay open after purchase so its print action remains available");
 
 assert.match(serverSource, /activeFulfillmentLabelBatchAssignments\(state\.batches\)/, "the server must exclude routes already assigned to an active label batch");
 assert.match(serverSource, /primaryOrderId: order\.id, primaryRouteIds/, "shipment-group creation must return only the primary combined package routes");
