@@ -49,6 +49,40 @@ assert.deepEqual(index.get("second").candidates.map((candidate) => candidate.ord
 
 assert.equal(shipmentConsolidationPair(first, order({ id: "wrong-unit", address: { ...first.address, line2: "Apt 3" } })).eligible, false);
 assert.equal(shipmentConsolidationPair(first, order({ id: "wrong-warehouse", fulfillmentRoutes: [{ type: "warehouse", status: "allocated", warehouseId: "warehouse-3" }] })).eligible, false);
+const puertoRicoMarketplaceAddress = order({
+  id: "puerto-rico-marketplace",
+  source: "eBay",
+  buyer: "Giovannie Vega",
+  address: {
+    name: "Giovannie Vega",
+    line1: "Sector El Cobo BZN.3031\nAguadilla PR 00603",
+    line2: "",
+    city: "Aguadilla Puerto Rico",
+    state: "",
+    postalCode: "00603",
+    country: "PR",
+  },
+});
+const puertoRicoCanonicalAddress = order({
+  id: "puerto-rico-canonical",
+  source: "eBay",
+  buyer: "Giovannie Vega",
+  address: {
+    name: "Giovannie Vega",
+    line1: "Sector El Cobo BZN.3031",
+    line2: "",
+    city: "Aguadilla",
+    state: "PR",
+    postalCode: "00603-1234",
+    country: "US",
+  },
+});
+assert.equal(shipmentConsolidationEligibility(puertoRicoMarketplaceAddress).eligible, true, "Puerto Rico orders should infer the territory state from marketplace address data");
+assert.equal(shipmentConsolidationPair(puertoRicoMarketplaceAddress, puertoRicoCanonicalAddress).eligible, true, "equivalent Puerto Rico marketplace address formats should consolidate");
+assert.equal(shipmentConsolidationPair(
+  puertoRicoMarketplaceAddress,
+  order({ ...puertoRicoCanonicalAddress, id: "puerto-rico-other-street", address: { ...puertoRicoCanonicalAddress.address, line1: "99 Other Road" } }),
+).eligible, false, "Puerto Rico normalization must retain exact street matching");
 const olderCompatibleOrder = order({ id: "older-compatible", orderDate: "2026-09-10T03:00:01.000Z" });
 const olderPair = shipmentConsolidationPair(first, olderCompatibleOrder);
 assert.equal(olderPair.eligible, true, "compatible orders should not expire from shipment consolidation");
