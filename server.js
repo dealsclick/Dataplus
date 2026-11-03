@@ -33987,15 +33987,43 @@ function batchSummary(batch = {}) {
     deliveryEstimate: rate.deliveryEstimate,
     warning: rate.warning
   } : null;
+  const publicAdditionalLabel = (label) => label ? {
+    id: label.id,
+    rowId: label.rowId,
+    orderId: label.orderId,
+    orderNumber: label.orderNumber,
+    shipmentId: label.shipmentId,
+    package: label.package || {},
+    carrier: label.carrier || "",
+    service: label.service || "",
+    trackingNumber: label.trackingNumber || "",
+    trackingUrl: label.trackingUrl || "",
+    shippingCost: Number(label.shippingCost || 0),
+    currency: label.currency || "USD",
+    documentId: label.documentId || "",
+    documentUrl: label.documentUrl || "",
+    printCount: Number(label.printCount || 0),
+    printedAt: label.printedAt || "",
+    printedBy: label.printedBy || "",
+    createdAt: label.createdAt || "",
+    createdBy: label.createdBy || "",
+    channelSyncSuppressed: true
+  } : null;
   const publicRows = rows.map((row) => ({
     ...row,
     rates: Array.isArray(row.rates) ? row.rates.map(publicRate) : [],
     selectedRate: publicRate(row.selectedRate)
   }));
+  const {
+    additionalLabelQuote: _privateAdditionalLabelQuote,
+    additionalLabelQuotes: _privateAdditionalLabelQuotes,
+    ...publicBatch
+  } = batch;
   return {
-    ...batch,
+    ...publicBatch,
     warehouseStatus: normalizeBatchHandlingStatus(batch),
     rows: publicRows,
+    additionalLabels: (Array.isArray(batch.additionalLabels) ? batch.additionalLabels : []).map(publicAdditionalLabel).filter(Boolean),
     counts: rows.reduce((result, row) => {
       result.total += 1;
       result[row.status] = Number(result[row.status] || 0) + 1;
@@ -34003,6 +34031,41 @@ function batchSummary(batch = {}) {
       return result;
     }, { total: 0, picked: 0 })
   };
+}
+
+function fulfillmentBatchAdditionalLabelRow(batch = {}, reference = {}) {
+  const rows = Array.isArray(batch.rows) ? batch.rows : [];
+  const rowId = String(reference.rowId || "").trim();
+  const shipmentId = String(reference.shipmentId || "").trim();
+  const orderId = String(reference.orderId || "").trim();
+  if (rowId) {
+    const exact = rows.find((row) => String(row.id || "") === rowId);
+    if (exact) return exact;
+  }
+  if (shipmentId) {
+    const exact = rows.find((row) => String(row.shipmentId || "") === shipmentId);
+    if (exact) return exact;
+  }
+  const orderRows = orderId ? rows.filter((row) => String(row.orderId || "") === orderId) : [];
+  return orderRows.length === 1 ? orderRows[0] : null;
+}
+
+function publicFulfillmentAdditionalLabelRate(rate = {}) {
+  return {
+    id: rate.id,
+    provider: rate.provider,
+    carrier: rate.carrier,
+    service: rate.service,
+    amount: rate.amount,
+    currency: rate.currency,
+    deliveryDays: rate.deliveryDays,
+    deliveryEstimate: rate.deliveryEstimate,
+    warning: rate.warning
+  };
+}
+
+function publicFulfillmentAdditionalLabel(label = {}) {
+  return batchSummary({ rows: [], additionalLabels: [label] }).additionalLabels[0] || null;
 }
 
 function batchRateOptions(settings, order, route, ratesResult, selectionMode = "") {
@@ -54291,6 +54354,211 @@ async function handleApi(req, res) {
     await persistFulfillmentLabelPurchaseState(state);
     invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
     return sendJson(res, 200, { batch: batchSummary(batch), message: "Shipping choice saved." });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "additional-labels" && !parts[5] && postgres.isPostgresEnabled()) {
+    const state = await readFulfillmentLabelPurchaseState(parts[3]);
+    const batch = state.batches.find((entry) => String(entry.id || "") === String(parts[3]) || String(entry.batchNumber || "").toLowerCase() === String(parts[3]).toLowerCase());
+    if (!batch) return notFound(res);
+    const row = fulfillmentBatchAdditionalLabelRow(batch, {
+      rowId: url.searchParams.get("rowId"),
+      shipmentId: url.searchParams.get("shipmentId"),
+      orderId: url.searchParams.get("orderId")
+    });
+    if ((url.searchParams.get("rowId") || url.searchParams.get("shipmentId") || url.searchParams.get("orderId")) && !row) {
+      return sendJson(res, 404, { error: "The purchased batch shipment was not found." });
+    }
+    const labels = (Array.isArray(batch.additionalLabels) ? batch.additionalLabels : [])
+      .filter((label) => !row || String(label.rowId || "") === String(row.id || "") || String(label.orderId || "") === String(row.orderId || ""))
+      .map(publicFulfillmentAdditionalLabel)
+      .filter(Boolean);
+    return sendJson(res, 200, { batchId: batch.id, batchNumber: batch.batchNumber, rowId: row?.id || "", labels });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "additional-labels" && parts[5] === "rates" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const state = await readFulfillmentLabelPurchaseState(parts[3]);
+    const batch = state.batches.find((entry) => String(entry.id || "") === String(parts[3]) || String(entry.batchNumber || "").toLowerCase() === String(parts[3]).toLowerCase());
+    if (!batch) return notFound(res);
+    const row = fulfillmentBatchAdditionalLabelRow(batch, body);
+    if (!row) return sendJson(res, 404, { error: "Choose one purchased shipment from this batch." });
+    if (String(row.status || "").toLowerCase() !== "purchased" || (!row.documentId && !row.trackingNumber)) {
+      return sendJson(res, 409, { error: "The original batch label must be purchased before adding another parcel." });
+    }
+    const order = await postgres.readOrderByKey(row.orderId);
+    if (!order) return sendJson(res, 404, { error: "The order linked to this batch was not found." });
+    const db = await readFulfillmentShippingContext();
+    const settings = readSystemSettingsStore(db.systemSettings || dbCache.data?.systemSettings || {});
+    const parcel = packageForShippingRates(body, settings);
+    if (![parcel.weight, parcel.length, parcel.width, parcel.height].every((value) => Number(value) > 0)) {
+      return sendJson(res, 400, { error: "Enter the additional box weight, length, width, and height." });
+    }
+    const quoteOrder = JSON.parse(JSON.stringify(order));
+    Object.assign(quoteOrder, {
+      source: "manual",
+      channel: "Manual",
+      channelSource: "Manual",
+      shipments: [],
+      documents: [],
+      shippingLabelPurchases: [],
+      trackingNumber: "",
+      trackingUrl: ""
+    });
+    let result;
+    try {
+      result = await getUniversalShippingRates(quoteOrder, db, {
+        packageWeight: parcel.weight,
+        packageLength: parcel.length,
+        packageWidth: parcel.width,
+        packageHeight: parcel.height,
+        packageType: parcel.package_type || "box",
+        weightUnit: parcel.weight_unit || "lb",
+        dimensionUnit: parcel.dimension_unit || "in",
+        warehouseId: body.warehouseId || row.warehouseId || order.fulfillmentWarehouseId || "",
+        lines: Array.isArray(body.lines) ? body.lines : []
+      });
+    } catch (error) {
+      return sendJson(res, 502, { error: `Additional-label rate lookup failed: ${error.message || "Unknown carrier error"}` });
+    }
+    const rates = sortShippingRates((result.rates || []).filter((rate) => String(rate.provider || "").toLowerCase() === "veeqo" && !/media mail|bound printed matter/i.test(`${rate.carrier || ""} ${rate.service || ""}`)));
+    if (result.blockers?.length) return sendJson(res, 400, { error: result.blockers.join(" ") });
+    if (!rates.length) {
+      const detail = (result.providerErrors || []).map((entry) => `${entry.provider}: ${entry.message}`).join(" ");
+      return sendJson(res, 502, { error: detail || "No purchasable carrier rates were returned for the additional box." });
+    }
+    const now = new Date();
+    const actor = authUser?.name || authUser?.username || "DataPlus";
+    const quote = {
+      id: crypto.randomUUID(),
+      rowId: row.id,
+      orderId: row.orderId,
+      shipmentId: row.shipmentId || "",
+      package: result.package || parcel,
+      warehouseId: result.warehouseId || body.warehouseId || row.warehouseId || "",
+      rates,
+      maxCost: Number(result.labelRules?.maxCost || 0),
+      requireConfirmationAboveMax: result.labelRules?.requireConfirmationAboveMax === true,
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 30 * 60 * 1000).toISOString(),
+      createdBy: actor
+    };
+    batch.additionalLabelQuotes = [quote, ...(Array.isArray(batch.additionalLabelQuotes) ? batch.additionalLabelQuotes : [])]
+      .filter((entry, index, rows) => Date.parse(String(entry.expiresAt || "")) > Date.now() && rows.findIndex((candidate) => String(candidate.id || "") === String(entry.id || "")) === index)
+      .slice(0, 25);
+    delete batch.additionalLabelQuote;
+    batch.updatedAt = quote.createdAt;
+    await persistFulfillmentLabelPurchaseState(state);
+    return sendJson(res, 200, {
+      quoteId: quote.id,
+      package: quote.package,
+      rates: rates.map(publicFulfillmentAdditionalLabelRate),
+      maxCost: quote.maxCost,
+      requireConfirmationAboveMax: quote.requireConfirmationAboveMax,
+      expiresAt: quote.expiresAt,
+      message: `${rates.length} carrier rate${rates.length === 1 ? "" : "s"} loaded for the additional box.`
+    });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "additional-labels" && !parts[5] && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const state = await readFulfillmentLabelPurchaseState(parts[3]);
+    const batch = state.batches.find((entry) => String(entry.id || "") === String(parts[3]) || String(entry.batchNumber || "").toLowerCase() === String(parts[3]).toLowerCase());
+    if (!batch) return notFound(res);
+    const quote = (Array.isArray(batch.additionalLabelQuotes) ? batch.additionalLabelQuotes : []).find((entry) => String(entry.id || "") === String(body.quoteId || ""))
+      || (String(batch.additionalLabelQuote?.id || "") === String(body.quoteId || "") ? batch.additionalLabelQuote : null);
+    if (!quote || String(quote.id || "") !== String(body.quoteId || "")) return sendJson(res, 409, { error: "Load fresh rates for this additional box before purchasing." });
+    if (Date.parse(String(quote.expiresAt || "")) <= Date.now()) return sendJson(res, 409, { error: "The additional-box quote expired. Load fresh rates and try again." });
+    const row = fulfillmentBatchAdditionalLabelRow(batch, quote);
+    if (!row) return sendJson(res, 404, { error: "The purchased batch shipment was not found." });
+    const selectedRate = (quote.rates || []).find((rate) => String(rate.id || "") === String(body.selectedRateId || ""));
+    if (!selectedRate) return sendJson(res, 400, { error: "Choose one of the currently loaded carrier rates." });
+    if (String(selectedRate.provider || "").toLowerCase() !== "veeqo") return sendJson(res, 409, { error: "Additional parcels currently require a Veeqo carrier rate." });
+    const amount = Number(selectedRate.amount || 0);
+    if (quote.maxCost > 0 && amount > Number(quote.maxCost) && quote.requireConfirmationAboveMax && body.confirmAboveMaxCost !== true) {
+      return sendJson(res, 409, { error: `This additional label is $${amount.toFixed(2)} and exceeds the configured $${Number(quote.maxCost).toFixed(2)} limit. Confirm the over-limit purchase to continue.`, requiresConfirmation: true, amount, maxCost: quote.maxCost });
+    }
+    const order = await postgres.readOrderByKey(row.orderId);
+    if (!order) return sendJson(res, 404, { error: "The order linked to this batch was not found." });
+    const db = await readFulfillmentShippingContext();
+    const detachedOrder = JSON.parse(JSON.stringify(order));
+    Object.assign(detachedOrder, {
+      source: "manual",
+      channel: "Manual",
+      channelSource: "Manual",
+      shipments: [],
+      documents: [],
+      shippingLabelPurchases: [],
+      trackingNumber: "",
+      trackingUrl: ""
+    });
+    const actor = authUser?.name || authUser?.username || "DataPlus";
+    let result;
+    try {
+      result = await attachVeeqoShippingLabel(detachedOrder, db, selectedRate, {
+        labelFormat: batch.labelFormat || "PDF",
+        package: quote.package || {},
+        warehouseId: quote.warehouseId || row.warehouseId || order.fulfillmentWarehouseId || "",
+        lines: [],
+        confirmAboveMaxCost: body.confirmAboveMaxCost === true
+      });
+    } catch (error) {
+      return sendJson(res, 502, { error: `Additional label purchase failed: ${error.message || "Unknown carrier error"}` });
+    }
+    const now = new Date().toISOString();
+    const document = { ...result.document, type: "supplemental_shipping_label", note: `Additional parcel for ${batch.batchNumber || "shipping batch"}`, createdBy: actor };
+    order.documents = [document, ...(Array.isArray(order.documents) ? order.documents.filter((entry) => String(entry.id || "") !== String(document.id || "")) : [])];
+    const additionalLabel = {
+      id: crypto.randomUUID(),
+      rowId: row.id,
+      orderId: row.orderId,
+      orderNumber: row.orderNumber || order.orderNumber || order.id,
+      shipmentId: row.shipmentId || "",
+      package: quote.package || {},
+      provider: "veeqo",
+      carrier: result.shipment?.carrierName || result.shipment?.carrier || selectedRate.carrier || "Carrier",
+      service: result.shipment?.service || selectedRate.service || "Shipping",
+      trackingNumber: result.shipment?.trackingNumber || "",
+      trackingUrl: result.shipment?.trackingUrl || "",
+      shippingCost: Number(result.shipment?.shippingCost ?? selectedRate.amount ?? 0),
+      currency: result.shipment?.currency || selectedRate.currency || order.currency || "USD",
+      documentId: document.id,
+      documentUrl: document.url,
+      remoteShipmentId: result.shipment?.remoteShipmentId || "",
+      veeqoShipmentId: result.shipment?.veeqoShipmentId || "",
+      channelSyncSuppressed: true,
+      printCount: 0,
+      printHistory: [],
+      createdAt: now,
+      createdBy: actor
+    };
+    batch.additionalLabels = [additionalLabel, ...(Array.isArray(batch.additionalLabels) ? batch.additionalLabels : [])];
+    batch.additionalLabelQuotes = (Array.isArray(batch.additionalLabelQuotes) ? batch.additionalLabelQuotes : []).filter((entry) => String(entry.id || "") !== String(quote.id || ""));
+    delete batch.additionalLabelQuote;
+    batch.updatedAt = now;
+    appendOrderShippingEvent(order, { provider: "veeqo", action: "supplemental_label_purchase", status: "purchased", message: `Additional parcel label purchased for ${batch.batchNumber || "shipping batch"}. Primary order tracking and marketplace tracking were not changed.`, details: { batchId: batch.id, additionalLabelId: additionalLabel.id, carrier: additionalLabel.carrier, service: additionalLabel.service, cost: additionalLabel.shippingCost } });
+    addOrderTimeline(order, { type: "shipping_label", title: "Additional parcel label purchased", message: `${additionalLabel.carrier} ${additionalLabel.service} was linked to ${batch.batchNumber || "the shipping batch"} for another box. It was not sent to the marketplace.`, user: actor });
+    order.updatedAt = now;
+    await postgres.saveOrder(order);
+    await persistFulfillmentLabelPurchaseState(state);
+    clearOrderApiCache(order.id);
+    return sendJson(res, 201, { label: publicFulfillmentAdditionalLabel(additionalLabel), batch: batchSummary(batch), message: "Additional parcel label purchased. Primary order and marketplace tracking were left unchanged." });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "additional-labels" && parts[5] && parts[6] === "printed" && postgres.isPostgresEnabled()) {
+    const state = await readFulfillmentLabelPurchaseState(parts[3]);
+    const batch = state.batches.find((entry) => String(entry.id || "") === String(parts[3]) || String(entry.batchNumber || "").toLowerCase() === String(parts[3]).toLowerCase());
+    if (!batch) return notFound(res);
+    const label = (Array.isArray(batch.additionalLabels) ? batch.additionalLabels : []).find((entry) => String(entry.id || "") === String(parts[5]));
+    if (!label) return sendJson(res, 404, { error: "The additional parcel label was not found." });
+    const printedAt = new Date().toISOString();
+    const actor = authUser?.name || authUser?.username || "Warehouse";
+    label.printCount = Number(label.printCount || 0) + 1;
+    label.printedAt = printedAt;
+    label.printedBy = actor;
+    label.printHistory = [{ id: crypto.randomUUID(), printedAt, printedBy: actor, destination: "browser" }, ...(Array.isArray(label.printHistory) ? label.printHistory : [])].slice(0, 100);
+    batch.updatedAt = printedAt;
+    await persistFulfillmentLabelPurchaseState(state);
+    return sendJson(res, 200, { label: publicFulfillmentAdditionalLabel(label), message: `Additional parcel label print recorded. Total prints: ${label.printCount}.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "label-batches" && parts[3] && parts[4] === "retry-released" && postgres.isPostgresEnabled()) {
@@ -76244,6 +76512,9 @@ module.exports = {
   temuShipmentState,
   trackingNumberFromShippingLabelText,
   firstTemuDocumentPayload,
+  batchSummary,
+  fulfillmentBatchAdditionalLabelRow,
+  publicFulfillmentAdditionalLabel,
   fulfillmentWorkRows,
   reconcileFulfillmentRouteLineIdentity,
   fulfillmentRowIsPending,

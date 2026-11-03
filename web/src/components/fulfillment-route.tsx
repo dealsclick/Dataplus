@@ -316,9 +316,170 @@ function fulfillmentCountedFilterOptions(rows: Array<Record<string, any>>, value
   return [...options.values()].sort((left, right) => left.label.localeCompare(right.label))
 }
 
+function AdditionalParcelLabelDialog({ target, open, onOpenChange, onChanged }: {
+  target: Record<string, any> | null
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onChanged?: () => Promise<unknown> | void
+}) {
+  const [packageDraft, setPackageDraft] = useState({ weight: "", length: "", width: "", height: "" })
+  const [rates, setRates] = useState<Array<Record<string, any>>>([])
+  const [selectedRateId, setSelectedRateId] = useState("")
+  const [quoteId, setQuoteId] = useState("")
+  const [maxCost, setMaxCost] = useState(0)
+  const [requireOverLimitConfirmation, setRequireOverLimitConfirmation] = useState(false)
+  const [confirmOverLimit, setConfirmOverLimit] = useState(false)
+  const [labels, setLabels] = useState<Array<Record<string, any>>>([])
+  const [previewLabel, setPreviewLabel] = useState<Record<string, any> | null>(null)
+  const [busy, setBusy] = useState<"load" | "rates" | "purchase" | "print" | "">("")
+  const printFrameRef = useRef<HTMLIFrameElement>(null)
+  const batchId = String(target?.fulfillmentBatchId || target?.batchId || "")
+  const orderId = String(target?.orderId || "")
+  const shipmentId = String(target?.shipmentId || target?.id || "")
+  const orderNumber = String(target?.orderNumber || orderId || "")
+  const batchNumber = String(target?.fulfillmentBatchNumber || target?.batchNumber || "Shipping batch")
+
+  const resetQuote = () => {
+    setRates([])
+    setSelectedRateId("")
+    setQuoteId("")
+    setMaxCost(0)
+    setRequireOverLimitConfirmation(false)
+    setConfirmOverLimit(false)
+  }
+
+  const loadLabels = async () => {
+    if (!batchId) return
+    setBusy("load")
+    try {
+      const params = new URLSearchParams()
+      if (shipmentId) params.set("shipmentId", shipmentId)
+      if (orderId) params.set("orderId", orderId)
+      const result = await api<{ labels?: Array<Record<string, any>> }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/additional-labels?${params.toString()}`)
+      setLabels(Array.isArray(result.labels) ? result.labels : [])
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load additional parcel labels.")
+    } finally {
+      setBusy("")
+    }
+  }
+
+  useEffect(() => {
+    if (!open || !batchId) return
+    setPreviewLabel(null)
+    resetQuote()
+    void loadLabels()
+  }, [open, batchId, shipmentId, orderId])
+
+  const getRates = async () => {
+    const values = Object.values(packageDraft).map(Number)
+    if (!values.every((value) => Number.isFinite(value) && value > 0)) {
+      toast.error("Enter the additional box weight, length, width, and height.")
+      return
+    }
+    setBusy("rates")
+    try {
+      const result = await api<{ quoteId: string; rates: Array<Record<string, any>>; maxCost?: number; requireConfirmationAboveMax?: boolean; message?: string }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/additional-labels/rates`, {
+        method: "POST",
+        body: JSON.stringify({
+          shipmentId,
+          orderId,
+          packageWeight: Number(packageDraft.weight),
+          packageLength: Number(packageDraft.length),
+          packageWidth: Number(packageDraft.width),
+          packageHeight: Number(packageDraft.height),
+          weightUnit: "lb",
+          dimensionUnit: "in"
+        })
+      })
+      const nextRates = sortShippingRatesForDisplay(result.rates || [])
+      setRates(nextRates)
+      setSelectedRateId(String(nextRates[0]?.id || ""))
+      setQuoteId(String(result.quoteId || ""))
+      setMaxCost(Number(result.maxCost || 0))
+      setRequireOverLimitConfirmation(result.requireConfirmationAboveMax === true)
+      setConfirmOverLimit(false)
+      toast.success(result.message || "Additional-box rates loaded.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load rates for the additional box.")
+    } finally {
+      setBusy("")
+    }
+  }
+
+  const selectedRate = rates.find((rate) => String(rate.id || "") === selectedRateId)
+  const selectedRateOverLimit = Boolean(selectedRate && requireOverLimitConfirmation && maxCost > 0 && Number(selectedRate.amount || 0) > maxCost)
+
+  const purchaseLabel = async () => {
+    if (!quoteId || !selectedRateId) return
+    if (selectedRateOverLimit && !confirmOverLimit) {
+      toast.error("Confirm the over-limit carrier charge before purchasing this label.")
+      return
+    }
+    setBusy("purchase")
+    try {
+      const result = await api<{ label?: Record<string, any>; message?: string }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/additional-labels`, {
+        method: "POST",
+        body: JSON.stringify({ quoteId, selectedRateId, confirmAboveMaxCost: confirmOverLimit })
+      })
+      if (!result.label) throw new Error("The carrier purchased the label, but no printable document was returned.")
+      setPreviewLabel(result.label)
+      setLabels((current) => [result.label as Record<string, any>, ...current.filter((label) => String(label.id || "") !== String(result.label?.id || ""))])
+      resetQuote()
+      await onChanged?.()
+      toast.success(result.message || "Additional parcel label purchased.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to purchase the additional parcel label.")
+    } finally {
+      setBusy("")
+    }
+  }
+
+  const printLabel = async () => {
+    if (!previewLabel?.id) return
+    setBusy("print")
+    printFrameRef.current?.contentWindow?.print()
+    try {
+      const result = await api<{ label?: Record<string, any>; message?: string }>(`/api/fulfillment/label-batches/${encodeURIComponent(batchId)}/additional-labels/${encodeURIComponent(String(previewLabel.id))}/printed`, { method: "POST", body: "{}" })
+      if (result.label) {
+        setPreviewLabel(result.label)
+        setLabels((current) => current.map((label) => String(label.id || "") === String(result.label?.id || "") ? result.label as Record<string, any> : label))
+      }
+      toast.success(result.message || "Additional parcel label print recorded.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "The label opened, but its print activity could not be recorded.")
+    } finally {
+      setBusy("")
+    }
+  }
+
+  return <Dialog open={open} onOpenChange={onOpenChange}>
+    <DialogContent className="flex max-h-[92dvh] max-w-4xl flex-col overflow-hidden p-0">
+      <DialogHeader className="border-b p-5 pr-12">
+        <DialogTitle>Print additional label</DialogTitle>
+        <DialogDescription>{batchNumber} · Order {orderNumber}. The extra tracking stays in this batch only and will not replace the primary tracking or update the marketplace.</DialogDescription>
+      </DialogHeader>
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="grid gap-5 p-5">
+          {labels.length ? <section className="grid gap-2"><div><p className="text-sm font-medium">Additional parcels</p><p className="text-xs text-muted-foreground">Open any prior extra label for reprinting.</p></div><div className="grid gap-2">{labels.map((label, index) => <button key={String(label.id || index)} type="button" className="flex items-center justify-between gap-3 rounded-md border p-3 text-left hover:bg-muted/50" onClick={() => setPreviewLabel(label)}><span><span className="block text-sm font-medium">Box {labels.length - index} · {String(label.carrier || "Carrier")} {String(label.service || "")}</span><span className="block text-xs text-muted-foreground">{String(label.trackingNumber || "Tracking pending")} · {moneyLabel(Number(label.shippingCost || 0))} · {Number(label.printCount || 0)} print{Number(label.printCount || 0) === 1 ? "" : "s"}</span></span><Printer className="size-4 shrink-0" /></button>)}</div></section> : null}
+          {previewLabel ? <section className="grid gap-3"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-medium">{String(previewLabel.carrier || "Carrier")} {String(previewLabel.service || "")}</p><p className="text-xs text-muted-foreground">{String(previewLabel.trackingNumber || "Tracking pending")} · Marketplace update disabled</p></div><Button variant="outline" size="sm" onClick={() => setPreviewLabel(null)}><Plus className="size-4" /> Add another box</Button></div><iframe ref={printFrameRef} src={String(previewLabel.documentUrl || "")} title="Additional parcel label" className="h-[52dvh] min-h-80 w-full rounded-md border bg-white" /></section> : <>
+            <section className="grid gap-3"><div><p className="text-sm font-medium">Additional box</p><p className="text-xs text-muted-foreground">Enter the actual packed carton measurements. A fresh carrier quote is required.</p></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><Label>Weight (lb)<Input inputMode="decimal" value={packageDraft.weight} onChange={(event) => { setPackageDraft((current) => ({ ...current, weight: event.target.value })); resetQuote() }} /></Label><Label>Length (in)<Input inputMode="decimal" value={packageDraft.length} onChange={(event) => { setPackageDraft((current) => ({ ...current, length: event.target.value })); resetQuote() }} /></Label><Label>Width (in)<Input inputMode="decimal" value={packageDraft.width} onChange={(event) => { setPackageDraft((current) => ({ ...current, width: event.target.value })); resetQuote() }} /></Label><Label>Height (in)<Input inputMode="decimal" value={packageDraft.height} onChange={(event) => { setPackageDraft((current) => ({ ...current, height: event.target.value })); resetQuote() }} /></Label></div></section>
+            {rates.length ? <section className="grid gap-3"><div><p className="text-sm font-medium">Choose a carrier rate</p><p className="text-xs text-muted-foreground">One new label will be purchased for this box.</p></div><RadioGroup value={selectedRateId} onValueChange={(value) => { setSelectedRateId(value); setConfirmOverLimit(false) }} className="grid gap-2">{rates.map((rate) => <Label key={String(rate.id)} className="flex cursor-pointer items-center justify-between gap-3 rounded-md border p-3 font-normal has-[[data-state=checked]]:border-primary has-[[data-state=checked]]:bg-primary/5"><span className="flex items-center gap-3"><RadioGroupItem value={String(rate.id)} /><span><span className="block font-medium">{String(rate.carrier || "Carrier")} · {String(rate.service || "Service")}</span><span className="block text-xs text-muted-foreground">{rate.deliveryEstimate ? `Delivery ${String(rate.deliveryEstimate)}` : rate.deliveryDays ? `${Number(rate.deliveryDays)} delivery days` : "Delivery estimate unavailable"}</span></span></span><span className="font-semibold tabular-nums">{moneyLabel(Number(rate.amount || 0))}</span></Label>)}</RadioGroup>{selectedRateOverLimit ? <Label className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 font-normal"><Checkbox checked={confirmOverLimit} onCheckedChange={(checked) => setConfirmOverLimit(checked === true)} /><span><span className="block text-sm font-medium">Confirm over-limit charge</span><span className="block text-xs text-muted-foreground">This rate exceeds the configured {moneyLabel(maxCost)} label limit.</span></span></Label> : null}</section> : null}
+          </>}
+        </div>
+      </ScrollArea>
+      <DialogFooter className="border-t p-4">
+        <Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
+        {previewLabel ? <Button disabled={busy === "print" || !previewLabel.documentUrl} onClick={() => void printLabel()}>{busy === "print" ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} Print label</Button> : <><Button variant="outline" disabled={Boolean(busy)} onClick={() => void getRates()}>{busy === "rates" ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Get rates</Button><Button disabled={Boolean(busy) || !quoteId || !selectedRateId || (selectedRateOverLimit && !confirmOverLimit)} onClick={() => void purchaseLabel()}>{busy === "purchase" ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} Buy & open label</Button></>}
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+}
+
 function FulfillmentShipmentTable({ rows, onPrint, onRefresh, emptyMessage }: { rows: Array<Record<string, any>>; onPrint: (row: Record<string, any>) => void; onRefresh?: () => Promise<unknown> | void; emptyMessage: string }) {
   const [page, setPage] = useState(1)
   const [evidenceRefreshId, setEvidenceRefreshId] = useState("")
+  const [additionalLabelTarget, setAdditionalLabelTarget] = useState<Record<string, any> | null>(null)
   const pageSize = 50
   const pageCount = Math.max(1, Math.ceil(rows.length / pageSize))
   const currentPage = Math.min(page, pageCount)
@@ -399,9 +560,9 @@ function FulfillmentShipmentTable({ rows, onPrint, onRefresh, emptyMessage }: { 
       <TableCell><Badge variant={row.trackingRefreshError ? "destructive" : row.trackingStatus === "delivered" ? "success" : row.trackingStatus === "voided" ? "destructive" : row.trackingStatus === "in_transit" ? "secondary" : "outline"}>{row.trackingRefreshError ? "Check failed" : trackingLabel}</Badge>{row.carrierTrackingSourceLabel ? <p className="mt-1 whitespace-nowrap text-xs font-medium text-muted-foreground">Source: {String(row.carrierTrackingSourceLabel)}</p> : null}{row.deliveryEvidence?.receivedBy || row.deliveryEvidence?.location ? <p className="mt-1 max-w-52 truncate text-xs text-muted-foreground" title={[row.deliveryEvidence?.receivedBy, row.deliveryEvidence?.location].filter(Boolean).join(" · ")}>{[row.deliveryEvidence?.receivedBy ? `Received by ${row.deliveryEvidence.receivedBy}` : "", row.deliveryEvidence?.location].filter(Boolean).join(" · ")}</p> : null}{row.trackingRefreshError ? <p className="mt-1 max-w-52 text-xs text-destructive" title={String(row.trackingRefreshError)}>{String(row.trackingRefreshError)}</p> : null}</TableCell>
       <TableCell>{labelGenerating ? <Badge variant="outline">Waiting for document</Badge> : printed ? <div title={printHistoryTitle}><Badge variant={printCount > 1 ? "warning" : "success"}>{printCount > 1 ? `Reprinted ${printCount} times` : "Printed once"}</Badge>{lastPrintedAt ? <p className="mt-1 whitespace-nowrap text-xs text-muted-foreground">Last {dateLabel(lastPrintedAt)}</p> : null}{lastPrintDestination ? <p className="max-w-44 truncate text-xs text-muted-foreground">{lastPrintDestination}</p> : null}</div> : <Badge variant="warning">Not printed</Badge>}</TableCell>
       <TableCell><span className="whitespace-nowrap text-xs">{row.trackingCheckedAt ? dateLabel(String(row.trackingCheckedAt)) : "Not checked"}</span></TableCell>
-      <TableCell className="sticky right-0 z-10 bg-background text-right shadow-[-1px_0_0_hsl(var(--border))] group-hover:bg-muted/50"><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" aria-label={`Actions for order ${String(row.orderNumber || row.orderId)}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem disabled={!labelDocument || labelGenerating} onSelect={printRow}><Printer className="size-4" /> {printed ? "Reprint label" : "Print label"}</DropdownMenuItem><DropdownMenuItem disabled={!row.fulfillmentBatchId || labelGenerating} onSelect={() => window.open(`/api/fulfillment/label-batches/${encodeURIComponent(String(row.fulfillmentBatchId))}/pick-sheet`, "_blank", "noopener,noreferrer")}><ListChecks className="size-4" /> Pick sheet</DropdownMenuItem>{isUpsShipment ? <><DropdownMenuSeparator /><DropdownMenuLabel>UPS tracking</DropdownMenuLabel><DropdownMenuItem disabled={evidenceRefreshing} onSelect={() => void refreshUpsEvidence(row)}>{evidenceRefreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {row.trackingStatus === "delivered" ? "Refresh delivery evidence" : "Refresh direct UPS status"}</DropdownMenuItem>{deliveryDocuments.map((document: Record<string, any>) => <DropdownMenuItem key={String(document.documentId || document.url)} asChild><a href={String(document.url)} download><FileDown className="size-4" /> {document.documentType === "carrier_tracking_report" ? "Download tracking report" : document.documentType === "proof_of_delivery" ? "Download proof of delivery" : document.documentType === "delivery_photo" ? "Download delivery photo" : "Download signature"}</a></DropdownMenuItem>)}</> : null}{isUspsShipment ? <><DropdownMenuSeparator /><DropdownMenuLabel>USPS tracking</DropdownMenuLabel><DropdownMenuItem disabled={evidenceRefreshing} onSelect={() => void refreshUspsTracking(row)}>{evidenceRefreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh direct USPS status</DropdownMenuItem>{row.deliveryEvidence?.proofOfDeliveryAvailable ? <DropdownMenuItem disabled={evidenceRefreshing} onSelect={() => void requestUspsProofOfDelivery(row)}><FileDown className="size-4" /> Email proof of delivery</DropdownMenuItem> : null}</> : null}</DropdownMenuContent></DropdownMenu></TableCell>
+      <TableCell className="sticky right-0 z-10 bg-background text-right shadow-[-1px_0_0_hsl(var(--border))] group-hover:bg-muted/50"><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" aria-label={`Actions for order ${String(row.orderNumber || row.orderId)}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem disabled={!labelDocument || labelGenerating} onSelect={printRow}><Printer className="size-4" /> {printed ? "Reprint label" : "Print label"}</DropdownMenuItem><DropdownMenuItem disabled={!row.fulfillmentBatchId || labelGenerating} onSelect={() => setAdditionalLabelTarget({ ...row, shipmentId: row.id })}><Plus className="size-4" /> Print additional label</DropdownMenuItem><DropdownMenuItem disabled={!row.fulfillmentBatchId || labelGenerating} onSelect={() => window.open(`/api/fulfillment/label-batches/${encodeURIComponent(String(row.fulfillmentBatchId))}/pick-sheet`, "_blank", "noopener,noreferrer")}><ListChecks className="size-4" /> Pick sheet</DropdownMenuItem>{isUpsShipment ? <><DropdownMenuSeparator /><DropdownMenuLabel>UPS tracking</DropdownMenuLabel><DropdownMenuItem disabled={evidenceRefreshing} onSelect={() => void refreshUpsEvidence(row)}>{evidenceRefreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {row.trackingStatus === "delivered" ? "Refresh delivery evidence" : "Refresh direct UPS status"}</DropdownMenuItem>{deliveryDocuments.map((document: Record<string, any>) => <DropdownMenuItem key={String(document.documentId || document.url)} asChild><a href={String(document.url)} download><FileDown className="size-4" /> {document.documentType === "carrier_tracking_report" ? "Download tracking report" : document.documentType === "proof_of_delivery" ? "Download proof of delivery" : document.documentType === "delivery_photo" ? "Download delivery photo" : "Download signature"}</a></DropdownMenuItem>)}</> : null}{isUspsShipment ? <><DropdownMenuSeparator /><DropdownMenuLabel>USPS tracking</DropdownMenuLabel><DropdownMenuItem disabled={evidenceRefreshing} onSelect={() => void refreshUspsTracking(row)}>{evidenceRefreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh direct USPS status</DropdownMenuItem>{row.deliveryEvidence?.proofOfDeliveryAvailable ? <DropdownMenuItem disabled={evidenceRefreshing} onSelect={() => void requestUspsProofOfDelivery(row)}><FileDown className="size-4" /> Email proof of delivery</DropdownMenuItem> : null}</> : null}</DropdownMenuContent></DropdownMenu></TableCell>
     </TableRow>
-  })}{!rows.length && <TableRow><TableCell colSpan={13} className="h-28 text-center text-muted-foreground">{emptyMessage}</TableCell></TableRow>}</TableBody></Table></div>{rows.length > pageSize && <div className="flex flex-col gap-2 border-t px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"><span className="text-muted-foreground">Showing {numberLabel((currentPage - 1) * pageSize + 1)}-{numberLabel(Math.min(currentPage * pageSize, rows.length))} of {numberLabel(rows.length)}</span><div className="flex items-center gap-2"><Button size="sm" variant="outline" disabled={currentPage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>Previous</Button><span className="min-w-20 text-center">Page {currentPage} of {pageCount}</span><Button size="sm" variant="outline" disabled={currentPage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>Next</Button></div></div>}</div>
+  })}{!rows.length && <TableRow><TableCell colSpan={13} className="h-28 text-center text-muted-foreground">{emptyMessage}</TableCell></TableRow>}</TableBody></Table></div>{rows.length > pageSize && <div className="flex flex-col gap-2 border-t px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between"><span className="text-muted-foreground">Showing {numberLabel((currentPage - 1) * pageSize + 1)}-{numberLabel(Math.min(currentPage * pageSize, rows.length))} of {numberLabel(rows.length)}</span><div className="flex items-center gap-2"><Button size="sm" variant="outline" disabled={currentPage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>Previous</Button><span className="min-w-20 text-center">Page {currentPage} of {pageCount}</span><Button size="sm" variant="outline" disabled={currentPage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>Next</Button></div></div>}<AdditionalParcelLabelDialog target={additionalLabelTarget} open={Boolean(additionalLabelTarget)} onOpenChange={(next) => !next && setAdditionalLabelTarget(null)} onChanged={onRefresh} /></div>
 }
 
 const fulfillmentWorkColumnOptions = [
@@ -671,6 +832,7 @@ export function ShippingBatchesPage() {
   const [loading, setLoading] = useState(true)
   const [busyId, setBusyId] = useState("")
   const [printJob, setPrintJob] = useState<Record<string, any> | null>(null)
+  const [additionalLabelTarget, setAdditionalLabelTarget] = useState<Record<string, any> | null>(null)
   const printFrameRef = useRef<HTMLIFrameElement>(null)
   const batches = Array.isArray(data.batches) ? data.batches as Array<Record<string, any>> : []
   const printQueue = Array.isArray(data.printQueue) ? data.printQueue as Array<Record<string, any>> : []
@@ -763,13 +925,14 @@ export function ShippingBatchesPage() {
           return <section key={String(batch.id)} className="border-b last:border-b-0">
             {batch.sourceBatchNumber ? <div className="px-4 pt-3"><RecoverySourceLabel record={batch} fallback={job} /></div> : null}
             <div className="flex flex-col gap-3 p-4 lg:flex-row lg:items-center lg:justify-between"><div><div className="flex flex-wrap items-center gap-2">{job ? <button type="button" className="font-semibold hover:underline" onClick={() => openBatchPrintModal(job, batch)}>{String(batch.batchNumber || "Shipping batch")}</button> : <h2 className="font-semibold">{String(batch.batchNumber || "Shipping batch")}</h2>}<Badge variant={Number(batch.counts?.failed || 0) > 0 ? "destructive" : Number(batch.counts?.purchased || 0) > 0 ? "success" : "outline"}>{String(batch.status || "queued").replaceAll("_", " ")}</Badge><Badge variant={String(batch.warehouseStatus || "open") === "closed" ? "success" : "warning"}>{String(batch.warehouseStatus || "open") === "closed" ? "Closed" : "Open"}</Badge>{String(job?.lastOutputAction || batch.lastOutputAction || "") === "saved_pdf" ? <Badge variant="secondary"><FileDown className="mr-1 size-3" /> Saved PDF</Badge> : Number(job?.printCount || batch.labelPrintCount || 0) > 0 ? <Badge variant="outline"><Printer className="mr-1 size-3" /> Printed</Badge> : null}</div><p className="mt-1 text-xs text-muted-foreground">Created {dateLabel(String(batch.createdAt || batch.updatedAt || ""))} · {numberLabel(Number(batch.counts?.purchased || 0))} purchased · {numberLabel(Number(batch.counts?.failed || 0))} failed · {numberLabel(Number(job?.printCount || batch.labelPrintCount || 0))} prints · {numberLabel(Number(job?.savedPdfCount || batch.labelPdfSaveCount || 0))} PDF saves</p></div><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={!Number(batch.counts?.purchased || 0)} onClick={() => window.open(`/api/fulfillment/label-batches/${encodeURIComponent(String(batch.id))}/pick-sheet`, "_blank", "noopener,noreferrer")}><ListChecks className="size-4" /> Pick sheet</Button><Button size="sm" variant="outline" disabled={busy || !Number(batch.counts?.purchased || 0)} onClick={() => void updateBatchHandlingStatus(String(batch.id || ""), String(batch.warehouseStatus || "open") === "closed" ? "open" : "closed")}>{busy ? <Loader2 className="size-4 animate-spin" /> : String(batch.warehouseStatus || "open") === "closed" ? <RotateCcw className="size-4" /> : <CheckCircle2 className="size-4" />} {String(batch.warehouseStatus || "open") === "closed" ? "Reopen batch" : "Close batch"}</Button>{Number(batch.counts?.failed || 0) > 0 ? <Button size="sm" variant="outline" disabled={busy} onClick={() => void runBatchAction(batch, "retry")}><RotateCcw className="size-4" /> Retry failed</Button> : null}{Number(batch.counts?.rated || 0) + Number(batch.counts?.queued || 0) > 0 ? <Button size="sm" disabled={busy} onClick={() => void runBatchAction(batch, "purchase")}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Buy ready labels</Button> : null}{job && Number(job.documentCount || batch.counts?.purchased || 0) > 0 ? <Button size="sm" onClick={() => openBatchPrintModal(job, batch)}><Printer className="size-4" /> {Number(job.printCount || 0) > 0 ? "Open & reprint" : "Open & print"}</Button> : null}</div></div>
-            <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Customer</TableHead><TableHead>SKUs</TableHead><TableHead>Label status</TableHead><TableHead>Carrier / service</TableHead><TableHead className="text-right">Cost</TableHead></TableRow></TableHeader><TableBody>{rows.map((row, index) => <TableRow key={`${String(row.orderId || row.orderNumber)}:${index}`}><TableCell><a className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId || row.orderNumber || ""))}`}>{String(row.orderNumber || row.orderId)}</a></TableCell><TableCell><p className="max-w-56 truncate" title={String(row.customer || "")}>{String(row.customer || "Customer unavailable")}</p></TableCell><TableCell><div className="flex max-w-80 flex-wrap gap-1">{(row.skus || []).map((sku: string) => <a key={sku} href={`/products/${encodeURIComponent(sku)}`}><Badge variant="outline" className="font-mono hover:bg-muted">{sku}</Badge></a>)}</div></TableCell><TableCell><Badge variant={row.status === "purchased" ? "success" : row.status === "failed" ? "destructive" : row.status === "label_pending" ? "warning" : "outline"}>{row.status === "purchased" ? "Purchased" : String(row.status || "pending").replaceAll("_", " ")}</Badge>{row.error ? <p className="mt-1 max-w-80 text-xs text-destructive">{String(row.error)}</p> : null}</TableCell><TableCell>{row.selectedRate ? <><p className="font-medium">{String(row.selectedRate.carrier || "Carrier")}</p><p className="text-xs text-muted-foreground">{String(row.selectedRate.service || "Service")}</p></> : "-"}</TableCell><TableCell className="text-right tabular-nums">{row.selectedRate ? moneyLabel(Number(row.shippingCost ?? row.selectedRate.amount ?? 0)) : "-"}</TableCell></TableRow>)}{!rows.length ? <TableRow><TableCell colSpan={6} className="h-24 text-center text-muted-foreground">No orders are stored in this batch.</TableCell></TableRow> : null}</TableBody></Table></div>
+            <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Customer</TableHead><TableHead>SKUs</TableHead><TableHead>Label status</TableHead><TableHead>Carrier / service</TableHead><TableHead className="text-right">Cost</TableHead><TableHead className="text-right">Additional parcel</TableHead></TableRow></TableHeader><TableBody>{rows.map((row, index) => <TableRow key={`${String(row.orderId || row.orderNumber)}:${index}`}><TableCell><a className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId || row.orderNumber || ""))}`}>{String(row.orderNumber || row.orderId)}</a></TableCell><TableCell><p className="max-w-56 truncate" title={String(row.customer || "")}>{String(row.customer || "Customer unavailable")}</p></TableCell><TableCell><div className="flex max-w-80 flex-wrap gap-1">{(row.skus || []).map((sku: string) => <a key={sku} href={`/products/${encodeURIComponent(sku)}`}><Badge variant="outline" className="font-mono hover:bg-muted">{sku}</Badge></a>)}</div></TableCell><TableCell><Badge variant={row.status === "purchased" ? "success" : row.status === "failed" ? "destructive" : row.status === "label_pending" ? "warning" : "outline"}>{row.status === "purchased" ? "Purchased" : String(row.status || "pending").replaceAll("_", " ")}</Badge>{row.error ? <p className="mt-1 max-w-80 text-xs text-destructive">{String(row.error)}</p> : null}</TableCell><TableCell>{row.selectedRate ? <><p className="font-medium">{String(row.selectedRate.carrier || "Carrier")}</p><p className="text-xs text-muted-foreground">{String(row.selectedRate.service || "Service")}</p></> : "-"}</TableCell><TableCell className="text-right tabular-nums">{row.selectedRate ? moneyLabel(Number(row.shippingCost ?? row.selectedRate.amount ?? 0)) : "-"}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" disabled={row.status !== "purchased"} onClick={() => setAdditionalLabelTarget({ ...row, batchId: batch.id, batchNumber: batch.batchNumber, fulfillmentBatchId: batch.id, fulfillmentBatchNumber: batch.batchNumber })}><Plus className="size-4" /> {Array.isArray(batch.additionalLabels) && batch.additionalLabels.some((label: Record<string, any>) => String(label.rowId || "") === String(row.id || "") || String(label.orderId || "") === String(row.orderId || "")) ? "Open extras" : "Add label"}</Button></TableCell></TableRow>)}{!rows.length ? <TableRow><TableCell colSpan={7} className="h-24 text-center text-muted-foreground">No orders are stored in this batch.</TableCell></TableRow> : null}</TableBody></Table></div>
           </section>
         })}
         {!loading && !batches.length ? <Empty className="min-h-56"><EmptyHeader><EmptyMedia variant="icon"><Truck className="size-4" /></EmptyMedia><EmptyTitle>No matching shipping batches</EmptyTitle><EmptyDescription>Try another batch number, order, customer, or SKU.</EmptyDescription></EmptyHeader></Empty> : null}
       </CardContent>
     </Card>
     <div className="flex items-center justify-between"><p className="text-sm text-muted-foreground">Page {numberLabel(Number(data.page || page))} of {numberLabel(Number(data.totalPages || 1))}</p><div className="flex gap-2"><Button variant="outline" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</Button><Button variant="outline" disabled={page >= Number(data.totalPages || 1) || loading} onClick={() => setPage((current) => current + 1)}>Next</Button></div></div>
+    <AdditionalParcelLabelDialog target={additionalLabelTarget} open={Boolean(additionalLabelTarget)} onOpenChange={(next) => !next && setAdditionalLabelTarget(null)} onChanged={() => load(true)} />
     <Dialog open={Boolean(printJob)} onOpenChange={(open) => !open && setPrintJob(null)}><DialogContent className="flex h-[92dvh] max-w-5xl flex-col gap-0 overflow-hidden p-0"><DialogHeader className="border-b p-4 pr-12"><DialogTitle>{String(printJob?.printNumber || printJob?.batchNumber || "Print labels")}</DialogTitle><DialogDescription>This packet contains purchased labels only. Printing it does not buy another label or close the warehouse batch.</DialogDescription></DialogHeader><div className="flex flex-wrap items-center justify-between gap-3 border-b bg-muted/20 px-4 py-3"><div><p className="text-sm font-medium">Warehouse batch status</p><p className="text-xs text-muted-foreground">Close only after the physical labels are in hand and this batch has been handled.</p></div><Select value={String(printJobBatch?.warehouseStatus || printJob?.warehouseStatus || "open")} onValueChange={(value) => void updateBatchHandlingStatus(String(printJob?.batchId || ""), value as "open" | "closed")} disabled={!printJob?.batchId || busyId === String(printJob?.batchId || "")}><SelectTrigger className="w-32"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="open">Open</SelectItem><SelectItem value="closed">Closed</SelectItem></SelectContent></Select></div><div className="min-h-0 flex-1 bg-muted/30 p-3">{printJob?.id ? <iframe ref={printFrameRef} src={`/api/fulfillment/print-queue/${encodeURIComponent(String(printJob.id))}/document.pdf`} title="Purchased shipping labels" className="h-full min-h-[420px] w-full rounded-md border bg-white" /> : null}</div><DialogFooter className="border-t p-4"><Button variant="outline" onClick={() => setPrintJob(null)}>Close</Button>{printJob?.id ? <Button variant="outline" asChild><a href={`/api/fulfillment/print-queue/${encodeURIComponent(String(printJob.id))}/document.pdf`} download={`${String(printJob.printNumber || "shipping-labels")}.pdf`} onClick={() => void recordSavedPdf()}><FileDown className="size-4" /> Download PDF</a></Button> : null}<Button disabled={busyId === String(printJob?.id || "")} onClick={() => void printInBrowser()}>{busyId === String(printJob?.id || "") ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} Print in browser</Button></DialogFooter></DialogContent></Dialog>
   </div>
 }
