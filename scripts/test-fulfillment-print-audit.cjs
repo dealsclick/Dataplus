@@ -74,6 +74,9 @@ assert.match(dbSource, /'isEbayLive', to_jsonb\([\s\S]*?ebay_live/, "batch proje
 assert.match(serverSource, /completePrintedPurchasedShipment\(db, order, shipment, actor, printedAt\)[\s\S]*syncDropshipShipmentToChannel/, "printing must complete local fulfillment before marketplace tracking sync")
 const directPrintRoute = serverSource.slice(serverSource.indexOf('parts[5] === "printed"'), serverSource.indexOf('url.pathname === "/api/fulfillment/pack/scan"'))
 assert.match(directPrintRoute, /completePrintedShipmentGroup\(db, order, shipment, directPrintJob, actor, printedAt\)/, "browser printing must mark every grouped order fulfilled")
+assert.match(directPrintRoute, /groupResult\.fulfillmentResults[\s\S]*invalidateFulfillmentConsoleSnapshot\(affectedOrderIds\)[\s\S]*await drainFulfillmentConsoleProjectionPatches\(\)/, "direct browser printing must synchronously remove every grouped order from pending fulfillment")
+const printQueueCompletionRoute = serverSource.slice(serverSource.indexOf('parts[4] === "printed"'), serverSource.indexOf('parts[4] === "saved-pdf"'))
+assert.match(printQueueCompletionRoute, /printJob\.fulfillmentResults[\s\S]*invalidateFulfillmentConsoleSnapshot\(affectedOrderIds\)[\s\S]*await drainFulfillmentConsoleProjectionPatches\(\)/, "print-queue completion must synchronously remove every grouped order from pending fulfillment")
 assert.match(serverSource.slice(serverSource.indexOf("async function reconcilePrintedShipmentFulfillment"), serverSource.indexOf("async function markPrintJobShipmentsPrinted")), /completePrintedShipmentGroup/, "printed-shipment repair must recover grouped child orders")
 assert.match(serverSource, /qtyFulfilled \|\| localShipmentLine\?\.qtyAllocated \|\| localShipmentLine\?\.qty/, "Shopify fulfillment must support purchased-label lines that store qty")
 

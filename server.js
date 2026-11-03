@@ -54674,8 +54674,13 @@ async function handleApi(req, res) {
       postgres.upsertStateEntityDocument("fulfillmentPrintQueue", printJob),
       ...(state.batches || []).map((batch) => postgres.upsertStateEntityDocument("fulfillmentLabelBatches", batch))
     ]);
-    invalidateFulfillmentConsoleSnapshot(fulfillmentPrintJobOrderIds(printJob, state));
-    return sendJson(res, 200, { printJob, message: `${printJob.printNumber} marked printed. Total prints: ${printJob.printCount}.` });
+    const affectedOrderIds = [...new Set([
+      ...fulfillmentPrintJobOrderIds(printJob, state),
+      ...(printJob.fulfillmentResults || []).map((result) => String(result.orderId || "").trim()).filter(Boolean)
+    ])];
+    invalidateFulfillmentConsoleSnapshot(affectedOrderIds);
+    const projectionUpdated = await drainFulfillmentConsoleProjectionPatches();
+    return sendJson(res, 200, { printJob, affectedOrderIds, projectionUpdated, message: `${printJob.printNumber} marked printed. Total prints: ${printJob.printCount}.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-queue" && parts[3] && parts[4] === "saved-pdf" && postgres.isPostgresEnabled()) {
@@ -58158,6 +58163,12 @@ async function handleApi(req, res) {
     order.updatedAt = printedAt;
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
+    const affectedOrderIds = [...new Set([
+      String(order.id || "").trim(),
+      ...(groupResult.fulfillmentResults || []).map((result) => String(result.orderId || "").trim()).filter(Boolean)
+    ].filter(Boolean))];
+    invalidateFulfillmentConsoleSnapshot(affectedOrderIds);
+    const projectionUpdated = await drainFulfillmentConsoleProjectionPatches();
     const syncWarning = channelResult && !["sent", "already_synced"].includes(String(channelResult.status || "").toLowerCase())
       ? ` Marketplace tracking was not sent: ${channelResult.error || shipment.channelSync?.message || channelResult.status}.`
       : "";
@@ -58177,7 +58188,7 @@ async function handleApi(req, res) {
       : groupedFulfillmentFailures.length
         ? ` ${groupedFulfillmentFailures.length} grouped order${groupedFulfillmentFailures.length === 1 ? "" : "s"} still need fulfillment review.`
         : "";
-    return sendJson(res, 200, { shipment, fulfillmentResult, groupResult, channelResult, channelResults, message: `${firstPrint ? "Shipping label marked printed." : `Shipping label reprinted. Total prints: ${shipment.labelPrintCount}.`}${fulfillmentMessage}${groupMessage}${fulfillmentWarning}${syncWarning}` });
+    return sendJson(res, 200, { shipment, fulfillmentResult, groupResult, channelResult, channelResults, affectedOrderIds, projectionUpdated, message: `${firstPrint ? "Shipping label marked printed." : `Shipping label reprinted. Total prints: ${shipment.labelPrintCount}.`}${fulfillmentMessage}${groupMessage}${fulfillmentWarning}${syncWarning}` });
   }
 
   if (req.method === "POST" && url.pathname === "/api/fulfillment/pack/scan" && postgres.isPostgresEnabled()) {
