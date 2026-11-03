@@ -678,6 +678,7 @@ export function FulfillmentPage() {
   const [data, setData] = useState<Record<string, any>>(cachedReadyView || { work: [], allWork: [], batches: [], printQueue: [], printStations: [], shipments: [], doNotShip: [], exceptions: [], manifests: [], reports: {}, settings: {} })
   const fulfillmentTabMountedRef = useRef(false)
   const fulfillmentRequestRef = useRef(0)
+  const fulfillmentLoadRef = useRef<(fresh?: boolean, quiet?: boolean, requestedView?: string) => Promise<Record<string, any> | null>>(async () => null)
   const [loading, setLoading] = useState(!cachedReadyView)
   const [busy, setBusy] = useState(false)
   const [tab, setFulfillmentTab] = useState("ready")
@@ -1037,7 +1038,7 @@ export function FulfillmentPage() {
           fresh,
         })
       }))
-      if (result.snapshotStale) window.setTimeout(() => void load(false, true), 2500)
+      if (result.snapshotStale) window.setTimeout(() => void fulfillmentLoadRef.current(false, true), 2500)
       return result
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load fulfillment work.")
@@ -1046,6 +1047,7 @@ export function FulfillmentPage() {
       if (!quiet) setLoading(false)
     }
   }
+  fulfillmentLoadRef.current = load
 
   const loadConsolidationCartonization = async (row: Record<string, any>, orderIds: string[]) => {
     if (!orderIds.length) { setConsolidationCartonization(null); return }
@@ -1232,7 +1234,7 @@ export function FulfillmentPage() {
   }, [tab, workPage, workPageSize, status, query, workSort, allocationFilter, consolidationFilter, deadlineFilter, salesTypeFilter, hiddenChannels, selectedSkuFilters, purchasedLabelFilter, purchasedCarrierFilter, purchasedSupplierFilter, purchasedSkuFilter, purchasedChannelFilter, purchasedLabelSourceFilter, purchasedChannelSyncFilter, doNotShipFilter])
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void load(false, true, tab)
+      if (document.visibilityState === "visible") void fulfillmentLoadRef.current(false, true)
     }, 60_000)
     return () => window.clearInterval(timer)
   }, [tab])
@@ -1291,7 +1293,7 @@ export function FulfillmentPage() {
               routeIds: new Set(items.flatMap((item) => item.routeIds.map(String))),
             })
           }
-          await load(false, true)
+          await fulfillmentLoadRef.current(false, true)
           const openLabelPurchase = rateRefreshOpenLabelOnCompleteRef.current
           rateRefreshOpenLabelOnCompleteRef.current = false
           if (openLabelPurchase && items.some((item) => item.status === "rated")) window.setTimeout(() => setBatchOpen(true), 0)
@@ -1322,7 +1324,7 @@ export function FulfillmentPage() {
         }
         window.localStorage.removeItem("dataplus:fulfillment-carrier-scan-job")
         setCarrierScanJobId("")
-        await load(false, true)
+        await fulfillmentLoadRef.current(false, true)
         if (["failed", "warning"].includes(String(job.status || "").toLowerCase())) toast.warning(job.message || "Carrier scan check finished with labels needing attention.")
         else toast.success(job.message || "Carrier scan check finished.")
       } catch {
@@ -1360,7 +1362,7 @@ export function FulfillmentPage() {
         }
         window.localStorage.removeItem("dataplus:fulfillment-label-purchase-job")
         setLabelPurchaseJobId("")
-        const refreshedData = await load(false, true)
+        const refreshedData = await fulfillmentLoadRef.current(false, true)
         const printJobs = (Array.isArray(refreshedData?.printQueue) ? refreshedData.printQueue : []).filter((entry: Record<string, any>) => {
           const matchesPrintJob = Boolean(job.printJobId) && String(entry.id || "") === String(job.printJobId)
           const matchesPrintRequest = Boolean(job.printRequestId) && String(entry.printRequestId || "") === String(job.printRequestId)
@@ -1442,10 +1444,10 @@ export function FulfillmentPage() {
         const previousKey = automaticRateStatusRef.current
         automaticRateStatusRef.current = key
         if (previousKey && key !== previousKey && ["success", "warning", "failed"].includes(status)) {
-          await load(false, true)
+          await fulfillmentLoadRef.current(false, true)
           toast.info(status === "success" ? "Fresh shipping rates are now available." : "The automatic rate refresh finished with orders needing attention.")
         } else if (!previousKey && ["success", "warning"].includes(status)) {
-          await load(false, true)
+          await fulfillmentLoadRef.current(false, true)
         }
       } catch {
         // The next lightweight status check will reconcile completed background rates.
@@ -2456,6 +2458,12 @@ export function FulfillmentPage() {
     try {
       const targets = packageTargetRows.filter((row) => packageRouteIds.includes(String(row.id)))
       if (!targets.length) throw new Error("The selected package records are no longer available. Close the editor and select them again.")
+      const packageValues = {
+        packageWeight: Number(packageDraft.packageWeight || 0),
+        packageLength: Number(packageDraft.packageLength || 0),
+        packageWidth: Number(packageDraft.packageWidth || 0),
+        packageHeight: Number(packageDraft.packageHeight || 0),
+      }
       const targetsByPackageOwner = [...targets.reduce((groups, row) => {
         const shipmentGroupId = String(row.shipmentGroupId || "").trim()
         const key = shipmentGroupId ? `shipment-group:${shipmentGroupId}` : `order:${String(row.orderId)}`
@@ -2463,24 +2471,47 @@ export function FulfillmentPage() {
         return groups
       }, new Map<string, Array<Record<string, any>>>() ).values()]
       const responses = await Promise.all(targetsByPackageOwner.map(async (packageRows) => {
-        const saved = [] as Array<{ warning?: string }>
+        const saved = [] as Array<{ warning?: string; affectedOrderIds?: string[] }>
         const shipmentGroupId = String(packageRows[0]?.shipmentGroupId || "").trim()
         const rowsToSave = shipmentGroupId ? packageRows.slice(0, 1) : packageRows
         for (const row of rowsToSave) {
-          saved.push(await api<{ warning?: string }>(`/api/orders/${encodeURIComponent(String(row.orderId))}/fulfillment-package`, {
+          saved.push(await api<{ warning?: string; affectedOrderIds?: string[] }>(`/api/orders/${encodeURIComponent(String(row.orderId))}/fulfillment-package`, {
             method: "PATCH",
-            body: JSON.stringify({ routeId: row.id, packageWeight: Number(packageDraft.packageWeight || 0), packageLength: Number(packageDraft.packageLength || 0), packageWidth: Number(packageDraft.packageWidth || 0), packageHeight: Number(packageDraft.packageHeight || 0), warehouseId: row.warehouseId, warehouseName: row.warehouseName, shipAlone: targets.length === 1 ? packageShipAlone : undefined, saveAsProductDefault: targets.length === 1 && savePackageAsDefault, saveShipAloneAsProductDefault: targets.length === 1 && saveShipAloneAsDefault, catalogSku: row.catalogSku || row.sku || "", user: "Luis" }),
+            body: JSON.stringify({ routeId: row.id, ...packageValues, warehouseId: row.warehouseId, warehouseName: row.warehouseName, shipAlone: targets.length === 1 ? packageShipAlone : undefined, saveAsProductDefault: targets.length === 1 && savePackageAsDefault, saveShipAloneAsProductDefault: targets.length === 1 && saveShipAloneAsDefault, catalogSku: row.catalogSku || row.sku || "", user: "Luis" }),
           }))
         }
         return saved
       }))
       const warning = responses.flat().map((response) => String(response.warning || "").trim()).find(Boolean)
+      const affectedOrderIds = new Set(responses.flat().flatMap((response) => response.affectedOrderIds || []).map(String))
+      const targetRouteIds = new Set(targets.map((row) => String(row.id || "")).filter(Boolean))
+      const applyPackageValues = (items: unknown) => (Array.isArray(items) ? items : []).map((row: Record<string, any>) => {
+        if (!targetRouteIds.has(String(row.id || "")) && !affectedOrderIds.has(String(row.orderId || ""))) return row
+        const blockers = (Array.isArray(row.labelReadiness?.blockers) ? row.labelReadiness.blockers : [])
+          .filter((blocker: unknown) => !/package|weight|dimension|measurement/i.test(String(blocker || "")))
+        return {
+          ...row,
+          package: { ...(row.package || {}), ...packageValues },
+          packageSource: "manual",
+          packageInferred: false,
+          labelReadiness: {
+            ...(row.labelReadiness || {}),
+            ready: blockers.length === 0,
+            blockers,
+            weight: packageValues.packageWeight,
+            length: packageValues.packageLength,
+            width: packageValues.packageWidth,
+            height: packageValues.packageHeight,
+          },
+        }
+      })
+      setData((current) => ({ ...current, work: applyPackageValues(current.work), allWork: applyPackageValues(current.allWork) }))
       if (warning) toast.warning(warning)
       else toast.success(`Package details saved for ${targetsByPackageOwner.length} shipment${targetsByPackageOwner.length === 1 ? "" : "s"}.`)
       setPackageRow(null)
       setPackageRouteIds([])
       setPackageTargetRows([])
-      await load(true, false, tab)
+      window.setTimeout(() => void fulfillmentLoadRef.current(false, true), 750)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to save package details.")
     } finally {

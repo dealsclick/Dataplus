@@ -57920,7 +57920,6 @@ async function handleApi(req, res) {
     }
     if (invalidatedRates) await postgres.writeStateDocuments({ fulfillmentLabelBatches: fulfillmentState.batches.slice(0, 1000) });
     invalidateFulfillmentConsoleSnapshot(affectedOrderIds);
-    await flushFulfillmentConsoleProjectionPatch();
     return sendJson(res, 200, { order, route, package: order.package, shipmentGroupPackage: order.shipmentGroupPackage || null, affectedOrderIds, productDefault, warning: productDefaultWarning, message: body.markReady === true ? "Order is ready to ship. A pick list is optional." : shipmentGroupId ? `Final package saved for all ${affectedOrderIds.length} orders in shipment group ${shipmentGroupId}.` : productDefault ? `Package details saved as the default for ${productDefault.sku}. Readiness will refresh now.` : productDefaultWarning || "Package details saved. Readiness will refresh now." });
   }
 
