@@ -179,7 +179,7 @@ export function JobsPage({
                 {workerStatus.workers?.length ? workerStatus.workers.map(worker => (
                   <span key={worker.workerId || worker.lane} className="min-w-0 break-words">
                     <strong className="text-foreground">{worker.name || worker.workerId}</strong>
-                    {" · "}{worker.lane === "orders" ? "Orders & returns" : worker.lane === "background" ? "Scheduled jobs" : "Manual jobs"}
+                    {" · "}{worker.lane === "orders" ? "Orders & returns" : worker.lane === "background" ? "Scheduled jobs" : worker.lane === "carrier" ? "Rates & labels" : "Manual jobs"}
                     {" · "}{worker.online ? worker.currentTask || "Idle" : "Offline"}
                   </span>
                 )) : workerStatus.currentTask || workerStatus.workerId || "No task"}

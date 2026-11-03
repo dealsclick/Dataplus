@@ -139,6 +139,19 @@ services:
     mem_limit: 768m
     cpus: 1.0
 
+  worker-carrier:
+    extends:
+      service: worker
+    image: dataplus-worker
+    container_name: dataplus-worker-carrier
+    environment:
+      DATAPLUS_WORKER_LANE: carrier
+      NODE_OPTIONS: --max-old-space-size=512
+      DATAPLUS_WORKER_JOB_RSS_MB: 480
+      DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: 560
+    mem_limit: 768m
+    cpus: 1.0
+
   worker-orders-ebay:
     extends:
       service: worker

@@ -1082,6 +1082,7 @@ export function FulfillmentPage() {
       const result = await api<{ eligible?: boolean; reason?: string; primary?: Record<string, any>; candidates?: Array<Record<string, any>> }>(`/api/orders/${encodeURIComponent(String(row.orderId || ""))}/shipment-group-candidates`)
       if (result.eligible === false) throw new Error(result.reason || "This order cannot be combined yet.")
       const candidates = result.candidates || []
+      const savedPackage = result.primary?.shipmentGroupPackage && typeof result.primary.shipmentGroupPackage === "object" ? result.primary.shipmentGroupPackage : null
       const availableIds = new Set(candidates.map((candidate) => String(candidate.id || "")).filter(Boolean))
       const preferredIds = preferredOrderIds.map(String).filter((id) => id && id !== String(row.orderId || "") && availableIds.has(id))
       const candidateIds = preferredOrderIds.length ? preferredIds : [...availableIds]
@@ -1090,6 +1091,12 @@ export function FulfillmentPage() {
       setConsolidationCandidates(candidates)
       setConsolidationSelection(new Set(candidateIds))
       await loadConsolidationCartonization(row, candidateIds)
+      if (savedPackage) setConsolidationPackageDraft({
+        packageWeight: String(savedPackage.packageWeight || ""),
+        packageLength: String(savedPackage.packageLength || ""),
+        packageWidth: String(savedPackage.packageWidth || ""),
+        packageHeight: String(savedPackage.packageHeight || ""),
+      })
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to find orders that can ship together.")
       setConsolidationOrder(null)

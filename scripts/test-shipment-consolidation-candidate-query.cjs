@@ -22,6 +22,7 @@ test("candidate lookup uses stable buyer identity without an age cutoff", () => 
   assert.match(serverSource, /listOrders\(\{ limit: 5000, summary: true, q: candidateIdentity, openWorkOnly: true \}\)/);
   assert.match(serverSource, /timeLimitEnforced: false/);
   assert.doesNotMatch(serverSource, /const dateFrom = new Date\(primaryTimestamp - windowMs\)/);
+  assert.match(serverSource, /shipmentGroupPackage: order\.shipmentGroupPackage \|\| null/);
 });
 
 test("active and purchased label rows are excluded from consolidation", () => {

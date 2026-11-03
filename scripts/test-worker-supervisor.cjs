@@ -47,6 +47,7 @@ try {
   assert.deepStrictEqual(readChildPids(102, root), []);
   assert.strictEqual(processTreeRssBytes(100, root), (1024 + 2048 + 4096 + 8192) * 1024);
   assert.strictEqual(jobMemoryBudgetMb("background", "fulfillment-rate-refresh", {}), 680);
+  assert.strictEqual(jobMemoryBudgetMb("carrier", "fulfillment-rate-refresh", {}), 480);
   assert.strictEqual(jobMemoryBudgetMb("background", "product-dump-import", {}), 900);
   assert.strictEqual(jobMemoryBudgetMb("background", "product-dump-import", { DATAPLUS_PRODUCT_DUMP_JOB_RSS_MB: "880" }), 880);
   assert.strictEqual(jobMemoryBudgetMb("orders-ebay", "ebay-order-import", {}), 600);

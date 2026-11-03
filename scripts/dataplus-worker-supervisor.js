@@ -24,6 +24,7 @@ function positiveNumber(value, fallback) {
 }
 
 function laneDefaultBudgetMb(lane = "manual") {
+  if (lane === "carrier") return 480;
   if (["orders-shopify", "orders-ebay"].includes(lane)) return 480;
   if (lane === "orders-temu") return 1000;
   if (["background", "walmart"].includes(lane)) return 680;
@@ -31,6 +32,7 @@ function laneDefaultBudgetMb(lane = "manual") {
 }
 
 function laneHeavyBudgetMb(lane = "manual") {
+  if (lane === "carrier") return 560;
   if (lane === "orders-shopify") return 560;
   if (lane === "orders-ebay") return 600;
   if (lane === "orders-temu") return 1200;

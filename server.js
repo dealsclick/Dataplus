@@ -58982,7 +58982,7 @@ async function handleApi(req, res) {
       candidate.catalogSku,
       ...orderLineItems(candidate).flatMap((line) => [line.sku, line.originalSku, line.parentSku])
     ].map((value) => String(value || "").trim()).filter(Boolean))];
-    const primary = { id: order.id, orderNumber: order.orderNumber, buyer: order.buyer || order.customerName || order.address?.name || "Customer", skus: displaySkus(order), createdAt: order.orderDate || order.createdAt, isEbayLive: order.isEbayLive === true || order.salesOrigin === "ebay_live" };
+    const primary = { id: order.id, orderNumber: order.orderNumber, buyer: order.buyer || order.customerName || order.address?.name || "Customer", skus: displaySkus(order), createdAt: order.orderDate || order.createdAt, isEbayLive: order.isEbayLive === true || order.salesOrigin === "ebay_live", shipmentGroupId: order.shipmentGroupId || "", shipmentGroupOrderIds: Array.isArray(order.shipmentGroupOrderIds) ? order.shipmentGroupOrderIds : [], shipmentGroupPackage: order.shipmentGroupPackage || null };
     const candidates = (orders || []).filter((candidate) => {
       if (candidate.id === order.id) return false;
       if (protectedOrderIds.has(String(candidate.id || candidate.orderId || ""))) return false;
