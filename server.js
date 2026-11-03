@@ -152,6 +152,7 @@ const { applyPrintedShipmentFulfillment } = require("./lib/printed-shipment-fulf
 const { mergeImportedShipments } = require("./lib/imported-shipment-merge");
 const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, packageFor: fulfillmentPackageFor, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
 const shipmentConsolidation = require("./lib/shipment-consolidation");
+const { normalizeCarrierShippingAddress } = require("./lib/shipping-address");
 const { ebayLiveLineContext, ebayLiveOrderUsesCommittedStock } = require("./lib/ebay-live-order");
 const { packageDimensionsChanged, applyManualPackageDimensions, applyShippingPreferences } = require("./lib/product-dimensions");
 const { canonicalCarrierName, carrierTrackingUrl, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
@@ -30578,7 +30579,7 @@ async function runFulfillmentTrackingRefreshWorkerJob(job = {}) {
 }
 
 function shippingAddressForRates(order = {}, settings = {}) {
-  const address = order.address || {};
+  const address = normalizeCarrierShippingAddress(order.address || {});
   return {
     name: String(address.name || order.buyer || "Customer"),
     company: String(address.company || ""),
@@ -41122,7 +41123,7 @@ function ebayAddressFromOrder(order) {
   const registration = order.buyer?.buyerRegistrationAddress || {};
   const contact = shipTo.contactAddress || registration.contactAddress || {};
   const name = shipTo.fullName || registration.fullName || order.buyer?.username || "eBay buyer";
-  return {
+  return normalizeCarrierShippingAddress({
     name,
     line1: contact.addressLine1 || "",
     line2: contact.addressLine2 || "",
@@ -41132,7 +41133,7 @@ function ebayAddressFromOrder(order) {
     country: contact.countryCode || "US",
     email: shipTo.email || registration.email || "",
     phone: shipTo.primaryPhone?.phoneNumber || registration.primaryPhone?.phoneNumber || ""
-  };
+  });
 }
 
 function displayCarrierName(carrier = "") {
