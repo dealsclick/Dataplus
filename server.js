@@ -32703,16 +32703,19 @@ async function flushFulfillmentConsoleProjectionPatch() {
 
 async function drainFulfillmentConsoleProjectionPatches(maximumPasses = 10) {
   const passes = Math.max(1, Math.min(25, Number(maximumPasses || 10)));
+  let projectionUpdated = true;
   for (let pass = 0; pass < passes; pass += 1) {
     if (fulfillmentConsoleProjectionPatchTimer) {
       clearTimeout(fulfillmentConsoleProjectionPatchTimer);
       fulfillmentConsoleProjectionPatchTimer = null;
     }
-    if (fulfillmentConsoleProjectionPatchPromise) await fulfillmentConsoleProjectionPatchPromise;
-    else if (fulfillmentConsoleProjectionPendingOrderIds.size) await flushFulfillmentConsoleProjectionPatch();
-    else return true;
+    if (fulfillmentConsoleProjectionPatchPromise) {
+      if (!await fulfillmentConsoleProjectionPatchPromise) projectionUpdated = false;
+    } else if (fulfillmentConsoleProjectionPendingOrderIds.size) {
+      if (!await flushFulfillmentConsoleProjectionPatch()) projectionUpdated = false;
+    } else return projectionUpdated;
   }
-  return fulfillmentConsoleProjectionPendingOrderIds.size === 0 && !fulfillmentConsoleProjectionPatchPromise;
+  return projectionUpdated && fulfillmentConsoleProjectionPendingOrderIds.size === 0 && !fulfillmentConsoleProjectionPatchPromise;
 }
 
 async function reconcileFulfillmentConsoleProjection(since = "") {
@@ -57924,7 +57927,8 @@ async function handleApi(req, res) {
     }
     if (invalidatedRates) await postgres.writeStateDocuments({ fulfillmentLabelBatches: fulfillmentState.batches.slice(0, 1000) });
     invalidateFulfillmentConsoleSnapshot(affectedOrderIds);
-    return sendJson(res, 200, { order, route, package: order.package, shipmentGroupPackage: order.shipmentGroupPackage || null, affectedOrderIds, productDefault, warning: productDefaultWarning, message: body.markReady === true ? "Order is ready to ship. A pick list is optional." : shipmentGroupId ? `Final package saved for all ${affectedOrderIds.length} orders in shipment group ${shipmentGroupId}.` : productDefault ? `Package details saved as the default for ${productDefault.sku}. Readiness will refresh now.` : productDefaultWarning || "Package details saved. Readiness will refresh now." });
+    const projectionUpdated = await drainFulfillmentConsoleProjectionPatches();
+    return sendJson(res, 200, { order, route, package: order.package, shipmentGroupPackage: order.shipmentGroupPackage || null, affectedOrderIds, productDefault, warning: productDefaultWarning, projectionUpdated, message: body.markReady === true ? "Order is ready to ship. A pick list is optional." : shipmentGroupId ? `Final package saved for all ${affectedOrderIds.length} orders in shipment group ${shipmentGroupId}.` : productDefault ? `Package details saved as the default for ${productDefault.sku}. Readiness is updated.` : productDefaultWarning || "Package details saved. Readiness is updated." });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "exceptions" && parts[3] && parts[4] === "resolve" && postgres.isPostgresEnabled()) {
@@ -59651,9 +59655,16 @@ async function handleApi(req, res) {
       packageType: String(manualPackage.packageType || "box"),
       dimensionalWeight: manualPackageAssessment.dimensionalWeight,
       billableWeight: manualPackageAssessment.billableWeight,
-      source: "warehouse_entered"
+      source: "warehouse_entered",
+      savedAt: now,
+      savedBy: actor
     } : null;
     const existingMembers = (await postgres.readOrdersByShipmentGroupId(groupId)).filter((candidate) => !groupOrders.some((entry) => entry.id === candidate.id));
+    const existingPrimaryOrderId = groupOrders
+      .map((candidate) => String(candidate.shipmentGroupPrimaryOrderId || "").trim())
+      .find((candidateId) => candidateId && groupOrders.some((candidate) => String(candidate.id || "") === candidateId));
+    const primaryOrderId = existingPrimaryOrderId || String(order.id || "");
+    const primaryOrder = groupOrders.find((candidate) => String(candidate.id || "") === primaryOrderId) || order;
     for (const candidate of existingMembers) {
       delete candidate.shipmentGroupId;
       delete candidate.shipmentGroupOrderIds;
@@ -59675,7 +59686,7 @@ async function handleApi(req, res) {
     for (const candidate of groupOrders) {
       candidate.shipmentGroupId = groupId;
       candidate.shipmentGroupOrderIds = groupOrders.map((entry) => entry.id);
-      candidate.shipmentGroupPrimaryOrderId = order.id;
+      candidate.shipmentGroupPrimaryOrderId = primaryOrderId;
       candidate.shipmentGroupWarehouseId = warehouseId;
       candidate.shipmentGroupPackageReviewRequired = !savedGroupPackage;
       candidate.shipmentGroupCombinedWeight = packageAssessment.combinedWeight || 0;
@@ -59685,18 +59696,31 @@ async function handleApi(req, res) {
       candidate.shipmentGroupCartonizationUpdatedAt = now;
       candidate.shipmentGroupPackage = savedGroupPackage;
       candidate.shipmentGroupMatchSource = pair.matchSource || "dataplus_window";
-      if (savedGroupPackage) persistFulfillmentPackage(candidate, savedGroupPackage, { user: actor, source: "shipment_group", warehouseId });
+      if (savedGroupPackage) {
+        persistFulfillmentPackage(candidate, savedGroupPackage, { user: actor, source: "shipment_group", warehouseId });
+        for (const candidateRoute of candidate.fulfillmentRoutes || []) {
+          const routeStatus = String(candidateRoute.status || "").toLowerCase();
+          if (!["warehouse", "purchase"].includes(String(candidateRoute.type || "warehouse").toLowerCase())) continue;
+          if (["canceled", "cancelled", "closed", "fulfilled", "shipped", "delivered", "void", "voided"].includes(routeStatus)) continue;
+          candidateRoute.package = { ...(candidateRoute.package || {}), ...savedGroupPackage };
+          candidateRoute.packageMeasurementSource = "manual";
+          candidateRoute.shippingPreferencesUpdatedAt = now;
+          candidateRoute.shippingPreferencesUpdatedBy = actor;
+        }
+      }
       candidate.updatedAt = now;
       addOrderTimeline(candidate, { type: "shipment_group", title: "Shipment group updated", message: `Order assigned to combined shipment group ${groupId}${savedGroupPackage ? " with the final warehouse-entered carton" : ""}.`, user: actor });
       await postgres.saveOrder(candidate);
       clearOrderApiCache(candidate.id);
     }
-    invalidateFulfillmentConsoleSnapshot([...existingMembers, ...groupOrders].map((candidate) => candidate.id));
-    const primaryRouteIds = (Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [])
+    const affectedOrderIds = [...existingMembers, ...groupOrders].map((candidate) => candidate.id);
+    invalidateFulfillmentConsoleSnapshot(affectedOrderIds);
+    const projectionUpdated = await drainFulfillmentConsoleProjectionPatches();
+    const primaryRouteIds = (Array.isArray(primaryOrder.fulfillmentRoutes) ? primaryOrder.fulfillmentRoutes : [])
       .filter((route) => String(route.type || "warehouse").toLowerCase() === "warehouse" && !["shipped", "fulfilled", "delivered", "canceled", "cancelled"].includes(String(route.status || "").toLowerCase()))
       .map((route) => String(route.id || "").trim())
       .filter(Boolean);
-    return sendJson(res, 200, { groupId, primaryOrderId: order.id, primaryRouteIds, orders: groupOrders, packageAssessment, cartonizationPreview, message: `${groupOrders.length} orders grouped for one shipment. ${cartonizationPreview.reason || "Review the final carton before buying the label."}` });
+    return sendJson(res, 200, { groupId, primaryOrderId, primaryRouteIds, orders: groupOrders, packageAssessment, cartonizationPreview, projectionUpdated, message: `${groupOrders.length} orders grouped for one shipment. ${cartonizationPreview.reason || "Review the final carton before buying the label."}` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && parts[4] === "apply-shipment" && postgres.isPostgresEnabled()) {

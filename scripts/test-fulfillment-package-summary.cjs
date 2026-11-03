@@ -35,7 +35,8 @@ test("shipment package edits persist the final carton across every combined orde
   assert.match(route, /member\.shipmentGroupPackage = groupPackage/);
   assert.match(route, /memberRoute\.package = \{ \.\.\.\(memberRoute\.package \|\| \{\}\), \.\.\.packageInfo \}/);
   assert.match(route, /invalidateFulfillmentConsoleSnapshot\(affectedOrderIds\)/);
-  assert.doesNotMatch(route, /await flushFulfillmentConsoleProjectionPatch\(\)/);
+  assert.match(route, /const projectionUpdated = await drainFulfillmentConsoleProjectionPatches\(\)/);
+  assert.match(route, /projectionUpdated, message:/);
 });
 
 test("bulk package edits save each shipment group once and retain active queue filters", () => {
@@ -45,6 +46,9 @@ test("bulk package edits save each shipment group once and retain active queue f
   assert.match(appSource, /const rowsToSave = shipmentGroupId \? packageRows\.slice\(0, 1\) : packageRows/);
   assert.match(appSource, /fulfillmentLoadRef\.current\(false, true\)/);
   assert.match(appSource, /setData\(\(current\) => \(\{ \.\.\.current, work: applyPackageValues\(current\.work\), allWork: applyPackageValues\(current\.allWork\) \}\)\)/);
+  assert.match(appSource, /Package saved · ready for quote/);
+  assert.match(appSource, /Ready to request rates\./);
+  assert.doesNotMatch(appSource, /window\.setTimeout\(\(\) => void fulfillmentLoadRef\.current\(false, true\), 750\)/);
   assert.doesNotMatch(appSource, /if \(previousKey[\s\S]{0,300}await load\(false, true\)/);
   assert.match(appSource, /Edit combined shipment package/);
   assert.match(appSource, /Each combined group will use these values as its shared final carton for rates and one label\./);
@@ -72,7 +76,9 @@ test("eligible shipment candidates render as one suggested cluster until dimensi
 });
 
 test("shipment groups persist an explicit master order", () => {
-  assert.match(serverSource, /candidate\.shipmentGroupPrimaryOrderId = order\.id/);
+  assert.match(serverSource, /const existingPrimaryOrderId = groupOrders/);
+  assert.match(serverSource, /candidate\.shipmentGroupPrimaryOrderId = primaryOrderId/);
+  assert.match(serverSource, /candidateRoute\.package = \{ \.\.\.\(candidateRoute\.package \|\| \{\}\), \.\.\.savedGroupPackage \}/);
   assert.match(serverSource, /shipmentGroupPrimaryOrderId: order\.shipmentGroupPrimaryOrderId \|\| order\.shipmentGroupOrderIds\?\.\[0\] \|\| ""/);
   assert.match(dbSource, /shipmentGroupPrimaryOrderId: row\.shipment_group_primary_order_id \|\| ''/);
   assert.match(dbSource, /"shipmentGroupOrderIds" jsonb,[\s\S]{0,80}"shipmentGroupPrimaryOrderId" text/);

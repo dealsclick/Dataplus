@@ -634,6 +634,8 @@ function FulfillmentPackageTableRow({
   const selected = routeIds.length > 0 && routeIds.every((routeId) => selectedRouteIds.has(routeId))
   const readiness = (row.labelReadiness || {}) as Record<string, unknown>
   const blockers = Array.isArray(readiness.blockers) ? readiness.blockers as string[] : []
+  const savedPackageReady = [readiness.weight, readiness.length, readiness.width, readiness.height].every((value) => Number(value || 0) > 0)
+  const savedPackageLabel = `${String(readiness.weight || 0)} lb · ${String(readiness.length || 0)} × ${String(readiness.width || 0)} × ${String(readiness.height || 0)} in`
   const next: string = ""
   const statusRow = rows.find((entry) => String(entry.status || "") === "exception") || row
   const suppliers = [...new Set(rows.map((entry) => String(entry.supplierName || "Internal stock")))]
@@ -651,7 +653,7 @@ function FulfillmentPackageTableRow({
     {showColumn("supplier") && <TableCell><p className="max-w-44 truncate font-medium" title={suppliers.join(", ")}>{suppliers.length === 1 ? suppliers[0] : `${suppliers.length} sources`}</p></TableCell>}
     {showColumn("warehouse") && <TableCell>{String(row.warehouseName || "Unassigned")}</TableCell>}
     {showColumn("supply") && <TableCell><Badge variant={row.supplyStatus === "incoming" ? "secondary" : row.supplyStatus === "draft" ? "warning" : "outline"}>{supplies.length === 1 ? supplies[0] : "Mixed supply"}</Badge>{row.purchaseOrderId ? <p className="mt-1 text-xs"><a className="text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(String(row.purchaseOrderId))}`}>{String(row.purchaseOrderNumber || "Open PO")}</a></p> : null}</TableCell>}
-    {showColumn("readiness") && <TableCell>{suggestedCombinedShipment ? <button type="button" className="w-full min-w-40 rounded-md border border-amber-500/40 bg-amber-500/5 p-2 text-left transition-colors hover:bg-accent/50" onClick={() => onEditPackage(rows)}><p className="text-xs font-medium text-amber-800 dark:text-amber-300">Final combined package required</p><p className="mt-1 text-xs text-muted-foreground">Enter weight and dimensions to create this shipment group.</p></button> : <button type="button" className={`w-full min-w-40 rounded-md border p-2 text-left transition-colors hover:bg-accent/50 ${readiness.ready ? "border-emerald-500/30 bg-emerald-500/5" : "border-amber-500/40 bg-amber-500/5"}`} onClick={() => onEditPackage(rows)}><p className={`text-xs font-medium ${readiness.ready ? "text-emerald-700 dark:text-emerald-300" : "text-amber-800 dark:text-amber-300"}`}>{readiness.ready ? "Ready for label" : blockers[0] || "Review needed"}</p><div className="mt-2"><FulfillmentReadinessChecklist row={row} compact /></div></button>}</TableCell>}
+    {showColumn("readiness") && <TableCell>{suggestedCombinedShipment ? <button type="button" className="w-full min-w-40 rounded-md border border-amber-500/40 bg-amber-500/5 p-2 text-left transition-colors hover:bg-accent/50" onClick={() => onEditPackage(rows)}><p className="text-xs font-medium text-amber-800 dark:text-amber-300">Final combined package required</p><p className="mt-1 text-xs text-muted-foreground">Enter weight and dimensions to create this shipment group.</p></button> : <button type="button" className={`w-full min-w-40 rounded-md border p-2 text-left transition-colors hover:bg-accent/50 ${readiness.ready ? "border-emerald-500/30 bg-emerald-500/5" : "border-amber-500/40 bg-amber-500/5"}`} onClick={() => onEditPackage(rows)}><p className={`text-xs font-medium ${readiness.ready ? "text-emerald-700 dark:text-emerald-300" : "text-amber-800 dark:text-amber-300"}`}>{readiness.ready ? persistedCombinedShipment && !sharedRateRow.rateReview?.selectedRate ? "Package saved · ready for quote" : "Ready for label" : blockers[0] || "Review needed"}</p>{savedPackageReady ? <p className="mt-1 text-xs font-medium tabular-nums text-foreground">{savedPackageLabel}</p> : null}<div className="mt-2"><FulfillmentReadinessChecklist row={row} compact /></div></button>}</TableCell>}
     {showColumn("rate") && <TableCell>{suggestedCombinedShipment ? <div className="min-w-40 rounded-md border border-amber-500/30 bg-amber-500/5 p-2"><p className="text-sm font-medium">Not quoted</p><p className="mt-1 text-xs text-muted-foreground">Save the final carton first, then request one shared rate.</p></div> : <div className="grid gap-1"><FulfillmentRateCell review={sharedRateRow.rateReview} busy={busy} onOpen={onOpenBatches} onProcess={() => onProcessRates(sharedRateRow)} onSelectRate={(rateId) => onSelectRate(sharedRateRow, rateId)} />{persistedCombinedShipment ? <Badge variant={sharedRateRow.rateReview?.selectedRate ? "success" : "secondary"} className="w-fit text-[10px]">{sharedRateRow.rateReview?.selectedRate ? `Shared group rate · covers ${memberOrders.length} orders` : "Quote once for this group"}</Badge> : null}</div>}</TableCell>}
     {showColumn("shipBy") && <TableCell><FulfillmentShipBy row={row} /></TableCell>}
     {showColumn("status") && <TableCell><Badge variant={statusRow.status === "exception" ? "destructive" : statusRow.status === "ready_to_ship" ? "success" : "outline"}>{statusRow.status === "ready_to_ship" ? "Ready for label" : String(statusRow.status || "new").replace(/_/g, " ")}</Badge>{row.rateReview?.batchNumber ? <p className="mt-1 text-xs text-blue-700 dark:text-blue-300">{String(row.rateReview.batchNumber)}</p> : null}</TableCell>}
@@ -2591,7 +2593,7 @@ export function FulfillmentPage() {
         return groups
       }, new Map<string, Array<Record<string, any>>>() ).values()]
       const responses = await Promise.all(targetsByPackageOwner.map(async (packageRows: Array<Record<string, any>>) => {
-        const saved = [] as Array<{ warning?: string; affectedOrderIds?: string[]; groupId?: string; primaryOrderId?: string; groupOrderIds?: string[] }>
+        const saved = [] as Array<{ warning?: string; affectedOrderIds?: string[]; groupId?: string; primaryOrderId?: string; groupOrderIds?: string[]; projectionUpdated?: boolean }>
         const shipmentGroupId = String(packageRows[0]?.shipmentGroupId || "").trim()
         const suggestedCluster = !shipmentGroupId && packageRows.some((row) => Boolean(fulfillmentSuggestedClusterKey(row)))
         if (suggestedCluster) {
@@ -2600,7 +2602,7 @@ export function FulfillmentPage() {
           if (candidateResult.eligible === false) throw new Error(candidateResult.reason || `${String(owner.orderNumber || owner.orderId)} is no longer eligible for a combined shipment.`)
           const candidateOrderIds = [...new Set((candidateResult.candidates || []).map((candidate) => String(candidate.id || candidate.orderId || "").trim()).filter(Boolean))]
           if (!candidateOrderIds.length) throw new Error(`${String(owner.orderNumber || owner.orderId)} no longer has matching orders to combine.`)
-          const result = await api<{ groupId?: string; primaryOrderId?: string; orders?: Array<Record<string, any>> }>(`/api/orders/${encodeURIComponent(String(owner.orderId || ""))}/shipment-group`, {
+          const result = await api<{ groupId?: string; primaryOrderId?: string; orders?: Array<Record<string, any>>; projectionUpdated?: boolean }>(`/api/orders/${encodeURIComponent(String(owner.orderId || ""))}/shipment-group`, {
             method: "POST",
             body: JSON.stringify({ orderIds: candidateOrderIds, ...packageValues, user: "Luis" }),
           })
@@ -2610,12 +2612,13 @@ export function FulfillmentPage() {
             groupId: String(result.groupId || ""),
             primaryOrderId: String(result.primaryOrderId || owner.orderId || ""),
             groupOrderIds,
+            projectionUpdated: result.projectionUpdated,
           })
           return saved
         }
         const rowsToSave = shipmentGroupId ? packageRows.slice(0, 1) : packageRows
         for (const row of rowsToSave) {
-          saved.push(await api<{ warning?: string; affectedOrderIds?: string[] }>(`/api/orders/${encodeURIComponent(String(row.orderId))}/fulfillment-package`, {
+          saved.push(await api<{ warning?: string; affectedOrderIds?: string[]; projectionUpdated?: boolean }>(`/api/orders/${encodeURIComponent(String(row.orderId))}/fulfillment-package`, {
             method: "PATCH",
             body: JSON.stringify({ routeId: row.id, ...packageValues, warehouseId: row.warehouseId, warehouseName: row.warehouseName, shipAlone: allowsIndividualOptions ? packageShipAlone : undefined, saveAsProductDefault: allowsIndividualOptions && savePackageAsDefault, saveShipAloneAsProductDefault: allowsIndividualOptions && saveShipAloneAsDefault, catalogSku: row.catalogSku || row.sku || "", user: "Luis" }),
           }))
@@ -2623,6 +2626,7 @@ export function FulfillmentPage() {
         return saved
       }))
       const warning = responses.flat().map((response) => String(response.warning || "").trim()).find(Boolean)
+      const projectionUpdated = responses.flat().every((response) => response.projectionUpdated !== false)
       const affectedOrderIds = new Set(responses.flat().flatMap((response) => response.affectedOrderIds || []).map(String))
       const createdGroupByOrderId = new Map<string, { groupId: string; primaryOrderId: string; groupOrderIds: string[] }>()
       for (const response of responses.flat()) {
@@ -2654,12 +2658,14 @@ export function FulfillmentPage() {
         }
       })
       setData((current) => ({ ...current, work: applyPackageValues(current.work), allWork: applyPackageValues(current.allWork) }))
+      const packageSummary = `${packageValues.packageWeight} lb · ${packageValues.packageLength} × ${packageValues.packageWidth} × ${packageValues.packageHeight} in`
       if (warning) toast.warning(warning)
-      else toast.success(createdGroupByOrderId.size ? `Package details saved. ${new Set([...createdGroupByOrderId.values()].map((group) => group.groupId)).size} suggested combination${new Set([...createdGroupByOrderId.values()].map((group) => group.groupId)).size === 1 ? " is" : "s are"} now ready as a shipment group.` : `Package details saved for ${targetsByPackageOwner.length} shipment${targetsByPackageOwner.length === 1 ? "" : "s"}.`)
+      else if (!projectionUpdated) toast.warning(`Package saved as ${packageSummary}. The live queue is still catching up; the saved measurements will remain visible.`)
+      else toast.success(createdGroupByOrderId.size ? `${packageSummary} saved. ${new Set([...createdGroupByOrderId.values()].map((group) => group.groupId)).size} combined shipment${new Set([...createdGroupByOrderId.values()].map((group) => group.groupId)).size === 1 ? " is" : "s are"} ready for one shared quote.` : `${packageSummary} saved for ${targetsByPackageOwner.length} shipment${targetsByPackageOwner.length === 1 ? "" : "s"}. Ready to request rates.`)
       setPackageRow(null)
       setPackageRouteIds([])
       setPackageTargetRows([])
-      window.setTimeout(() => void fulfillmentLoadRef.current(false, true), 750)
+      if (projectionUpdated) window.requestAnimationFrame(() => void fulfillmentLoadRef.current(false, true))
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to save package details.")
     } finally {
