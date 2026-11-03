@@ -5,11 +5,14 @@ const path = require("node:path");
 const appSource = ["App.tsx", "components/fulfillment-route.tsx"].map((file) => fs.readFileSync(path.join(__dirname, "..", "web", "src", ...file.split("/")), "utf8")).join("\n");
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 
-assert.match(appSource, /selectedPurchaseEligiblePackageEntries = \[\.\.\.selectedPackageGroups\.entries\(\)\][\s\S]*readinessFor\(row\)\.ready === true && Boolean\(row\.rateReview\?\.selectedRate\)/, "purchase eligibility must require complete shipment data and a selected rate for the whole package");
+assert.match(appSource, /selectedPurchaseEligiblePackageEntries = selectedRateReadyPackageEntries\.filter\(\(\[, packageRows\]\) => Boolean\(fulfillmentSharedRateRow\(packageRows\)\?\.rateReview\?\.selectedRate\)\)/, "purchase eligibility must require complete shipment data and one selected shared rate per physical package");
 assert.match(appSource, /function fulfillmentRateIsCurrent[\s\S]*validUntil === null \|\| validUntil > now/, "saved provider rates must remain purchasable until their real validity window ends");
 assert.match(appSource, /rate\.quotedAt \|\| review\?\.ratedAt \|\| review\?\.attemptedAt[\s\S]*FULFILLMENT_SAVED_RATE_TTL_MS/, "providers without an explicit expiration must use the saved quote timestamp and fallback TTL");
 assert.match(appSource, /latestRateAuthorization\.selectionKey === selectedRouteIdsKey/, "the completed-job fallback must belong to the exact current selection");
-assert.match(appSource, /selectedRateReadyPackageEntries\.every\(\(\[, packageRows\]\) => packageRows\.every\(\(row: Record<string, any>\) => Boolean\(row\.rateReview\?\.selectedRate\)\)\)/, "every ready package must have a selected quote before purchase can begin");
+assert.match(appSource, /selectedRateReadyPackageEntries\.every\(\(\[, packageRows\]\) => Boolean\(fulfillmentSharedRateRow\(packageRows\)\?\.rateReview\?\.selectedRate\)\)/, "every ready physical package must have one selected quote before purchase can begin");
+assert.match(appSource, /selectedPurchaseEligibleRows = selectedPurchaseEligiblePackageEntries\.flatMap\(\(\[, packageRows\]\) => fulfillmentPackageOwnerRows\(packageRows\)\)/, "combined shipments must submit only the shared rate owner to label purchase");
+assert.match(appSource, /Shared group rate · covers \$\{memberOrders\.length\} orders/, "combined shipment rows must label the one quote as shared");
+assert.match(appSource, /Combined shipment[\s\S]*memberOrders\.length[\s\S]*1 label/, "combined shipment members must collapse beneath one master row");
 assert.match(appSource, /const purchaseRouteIds = inlineShipmentGroup \? inlineRouteIds : purchaseRows\.map/, "label batches must receive the saved shipment-group routes or only eligible bulk route IDs");
 assert.match(appSource, /onClick=\{\(\) => setBatchOpen\(true\)\}[\s\S]*Buy \$\{selectedPurchaseEligiblePackages\.length\}/, "the bulk button must open a confirmation summary before purchasing");
 assert.match(appSource, /Ready to buy[\s\S]*Skipped[\s\S]*selectedPurchaseSkippedCount/, "the purchase summary must show eligible and skipped counts");

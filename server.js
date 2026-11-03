@@ -31588,6 +31588,7 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
         destination: address,
         shipmentGroupId: order.shipmentGroupId || "",
         shipmentGroupOrderIds: order.shipmentGroupOrderIds || [],
+        shipmentGroupPrimaryOrderId: order.shipmentGroupPrimaryOrderId || order.shipmentGroupOrderIds?.[0] || "",
         packageGroupKey,
         packageRouteIds: packageRoutes.map((entry) => String(entry.id || "")).filter(Boolean),
         lineFulfilledQty: lineState.fulfilledQty,
@@ -32923,7 +32924,7 @@ async function loadPurchasedShipmentGroup(masterOrder = {}, masterShipment = {})
     const persistedMemberIds = shipmentGroupMemberIds(persistedOrder || {}, masterShipment);
     if (persistedGroupId && persistedMemberIds.length > 1) {
       for (const key of [
-        "shipmentGroupId", "shipmentGroupOrderIds", "shipmentGroupWarehouseId",
+        "shipmentGroupId", "shipmentGroupOrderIds", "shipmentGroupPrimaryOrderId", "shipmentGroupWarehouseId",
         "shipmentGroupPackageReviewRequired", "shipmentGroupCombinedWeight",
         "shipmentGroupCombinedVolume", "shipmentGroupCartonizationPreview",
         "shipmentGroupCartonizationUpdatedAt", "shipmentGroupPackage", "shipmentGroupMatchSource"
@@ -33455,6 +33456,7 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
       isEbayLive: order.isEbayLive === true || order.ebayLive?.isLive === true || order.external?.isEbayLive === true,
       shipmentGroupId: shipment.shipmentGroupId || order.shipmentGroupId || "",
       shipmentGroupOrderIds: Array.isArray(order.shipmentGroupOrderIds) ? order.shipmentGroupOrderIds : [],
+      shipmentGroupPrimaryOrderId: order.shipmentGroupPrimaryOrderId || shipment.masterOrderId || order.shipmentGroupOrderIds?.[0] || "",
       sharedLabel: shipment.sharedLabel === true,
       channelSync: {
         status: shipment.channelSync?.status || "",
@@ -33538,6 +33540,7 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
         isEbayLive: order.isEbayLive === true || order.ebayLive?.isLive === true || order.external?.isEbayLive === true,
         shipmentGroupId: row.shipmentGroupId || order.shipmentGroupId || "",
         shipmentGroupOrderIds: Array.isArray(row.shipmentGroupOrderIds) && row.shipmentGroupOrderIds.length ? row.shipmentGroupOrderIds : Array.isArray(order.shipmentGroupOrderIds) ? order.shipmentGroupOrderIds : [],
+        shipmentGroupPrimaryOrderId: row.shipmentGroupPrimaryOrderId || order.shipmentGroupPrimaryOrderId || order.shipmentGroupOrderIds?.[0] || "",
         channelSync: {
           status: "pending",
           channel: order.channelSource || order.source || row.channel || "",
@@ -33828,6 +33831,7 @@ function projectFulfillmentConsoleSnapshot(snapshot = {}, view = "") {
           isEbayLive: row.isEbayLive === true || String(row.salesOrigin || "").toLowerCase() === "ebay_live",
           shipmentGroupId: row.shipmentGroupId || "",
           shipmentGroupOrderIds: Array.isArray(row.shipmentGroupOrderIds) ? row.shipmentGroupOrderIds : [],
+          shipmentGroupPrimaryOrderId: row.shipmentGroupPrimaryOrderId || "",
           sharedLabel: row.sharedLabel === true
         }))
       };
@@ -59653,6 +59657,7 @@ async function handleApi(req, res) {
     for (const candidate of existingMembers) {
       delete candidate.shipmentGroupId;
       delete candidate.shipmentGroupOrderIds;
+      delete candidate.shipmentGroupPrimaryOrderId;
       delete candidate.shipmentGroupWarehouseId;
       delete candidate.shipmentGroupPackageReviewRequired;
       delete candidate.shipmentGroupCombinedWeight;
@@ -59670,6 +59675,7 @@ async function handleApi(req, res) {
     for (const candidate of groupOrders) {
       candidate.shipmentGroupId = groupId;
       candidate.shipmentGroupOrderIds = groupOrders.map((entry) => entry.id);
+      candidate.shipmentGroupPrimaryOrderId = order.id;
       candidate.shipmentGroupWarehouseId = warehouseId;
       candidate.shipmentGroupPackageReviewRequired = !savedGroupPackage;
       candidate.shipmentGroupCombinedWeight = packageAssessment.combinedWeight || 0;

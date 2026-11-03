@@ -49,3 +49,19 @@ test("bulk package edits save each shipment group once and retain active queue f
   assert.match(appSource, /Edit combined shipment package/);
   assert.match(appSource, /Each combined group will use these values as its shared final carton for rates and one label\./);
 });
+
+test("combined shipments render and paginate as one physical package", () => {
+  assert.match(appSource, /const key = fulfillmentPhysicalPackageKey\(row\)[\s\S]{0,120}groups\.set\(key/);
+  assert.match(appSource, /function fulfillmentPackageOwnerRows/);
+  assert.match(appSource, /flatMap\(\(packageRows\) => fulfillmentPackageOwnerRows\(packageRows\)\)/);
+  assert.match(appSource, /FulfillmentShipmentGroupChildRow/);
+  assert.match(appSource, /Quote once for this group/);
+  assert.match(dbSource, /when coalesce\(data->>'shipmentGroupId', ''\) <> '' then 'shipment-group:' \|\| data->>'shipmentGroupId'/);
+  assert.match(dbSource, /count\(distinct \(\$\{physicalGroupExpression\}\)\)/);
+});
+
+test("shipment groups persist an explicit master order", () => {
+  assert.match(serverSource, /candidate\.shipmentGroupPrimaryOrderId = order\.id/);
+  assert.match(serverSource, /shipmentGroupPrimaryOrderId: order\.shipmentGroupPrimaryOrderId \|\| order\.shipmentGroupOrderIds\?\.\[0\] \|\| ""/);
+  assert.match(dbSource, /shipmentGroupPrimaryOrderId: row\.shipment_group_primary_order_id \|\| ''/);
+});

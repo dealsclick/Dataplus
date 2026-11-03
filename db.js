@@ -4506,6 +4506,10 @@ async function listFulfillmentLabelBatchProjectionRows() {
             when jsonb_typeof(orders.raw->'shipmentGroupOrderIds') = 'array' then orders.raw->'shipmentGroupOrderIds'
             else '[]'::jsonb
           end,
+          'shipmentGroupPrimaryOrderId', coalesce(
+            batch_rows.row_payload->'shipmentGroupPrimaryOrderId',
+            orders.raw->'shipmentGroupPrimaryOrderId'
+          ),
           'routeId', batch_rows.route_id,
           'routeIds', to_jsonb(batch_rows.route_ids),
           'skus', to_jsonb(batch_rows.skus),
@@ -4776,10 +4780,14 @@ async function readFulfillmentConsoleProjectionPage(viewKey, options = {}) {
   const offsetParam = bind((page - 1) * pageSize);
   const where = filters.join(" and ");
   const grouped = normalizedView === "ready" || normalizedView === "all-shipments";
+  const physicalGroupExpression = `case
+    when coalesce(data->>'shipmentGroupId', '') <> '' then 'shipment-group:' || data->>'shipmentGroupId'
+    else coalesce(data->>'orderId', data->>'orderNumber', row_key) || ':' || coalesce(data->>'packageGroupKey', 'combined')
+  end`;
   const result = await client.query(grouped ? `
     with filtered as (
       select *,
-        coalesce(data->>'orderId', data->>'orderNumber', row_key) || ':' || coalesce(data->>'packageGroupKey', 'combined') as group_key,
+        ${physicalGroupExpression} as group_key,
         ${sortExpression} as sort_value
       from fulfillment_console_projection_rows
       where ${where}
@@ -4807,7 +4815,7 @@ async function readFulfillmentConsoleProjectionPage(viewKey, options = {}) {
   let total = Number(result.rows[0]?.total || 0);
   if (!result.rows.length) {
     const countResult = await client.query(grouped ? `
-      select count(distinct (coalesce(data->>'orderId', data->>'orderNumber', row_key) || ':' || coalesce(data->>'packageGroupKey', 'combined')))::int as total
+      select count(distinct (${physicalGroupExpression}))::int as total
       from fulfillment_console_projection_rows
       where ${where}
     ` : `select count(*)::int as total from fulfillment_console_projection_rows where ${where}`, baseParams);
@@ -9758,6 +9766,7 @@ function orderRowToSummary(row = {}, lines = []) {
     shippingService: row.shipping_service || '',
     shipmentGroupId: row.shipment_group_id || '',
     shipmentGroupOrderIds: Array.isArray(row.shipment_group_order_ids) ? row.shipment_group_order_ids : [],
+    shipmentGroupPrimaryOrderId: row.shipment_group_primary_order_id || '',
     packVerification: row.pack_verification && typeof row.pack_verification === 'object' ? row.pack_verification : {},
     fulfillmentDisposition: row.fulfillment_disposition && typeof row.fulfillment_disposition === 'object' ? row.fulfillment_disposition : {},
     refunds: Array.isArray(row.refunds) ? row.refunds : [],
@@ -11065,6 +11074,8 @@ async function listOrders(options = {}) {
       coalesce(summary_raw."deliverBy", summary_raw."deliveryDueAt", summary_raw."promisedDeliveryAt", summary_raw."expectedDeliveryAt", '') as deliver_by,
       coalesce(summary_raw."shippingService", summary_raw."deliveryMethod", '') as shipping_service,
       coalesce(summary_raw."shipmentGroupId", '') as shipment_group_id,
+      case when jsonb_typeof(summary_raw."shipmentGroupOrderIds") = 'array' then summary_raw."shipmentGroupOrderIds" else '[]'::jsonb end as shipment_group_order_ids,
+      coalesce(nullif(summary_raw."shipmentGroupPrimaryOrderId", ''), summary_raw."shipmentGroupOrderIds"->>0, '') as shipment_group_primary_order_id,
       coalesce(summary_raw."channelStatus", '') as channel_status,
       coalesce(summary_raw."marketplaceStatus", '') as marketplace_status,
       case when jsonb_typeof(summary_raw."marketplaceCancellation") = 'object' then summary_raw."marketplaceCancellation" else '{}'::jsonb end as marketplace_cancellation,

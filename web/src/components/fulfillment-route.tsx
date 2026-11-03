@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import {
   AlertCircle, AlertTriangle, ArrowLeft, ArrowRight, Boxes, CalendarDays, CheckCircle2,
-  ChevronDown, Clock3, Copy, ExternalLink, Eye, FileDown, Info, Link2, ListChecks,
+  ChevronDown, ChevronRight, Clock3, Copy, ExternalLink, Eye, FileDown, Info, Link2, ListChecks,
   Loader2, Monitor, MoreHorizontal, Package, PackageCheck, Pencil, Plus, Printer, RadioTower, RefreshCw,
   RotateCcw, Save, Search, SendHorizontal, ShieldAlert, ShieldCheck, SlidersHorizontal,
   Trash2, Truck, Filter, X,
@@ -74,6 +74,28 @@ function fulfillmentPhysicalPackageKey(row: Record<string, any>) {
   const shipmentGroupId = String(row.shipmentGroupId || "").trim()
   if (shipmentGroupId) return `shipment-group:${shipmentGroupId}`
   return `order:${String(row.orderId || row.orderNumber || row.id)}:${String(row.packageGroupKey || "combined")}`
+}
+
+function fulfillmentOrderKey(row: Record<string, any>) {
+  return String(row.orderId || row.orderNumber || row.id || "").trim()
+}
+
+function fulfillmentPackageOwnerRows(rows: Array<Record<string, any>>) {
+  if (!rows.length || !String(rows[0]?.shipmentGroupId || "").trim()) return rows
+  const ratedRow = rows.find((row) => Boolean(row.rateReview?.selectedRate))
+  const primaryOrderId = String(
+    ratedRow?.orderId
+    || rows.find((row) => row.shipmentGroupPrimaryOrderId)?.shipmentGroupPrimaryOrderId
+    || rows[0]?.orderId
+    || rows[0]?.orderNumber
+    || ""
+  ).trim()
+  const ownerRows = rows.filter((row) => fulfillmentOrderKey(row) === primaryOrderId)
+  return ownerRows.length ? ownerRows : rows.slice(0, 1)
+}
+
+function fulfillmentSharedRateRow(rows: Array<Record<string, any>>) {
+  return rows.find((row) => Boolean(row.rateReview?.selectedRate)) || fulfillmentPackageOwnerRows(rows)[0] || rows[0]
 }
 
 function RecoverySourceLabel({ record, fallback }: { record?: Record<string, any> | null; fallback?: Record<string, any> | null }) {
@@ -492,6 +514,44 @@ function FulfillmentReadinessChecklist({ row, compact = false }: { row: Record<s
   </div></TooltipProvider>
 }
 
+function FulfillmentShipmentGroupChildRow({
+  orderRows,
+  sharedRateRow,
+  primaryOrderId,
+  showColumn,
+  onQuickView,
+}: {
+  orderRows: Array<Record<string, any>>
+  sharedRateRow: Record<string, any>
+  primaryOrderId: string
+  showColumn: (column: string) => boolean
+  onQuickView: (rows: Array<Record<string, any>>) => void
+}) {
+  const row = orderRows[0]
+  if (!row) return null
+  const rate = sharedRateRow.rateReview?.selectedRate as Record<string, any> | undefined
+  const ownerNumber = String(sharedRateRow.orderNumber || sharedRateRow.orderId || "master order")
+  const readiness = (sharedRateRow.labelReadiness || {}) as Record<string, any>
+  const isPrimary = fulfillmentOrderKey(row) === primaryOrderId
+  const suppliers = [...new Set(orderRows.map((entry) => String(entry.supplierName || "Internal stock")))]
+  const supplies = [...new Set(orderRows.map((entry) => String(entry.supplyLabel || "No PO")))]
+  return <TableRow className="bg-muted/20 align-top hover:bg-muted/40">
+    <TableCell><span className="ml-3 block h-6 w-px bg-border" aria-hidden="true" /></TableCell>
+    {showColumn("order") && <TableCell><div className="pl-5"><div className="flex items-center gap-2"><a className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId))}`}>{String(row.orderNumber || row.orderId)}</a>{isPrimary ? <Badge variant="outline" className="text-[10px]">Master</Badge> : null}</div><p className="max-w-40 truncate text-xs text-muted-foreground">{String(row.customer || "Customer")}</p><p className="text-xs text-muted-foreground">{row.orderDate ? dateLabel(String(row.orderDate)) : "Order date unavailable"}</p></div></TableCell>}
+    {showColumn("item") && <TableCell><div className="grid min-w-56 gap-2">{orderRows.map((item) => <div key={String(item.id)} className="flex items-center gap-2"><a className="shrink-0" href={`/products/${encodeURIComponent(String(item.parentSku || item.catalogSku || item.sku || ""))}`}>{item.productImage ? <img src={String(item.productImage)} alt="" className="size-9 rounded border bg-background object-contain" /> : <span className="grid size-9 place-items-center rounded border bg-muted"><Package className="size-4 text-muted-foreground" /></span>}</a><div className="min-w-0"><a className="block truncate font-medium hover:underline" href={`/products/${encodeURIComponent(String(item.parentSku || item.catalogSku || item.sku || ""))}`}>{String(item.sku || "Missing SKU")}</a><p className="text-xs text-muted-foreground">{numberLabel(Number(item.qty || 0))} units</p></div></div>)}</div></TableCell>}
+    {showColumn("shipTo") && <TableCell><p className="max-w-40 truncate font-medium">{String(row.destination?.city || row.destination?.town || "Unknown city")}</p><p className="max-w-40 truncate text-xs text-muted-foreground">{[row.destination?.state, row.destination?.postalCode || row.destination?.zip || row.destination?.postcode].filter(Boolean).join(" ") || "Address unavailable"}</p></TableCell>}
+    {showColumn("channel") && <TableCell><div className="flex max-w-36 flex-wrap gap-1"><Badge variant="outline">{String(row.channel || "Unassigned")}</Badge>{row.isEbayLive === true || String(row.salesOrigin || "") === "ebay_live" ? <Badge className="bg-pink-600 text-white hover:bg-pink-600">eBay Live</Badge> : null}</div></TableCell>}
+    {showColumn("supplier") && <TableCell><p className="max-w-44 truncate font-medium" title={suppliers.join(", ")}>{suppliers.length === 1 ? suppliers[0] : `${suppliers.length} sources`}</p></TableCell>}
+    {showColumn("warehouse") && <TableCell>{String(row.warehouseName || "Unassigned")}</TableCell>}
+    {showColumn("supply") && <TableCell><Badge variant="outline">{supplies.length === 1 ? supplies[0] : "Mixed supply"}</Badge></TableCell>}
+    {showColumn("readiness") && <TableCell><div className="min-w-40 rounded-md border border-blue-500/30 bg-blue-500/5 p-2"><p className="text-xs font-medium text-blue-700 dark:text-blue-300">Included in combined package</p><p className="mt-1 text-xs text-muted-foreground">{String(readiness.weight || 0)} lb · {String(readiness.length || 0)} × {String(readiness.width || 0)} × {String(readiness.height || 0)} in</p></div></TableCell>}
+    {showColumn("rate") && <TableCell><div className="min-w-40 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-2">{rate ? <><p className="font-semibold tabular-nums text-emerald-700 dark:text-emerald-300">{moneyLabel(Number(rate.amount || 0))}</p><p className="truncate text-xs text-muted-foreground">{String(rate.carrier || "Carrier")} {String(rate.service || "")}</p><p className="mt-1 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">Shared from order {ownerNumber}</p></> : <><p className="text-sm font-medium">Shared group rate pending</p><p className="mt-1 text-xs text-muted-foreground">Quote the master row once.</p></>}</div></TableCell>}
+    {showColumn("shipBy") && <TableCell><FulfillmentShipBy row={row} /></TableCell>}
+    {showColumn("status") && <TableCell><Badge variant="secondary">Grouped</Badge><p className="mt-1 text-xs text-muted-foreground">One label with master order</p></TableCell>}
+    <TableCell className="text-right"><div className="flex justify-end gap-1"><Button size="icon" variant="ghost" title="Quick view" aria-label={`Quick view order ${String(row.orderNumber || row.orderId)}`} onClick={() => onQuickView(orderRows)}><Eye className="size-4" /></Button><Button size="icon" variant="ghost" asChild aria-label={`Open order ${String(row.orderNumber || row.orderId)}`}><a href={`/orders/${encodeURIComponent(String(row.orderId))}`}><ExternalLink className="size-4" /></a></Button></div></TableCell>
+  </TableRow>
+}
+
 function FulfillmentPackageTableRow({
   rows,
   selectedRouteIds,
@@ -525,8 +585,18 @@ function FulfillmentPackageTableRow({
   onShipTogether: (row: Record<string, any>) => void
   onQuickView: (rows: Array<Record<string, any>>) => void
 }) {
-  const row = rows.find((entry) => entry.rateReview?.selectedRate) || rows[0]
+  const [expanded, setExpanded] = useState(false)
+  const sharedRateRow = fulfillmentSharedRateRow(rows)
+  const explicitPrimaryOrderId = String(rows.find((entry) => entry.shipmentGroupPrimaryOrderId)?.shipmentGroupPrimaryOrderId || "").trim()
+  const row = rows.find((entry) => fulfillmentOrderKey(entry) === explicitPrimaryOrderId) || sharedRateRow || rows[0]
   if (!row) return null
+  const memberOrders = [...rows.reduce((groups, entry) => {
+    const orderKey = fulfillmentOrderKey(entry)
+    groups.set(orderKey, [...(groups.get(orderKey) || []), entry])
+    return groups
+  }, new Map<string, Array<Record<string, any>>>()).entries()]
+  const combinedShipment = Boolean(String(row.shipmentGroupId || "").trim()) && memberOrders.length > 1
+  const primaryOrderId = explicitPrimaryOrderId || fulfillmentOrderKey(fulfillmentPackageOwnerRows(rows)[0] || row)
   const routeIds = rows.map((entry) => String(entry.id || "")).filter(Boolean)
   const selected = routeIds.length > 0 && routeIds.every((routeId) => selectedRouteIds.has(routeId))
   const readiness = (row.labelReadiness || {}) as Record<string, unknown>
@@ -537,21 +607,24 @@ function FulfillmentPackageTableRow({
   const supplies = [...new Set(rows.map((entry) => String(entry.supplyLabel || "No PO")))]
   const shipmentGroupId = String(row.shipmentGroupId || "").trim()
   const shipmentGroupSize = new Set((Array.isArray(row.shipmentGroupOrderIds) ? row.shipmentGroupOrderIds : []).map(String).filter(Boolean)).size
-  return <TableRow className="group align-top hover:bg-muted/30">
+  return <>
+  <TableRow className={cn("group align-top hover:bg-muted/30", combinedShipment && "border-b-0 bg-blue-500/[0.03]")}>
     <TableCell><Checkbox aria-label={`Select shipment for ${String(row.orderNumber || row.orderId)}`} checked={selected} onCheckedChange={(checked) => onToggleSelection(routeIds, checked === true)} /></TableCell>
-    {showColumn("order") && <TableCell><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId))}`}>{String(row.orderNumber || row.orderId)}</a><p className="max-w-40 truncate text-xs text-muted-foreground">{String(row.customer || "Customer")}</p><p className="text-xs text-muted-foreground">{row.orderDate ? dateLabel(String(row.orderDate)) : "Order date unavailable"}</p>{rows.length > 1 ? <Badge variant="secondary" className="mt-1">{rows.length} items · 1 shipment</Badge> : null}{shipmentGroupId ? <button type="button" className="mt-1 block" title={`Shipment group ${shipmentGroupId}`} onClick={() => onShipTogether(row)}><Badge variant="success"><PackageCheck className="mr-1 size-3" /> Grouped · {shipmentGroupSize || 1}</Badge></button> : Number(row.shipmentConsolidation?.candidateCount || 0) > 0 ? <button type="button" className="mt-1 block" onClick={() => onShipTogether(row)}><Badge variant="outline" className={row.isEbayLive ? "border-pink-500/50 text-pink-700 dark:text-pink-300" : "border-blue-500/40 text-blue-700 dark:text-blue-300"}><PackageCheck className="mr-1 size-3" /> {row.isEbayLive ? "Live combine" : "Ship together"} · {Number(row.shipmentConsolidation.candidateCount) + 1}</Badge></button> : null}</TableCell>}
-    {showColumn("item") && <TableCell><div className="grid min-w-56 gap-2">{rows.map((item) => <div key={String(item.id)} className="flex items-center gap-2"><a className="shrink-0" href={`/products/${encodeURIComponent(String(item.parentSku || item.catalogSku || item.sku || ""))}`}>{item.productImage ? <img src={String(item.productImage)} alt="" className="size-10 rounded border bg-background object-contain" /> : <span className="grid size-10 place-items-center rounded border bg-muted"><Package className="size-4 text-muted-foreground" /></span>}</a><div className="min-w-0"><a className="block truncate font-medium hover:underline" href={`/products/${encodeURIComponent(String(item.parentSku || item.catalogSku || item.sku || ""))}`}>{String(item.sku || "Missing SKU")}</a>{item.parentSku ? <p className="truncate text-xs text-muted-foreground">Parent {String(item.parentSku)}</p> : null}<div className="flex flex-wrap items-center gap-1"><span className="text-xs text-muted-foreground">{numberLabel(Number(item.qty || 0))} units</span>{item.shipAlone === true ? <Badge variant="outline" className="border-blue-500/30 text-[10px] text-blue-700 dark:text-blue-300">Ships alone</Badge> : null}</div></div></div>)}</div></TableCell>}
+    {showColumn("order") && <TableCell>{combinedShipment ? <button type="button" className="flex max-w-48 items-start gap-1.5 text-left" onClick={() => setExpanded((current) => !current)} aria-expanded={expanded}><span className="mt-0.5 grid size-5 shrink-0 place-items-center rounded hover:bg-muted">{expanded ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}</span><span className="min-w-0"><span className="block font-medium">Combined shipment</span><span className="block truncate text-xs text-muted-foreground">Master {String(row.orderNumber || row.orderId)} · {String(row.customer || "Customer")}</span><Badge variant="success" className="mt-1"><PackageCheck className="mr-1 size-3" /> {memberOrders.length} orders · 1 label</Badge></span></button> : <><a className="font-medium hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId))}`}>{String(row.orderNumber || row.orderId)}</a><p className="max-w-40 truncate text-xs text-muted-foreground">{String(row.customer || "Customer")}</p><p className="text-xs text-muted-foreground">{row.orderDate ? dateLabel(String(row.orderDate)) : "Order date unavailable"}</p>{rows.length > 1 ? <Badge variant="secondary" className="mt-1">{rows.length} items · 1 shipment</Badge> : null}{shipmentGroupId ? <button type="button" className="mt-1 block" title={`Shipment group ${shipmentGroupId}`} onClick={() => onShipTogether(row)}><Badge variant="success"><PackageCheck className="mr-1 size-3" /> Grouped · {shipmentGroupSize || 1}</Badge></button> : Number(row.shipmentConsolidation?.candidateCount || 0) > 0 ? <button type="button" className="mt-1 block" onClick={() => onShipTogether(row)}><Badge variant="outline" className={row.isEbayLive ? "border-pink-500/50 text-pink-700 dark:text-pink-300" : "border-blue-500/40 text-blue-700 dark:text-blue-300"}><PackageCheck className="mr-1 size-3" /> {row.isEbayLive ? "Live combine" : "Ship together"} · {Number(row.shipmentConsolidation.candidateCount) + 1}</Badge></button> : null}</>}</TableCell>}
+    {showColumn("item") && <TableCell>{combinedShipment ? <div className="flex min-w-56 items-center gap-2"><span className="grid size-10 shrink-0 place-items-center rounded border border-blue-500/30 bg-blue-500/10"><PackageCheck className="size-4 text-blue-700 dark:text-blue-300" /></span><div><p className="font-medium">{numberLabel(memberOrders.length)} grouped orders</p><p className="text-xs text-muted-foreground">{numberLabel(rows.reduce((sum, item) => sum + Number(item.qty || 0), 0))} units in one package</p></div></div> : <div className="grid min-w-56 gap-2">{rows.map((item) => <div key={String(item.id)} className="flex items-center gap-2"><a className="shrink-0" href={`/products/${encodeURIComponent(String(item.parentSku || item.catalogSku || item.sku || ""))}`}>{item.productImage ? <img src={String(item.productImage)} alt="" className="size-10 rounded border bg-background object-contain" /> : <span className="grid size-10 place-items-center rounded border bg-muted"><Package className="size-4 text-muted-foreground" /></span>}</a><div className="min-w-0"><a className="block truncate font-medium hover:underline" href={`/products/${encodeURIComponent(String(item.parentSku || item.catalogSku || item.sku || ""))}`}>{String(item.sku || "Missing SKU")}</a>{item.parentSku ? <p className="truncate text-xs text-muted-foreground">Parent {String(item.parentSku)}</p> : null}<div className="flex flex-wrap items-center gap-1"><span className="text-xs text-muted-foreground">{numberLabel(Number(item.qty || 0))} units</span>{item.shipAlone === true ? <Badge variant="outline" className="border-blue-500/30 text-[10px] text-blue-700 dark:text-blue-300">Ships alone</Badge> : null}</div></div></div>)}</div>}</TableCell>}
     {showColumn("shipTo") && <TableCell><p className="max-w-40 truncate font-medium" title={String(row.destination?.name || row.customer || "")}>{String(row.destination?.city || row.destination?.town || "Unknown city")}</p><p className="max-w-40 truncate text-xs text-muted-foreground">{[row.destination?.state, row.destination?.postalCode || row.destination?.zip || row.destination?.postcode].filter(Boolean).join(" ") || "Address unavailable"}</p></TableCell>}
     {showColumn("channel") && <TableCell><div className="flex max-w-36 flex-wrap gap-1"><Badge variant="outline">{String(row.channel || "Unassigned")}</Badge>{row.isEbayLive === true || String(row.salesOrigin || "") === "ebay_live" ? <Badge className="bg-pink-600 text-white hover:bg-pink-600">eBay Live</Badge> : null}</div></TableCell>}
     {showColumn("supplier") && <TableCell><p className="max-w-44 truncate font-medium" title={suppliers.join(", ")}>{suppliers.length === 1 ? suppliers[0] : `${suppliers.length} sources`}</p></TableCell>}
     {showColumn("warehouse") && <TableCell>{String(row.warehouseName || "Unassigned")}</TableCell>}
     {showColumn("supply") && <TableCell><Badge variant={row.supplyStatus === "incoming" ? "secondary" : row.supplyStatus === "draft" ? "warning" : "outline"}>{supplies.length === 1 ? supplies[0] : "Mixed supply"}</Badge>{row.purchaseOrderId ? <p className="mt-1 text-xs"><a className="text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(String(row.purchaseOrderId))}`}>{String(row.purchaseOrderNumber || "Open PO")}</a></p> : null}</TableCell>}
     {showColumn("readiness") && <TableCell><button type="button" className={`w-full min-w-40 rounded-md border p-2 text-left transition-colors hover:bg-accent/50 ${readiness.ready ? "border-emerald-500/30 bg-emerald-500/5" : "border-amber-500/40 bg-amber-500/5"}`} onClick={() => onEditPackage(rows)}><p className={`text-xs font-medium ${readiness.ready ? "text-emerald-700 dark:text-emerald-300" : "text-amber-800 dark:text-amber-300"}`}>{readiness.ready ? "Ready for label" : blockers[0] || "Review needed"}</p><div className="mt-2"><FulfillmentReadinessChecklist row={row} compact /></div></button></TableCell>}
-    {showColumn("rate") && <TableCell><FulfillmentRateCell review={row.rateReview} busy={busy} onOpen={onOpenBatches} onProcess={() => onProcessRates(row)} onSelectRate={(rateId) => onSelectRate(row, rateId)} /></TableCell>}
+    {showColumn("rate") && <TableCell><div className="grid gap-1"><FulfillmentRateCell review={sharedRateRow.rateReview} busy={busy} onOpen={onOpenBatches} onProcess={() => onProcessRates(sharedRateRow)} onSelectRate={(rateId) => onSelectRate(sharedRateRow, rateId)} />{combinedShipment ? <Badge variant={sharedRateRow.rateReview?.selectedRate ? "success" : "secondary"} className="w-fit text-[10px]">{sharedRateRow.rateReview?.selectedRate ? `Shared group rate · covers ${memberOrders.length} orders` : "Quote once for this group"}</Badge> : null}</div></TableCell>}
     {showColumn("shipBy") && <TableCell><FulfillmentShipBy row={row} /></TableCell>}
     {showColumn("status") && <TableCell><Badge variant={statusRow.status === "exception" ? "destructive" : statusRow.status === "ready_to_ship" ? "success" : "outline"}>{statusRow.status === "ready_to_ship" ? "Ready for label" : String(statusRow.status || "new").replace(/_/g, " ")}</Badge>{row.rateReview?.batchNumber ? <p className="mt-1 text-xs text-blue-700 dark:text-blue-300">{String(row.rateReview.batchNumber)}</p> : null}</TableCell>}
     <TableCell className="text-right"><div className="flex justify-end gap-1"><Button size="icon" variant="ghost" title="Quick view" aria-label={`Quick view order ${String(row.orderNumber || row.orderId)}`} onClick={() => onQuickView(rows)}><Eye className="size-4" /></Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" aria-label={`Actions for order ${String(row.orderNumber || row.orderId)}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => onEditPackage(rows)}><Pencil className="size-4" /> Edit shipment package</DropdownMenuItem><DropdownMenuItem disabled={busy} onClick={() => onSplitShipment(rows)}><Boxes className="size-4" /> Set number of labels</DropdownMenuItem>{rows.map((item) => <DropdownMenuItem key={String(item.id)} disabled={busy} onClick={() => onSetShipAlone(item, item.shipAlone !== true)}><Package className="size-4" /> {item.shipAlone === true ? `Rejoin ${String(item.sku || "item")}` : `Ship ${String(item.sku || "item")} separately`}</DropdownMenuItem>)}{shipmentGroupId || Number(row.shipmentConsolidation?.candidateCount || 0) > 0 ? <DropdownMenuItem disabled={busy} onClick={() => onShipTogether(row)}><PackageCheck className="size-4" /> {shipmentGroupId ? "Review shipment group" : row.isEbayLive ? "Combine eBay Live orders" : "Ship orders together"}</DropdownMenuItem> : null}<DropdownMenuSeparator /><DropdownMenuItem disabled={busy || !readiness.ready} onClick={() => onCreateLabel(rows)}><Truck className="size-4" /> Create shipping label</DropdownMenuItem>{row.rateReview?.batchId ? <DropdownMenuItem onClick={onOpenBatches}><ExternalLink className="size-4" /> Open rate review</DropdownMenuItem> : null}{next && <DropdownMenuItem onClick={() => onAdvance(row, next)}><ArrowRight className="size-4" /> Mark {next.replace(/_/g, " ")}</DropdownMenuItem>}<DropdownMenuItem asChild><a href={`/orders/${encodeURIComponent(String(row.orderId))}`}><ExternalLink className="size-4" /> Open order</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></TableCell>
   </TableRow>
+  {combinedShipment && expanded ? memberOrders.map(([orderId, orderRows]) => <FulfillmentShipmentGroupChildRow key={orderId} orderRows={orderRows} sharedRateRow={sharedRateRow} primaryOrderId={primaryOrderId} showColumn={showColumn} onQuickView={onQuickView} />) : null}
+  </>
 }
 
 export function ShippingBatchesPage() {
@@ -1507,7 +1580,7 @@ export function FulfillmentPage() {
     return leftValue.localeCompare(rightValue, undefined, { numeric: true, sensitivity: "base" }) * direction || String(left.orderNumber || left.orderId || "").localeCompare(String(right.orderNumber || right.orderId || ""), undefined, { numeric: true })
   })
   const filteredWorkGroups = [...filteredWork.reduce((groups, row) => {
-    const key = `${String(row.orderId || row.orderNumber || row.id)}:${String(row.packageGroupKey || "combined")}`
+    const key = fulfillmentPhysicalPackageKey(row)
     groups.set(key, [...(groups.get(key) || []), row])
     return groups
   }, new Map<string, Array<Record<string, any>>>() ).values()]
@@ -1706,7 +1779,12 @@ export function FulfillmentPage() {
   }
 
   const refreshRatesForRows = async (targetRows: Array<Record<string, any>>, quiet = false) => {
-    const targets = [...targetRows.reduce((grouped, row) => {
+    const physicalPackageRows = [...targetRows.reduce((grouped, row) => {
+      const key = fulfillmentPhysicalPackageKey(row)
+      grouped.set(key, [...(grouped.get(key) || []), row])
+      return grouped
+    }, new Map<string, Array<Record<string, any>>>()).values()].flatMap((packageRows) => fulfillmentPackageOwnerRows(packageRows))
+    const targets = [...physicalPackageRows.reduce((grouped, row) => {
       const orderId = String(row.orderId || "")
       const routeId = String(row.id || "")
       if (!orderId || !routeId) return grouped
@@ -2619,23 +2697,21 @@ export function FulfillmentPage() {
     groups.set(key, packageRows)
     return groups
   }, new Map<string, Array<Record<string, any>>>())
-  const selectedPackageRows = [...selectedPackageGroups.values()].map((packageRows) => packageRows[0])
+  const selectedPackageRows = [...selectedPackageGroups.values()].map((packageRows) => fulfillmentSharedRateRow(packageRows))
   const selectedRateReadyPackageEntries = [...selectedPackageGroups.entries()].filter(([, packageRows]) => packageRows.every((row: Record<string, any>) => readinessFor(row).ready === true))
-  const selectedRateReadyPackageKeys = new Set(selectedRateReadyPackageEntries.map(([key]) => key))
-  const selectedRateReadyRows = selectedRows.filter((row) => selectedRateReadyPackageKeys.has(fulfillmentPhysicalPackageKey(row)))
-  const selectedRateReadyPackages = selectedRateReadyPackageEntries.map(([, packageRows]) => packageRows[0])
+  const selectedRateReadyRows = selectedRateReadyPackageEntries.flatMap(([, packageRows]) => fulfillmentPackageOwnerRows(packageRows))
+  const selectedRateReadyPackages = selectedRateReadyPackageEntries.map(([, packageRows]) => fulfillmentSharedRateRow(packageRows))
   const selectedRateSkippedCount = Math.max(0, selectedPackageRows.length - selectedRateReadyPackages.length)
   const selectedRouteIdsKey = [...selectedRouteIds].sort().join("|")
   const latestRefreshMatchesSelection = latestRateAuthorization.selectionKey === selectedRouteIdsKey
   const routeHasCurrentRate = (row: Record<string, any>) => fulfillmentRateIsCurrent(row.rateReview)
     || (latestRefreshMatchesSelection && latestRateAuthorization.routeIds.has(String(row.id)))
-  const selectedPurchaseEligiblePackageEntries = [...selectedPackageGroups.entries()].filter(([, packageRows]) => packageRows.every((row: Record<string, any>) => readinessFor(row).ready === true && Boolean(row.rateReview?.selectedRate)))
+  const selectedPurchaseEligiblePackageEntries = selectedRateReadyPackageEntries.filter(([, packageRows]) => Boolean(fulfillmentSharedRateRow(packageRows)?.rateReview?.selectedRate))
   const selectedRatesCurrent = selectedRateReadyPackageEntries.length > 0
-    && selectedRateReadyPackageEntries.every(([, packageRows]) => packageRows.every((row: Record<string, any>) => Boolean(row.rateReview?.selectedRate)))
-  const selectedPurchaseEligiblePackageKeys = new Set(selectedPurchaseEligiblePackageEntries.map(([key]) => key))
-  const selectedPurchaseEligibleRows = selectedRows.filter((row) => selectedPurchaseEligiblePackageKeys.has(fulfillmentPhysicalPackageKey(row)))
-  const selectedPurchaseEligiblePackages = selectedPurchaseEligiblePackageEntries.map(([, packageRows]) => packageRows[0])
-  const selectedPurchaseVerificationCount = selectedPurchaseEligiblePackageEntries.filter(([, packageRows]) => packageRows.some((row: Record<string, any>) => !routeHasCurrentRate(row))).length
+    && selectedRateReadyPackageEntries.every(([, packageRows]) => Boolean(fulfillmentSharedRateRow(packageRows)?.rateReview?.selectedRate))
+  const selectedPurchaseEligibleRows = selectedPurchaseEligiblePackageEntries.flatMap(([, packageRows]) => fulfillmentPackageOwnerRows(packageRows))
+  const selectedPurchaseEligiblePackages = selectedPurchaseEligiblePackageEntries.map(([, packageRows]) => fulfillmentSharedRateRow(packageRows))
+  const selectedPurchaseVerificationCount = selectedPurchaseEligiblePackageEntries.filter(([, packageRows]) => fulfillmentPackageOwnerRows(packageRows).some((row: Record<string, any>) => !routeHasCurrentRate(row))).length
   const selectedPurchaseSkippedCount = Math.max(0, selectedPackageRows.length - selectedPurchaseEligiblePackages.length)
   const previewOrderIds = [...new Set(selectedRows.map((row) => String(row.orderId || "")).filter(Boolean))].slice(0, 10)
   const printPreviewUrl = `/api/fulfillment/print-preview.pdf?orderIds=${encodeURIComponent(previewOrderIds.join(","))}&size=${encodeURIComponent(batchDraft.printSize)}&packingSlips=${batchDraft.includePackingSlips ? "1" : "0"}&packingSlipOrientation=${encodeURIComponent(batchDraft.packingSlipOrientation)}`
