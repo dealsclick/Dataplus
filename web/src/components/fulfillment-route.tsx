@@ -2456,14 +2456,17 @@ export function FulfillmentPage() {
     try {
       const targets = packageTargetRows.filter((row) => packageRouteIds.includes(String(row.id)))
       if (!targets.length) throw new Error("The selected package records are no longer available. Close the editor and select them again.")
-      const targetsByOrder = [...targets.reduce((groups, row) => {
-        const orderId = String(row.orderId)
-        groups.set(orderId, [...(groups.get(orderId) || []), row])
+      const targetsByPackageOwner = [...targets.reduce((groups, row) => {
+        const shipmentGroupId = String(row.shipmentGroupId || "").trim()
+        const key = shipmentGroupId ? `shipment-group:${shipmentGroupId}` : `order:${String(row.orderId)}`
+        groups.set(key, [...(groups.get(key) || []), row])
         return groups
       }, new Map<string, Array<Record<string, any>>>() ).values()]
-      const responses = await Promise.all(targetsByOrder.map(async (orderRows) => {
+      const responses = await Promise.all(targetsByPackageOwner.map(async (packageRows) => {
         const saved = [] as Array<{ warning?: string }>
-        for (const row of orderRows) {
+        const shipmentGroupId = String(packageRows[0]?.shipmentGroupId || "").trim()
+        const rowsToSave = shipmentGroupId ? packageRows.slice(0, 1) : packageRows
+        for (const row of rowsToSave) {
           saved.push(await api<{ warning?: string }>(`/api/orders/${encodeURIComponent(String(row.orderId))}/fulfillment-package`, {
             method: "PATCH",
             body: JSON.stringify({ routeId: row.id, packageWeight: Number(packageDraft.packageWeight || 0), packageLength: Number(packageDraft.packageLength || 0), packageWidth: Number(packageDraft.packageWidth || 0), packageHeight: Number(packageDraft.packageHeight || 0), warehouseId: row.warehouseId, warehouseName: row.warehouseName, shipAlone: targets.length === 1 ? packageShipAlone : undefined, saveAsProductDefault: targets.length === 1 && savePackageAsDefault, saveShipAloneAsProductDefault: targets.length === 1 && saveShipAloneAsDefault, catalogSku: row.catalogSku || row.sku || "", user: "Luis" }),
@@ -2473,11 +2476,11 @@ export function FulfillmentPage() {
       }))
       const warning = responses.flat().map((response) => String(response.warning || "").trim()).find(Boolean)
       if (warning) toast.warning(warning)
-      else toast.success(`Package details saved for ${targets.length} order${targets.length === 1 ? "" : "s"}.`)
+      else toast.success(`Package details saved for ${targetsByPackageOwner.length} shipment${targetsByPackageOwner.length === 1 ? "" : "s"}.`)
       setPackageRow(null)
       setPackageRouteIds([])
       setPackageTargetRows([])
-      await load()
+      await load(true, false, tab)
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to save package details.")
     } finally {

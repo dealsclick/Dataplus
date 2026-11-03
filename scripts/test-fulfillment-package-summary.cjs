@@ -26,5 +26,20 @@ test("a missing catalog default cannot reject a shipment package save", () => {
   const route = serverSource.slice(serverSource.indexOf('parts[3] === "fulfillment-package"'), serverSource.indexOf('parts[2] === "exceptions"'));
   assert.doesNotMatch(route, /if \(!product\) return sendJson/);
   assert.match(route, /Shipment package saved\. A reusable catalog default was not saved/);
-  assert.match(route, /await postgres\.saveOrder\(order\)/);
+  assert.match(route, /await postgres\.saveOrder\(member\)/);
+});
+
+test("shipment package edits persist the final carton across every combined order", () => {
+  const route = serverSource.slice(serverSource.indexOf('parts[3] === "fulfillment-package"'), serverSource.indexOf('parts[2] === "exceptions"'));
+  assert.match(route, /readOrdersByShipmentGroupId\(shipmentGroupId\)/);
+  assert.match(route, /member\.shipmentGroupPackage = groupPackage/);
+  assert.match(route, /memberRoute\.package = \{ \.\.\.\(memberRoute\.package \|\| \{\}\), \.\.\.packageInfo \}/);
+  assert.match(route, /invalidateFulfillmentConsoleSnapshot\(affectedOrderIds\)/);
+  assert.match(route, /await flushFulfillmentConsoleProjectionPatch\(\)/);
+});
+
+test("bulk package edits save each shipment group once and retain active queue filters", () => {
+  assert.match(appSource, /const key = shipmentGroupId \? `shipment-group:\$\{shipmentGroupId\}` : `order:\$\{String\(row\.orderId\)\}`/);
+  assert.match(appSource, /const rowsToSave = shipmentGroupId \? packageRows\.slice\(0, 1\) : packageRows/);
+  assert.match(appSource, /await load\(true, false, tab\)/);
 });

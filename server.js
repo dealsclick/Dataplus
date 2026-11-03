@@ -57839,15 +57839,75 @@ async function handleApi(req, res) {
       route.readyToShipAt = new Date().toISOString();
       route.updatedAt = route.readyToShipAt;
     }
-    order.updatedAt = new Date().toISOString();
+    const savedAt = new Date().toISOString();
+    order.updatedAt = savedAt;
     recalculateOrderOperationalStatus(order);
     addOrderTimeline(order, { type: "package", title: body.markReady === true ? "Warehouse order ready to ship" : "Fulfillment package updated", message: `${packageInfo.packageWeight} lb · ${packageInfo.packageLength} × ${packageInfo.packageWidth} × ${packageInfo.packageHeight} in.`, user: body.user || "Luis" });
-    await postgres.saveOrder(order); clearOrderApiCache(order.id);
-    const fulfillmentState = { batches: await postgres.readFulfillmentBatchesByOrderIds([order.id]) };
+    let ordersToSave = [order];
+    const shipmentGroupId = String(order.shipmentGroupId || "").trim();
+    const completePackage = Object.values(packageInfo).every((value) => Number(value) > 0);
+    if (shipmentGroupId && completePackage && body.shipAlone !== true) {
+      const groupMembers = await postgres.readOrdersByShipmentGroupId(shipmentGroupId);
+      const membersById = new Map(groupMembers.map((member) => [String(member.id || ""), member]));
+      membersById.set(String(order.id || ""), order);
+      ordersToSave = [...membersById.values()];
+      const systemSettings = readSystemSettingsStore(await postgres.readStateField("systemSettings").catch(() => ({})) || {});
+      const cartonizationOptions = { dimensionalDivisor: Number(systemSettings.shippingDimensionalDivisor || 139), maxParcelWeight: 150 };
+      const manualAssessment = shipmentConsolidation.assessManualPackage(packageInfo, cartonizationOptions);
+      const groupPackage = {
+        ...packageInfo,
+        packageType: String(body.packageType || order.shipmentGroupPackage?.packageType || order.package?.packageType || "box"),
+        dimensionalWeight: manualAssessment.dimensionalWeight,
+        billableWeight: manualAssessment.billableWeight,
+        source: "warehouse_entered",
+        savedAt,
+        savedBy: actor
+      };
+      const groupPlan = shipmentConsolidation.manualPackagePlan(groupPackage, cartonizationOptions);
+      for (const member of ordersToSave) {
+        member.packageUpdatedAt = savedAt;
+        member.packageMeasurementSource = "manual";
+        member.package = {
+          ...(member.package || {}),
+          ...packageInfo,
+          packageType: groupPackage.packageType,
+          weightUnit: String(body.weightUnit || member.package?.weightUnit || "lb"),
+          dimensionUnit: String(body.dimensionUnit || member.package?.dimensionUnit || "in"),
+          savedAt,
+          savedBy: actor,
+          source: "shipment_group"
+        };
+        member.shipmentGroupPackage = groupPackage;
+        member.shipmentGroupPackageReviewRequired = false;
+        member.shipmentGroupCombinedWeight = packageInfo.packageWeight;
+        member.shipmentGroupCombinedVolume = packageInfo.packageLength * packageInfo.packageWidth * packageInfo.packageHeight;
+        member.shipmentGroupCartonizationPreview = groupPlan;
+        member.shipmentGroupCartonizationUpdatedAt = savedAt;
+        for (const memberRoute of member.fulfillmentRoutes || []) {
+          const routeStatus = String(memberRoute.status || "").toLowerCase();
+          if (!["warehouse", "purchase"].includes(String(memberRoute.type || "warehouse").toLowerCase())) continue;
+          if (["canceled", "cancelled", "closed", "fulfilled", "shipped", "delivered", "void", "voided"].includes(routeStatus)) continue;
+          memberRoute.package = { ...(memberRoute.package || {}), ...packageInfo };
+          memberRoute.packageMeasurementSource = "manual";
+          memberRoute.shippingPreferencesUpdatedAt = savedAt;
+          memberRoute.shippingPreferencesUpdatedBy = actor;
+        }
+        member.updatedAt = savedAt;
+        recalculateOrderOperationalStatus(member);
+        if (String(member.id || "") !== String(order.id || "")) addOrderTimeline(member, { type: "package", title: "Shipment group package updated", message: `${packageInfo.packageWeight} lb · ${packageInfo.packageLength} × ${packageInfo.packageWidth} × ${packageInfo.packageHeight} in for group ${shipmentGroupId}.`, user: actor });
+      }
+    }
+    const affectedOrderIds = ordersToSave.map((member) => String(member.id || "")).filter(Boolean);
+    for (const member of ordersToSave) {
+      await postgres.saveOrder(member);
+      clearOrderApiCache(member.id);
+    }
+    const affectedOrderIdSet = new Set(affectedOrderIds);
+    const fulfillmentState = { batches: await postgres.readFulfillmentBatchesByOrderIds(affectedOrderIds) };
     let invalidatedRates = 0;
     for (const batch of fulfillmentState.batches) {
       for (const batchRow of batch.rows || []) {
-        if (String(batchRow.orderId) !== String(order.id) || batchRow.status === "purchased") continue;
+        if (!affectedOrderIdSet.has(String(batchRow.orderId || "")) || batchRow.status === "purchased") continue;
         batchRow.status = "queued";
         batchRow.rates = [];
         batchRow.selectedRate = null;
@@ -57859,7 +57919,9 @@ async function handleApi(req, res) {
       }
     }
     if (invalidatedRates) await postgres.writeStateDocuments({ fulfillmentLabelBatches: fulfillmentState.batches.slice(0, 1000) });
-    return sendJson(res, 200, { order, route, package: order.package, productDefault, warning: productDefaultWarning, message: body.markReady === true ? "Order is ready to ship. A pick list is optional." : productDefault ? `Package details saved as the default for ${productDefault.sku}. Readiness will refresh now.` : productDefaultWarning || "Package details saved. Readiness will refresh now." });
+    invalidateFulfillmentConsoleSnapshot(affectedOrderIds);
+    await flushFulfillmentConsoleProjectionPatch();
+    return sendJson(res, 200, { order, route, package: order.package, shipmentGroupPackage: order.shipmentGroupPackage || null, affectedOrderIds, productDefault, warning: productDefaultWarning, message: body.markReady === true ? "Order is ready to ship. A pick list is optional." : shipmentGroupId ? `Final package saved for all ${affectedOrderIds.length} orders in shipment group ${shipmentGroupId}.` : productDefault ? `Package details saved as the default for ${productDefault.sku}. Readiness will refresh now.` : productDefaultWarning || "Package details saved. Readiness will refresh now." });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "exceptions" && parts[3] && parts[4] === "resolve" && postgres.isPostgresEnabled()) {
