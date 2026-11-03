@@ -39,9 +39,13 @@ test("shipment package edits persist the final carton across every combined orde
 });
 
 test("bulk package edits save each shipment group once and retain active queue filters", () => {
-  assert.match(appSource, /const key = shipmentGroupId \? `shipment-group:\$\{shipmentGroupId\}` : `order:\$\{String\(row\.orderId\)\}`/);
+  assert.match(appSource, /function fulfillmentPhysicalPackageKey/);
+  assert.match(appSource, /if \(shipmentGroupId\) return `shipment-group:\$\{shipmentGroupId\}`/);
+  assert.match(appSource, /const key = fulfillmentPhysicalPackageKey\(row\)/);
   assert.match(appSource, /const rowsToSave = shipmentGroupId \? packageRows\.slice\(0, 1\) : packageRows/);
   assert.match(appSource, /fulfillmentLoadRef\.current\(false, true\)/);
   assert.match(appSource, /setData\(\(current\) => \(\{ \.\.\.current, work: applyPackageValues\(current\.work\), allWork: applyPackageValues\(current\.allWork\) \}\)\)/);
   assert.doesNotMatch(appSource, /if \(previousKey[\s\S]{0,300}await load\(false, true\)/);
+  assert.match(appSource, /Edit combined shipment package/);
+  assert.match(appSource, /Each combined group will use these values as its shared final carton for rates and one label\./);
 });
