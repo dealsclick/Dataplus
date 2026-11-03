@@ -4781,7 +4781,7 @@ async function readFulfillmentConsoleProjectionPage(viewKey, options = {}) {
   const where = filters.join(" and ");
   const grouped = normalizedView === "ready" || normalizedView === "all-shipments";
   const physicalGroupExpression = `case
-    when coalesce(data->>'shipmentGroupId', '') <> '' then 'shipment-group:' || data->>'shipmentGroupId'
+    when coalesce(data->>'shipmentGroupId', '') <> '' then concat('shipment-group:', data->>'shipmentGroupId')
     else coalesce(data->>'orderId', data->>'orderNumber', row_key) || ':' || coalesce(data->>'packageGroupKey', 'combined')
   end`;
   const result = await client.query(grouped ? `

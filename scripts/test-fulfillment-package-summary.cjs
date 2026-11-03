@@ -60,7 +60,8 @@ test("combined shipments render and paginate as one physical package", () => {
   assert.match(appSource, /flatMap\(\(packageRows\) => fulfillmentPackageOwnerRows\(packageRows\)\)/);
   assert.match(appSource, /FulfillmentShipmentGroupChildRow/);
   assert.match(appSource, /Quote once for this group/);
-  assert.match(dbSource, /when coalesce\(data->>'shipmentGroupId', ''\) <> '' then 'shipment-group:' \|\| data->>'shipmentGroupId'/);
+  assert.match(dbSource, /when coalesce\(data->>'shipmentGroupId', ''\) <> '' then concat\('shipment-group:', data->>'shipmentGroupId'\)/);
+  assert.doesNotMatch(dbSource, /then 'shipment-group:' \|\| data->>'shipmentGroupId'/);
   assert.match(dbSource, /count\(distinct \(\$\{physicalGroupExpression\}\)\)/);
 });
 
