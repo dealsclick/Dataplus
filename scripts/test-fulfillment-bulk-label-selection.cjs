@@ -19,8 +19,10 @@ assert.match(appSource, /Refresh rates before buying/, "the disabled bulk purcha
 assert.match(appSource, /Get latest rates for \$\{selectedRateReadyPackages\.length\}/, "the purchase dialog must offer the same latest-rate step for a single shipment");
 assert.doesNotMatch(appSource, /ratedRows\.length !== selectedRows\.length/, "an ineligible row must not block every selected label");
 assert.match(appSource, /Grouped · \{shipmentGroupSize \|\| 1\}/, "group members must remain visibly grouped in the fulfillment table");
-assert.match(appSource, /Get rates & open label purchase/, "the shipment-group modal must continue directly into the reviewed label workflow");
-assert.match(appSource, /rateRefreshOpenLabelOnCompleteRef\.current = true/, "shipment-group rate completion must open label purchase when requested");
+assert.match(appSource, /continueShipmentGroup\(true, true\)/, "the shipment-group modal must keep its inline rate workflow open");
+assert.match(appSource, /Buy & print label/, "the shipment-group modal must purchase and print its shared label directly");
+assert.match(appSource, /consolidationPurchaseInlineRef\.current = inlineShipmentGroup/, "inline shipment-group purchases must retain their print handoff context");
+assert.match(appSource, /purchasedFromShipmentGroup && printJobs\.length[\s\S]*setConsolidationOrder\(null\)/, "the shipment-group dialog must close only after a print packet is ready");
 
 assert.match(serverSource, /activeFulfillmentLabelBatchAssignments\(state\.batches\)/, "the server must exclude routes already assigned to an active label batch");
 assert.match(serverSource, /primaryOrderId: order\.id, primaryRouteIds/, "shipment-group creation must return only the primary combined package routes");

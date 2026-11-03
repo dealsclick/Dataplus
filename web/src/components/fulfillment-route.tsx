@@ -708,6 +708,7 @@ export function FulfillmentPage() {
   const [rateStatusOpen, setRateStatusOpen] = useState(false)
   const rateRefreshSelectionKeyRef = useRef("")
   const rateRefreshOpenLabelOnCompleteRef = useRef(false)
+  const consolidationPurchaseInlineRef = useRef(false)
   const [latestRateAuthorization, setLatestRateAuthorization] = useState<{ selectionKey: string; routeIds: Set<string> }>({ selectionKey: "", routeIds: new Set() })
   const [rateRefreshJobId, setRateRefreshJobId] = useState(() => window.localStorage.getItem("dataplus:fulfillment-rate-refresh-job") || "")
   const [carrierScanJobId, setCarrierScanJobId] = useState(() => window.localStorage.getItem("dataplus:fulfillment-carrier-scan-job") || "")
@@ -1301,6 +1302,14 @@ export function FulfillmentPage() {
         setSelectedRouteIds(new Set())
         setPurchasedLabelFilter("unprinted")
         setTab("purchased-labels")
+        const purchasedFromShipmentGroup = consolidationPurchaseInlineRef.current
+        consolidationPurchaseInlineRef.current = false
+        if (purchasedFromShipmentGroup && printJobs.length) {
+          setConsolidationOrder(null)
+          setConsolidationPrimary(null)
+          setConsolidationSaved(null)
+          setConsolidationCartonization(null)
+        }
         if (Number(counts.label_pending || 0) > 0 && job.labelPurchaseBatchId) setPendingPrintRecovery({ batchId: String(job.labelPurchaseBatchId) })
         else if (printJobs.length) showPurchasedPrintPackets(printJobs, refreshedData, String(job.labelPurchaseBatchId || ""), String(job.printRequestId || ""))
         if (status === "failed") toast.error(job.message || "Shipping-label purchase failed.")
@@ -1766,14 +1775,16 @@ export function FulfillmentPage() {
     await refreshRatesForRows(selectedRateReadyRows)
   }
 
-  const continueShipmentGroup = async (getRatesNow: boolean) => {
+  const continueShipmentGroup = async (getRatesNow: boolean, keepDialogOpen = false) => {
     const routeIds = consolidationSaved?.primaryRouteIds || []
     const selectedIds = new Set(routeIds)
     const targetRows = rows.filter((row) => selectedIds.has(String(row.id || "")))
     setSelectedRouteIds(selectedIds)
-    setConsolidationOrder(null)
-    setConsolidationSaved(null)
-    setConsolidationCartonization(null)
+    if (!keepDialogOpen) {
+      setConsolidationOrder(null)
+      setConsolidationSaved(null)
+      setConsolidationCartonization(null)
+    }
     if (!getRatesNow) {
       toast.info(routeIds.length ? "The combined shipment is selected in the bulk toolbar." : "The shipment group was saved. Refresh the table to continue with rates.")
       return
@@ -1788,7 +1799,7 @@ export function FulfillmentPage() {
       return
     }
     rateRefreshSelectionKeyRef.current = [...selectedIds].sort().join("|")
-    rateRefreshOpenLabelOnCompleteRef.current = true
+    rateRefreshOpenLabelOnCompleteRef.current = !keepDialogOpen
     setLatestRateAuthorization({ selectionKey: "", routeIds: new Set() })
     await refreshRatesForRows(readyRows)
   }
@@ -1826,9 +1837,10 @@ export function FulfillmentPage() {
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update the ship date.") } finally { setBusy(false) }
   }
 
-  const buySelectedLabels = async (adminPin = "") => {
+  const buySelectedLabels = async (adminPin = "", options: { inlineShipmentGroup?: boolean } = {}) => {
+    const inlineShipmentGroup = options.inlineShipmentGroup === true
     if (labelPurchaseProgress?.active) {
-      setBatchOpen(true)
+      if (!inlineShipmentGroup) setBatchOpen(true)
       return
     }
     if (!selectedPurchaseEligibleRows.length) {
@@ -1842,7 +1854,8 @@ export function FulfillmentPage() {
       ? window.confirm("At least one selected label is above the configured cost limit. Create the batch and purchase anyway?")
       : false
     if (selectedPurchaseEligiblePackages.some((row) => row.rateReview?.requiresCostConfirmation === true) && !confirmOverLimit) return
-    setBatchOpen(true)
+    consolidationPurchaseInlineRef.current = inlineShipmentGroup
+    if (!inlineShipmentGroup) setBatchOpen(true)
     setBusy(true)
     setLabelPurchaseProgress({ active: true, total: selectedPurchaseEligiblePackages.length, purchased: 0, failed: 0, pending: 0, batchNumber: "", message: "Creating shipping batch" })
     let batchId = ""
@@ -1863,6 +1876,7 @@ export function FulfillmentPage() {
       setLabelPurchaseProgress((current) => current ? { ...current, total: Number(queued.batch?.counts?.total || current.total), message: queued.message || "Shipping-label purchase queued" } : current)
       toast.success(`${created.batch?.batchNumber || "Shipping batch"} started. You can leave this page while labels are purchased.`)
     } catch (error) {
+      consolidationPurchaseInlineRef.current = false
       setLabelPurchaseProgress((current) => current ? { ...current, active: false, message: "Label purchase stopped" } : current)
       const payload = (error as Error & { payload?: Record<string, unknown> })?.payload
       if (payload?.requiresAdminPin === true && batchId) {
@@ -2498,6 +2512,11 @@ export function FulfillmentPage() {
   const rateProgressSelectionKey = [...new Set(rateRefreshProgress.items.flatMap((item) => item.routeIds.map(String)))].sort().join("|")
   const currentRateSelectionKey = [...selectedRouteIds].sort().join("|")
   const rateProgressMatchesSelection = rateRefreshProgress.active || (Boolean(rateProgressSelectionKey) && rateProgressSelectionKey === currentRateSelectionKey)
+  const consolidationRatePackage = consolidationSaved ? selectedPackageRows[0] : null
+  const consolidationSelectedRate = consolidationRatePackage?.rateReview?.selectedRate as Record<string, any> | undefined
+  const consolidationRateLabel = consolidationSelectedRate
+    ? `${String(consolidationSelectedRate.carrier || "Carrier")} ${String(consolidationSelectedRate.service || "")}`.trim()
+    : ""
   const selectedWarehouseOnly = selectedRows.every((row) => String(row.routeType || "warehouse") === "warehouse")
   const configuredCarriers = (Array.isArray(settingsDraft.carriers) ? settingsDraft.carriers : []) as FulfillmentCarrier[]
   const carrierNames = [...new Set([...configuredCarriers.filter((carrier) => carrier.enabled).map((carrier) => carrier.name), ...shipments.map((row) => String(row.carrierName || row.carrier || "")).filter(Boolean)])].sort()
@@ -2790,6 +2809,12 @@ export function FulfillmentPage() {
             <Alert className="border-emerald-500/40 bg-emerald-500/5"><CheckCircle2 className="size-4 text-emerald-600" /><AlertTitle>{consolidationSaved.orderNumbers.length} orders grouped successfully</AlertTitle><AlertDescription>Group {consolidationSaved.groupId} will use one shipping rate, one label, and one packing slip packet. Printing that label will mark every member order shipped.</AlertDescription></Alert>
             <div className="rounded-md border p-4"><p className="text-xs font-semibold uppercase text-muted-foreground">Grouped orders</p><div className="mt-3 flex flex-wrap gap-2">{consolidationSaved.orderNumbers.map((orderNumber) => <Badge key={orderNumber} variant="secondary">{orderNumber}</Badge>)}</div></div>
             {!consolidationSaved.primaryRouteIds.length ? <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Primary package needs review</AlertTitle><AlertDescription>The group was saved, but no warehouse package is ready for rates. Clear table filters and open the group from its green badge after the package is ready.</AlertDescription></Alert> : null}
+            {consolidationSaved.primaryRouteIds.length ? <div className="grid gap-4 rounded-md border p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-semibold uppercase text-muted-foreground">Rate and label</p><p className="mt-1 text-sm text-muted-foreground">Buy the shared label here, then DataPlus opens the finished print packet.</p></div>{consolidationSelectedRate ? <Badge variant="success">Rate ready</Badge> : rateRefreshProgress.active ? <Badge variant="secondary">Checking rates</Badge> : <Badge variant="outline">Rate needed</Badge>}</div>
+              {rateRefreshProgress.active ? <div className="grid gap-2" role="status" aria-live="polite"><div className="flex items-center justify-between gap-3 text-sm"><span className="flex items-center gap-2"><Loader2 className="size-4 animate-spin text-primary" /> Requesting live carrier rates</span><span className="font-medium tabular-nums">{rateProgressProcessed}/{Math.max(1, rateRefreshProgress.items.length)}</span></div><Progress value={Math.round((rateProgressProcessed / Math.max(1, rateRefreshProgress.items.length)) * 100)} className="h-2" /></div> : consolidationSelectedRate ? <div className="flex flex-wrap items-center justify-between gap-4 rounded-md border bg-muted/20 p-3"><div><p className="font-semibold">{consolidationRateLabel}</p><p className="text-xs text-muted-foreground">One label covers all {consolidationSaved.orderNumbers.length} grouped orders.</p></div><p className="text-lg font-semibold tabular-nums">{consolidationSelectedRate.amount === null || consolidationSelectedRate.amount === undefined ? "Cost unavailable" : moneyLabel(Number(consolidationSelectedRate.amount))}</p></div> : <Alert><RefreshCw className="size-4" /><AlertTitle>Get a live rate before purchasing</AlertTitle><AlertDescription>The final combined carton is saved. Request rates below, then buy and print without leaving this dialog.</AlertDescription></Alert>}
+              <div className="grid gap-3 sm:grid-cols-2"><Field label="Print size"><Select disabled={busy || labelPurchaseProgress?.active} value={batchDraft.printSize} onValueChange={(printSize) => setBatchDraft((current) => ({ ...current, printSize }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="4x6">4 × 6 thermal</SelectItem><SelectItem value="letter">US Letter</SelectItem></SelectContent></Select></Field><div className="self-end"><ToggleField label="Include packing slip" checked={batchDraft.includePackingSlips} onCheckedChange={(includePackingSlips) => !busy && setBatchDraft((current) => ({ ...current, includePackingSlips }))} /></div></div>
+              {consolidationPurchaseInlineRef.current && labelPurchaseProgress ? <div className="grid gap-2 rounded-md border p-3" role="status" aria-live="polite"><div className="flex items-center justify-between gap-3 text-sm"><span className="flex items-center gap-2">{labelPurchaseProgress.active ? <Loader2 className="size-4 animate-spin text-primary" /> : labelPurchaseProgress.failed ? <AlertCircle className="size-4 text-destructive" /> : <CheckCircle2 className="size-4 text-emerald-600" />} {labelPurchaseProgress.message}</span><span className="font-semibold tabular-nums">Purchased {labelPurchaseProgress.purchased}/{Math.max(1, labelPurchaseProgress.total)}</span></div><Progress value={purchaseProgressPercent} className="h-2" /></div> : null}
+            </div> : null}
           </div> : consolidationLoading && !consolidationCandidates.length ? <div className="grid gap-2"><Skeleton className="h-14" /><Skeleton className="h-14" /></div> : <div className="min-h-0 space-y-3 overflow-y-auto">
             <Alert><PackageCheck className="size-4" /><AlertTitle>{consolidationOrder?.isEbayLive ? "eBay Live shipment match" : "Cartonization preview"}</AlertTitle><AlertDescription>{consolidationOrder?.isEbayLive ? "DataPlus requires the same buyer, exact delivery address, and warehouse. Enter the final carton below even when temporary Live SKUs have no catalog dimensions." : "DataPlus tests the selected orders against the configured package catalog. Confirm the physical carton before purchase."}</AlertDescription></Alert>
             <div className="overflow-x-auto rounded-md border"><Table className="min-w-[880px]"><TableHeader><TableRow><TableHead className="w-10" /><TableHead>Order number</TableHead><TableHead>Customer name</TableHead><TableHead>SKU</TableHead><TableHead>Created</TableHead><TableHead>Match</TableHead><TableHead className="w-24 text-center">Parent order</TableHead></TableRow></TableHeader><TableBody>{consolidationDisplayOrders.map((candidate) => { const id = String(candidate.id || ""); const liveWindowMatch = String(candidate.matchSource || "") === "ebay_live_shipping_window"; const skus = [...new Set((Array.isArray(candidate.skus) ? candidate.skus : [candidate.sku]).map((value) => String(value || "").trim()).filter(Boolean))]; return <TableRow key={`${candidate.isPrimary ? "primary" : "candidate"}-${id}`} className={candidate.isPrimary ? "bg-blue-500/5" : undefined}><TableCell>{candidate.isPrimary ? <Checkbox checked disabled aria-label="Parent order is always included" /> : <Checkbox checked={consolidationSelection.has(id)} aria-label={`Include order ${String(candidate.orderNumber || id)}`} onCheckedChange={(checked) => updateConsolidationSelection(id, checked === true)} />}</TableCell><TableCell><a className="font-semibold text-primary hover:underline" href={`/orders/${encodeURIComponent(id)}`}>{String(candidate.orderNumber || id)}</a></TableCell><TableCell><a className="text-sm hover:underline" href={`/orders/${encodeURIComponent(id)}`}>{String(candidate.buyer || "Customer")}</a></TableCell><TableCell><a className="block max-w-52 truncate font-mono text-xs text-primary hover:underline" href={`/orders/${encodeURIComponent(id)}`} title={skus.join(", ") || "No SKU recorded"}>{skus.join(", ") || "-"}</a></TableCell><TableCell className="whitespace-nowrap text-xs">{candidate.createdAt ? dateLabel(String(candidate.createdAt)) : "-"}</TableCell><TableCell><Badge variant="outline" className={liveWindowMatch ? "border-pink-500/50 text-pink-700 dark:text-pink-300" : ""}>{candidate.isPrimary ? "Selected order" : liveWindowMatch ? "eBay Live window" : "Customer + address + warehouse"}</Badge></TableCell><TableCell className="text-center">{candidate.isPrimary ? <CheckCircle2 className="mx-auto size-5 text-emerald-600" aria-label="Parent order" /> : <span className="text-muted-foreground">-</span>}</TableCell></TableRow> })}</TableBody></Table></div>
@@ -2800,7 +2825,7 @@ export function FulfillmentPage() {
             <div className="grid gap-3 rounded-md border border-blue-500/30 bg-blue-500/5 p-3"><div><p className="text-sm font-medium">Final combined package</p><p className="text-xs text-muted-foreground">These are the dimensions used to request the rate and buy one label for the group.</p></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><Field label="Weight (lb)"><Input type="number" min="0.01" step="0.01" value={consolidationPackageDraft.packageWeight} onChange={(event) => setConsolidationPackageDraft((current) => ({ ...current, packageWeight: event.target.value }))} /></Field><Field label="Length (in)"><Input type="number" min="0.01" step="0.01" value={consolidationPackageDraft.packageLength} onChange={(event) => setConsolidationPackageDraft((current) => ({ ...current, packageLength: event.target.value }))} /></Field><Field label="Width (in)"><Input type="number" min="0.01" step="0.01" value={consolidationPackageDraft.packageWidth} onChange={(event) => setConsolidationPackageDraft((current) => ({ ...current, packageWidth: event.target.value }))} /></Field><Field label="Height (in)"><Input type="number" min="0.01" step="0.01" value={consolidationPackageDraft.packageHeight} onChange={(event) => setConsolidationPackageDraft((current) => ({ ...current, packageHeight: event.target.value }))} /></Field></div>{consolidationNeedsFinalCarton && consolidationPackageComplete ? <p className="text-xs font-medium text-emerald-700 dark:text-emerald-300">Ready: this final carton replaces the unavailable source dimensions for this shipment.</p> : null}</div>
             <p className="text-xs text-muted-foreground">Orders are not excluded because of age. Picked, packed, held, shipped, labeled, or mismatched-warehouse orders remain excluded.</p>
           </div>}
-          {consolidationSaved ? <DialogFooter><Button variant="outline" onClick={() => { setConsolidationOrder(null); setConsolidationSaved(null); setConsolidationCartonization(null) }}>Done</Button><Button variant="outline" disabled={!consolidationSaved.primaryRouteIds.length} onClick={() => void continueShipmentGroup(false)}><ListChecks className="size-4" /> Use bulk workflow</Button><Button disabled={!consolidationSaved.primaryRouteIds.length || rateRefreshProgress.active} onClick={() => void continueShipmentGroup(true)}>{rateRefreshProgress.active ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Get rates & open label purchase</Button></DialogFooter> : <DialogFooter><Button variant="outline" disabled={consolidationLoading} onClick={() => setConsolidationOrder(null)}>Cancel</Button><Button disabled={consolidationLoading || consolidationPreviewLoading || !consolidationSelection.size || !consolidationPackageComplete || consolidationHardBlocked} onClick={() => void saveShipmentConsolidation()}>{consolidationLoading ? <Loader2 className="size-4 animate-spin" /> : <PackageCheck className="size-4" />} Create one shipment group</Button></DialogFooter>}
+          {consolidationSaved ? <DialogFooter><Button variant="outline" disabled={busy || labelPurchaseProgress?.active} onClick={() => { setConsolidationOrder(null); setConsolidationSaved(null); setConsolidationCartonization(null) }}>Done</Button><Button variant="outline" disabled={busy || labelPurchaseProgress?.active || !consolidationSaved.primaryRouteIds.length} onClick={() => void continueShipmentGroup(false)}><ListChecks className="size-4" /> Use bulk workflow</Button><Button variant={consolidationSelectedRate ? "outline" : "default"} disabled={busy || labelPurchaseProgress?.active || !consolidationSaved.primaryRouteIds.length || rateRefreshProgress.active} onClick={() => void continueShipmentGroup(true, true)}>{rateRefreshProgress.active ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {consolidationSelectedRate ? "Refresh rate" : "Get rates"}</Button>{consolidationSelectedRate ? <Button disabled={busy || labelPurchaseProgress?.active || !selectedRatesCurrent || !selectedPurchaseEligibleRows.length} onClick={() => void buySelectedLabels("", { inlineShipmentGroup: true })}>{busy || labelPurchaseProgress?.active ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} {labelPurchaseProgress?.active ? `Buying ${labelPurchaseProgress.purchased}/${labelPurchaseProgress.total}` : "Buy & print label"}</Button> : null}</DialogFooter> : <DialogFooter><Button variant="outline" disabled={consolidationLoading} onClick={() => setConsolidationOrder(null)}>Cancel</Button><Button disabled={consolidationLoading || consolidationPreviewLoading || !consolidationSelection.size || !consolidationPackageComplete || consolidationHardBlocked} onClick={() => void saveShipmentConsolidation()}>{consolidationLoading ? <Loader2 className="size-4 animate-spin" /> : <PackageCheck className="size-4" />} Create one shipment group</Button></DialogFooter>}
         </DialogContent>
       </Dialog>
       <Dialog open={Boolean(testPrintStation)} onOpenChange={(open) => !open && setTestPrintStation(null)}>
