@@ -58982,7 +58982,7 @@ async function handleApi(req, res) {
       candidate.catalogSku,
       ...orderLineItems(candidate).flatMap((line) => [line.sku, line.originalSku, line.parentSku])
     ].map((value) => String(value || "").trim()).filter(Boolean))];
-    const primary = { id: order.id, orderNumber: order.orderNumber, buyer: order.buyer || order.customerName || order.address?.name || "Customer", skus: displaySkus(order), createdAt: order.orderDate || order.createdAt, isEbayLive: order.isEbayLive === true || order.salesOrigin === "ebay_live", shipmentGroupId: order.shipmentGroupId || "", shipmentGroupOrderIds: Array.isArray(order.shipmentGroupOrderIds) ? order.shipmentGroupOrderIds : [], shipmentGroupPackage: order.shipmentGroupPackage || null };
+    const primary = { id: order.id, orderNumber: order.orderNumber, buyer: order.buyer || order.customerName || order.address?.name || "Customer", skus: displaySkus(order), createdAt: order.orderDate || order.createdAt, isEbayLive: order.isEbayLive === true || order.salesOrigin === "ebay_live", fulfillmentPackage: fulfillmentPackageFor(order), shipmentGroupId: order.shipmentGroupId || "", shipmentGroupOrderIds: Array.isArray(order.shipmentGroupOrderIds) ? order.shipmentGroupOrderIds : [], shipmentGroupPackage: order.shipmentGroupPackage || null };
     const candidates = (orders || []).filter((candidate) => {
       if (candidate.id === order.id) return false;
       if (protectedOrderIds.has(String(candidate.id || candidate.orderId || ""))) return false;
@@ -58991,7 +58991,7 @@ async function handleApi(req, res) {
     }).slice(0, 25).map((candidate) => {
       const candidateEligibility = shipmentGroupEligibility(candidate, { windowHours: settings.shipmentConsolidationWindowHours });
       const pair = shipmentConsolidation.shipmentConsolidationPair(order, candidate, { windowHours: settings.shipmentConsolidationWindowHours });
-      return { id: candidate.id, orderNumber: candidate.orderNumber, status: candidate.status, fulfillmentStatus: candidate.fulfillmentStatus || "", total: candidate.total, buyer: candidate.buyer || candidate.customerName || candidate.address?.name || "Customer", skus: displaySkus(candidate), address: candidate.address || {}, createdAt: candidate.orderDate || candidate.createdAt, shipmentGroupId: candidate.shipmentGroupId || "", warehouseId: candidateEligibility.warehouseId || "", identitySource: pair.identitySource || "recipient_address", matchSource: pair.matchSource || "customer_address_warehouse", ebayLiveShippingWindowId: pair.ebayLiveShippingWindowId || "", isEbayLive: candidate.isEbayLive === true || candidate.salesOrigin === "ebay_live", matchReasons: [pair.sameGroup ? "same_group" : "", pair.matchSource === "ebay_live_shipping_window" ? "ebay_live_shipping_window" : "", "same_customer", "same_address", "same_warehouse"].filter(Boolean) };
+      return { id: candidate.id, orderNumber: candidate.orderNumber, status: candidate.status, fulfillmentStatus: candidate.fulfillmentStatus || "", total: candidate.total, buyer: candidate.buyer || candidate.customerName || candidate.address?.name || "Customer", skus: displaySkus(candidate), address: candidate.address || {}, createdAt: candidate.orderDate || candidate.createdAt, fulfillmentPackage: fulfillmentPackageFor(candidate), shipmentGroupId: candidate.shipmentGroupId || "", warehouseId: candidateEligibility.warehouseId || "", identitySource: pair.identitySource || "recipient_address", matchSource: pair.matchSource || "customer_address_warehouse", ebayLiveShippingWindowId: pair.ebayLiveShippingWindowId || "", isEbayLive: candidate.isEbayLive === true || candidate.salesOrigin === "ebay_live", matchReasons: [pair.sameGroup ? "same_group" : "", pair.matchSource === "ebay_live_shipping_window" ? "ebay_live_shipping_window" : "", "same_customer", "same_address", "same_warehouse"].filter(Boolean) };
     });
     return sendJson(res, 200, { orderId: order.id, eligible: true, warehouseId: eligibility.warehouseId, timeLimitEnforced: false, ebayLive: liveWindow, primary, candidates });
   }
@@ -59509,13 +59509,18 @@ async function handleApi(req, res) {
     const assessment = shipmentConsolidation.assessConsolidatedPackages(groupWork, groupOrders.map((candidate) => candidate.id));
     if (!assessment.allowed) return sendJson(res, 400, { error: assessment.reason || "The selected packages cannot be combined safely." });
     const systemSettings = readSystemSettingsStore(savedSystemSettings || {});
-    const preview = shipmentConsolidation.cartonizeShipment(
-      groupWork,
-      groupOrders.map((candidate) => candidate.id),
-      normalizeShippingPackagePresets(systemSettings.shippingPackagePresets),
-      { dimensionalDivisor: Number(systemSettings.shippingDimensionalDivisor || 139), maxParcelWeight: 150 }
-    );
-    return sendJson(res, 200, { preview, assessment, packagePresets: normalizeShippingPackagePresets(systemSettings.shippingPackagePresets) });
+    const packagePresets = normalizeShippingPackagePresets(systemSettings.shippingPackagePresets);
+    const cartonizationOptions = { dimensionalDivisor: Number(systemSettings.shippingDimensionalDivisor || 139), maxParcelWeight: 150 };
+    const selectedGroupIds = new Set(groupOrders.map((candidate) => String(candidate.id || "")).filter(Boolean));
+    const savedGroupIds = new Set([order.id, ...(Array.isArray(order.shipmentGroupOrderIds) ? order.shipmentGroupOrderIds : [])].map((id) => String(id || "")).filter(Boolean));
+    const sameSavedGroup = selectedGroupIds.size === savedGroupIds.size && [...selectedGroupIds].every((id) => savedGroupIds.has(id));
+    const savedPackageAssessment = sameSavedGroup
+      ? shipmentConsolidation.assessManualPackage(order.shipmentGroupPackage || {}, cartonizationOptions)
+      : { provided: false, allowed: false };
+    const preview = savedPackageAssessment.allowed
+      ? shipmentConsolidation.manualPackagePlan(order.shipmentGroupPackage, cartonizationOptions)
+      : shipmentConsolidation.cartonizeShipment(groupWork, groupOrders.map((candidate) => candidate.id), packagePresets, cartonizationOptions);
+    return sendJson(res, 200, { preview, assessment, packagePresets });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "shipment-group" && !parts[4] && postgres.isPostgresEnabled()) {

@@ -22,7 +22,15 @@ test("candidate lookup uses stable buyer identity without an age cutoff", () => 
   assert.match(serverSource, /listOrders\(\{ limit: 5000, summary: true, q: candidateIdentity, openWorkOnly: true \}\)/);
   assert.match(serverSource, /timeLimitEnforced: false/);
   assert.doesNotMatch(serverSource, /const dateFrom = new Date\(primaryTimestamp - windowMs\)/);
+  assert.match(serverSource, /fulfillmentPackage: fulfillmentPackageFor\(order\)/);
+  assert.match(serverSource, /fulfillmentPackage: fulfillmentPackageFor\(candidate\)/);
   assert.match(serverSource, /shipmentGroupPackage: order\.shipmentGroupPackage \|\| null/);
+});
+
+test("cartonization preview reuses the exact saved shipment-group package", () => {
+  assert.match(serverSource, /const sameSavedGroup = selectedGroupIds\.size === savedGroupIds\.size/);
+  assert.match(serverSource, /shipmentConsolidation\.assessManualPackage\(order\.shipmentGroupPackage \|\| \{\}, cartonizationOptions\)/);
+  assert.match(serverSource, /savedPackageAssessment\.allowed[\s\S]*shipmentConsolidation\.manualPackagePlan\(order\.shipmentGroupPackage, cartonizationOptions\)/);
 });
 
 test("active and purchased label rows are excluded from consolidation", () => {
