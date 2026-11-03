@@ -11148,6 +11148,8 @@ async function listOrders(options = {}) {
       "shippingService" text,
       "deliveryMethod" text,
       "shipmentGroupId" text,
+      "shipmentGroupOrderIds" jsonb,
+      "shipmentGroupPrimaryOrderId" text,
       "channelStatus" text,
       "marketplaceStatus" text,
       "marketplaceCancellation" jsonb,

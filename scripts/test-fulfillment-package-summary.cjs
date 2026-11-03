@@ -64,4 +64,5 @@ test("shipment groups persist an explicit master order", () => {
   assert.match(serverSource, /candidate\.shipmentGroupPrimaryOrderId = order\.id/);
   assert.match(serverSource, /shipmentGroupPrimaryOrderId: order\.shipmentGroupPrimaryOrderId \|\| order\.shipmentGroupOrderIds\?\.\[0\] \|\| ""/);
   assert.match(dbSource, /shipmentGroupPrimaryOrderId: row\.shipment_group_primary_order_id \|\| ''/);
+  assert.match(dbSource, /"shipmentGroupOrderIds" jsonb,[\s\S]{0,80}"shipmentGroupPrimaryOrderId" text/);
 });
