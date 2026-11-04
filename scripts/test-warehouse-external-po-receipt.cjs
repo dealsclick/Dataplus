@@ -4,6 +4,7 @@ const path = require('node:path');
 
 const root = path.resolve(__dirname, '..');
 const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+const db = fs.readFileSync(path.join(root, 'db.js'), 'utf8');
 const warehouseUi = fs.readFileSync(path.join(root, 'web', 'src', 'components', 'warehouse-route.tsx'), 'utf8');
 const purchasingUi = fs.readFileSync(path.join(root, 'web', 'src', 'components', 'purchasing-route.tsx'), 'utf8');
 const purchaseOrderUi = fs.readFileSync(path.join(root, 'web', 'src', 'components', 'purchasing-workspaces.tsx'), 'utf8');
@@ -36,6 +37,14 @@ assert.match(warehouseUi, /compressEvidenceImage/, 'packing-slip photos are comp
 assert.match(warehouseUi, /Packing slip required/, 'the UI explains the packing-slip completion safeguard');
 assert.match(warehouseUi, /Extra item[\s\S]*Expected on another open PO/, 'linked PO receiving flags extra items and shows other open PO expectations');
 assert.match(warehouseUi, /Ready to post, not received yet/, 'the receipt preview clearly distinguishes saved scans from posted inventory');
+assert.match(warehouseUi, /Type \/ reference/, 'the audit register visibly identifies every audit type and PO reference');
+assert.match(warehouseUi, /All PO receipts/, 'the audit register can isolate DataPlus and external PO receipts');
+assert.match(warehouseUi, /Search audit, PO, supplier, or counter/, 'the audit register exposes operational search');
+assert.match(warehouseUi, /auditWarehouse/, 'audit register filters persist in the URL across detail navigation');
+assert.match(server, /reason: url\.searchParams\.get\("reason"\)/, 'the paginated audit API accepts server-side type filters');
+assert.match(server, /warehouse: url\.searchParams\.get\("warehouse"\)/, 'the paginated audit API accepts server-side warehouse filters');
+assert.match(db, /reason === "po_receipts"[\s\S]*purchase_order_receipt[\s\S]*external_po_receipt/, 'the audit query groups both PO receipt sources');
+assert.match(db, /linkedPurchaseOrderNumber[\s\S]*externalPurchaseOrderNumber/, 'audit summaries return PO references without loading full audit lines');
 assert.match(purchasingUi, /Receiving now[\s\S]*Receipt not posted yet/, 'the purchasing queue displays active warehouse receiving work');
 assert.match(purchaseOrderUi, /Receiving in progress[\s\S]*activeReceivingAudit\.scannedUnits/, 'the PO detail displays live scan progress');
 

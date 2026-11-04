@@ -55761,6 +55761,9 @@ async function handleApi(req, res) {
         page: url.searchParams.get("page"),
         pageSize: url.searchParams.get("pageSize") || url.searchParams.get("limit"),
         status: url.searchParams.get("status"),
+        reason: url.searchParams.get("reason"),
+        warehouse: url.searchParams.get("warehouse"),
+        search: url.searchParams.get("search"),
         sort: url.searchParams.get("sort")
       });
       return sendJson(res, 200, result);

@@ -2813,11 +2813,42 @@ async function listWarehouseAuditsPage(options = {}) {
   const page = Math.max(1, Number(options.page || 1));
   const offset = (page - 1) * pageSize;
   const status = nullableString(options.status)?.toLowerCase() || "";
+  const reason = nullableString(options.reason)?.toLowerCase() || "";
+  const warehouse = nullableString(options.warehouse)?.toLowerCase() || "";
+  const search = nullableString(options.search)?.toLowerCase() || "";
   const values = [];
   const conditions = [];
   if (status) {
-    values.push(status);
-    conditions.push(`lower(coalesce(a.status, a.audit_payload->>'status', '')) = $${values.length}`);
+    values.push(status === "open" ? ["in_progress", "pending_review"] : [status]);
+    conditions.push(`lower(coalesce(a.status, a.audit_payload->>'status', '')) = any($${values.length}::text[])`);
+  }
+  if (reason) {
+    const reasons = reason === "po_receipts"
+      ? ["purchase_order_receipt", "external_po_receipt"]
+      : reason === "receiving"
+        ? ["purchase_order_receipt", "external_po_receipt", "receiving_inventory"]
+        : [reason];
+    values.push(reasons);
+    conditions.push(`lower(coalesce(a.audit_payload->>'reason', '')) = any($${values.length}::text[])`);
+  }
+  if (warehouse) {
+    values.push(warehouse);
+    conditions.push(`(
+      lower(coalesce(a.warehouse_id, a.audit_payload->>'warehouseId', '')) = $${values.length}
+      or lower(coalesce(a.audit_payload->>'warehouseName', '')) = $${values.length}
+    )`);
+  }
+  if (search) {
+    values.push(`%${search}%`);
+    conditions.push(`(
+      lower(coalesce(a.audit_number, a.audit_payload->>'auditNumber', a.audit_id, '')) like $${values.length}
+      or lower(coalesce(a.audit_payload->>'linkedPurchaseOrderNumber', '')) like $${values.length}
+      or lower(coalesce(a.audit_payload->>'externalPurchaseOrderNumber', '')) like $${values.length}
+      or lower(coalesce(a.audit_payload->>'supplierName', '')) like $${values.length}
+      or lower(coalesce(a.audit_payload->>'warehouseName', '')) like $${values.length}
+      or lower(coalesce(a.audit_payload->>'createdBy', '')) like $${values.length}
+      or lower(coalesce(a.audit_payload->>'reviewer', '')) like $${values.length}
+    )`);
   }
   const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
   const sort = String(options.sort || "newest").toLowerCase();
@@ -2852,6 +2883,10 @@ async function listWarehouseAuditsPage(options = {}) {
       supplierName: payload.supplierName || "",
       status: payload.status || row.status || "",
       reason: payload.reason || "",
+      reasonLabel: payload.reasonLabel || "",
+      linkedPurchaseOrderId: payload.linkedPurchaseOrderId || "",
+      linkedPurchaseOrderNumber: payload.linkedPurchaseOrderNumber || "",
+      externalPurchaseOrderNumber: payload.externalPurchaseOrderNumber || "",
       createdBy: payload.createdBy || "",
       reviewer: payload.reviewer || "",
       createdAt: payload.createdAt || row.created_at?.toISOString?.() || String(row.created_at || ""),

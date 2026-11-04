@@ -709,9 +709,63 @@ function WarehouseAuditSortControl({ value, onChange, items = false }: { value: 
   return <Select value={value} onValueChange={(next) => onChange(next as WarehouseAuditSort)}><SelectTrigger aria-label={items ? "Sort audit items" : "Sort audits"} className="w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="newest">Latest first</SelectItem><SelectItem value="oldest">Oldest first</SelectItem><SelectItem value="identifier">{items ? "SKU / UPC A–Z" : "Audit ID A–Z"}</SelectItem></SelectContent></Select>;
 }
 
+const warehouseAuditTypeFilterOptions = [
+  { value: "all", label: "All audit types" },
+  { value: "po_receipts", label: "All PO receipts" },
+  { value: "purchase_order_receipt", label: "DataPlus PO receipts" },
+  { value: "external_po_receipt", label: "External / manual receipts" },
+  { value: "receiving_inventory", label: "Inbound receiving" },
+  { value: "cycle_count", label: "Cycle counts" },
+  { value: "new_inventory_onboarding", label: "New inventory onboarding" },
+  { value: "extra_stock", label: "Extra stock" },
+  { value: "ebay_one_time_listing", label: "One-time eBay listings" },
+] as const;
+
+function warehouseAuditQueryParam(name: string) {
+  if (typeof window === "undefined") return "";
+  return new URLSearchParams(window.location.search).get(name) || "";
+}
+
+function WarehouseAuditType({ audit }: { audit: Record<string, unknown> }) {
+  const reason = String(audit.reason || "");
+  const isDataPlusPo = reason === "purchase_order_receipt";
+  const isExternalPo = reason === "external_po_receipt";
+  const reference = isDataPlusPo ? String(audit.linkedPurchaseOrderNumber || "") : isExternalPo ? String(audit.externalPurchaseOrderNumber || "") : "";
+  const label = isDataPlusPo
+    ? "DataPlus PO receipt"
+    : isExternalPo
+      ? reference ? "External PO receipt" : "Manual inbound receipt"
+      : warehouseAuditReasonLabel(reason, audit.reasonLabel) || "Other audit";
+  return <div className="grid min-w-0 gap-1">
+    <Badge
+      variant="outline"
+      className={cn(
+        "w-fit max-w-full truncate",
+        isDataPlusPo && "border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-300",
+        isExternalPo && "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-300",
+        reason === "receiving_inventory" && "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+      )}
+    >{label}</Badge>
+    {isDataPlusPo && reference && audit.linkedPurchaseOrderId
+      ? <a className="truncate text-xs font-medium text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(String(audit.linkedPurchaseOrderId))}`}>{reference}</a>
+      : reference
+        ? <span className="truncate text-xs text-muted-foreground">{reference}</span>
+        : isExternalPo
+          ? <span className="text-xs text-muted-foreground">No PO reference</span>
+          : null}
+  </div>;
+}
+
 function WarehouseAuditHistory({ mobile = false }: { mobile?: boolean } = {}) {
+  const initialSort = warehouseAuditQueryParam("auditSort");
   const [audits, setAudits] = useState<Array<Record<string, unknown>>>([])
-  const [sort, setSort] = useState<WarehouseAuditSort>("newest")
+  const [warehouses, setWarehouses] = useState<Array<{ id?: string; name?: string; isPhysical?: boolean; inventorySourceType?: string; allowAudits?: boolean }>>([])
+  const [sort, setSort] = useState<WarehouseAuditSort>(["newest", "oldest", "identifier"].includes(initialSort) ? initialSort as WarehouseAuditSort : "newest")
+  const [searchInput, setSearchInput] = useState(() => warehouseAuditQueryParam("auditSearch"))
+  const [search, setSearch] = useState(() => warehouseAuditQueryParam("auditSearch"))
+  const [reason, setReason] = useState(() => warehouseAuditQueryParam("auditType"))
+  const [status, setStatus] = useState(() => warehouseAuditQueryParam("auditStatus"))
+  const [warehouse, setWarehouse] = useState(() => warehouseAuditQueryParam("auditWarehouse"))
   const sortedAudits = sortWarehouseAuditRows(audits, sort)
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
@@ -722,13 +776,69 @@ function WarehouseAuditHistory({ mobile = false }: { mobile?: boolean } = {}) {
   const [pin, setPin] = useState("")
   const [adminUserId, setAdminUserId] = useState("")
   const [acting, setActing] = useState(false)
-  const load = async () => { setLoading(true); try { const params = new URLSearchParams({ summary: "1", page: String(page), pageSize: "25", sort }); const [result, state] = await Promise.all([api<{ audits?: Array<Record<string, unknown>>; total?: number; totalPages?: number }>(`/api/warehouse-audits?${params.toString()}`), loadAppBootstrap()]); setAudits(result.audits || []); setTotal(Number(result.total || 0)); setTotalPages(Math.max(1, Number(result.totalPages || 1))); setAdminUserId(String(state.systemSettings?.activeSystemUserId || "")) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load warehouse audits.") } finally { setLoading(false) } }
-  useEffect(() => { void load() }, [page, sort])
+  const hasFilters = Boolean(search || reason || status || warehouse)
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const params = new URLSearchParams({ summary: "1", page: String(page), pageSize: "25", sort })
+      if (search) params.set("search", search)
+      if (reason) params.set("reason", reason)
+      if (status) params.set("status", status)
+      if (warehouse) params.set("warehouse", warehouse)
+      const result = await api<{ audits?: Array<Record<string, unknown>>; total?: number; totalPages?: number }>(`/api/warehouse-audits?${params.toString()}`)
+      setAudits(result.audits || [])
+      setTotal(Number(result.total || 0))
+      setTotalPages(Math.max(1, Number(result.totalPages || 1)))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load warehouse audits.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void Promise.all([loadAppBootstrap(), loadAppReferences(["warehouses"])]).then(([state, references]) => {
+      setAdminUserId(String(state.systemSettings?.activeSystemUserId || ""))
+      const available = ((references.warehouses || []) as typeof warehouses)
+        .filter((item) => (item.id || item.name) && item.isPhysical !== false && item.inventorySourceType !== "supplier_feed" && item.allowAudits !== false)
+      setWarehouses([...new Map(available.map((item) => [String(item.name || item.id).trim().toLowerCase(), item])).values()]
+        .sort((left, right) => String(left.name || left.id).localeCompare(String(right.name || right.id))))
+    }).catch(() => undefined)
+  }, [])
+  useEffect(() => { void load() }, [page, sort, search, reason, status, warehouse])
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    const setOrDelete = (key: string, value: string) => value ? url.searchParams.set(key, value) : url.searchParams.delete(key)
+    setOrDelete("auditSearch", search)
+    setOrDelete("auditType", reason)
+    setOrDelete("auditStatus", status)
+    setOrDelete("auditWarehouse", warehouse)
+    setOrDelete("auditSort", sort === "newest" ? "" : sort)
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`)
+  }, [search, reason, status, warehouse, sort])
+
+  const applySearch = () => { setPage(1); setSearch(searchInput.trim()) }
+  const clearFilters = () => { setSearchInput(""); setSearch(""); setReason(""); setStatus(""); setWarehouse(""); setPage(1) }
   const openAction = (audit: Record<string, unknown>, nextAction: "lock" | "delete") => { setActionAudit(audit); setAction(nextAction); setPin("") }
-  const confirmAction = async () => { if (!actionAudit || !pin.trim()) return; setActing(true); try { const path = action === "lock" ? `/api/warehouse-audits/${encodeURIComponent(String(actionAudit.id))}/lock` : `/api/warehouse-audits/${encodeURIComponent(String(actionAudit.id))}`; const result = await api<{ message?: string }>(path, { method: action === "lock" ? "POST" : "DELETE", body: JSON.stringify({ adminPin: pin, adminUserId }) }); toast.success(result.message || `Audit ${action}ed.`); setActionAudit(null); await load() } catch (error) { toast.error(error instanceof Error ? error.message : `Unable to ${action} audit.`) } finally { setActing(false) } }
+  const confirmAction = async () => {
+    if (!actionAudit || !pin.trim()) return
+    setActing(true)
+    try {
+      const path = action === "lock" ? `/api/warehouse-audits/${encodeURIComponent(String(actionAudit.id))}/lock` : `/api/warehouse-audits/${encodeURIComponent(String(actionAudit.id))}`
+      const result = await api<{ message?: string }>(path, { method: action === "lock" ? "POST" : "DELETE", body: JSON.stringify({ adminPin: pin, adminUserId }) })
+      toast.success(result.message || `Audit ${action}ed.`)
+      setActionAudit(null)
+      await load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : `Unable to ${action} audit.`)
+    } finally {
+      setActing(false)
+    }
+  }
   const auditStatus = (audit: Record<string, unknown>) => {
-    const status = String(audit.status || "unknown")
-    return <Badge variant={status === "in_progress" ? "info" : status === "pending_review" ? "warning" : status === "completed" ? "success" : status === "locked" ? "destructive" : "outline"}>{status === "in_progress" ? "In progress" : status === "pending_review" ? "Review" : status === "completed" ? "Completed" : status === "locked" ? "Locked" : status.replace(/_/g, " ")}</Badge>
+    const value = String(audit.status || "unknown")
+    return <Badge variant={value === "in_progress" ? "info" : value === "pending_review" ? "warning" : value === "completed" ? "success" : value === "locked" ? "destructive" : "outline"}>{value === "in_progress" ? "In progress" : value === "pending_review" ? "Review" : value === "completed" ? "Completed" : value === "locked" ? "Locked" : value.replace(/_/g, " ")}</Badge>
   }
   const auditHref = (audit: Record<string, unknown>) => `${mobile ? "/warehouse/mobile/audits" : "/warehouse/audits"}/${encodeURIComponent(String(audit.id))}`
   const auditActions = (audit: Record<string, unknown>) => <div className="flex shrink-0 items-center justify-end gap-1">
@@ -741,12 +851,60 @@ function WarehouseAuditHistory({ mobile = false }: { mobile?: boolean } = {}) {
       </DropdownMenuContent>
     </DropdownMenu>
   </div>
-  return <><Card><CardHeader className="audit-register-header flex flex-row items-center justify-between gap-3"><div><CardTitle className="text-base">Audit register</CardTitle><CardDescription>{numberLabel(total)} audits</CardDescription></div><Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></CardHeader><CardContent className="p-0"><div className="px-4 pb-2"><WarehouseAuditSortControl value={sort} onChange={(next) => { setPage(1); setSort(next) }} /></div><div className={cn("divide-y", !mobile && "sm:hidden")} data-testid="audit-register-cards">{sortedAudits.map(audit => <article key={String(audit.id)} className="space-y-2 px-4 py-3">
-    <div className="flex items-center justify-between gap-2"><a className="inline-flex min-h-11 min-w-0 items-center truncate font-semibold text-primary underline-offset-4 hover:underline" href={auditHref(audit)}>{String(audit.auditNumber || "Audit")}</a>{auditStatus(audit)}</div>
-    <p className="truncate text-xs text-muted-foreground">Created by {String(audit.createdBy || "Unknown")}</p><p className="truncate text-sm text-muted-foreground">{String(audit.warehouseName || "Warehouse")}</p>
-    <div className="flex items-center justify-between gap-2"><p className="min-w-0 text-xs"><span className="font-medium">{numberLabel(Number(audit.lineCount ?? (Array.isArray(audit.lines) ? audit.lines.length : 0)))}</span> counted <span className="px-1 text-muted-foreground">·</span> <span className={Number(audit.unknownBarcodeCount ?? (Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes.length : 0)) ? "font-medium text-amber-700 dark:text-amber-300" : "text-muted-foreground"}>{numberLabel(Number(audit.unknownBarcodeCount ?? (Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes.length : 0)))} unknown</span></p>{auditActions(audit)}</div>
-    <Collapsible><CollapsibleTrigger className="flex items-center gap-1 text-xs text-muted-foreground"><ChevronDown className="size-3" />Details</CollapsibleTrigger><CollapsibleContent><dl className="grid grid-cols-2 gap-x-3 gap-y-2 pt-2 text-xs"><div><dt className="text-muted-foreground">Counter</dt><dd className="break-words">{String(audit.createdBy || "-")}</dd></div><div><dt className="text-muted-foreground">Reviewer</dt><dd className="break-words">{String(audit.reviewer || "Unassigned")}</dd></div><div><dt className="text-muted-foreground">Started</dt><dd>{dateLabel(String(audit.createdAt || ""))}</dd></div><div><dt className="text-muted-foreground">Completed</dt><dd>{audit.completedAt ? dateLabel(String(audit.completedAt)) : "-"}</dd></div></dl></CollapsibleContent></Collapsible>
-  </article>)}{!audits.length && <p className="p-4 text-sm text-muted-foreground">{loading ? "Loading audits..." : "No warehouse audits have been created yet."}</p>}</div><div className={cn("hidden overflow-x-auto", !mobile && "sm:block")}><Table><TableHeader><TableRow><TableHead>Audit</TableHead><TableHead>Warehouse</TableHead><TableHead>Counter</TableHead><TableHead>Reviewer</TableHead><TableHead>Status</TableHead><TableHead>Counted SKUs</TableHead><TableHead>Unknown UPCs</TableHead><TableHead>Started</TableHead><TableHead>Completed</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{sortedAudits.map((audit) => { const lineCount = Number(audit.lineCount ?? (Array.isArray(audit.lines) ? audit.lines.length : 0)); const unknownCount = Number(audit.unknownBarcodeCount ?? (Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes.length : 0)); const href = `${mobile ? "/warehouse/mobile/audits" : "/warehouse/audits"}/${encodeURIComponent(String(audit.id))}`; return <TableRow key={String(audit.id)}><TableCell><a className="font-medium text-primary hover:underline" href={href}>{String(audit.auditNumber || "Audit")}</a></TableCell><TableCell>{String(audit.warehouseName || "-")}</TableCell><TableCell>{String(audit.createdBy || "-")}</TableCell><TableCell>{String(audit.reviewer || "Unassigned")}</TableCell><TableCell>{auditStatus(audit)}</TableCell><TableCell>{numberLabel(lineCount)}</TableCell><TableCell>{numberLabel(unknownCount)}</TableCell><TableCell>{dateLabel(String(audit.createdAt || ""))}</TableCell><TableCell>{audit.completedAt ? dateLabel(String(audit.completedAt)) : "-"}</TableCell><TableCell className="text-right">{auditActions(audit)}</TableCell></TableRow> })}{!audits.length && <TableRow><TableCell colSpan={10} className="h-20 text-center text-muted-foreground">No warehouse audits have been created yet.</TableCell></TableRow>}</TableBody></Table></div>{totalPages > 1 && <div className="flex items-center justify-between gap-3 border-t px-4 py-3"><p className="text-xs text-muted-foreground">Page {numberLabel(page)} of {numberLabel(totalPages)}</p><div className="flex gap-2"><Button size="sm" variant="outline" disabled={loading || page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</Button><Button size="sm" variant="outline" disabled={loading || page >= totalPages} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</Button></div></div>}</CardContent></Card><Dialog open={Boolean(actionAudit)} onOpenChange={(open) => !open && setActionAudit(null)}><DialogContent><DialogHeader><DialogTitle>{action === "lock" ? "Lock warehouse audit" : "Delete warehouse audit"}</DialogTitle><DialogDescription>{action === "lock" ? "Locking stops all scanning and count changes. This audit remains available for review and export." : "Deleting removes this audit and its stored count work. Completed audits cannot be deleted because their counts have already been applied."}</DialogDescription></DialogHeader><Field label="Administrator PIN"><Input autoFocus type="password" inputMode="numeric" value={pin} onChange={(event) => setPin(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void confirmAction() } }} placeholder="Enter administrator PIN" /></Field><DialogFooter><Button variant="outline" onClick={() => setActionAudit(null)}>Cancel</Button><Button variant={action === "delete" ? "destructive" : "default"} disabled={acting || !pin.trim()} onClick={() => void confirmAction()}>{acting ? <Loader2 className="size-4 animate-spin" /> : action === "lock" ? <LockKeyhole className="size-4" /> : <Trash2 className="size-4" />}{action === "lock" ? "Lock audit" : "Delete audit"}</Button></DialogFooter></DialogContent></Dialog></>
+
+  return <>
+    <Card>
+      <CardHeader className="audit-register-header flex flex-row items-center justify-between gap-3">
+        <div><CardTitle className="text-base">Audit register</CardTitle><CardDescription>{numberLabel(total)} {hasFilters ? "matching " : ""}audits</CardDescription></div>
+        <Button size="sm" variant="outline" disabled={loading} onClick={() => void load()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button>
+      </CardHeader>
+      <CardContent className="p-0">
+        <div className="grid gap-2 border-y bg-muted/20 px-4 py-3 sm:grid-cols-2 xl:grid-cols-[minmax(16rem,1.4fr)_minmax(11rem,1fr)_minmax(10rem,0.8fr)_minmax(11rem,1fr)_10rem_auto]">
+          <div className="flex min-w-0 gap-2 sm:col-span-2 xl:col-span-1">
+            <Input aria-label="Search audits" value={searchInput} onChange={(event) => setSearchInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); applySearch() } }} placeholder="Search audit, PO, supplier, or counter" />
+            <Button size="icon" variant="outline" aria-label="Search audits" onClick={applySearch}><Search className="size-4" /></Button>
+          </div>
+          <Select value={reason || "all"} onValueChange={(value) => { setPage(1); setReason(value === "all" ? "" : value) }}><SelectTrigger aria-label="Filter audits by type"><SelectValue /></SelectTrigger><SelectContent>{warehouseAuditTypeFilterOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select>
+          <Select value={status || "all"} onValueChange={(value) => { setPage(1); setStatus(value === "all" ? "" : value) }}><SelectTrigger aria-label="Filter audits by status"><SelectValue placeholder="All statuses" /></SelectTrigger><SelectContent><SelectItem value="all">All statuses</SelectItem><SelectItem value="open">Open work</SelectItem><SelectItem value="in_progress">In progress</SelectItem><SelectItem value="pending_review">Pending review</SelectItem><SelectItem value="completed">Completed</SelectItem><SelectItem value="locked">Locked</SelectItem><SelectItem value="canceled">Canceled</SelectItem></SelectContent></Select>
+          <Select value={warehouse || "all"} onValueChange={(value) => { setPage(1); setWarehouse(value === "all" ? "" : value) }}><SelectTrigger aria-label="Filter audits by warehouse"><SelectValue placeholder="All warehouses" /></SelectTrigger><SelectContent><SelectItem value="all">All warehouses</SelectItem>{warehouses.map((item) => <SelectItem key={String(item.id || item.name)} value={String(item.name || item.id)}>{String(item.name || item.id)}</SelectItem>)}</SelectContent></Select>
+          <WarehouseAuditSortControl value={sort} onChange={(next) => { setPage(1); setSort(next) }} />
+          <Button variant="ghost" disabled={!hasFilters} onClick={clearFilters}><X className="size-4" />Clear</Button>
+        </div>
+
+        <div className={cn("divide-y", !mobile && "sm:hidden")} data-testid="audit-register-cards">
+          {sortedAudits.map((audit) => <article key={String(audit.id)} className="space-y-2 px-4 py-3">
+            <div className="flex items-center justify-between gap-2"><a className="inline-flex min-h-11 min-w-0 items-center truncate font-semibold text-primary underline-offset-4 hover:underline" href={auditHref(audit)}>{String(audit.auditNumber || "Audit")}</a>{auditStatus(audit)}</div>
+            <WarehouseAuditType audit={audit} />
+            <p className="truncate text-sm text-muted-foreground">{String(audit.warehouseName || "Warehouse")}{audit.supplierName ? ` · ${String(audit.supplierName)}` : ""}</p>
+            <div className="flex items-center justify-between gap-2"><p className="min-w-0 text-xs"><span className="font-medium">{numberLabel(Number(audit.lineCount ?? 0))}</span> counted <span className="px-1 text-muted-foreground">·</span> <span className={Number(audit.unknownBarcodeCount || 0) ? "font-medium text-amber-700 dark:text-amber-300" : "text-muted-foreground"}>{numberLabel(Number(audit.unknownBarcodeCount || 0))} unknown</span></p>{auditActions(audit)}</div>
+            <Collapsible><CollapsibleTrigger className="flex items-center gap-1 text-xs text-muted-foreground"><ChevronDown className="size-3" />Details</CollapsibleTrigger><CollapsibleContent><dl className="grid grid-cols-2 gap-x-3 gap-y-2 pt-2 text-xs"><div><dt className="text-muted-foreground">Counter</dt><dd className="break-words">{String(audit.createdBy || "-")}</dd></div><div><dt className="text-muted-foreground">Reviewer</dt><dd className="break-words">{String(audit.reviewer || "Unassigned")}</dd></div><div><dt className="text-muted-foreground">Started</dt><dd>{dateLabel(String(audit.createdAt || ""))}</dd></div><div><dt className="text-muted-foreground">Completed</dt><dd>{audit.completedAt ? dateLabel(String(audit.completedAt)) : "-"}</dd></div></dl></CollapsibleContent></Collapsible>
+          </article>)}
+          {!audits.length && <p className="p-4 text-sm text-muted-foreground">{loading ? "Loading audits..." : hasFilters ? "No audits match these filters." : "No warehouse audits have been created yet."}</p>}
+        </div>
+
+        <div className={cn("hidden overflow-x-auto", !mobile && "sm:block")}>
+          <Table><TableHeader><TableRow><TableHead>Audit</TableHead><TableHead>Type / reference</TableHead><TableHead>Warehouse</TableHead><TableHead>Supplier</TableHead><TableHead>Counter / reviewer</TableHead><TableHead>Status</TableHead><TableHead>Counted</TableHead><TableHead>Unknown</TableHead><TableHead>Started</TableHead><TableHead>Completed</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
+            {sortedAudits.map((audit) => <TableRow key={String(audit.id)}>
+              <TableCell><a className="font-medium text-primary hover:underline" href={auditHref(audit)}>{String(audit.auditNumber || "Audit")}</a></TableCell>
+              <TableCell className="min-w-48"><WarehouseAuditType audit={audit} /></TableCell>
+              <TableCell>{String(audit.warehouseName || "-")}</TableCell>
+              <TableCell>{String(audit.supplierName || "-")}</TableCell>
+              <TableCell><p>{String(audit.createdBy || "-")}</p><p className="text-xs text-muted-foreground">{String(audit.reviewer || "Unassigned")}</p></TableCell>
+              <TableCell>{auditStatus(audit)}</TableCell>
+              <TableCell>{numberLabel(Number(audit.lineCount || 0))}</TableCell>
+              <TableCell>{numberLabel(Number(audit.unknownBarcodeCount || 0))}</TableCell>
+              <TableCell>{dateLabel(String(audit.createdAt || ""))}</TableCell>
+              <TableCell>{audit.completedAt ? dateLabel(String(audit.completedAt)) : "-"}</TableCell>
+              <TableCell className="text-right">{auditActions(audit)}</TableCell>
+            </TableRow>)}
+            {!audits.length && <TableRow><TableCell colSpan={11} className="h-20 text-center text-muted-foreground">{loading ? "Loading audits..." : hasFilters ? "No audits match these filters." : "No warehouse audits have been created yet."}</TableCell></TableRow>}
+          </TableBody></Table>
+        </div>
+        {totalPages > 1 && <div className="flex items-center justify-between gap-3 border-t px-4 py-3"><p className="text-xs text-muted-foreground">Page {numberLabel(page)} of {numberLabel(totalPages)}</p><div className="flex gap-2"><Button size="sm" variant="outline" disabled={loading || page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</Button><Button size="sm" variant="outline" disabled={loading || page >= totalPages} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</Button></div></div>}
+      </CardContent>
+    </Card>
+    <Dialog open={Boolean(actionAudit)} onOpenChange={(open) => !open && setActionAudit(null)}><DialogContent><DialogHeader><DialogTitle>{action === "lock" ? "Lock warehouse audit" : "Delete warehouse audit"}</DialogTitle><DialogDescription>{action === "lock" ? "Locking stops all scanning and count changes. This audit remains available for review and export." : "Deleting removes this audit and its stored count work. Completed audits cannot be deleted because their counts have already been applied."}</DialogDescription></DialogHeader><Field label="Administrator PIN"><Input autoFocus type="password" inputMode="numeric" value={pin} onChange={(event) => setPin(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void confirmAction() } }} placeholder="Enter administrator PIN" /></Field><DialogFooter><Button variant="outline" onClick={() => setActionAudit(null)}>Cancel</Button><Button variant={action === "delete" ? "destructive" : "default"} disabled={acting || !pin.trim()} onClick={() => void confirmAction()}>{acting ? <Loader2 className="size-4 animate-spin" /> : action === "lock" ? <LockKeyhole className="size-4" /> : <Trash2 className="size-4" />}{action === "lock" ? "Lock audit" : "Delete audit"}</Button></DialogFooter></DialogContent></Dialog>
+  </>
 }
 
 function PickScanPanel({ onChanged }: { onChanged: () => Promise<void> }) {
