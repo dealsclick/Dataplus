@@ -15008,7 +15008,8 @@ function purchaseOrderOpenQuantity(line = {}) {
   const received = Math.max(0, Number(line.receivedQty || 0));
   const reSourced = Math.max(0, Number(line.reSourcedQty || 0));
   const canceled = Math.max(0, Number(line.canceledQty || 0));
-  return Math.max(0, ordered - received - reSourced - canceled);
+  const shortClosed = Math.max(0, Number(line.shortClosedQty || 0));
+  return Math.max(0, ordered - received - reSourced - canceled - shortClosed);
 }
 
 function purchaseOrderSupplierQuantity(line = {}) {
@@ -46655,6 +46656,54 @@ function auditOrderLineRemaining(match = {}) {
   return Math.max(0, openCustomerDemand - warehouseCommitted);
 }
 
+function auditOrderLineCustomerRemaining(match = {}) {
+  const line = match.lineRaw || {};
+  const requested = Math.max(0, Number(match.qty || line.quantity || line.qty || 0));
+  const explicitRemaining = Number(line.remainingQty ?? line.remainingQuantity ?? line.unfulfilledQuantity);
+  const fulfilled = Math.max(0, Number(line.fulfilledQty ?? line.fulfilledQuantity ?? 0));
+  return Math.max(0, Number.isFinite(explicitRemaining) ? explicitRemaining : requested - fulfilled);
+}
+
+function auditOrderUnshippedLabelShipments(order = {}) {
+  return activeShippingLabelShipments(order).filter((shipment) =>
+    !["fulfilled", "shipped", "in_transit", "delivered"].includes(String(shipment.status || shipment.trackingStatus || shipment.carrierStatus || "").trim().toLowerCase()));
+}
+
+function auditOrderMatchIsPendingShipment(match = {}) {
+  const order = match.orderRaw || {};
+  const line = match.lineRaw || {};
+  const values = [match.status, order.status, order.operationalStatus, order.workflowStatus, order.fulfillmentStatus, line.fulfillmentStatus]
+    .map((value) => String(value || "").trim().toLowerCase());
+  const terminal = new Set(["archived", "canceled", "cancelled", "closed", "complete", "completed", "delivered", "deleted", "done", "fulfilled", "refunded", "returned", "shipped", "void"]);
+  const hasUnshippedLabel = auditOrderUnshippedLabelShipments(order).length > 0;
+  if (order.cancelledAt || order.canceledAt) return false;
+  if (!hasUnshippedLabel && (match.shippedAt || values.some((value) => terminal.has(value)))) return false;
+  const financial = String(order.financialStatus || order.paymentStatus || "").trim().toLowerCase();
+  if (["refunded", "voided", "pending", "unpaid"].includes(financial)) return false;
+  return hasUnshippedLabel || auditOrderLineCustomerRemaining(match) > 0;
+}
+
+function auditOrderFulfillmentState(match = {}) {
+  const order = match.orderRaw || {};
+  const lineIndex = Number(match.lineIndex ?? 0);
+  const unshippedLabels = auditOrderUnshippedLabelShipments(order);
+  if (unshippedLabels.length) {
+    const shipment = unshippedLabels[0];
+    return {
+      key: "label_purchased",
+      label: shipment.labelPrintedAt || shipment.printedAt ? "Label printed" : "Label purchased",
+      trackingNumber: String(shipment.trackingNumber || ""),
+      carrier: String(shipment.carrierName || shipment.carrier || "")
+    };
+  }
+  const activeWarehouseRoutes = (order.fulfillmentRoutes || []).filter((route) =>
+    Number(route.lineIndex) === lineIndex
+      && String(route.type || "").toLowerCase() === "warehouse"
+      && !["canceled", "cancelled", "closed", "expired", "void", "shipped", "delivered"].includes(String(route.status || "").toLowerCase()));
+  if (activeWarehouseRoutes.length) return { key: "ready_to_ship", label: "Ready to ship", trackingNumber: "", carrier: "" };
+  return { key: "needs_allocation", label: "Needs allocation", trackingNumber: "", carrier: "" };
+}
+
 function auditOrderMatchIsOpen(match = {}) {
   const order = match.orderRaw || {};
   const line = match.lineRaw || {};
@@ -46713,18 +46762,41 @@ async function buildWarehouseAuditActionPreview(audit = {}) {
   const lookupSkus = [...new Set(families.flatMap((family) => family.candidates))];
   const matches = lookupSkus.length ? await postgres.readOrderLinesBySkus(lookupSkus) : [];
   const demand = [];
+  const fulfillmentMatches = [];
   const seen = new Set();
+  const fulfillmentSeen = new Set();
   for (const match of matches || []) {
-    if (!auditOrderMatchIsOpen(match)) continue;
     const rowCandidates = [match.sku, match.mappedSku, match.originalSku, match.lineRaw?.parentSku, match.lineRaw?.baseSku, match.lineRaw?.catalogSku]
       .map(normalizeAuditDemandSku).filter(Boolean);
     const family = families.find((entry) => rowCandidates.some((candidate) => entry.candidateSet.has(candidate)));
     if (!family) continue;
+    const order = match.orderRaw || {};
+    const fulfillmentIdentity = `${match.orderId}:${match.lineId || match.lineIndex}:${family.lineKey}`;
+    if (!fulfillmentSeen.has(fulfillmentIdentity) && auditOrderMatchIsPendingShipment(match)) {
+      fulfillmentSeen.add(fulfillmentIdentity);
+      const state = auditOrderFulfillmentState(match);
+      fulfillmentMatches.push({
+        id: fulfillmentIdentity,
+        lineKey: family.lineKey,
+        orderId: match.orderId,
+        orderNumber: String(match.internalOrderNumber || match.orderNumber || match.marketplaceOrderId || match.orderId || "").trim(),
+        customer: String(order.customerName || order.customer?.displayName || order.customer?.name || order.shippingAddress?.name || "Customer").trim(),
+        sku: String(match.sku || match.mappedSku || match.originalSku || family.catalogSku || family.sku || "").trim(),
+        title: String(match.lineRaw?.title || match.lineRaw?.name || family.title || "").trim(),
+        remainingQty: auditOrderLineCustomerRemaining(match),
+        allocationQty: auditOrderLineRemaining(match),
+        shipBy: String(order.shipBy || order.fulfillBy || order.deliveryDueAt || order.requiredShipDate || ""),
+        state: state.key,
+        stateLabel: state.label,
+        trackingNumber: state.trackingNumber,
+        carrier: state.carrier
+      });
+    }
+    if (!auditOrderMatchIsOpen(match)) continue;
     const identity = `${match.orderId}:${match.lineId || match.lineIndex}:${family.lineKey}`;
     if (seen.has(identity)) continue;
     seen.add(identity);
     const remainingQty = auditOrderLineRemaining(match);
-    const order = match.orderRaw || {};
     demand.push({
       id: identity,
       lineKey: family.lineKey,
@@ -46756,15 +46828,77 @@ async function buildWarehouseAuditActionPreview(audit = {}) {
       orders
     };
   });
+  const fulfillmentByOrder = new Map();
+  const statePriority = { label_purchased: 0, ready_to_ship: 1, needs_allocation: 2 };
+  for (const row of fulfillmentMatches) {
+    const key = String(row.orderId || row.orderNumber || "");
+    const current = fulfillmentByOrder.get(key);
+    if (!current) {
+      fulfillmentByOrder.set(key, { ...row, skus: [row.sku], matchedQty: Number(row.remainingQty || 0), allocationQty: Number(row.allocationQty || 0) });
+      continue;
+    }
+    current.skus = [...new Set([...(current.skus || []), row.sku].filter(Boolean))];
+    current.matchedQty += Number(row.remainingQty || 0);
+    current.allocationQty += Number(row.allocationQty || 0);
+    if ((statePriority[row.state] ?? 99) < (statePriority[current.state] ?? 99)) {
+      current.state = row.state;
+      current.stateLabel = row.stateLabel;
+      current.trackingNumber = row.trackingNumber;
+      current.carrier = row.carrier;
+    }
+  }
+  const fulfillmentOrders = [...fulfillmentByOrder.values()].sort((left, right) => {
+    const stateDifference = (statePriority[left.state] ?? 99) - (statePriority[right.state] ?? 99);
+    return stateDifference || receiptAllocationPriority(left)[0] - receiptAllocationPriority(right)[0] || String(left.orderNumber || "").localeCompare(String(right.orderNumber || ""), undefined, { numeric: true });
+  });
   return {
     lines: byLine,
     orders: demand,
+    fulfillmentOrders,
     orderIds: [...new Set(demand.map((row) => row.orderId).filter(Boolean))],
     totalCountedQty: byLine.reduce((sum, row) => sum + row.countedQty, 0),
     totalOpenDemandQty: byLine.reduce((sum, row) => sum + row.openDemandQty, 0),
     totalUsableQty: byLine.reduce((sum, row) => sum + row.usableQty, 0),
     affectedOrderCount: new Set(demand.map((row) => row.orderId)).size,
     multipleSupplierLineCount: byLine.filter((row) => row.supplierCount > 1).length
+  };
+}
+
+async function buildPurchaseOrderReceiptPreview(po = {}, requestedItems = []) {
+  const requested = Array.isArray(requestedItems) ? requestedItems : [];
+  const lines = (po.items || []).map((line, lineIndex) => {
+    const routeId = String(line.routeId || "");
+    const selection = requested.find((item) => routeId && String(item.routeId || "") === routeId)
+      || requested.find((item) => Number(item.lineIndex) === lineIndex)
+      || requested.find((item) => String(item.sku || "").trim().toLowerCase() === String(line.sku || "").trim().toLowerCase());
+    const countedQty = requested.length ? Math.max(0, Number(selection?.qtyReceived || 0)) : purchaseOrderOpenQuantity(line);
+    return {
+      ...line,
+      id: String(line.id || routeId || `${lineIndex}:${line.sku || "line"}`),
+      countedQty,
+      selectedSupplierSku: line.sku,
+      selectedVendorSku: line.vendorSku || line.sourceItemNumber,
+      selectedManufacturerSku: line.manufacturerSku || line.mfrPartNumber,
+      selectedSupplierUpc: line.upc || line.barcode
+    };
+  }).filter((line) => Number(line.countedQty || 0) > 0 && String(line.sku || "").trim());
+  const preview = await buildWarehouseAuditActionPreview({ lines });
+  const linkedOrderIds = new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String));
+  const markLinked = (row) => ({ ...row, linkedToPurchaseOrder: linkedOrderIds.has(String(row.orderId || "")) });
+  return {
+    ...preview,
+    orders: (preview.orders || []).map(markLinked),
+    fulfillmentOrders: (preview.fulfillmentOrders || []).map(markLinked),
+    linkedOrderCount: new Set((preview.fulfillmentOrders || []).filter((row) => linkedOrderIds.has(String(row.orderId || ""))).map((row) => row.orderId)).size,
+    additionalOrderCount: new Set((preview.fulfillmentOrders || []).filter((row) => !linkedOrderIds.has(String(row.orderId || ""))).map((row) => row.orderId)).size,
+    receiptUnits: lines.reduce((sum, line) => sum + Number(line.countedQty || 0), 0),
+    remainingAfterReceipt: (po.items || []).reduce((sum, line, lineIndex) => {
+      const routeId = String(line.routeId || "");
+      const selection = requested.find((item) => routeId && String(item.routeId || "") === routeId)
+        || requested.find((item) => Number(item.lineIndex) === lineIndex)
+        || requested.find((item) => String(item.sku || "").trim().toLowerCase() === String(line.sku || "").trim().toLowerCase());
+      return sum + Math.max(0, purchaseOrderOpenQuantity(line) - Math.max(0, Number(selection?.qtyReceived || 0)));
+    }, 0)
   };
 }
 
@@ -56010,7 +56144,7 @@ async function handleApi(req, res) {
       ebay_one_time_listing: "One-time eBay listings",
       receiving_inventory: "Receive inventory",
       external_po_receipt: "External PO receipt",
-      purchase_order_receipt: "DataPlus PO receipt"
+      purchase_order_receipt: "PO receiving"
     };
     const reason = String(body.reason || "").trim();
     if (!Object.prototype.hasOwnProperty.call(reasonOptions, reason)) {
@@ -56121,7 +56255,7 @@ async function handleApi(req, res) {
       ebay_one_time_listing: "One-time eBay listings",
       receiving_inventory: "Receive inventory",
       external_po_receipt: "External PO receipt",
-      purchase_order_receipt: "DataPlus PO receipt"
+      purchase_order_receipt: "PO receiving"
     };
     const reason = Object.prototype.hasOwnProperty.call(reasonOptions, String(body.reason || "")) ? String(body.reason) : "cycle_count";
     const receivingReason = ["receiving_inventory", "external_po_receipt", "purchase_order_receipt"].includes(reason);
@@ -58739,6 +58873,11 @@ async function handleApi(req, res) {
     if (!query) return sendJson(res, 200, { purchaseOrders: [], hasMore: false });
     if (query.length > 120) return sendJson(res, 400, { error: "Use a search of 120 characters or fewer." });
     return sendJson(res, 200, await postgres.searchReceivingPurchaseOrders(query));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/purchasing/receiving-recent" && postgres.isPostgresEnabled()) {
+    const limit = Math.max(1, Math.min(25, Number(url.searchParams.get("limit") || 10)));
+    return sendJson(res, 200, { purchaseOrders: await postgres.listRecentReceivingPurchaseOrders({ limit }) });
   }
 
   if (req.method === "GET" && url.pathname === "/api/purchasing/receiving-sync" && postgres.isPostgresEnabled()) {
@@ -62297,6 +62436,13 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { purchaseOrder: po, message: `${po.poNumber || "PO"} was deleted and retained in audit history.` });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "receipt-preview" && postgres.isPostgresEnabled()) {
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const body = await parseBody(req);
+    return sendJson(res, 200, { preview: await buildPurchaseOrderReceiptPreview(po, body.items) });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "extra-items-preview" && postgres.isPostgresEnabled()) {
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
@@ -62403,6 +62549,7 @@ async function handleApi(req, res) {
     let totalReceived = 0;
     let orderedReceivedUnits = 0;
     let extraItemUnits = 0;
+    let shortShipmentLines = [];
     const receipt = {
       id: crypto.randomUUID(),
       receiptNumber: `${mode === "draft" ? "DRF" : "RCV"}-${String(((mode === "draft" ? po.receiptDrafts : po.receipts) || []).length + 1).padStart(4, "0")}`,
@@ -62556,7 +62703,7 @@ async function handleApi(req, res) {
     const unresolvedHeldUnits = mode === "final" ? receipt.items.filter((item) => item.inventoryStatus === "held_unresolved").reduce((sum, item) => sum + Number(item.qtyReceived || 0), 0) : 0;
     receipt.unresolvedHeldUnits = unresolvedHeldUnits;
     receipt.extraItemUnits = extraItemUnits;
-    if (!totalReceived) return sendJson(res, 400, { error: mode === "draft" ? "Enter at least one line to save a draft receipt." : "Enter at least one received quantity." });
+    if (!totalReceived && !(mode === "final" && body.closeRemaining === true)) return sendJson(res, 400, { error: mode === "draft" ? "Enter at least one line to save a draft receipt." : "Enter at least one received quantity or choose to close the unreceived balance as a short shipment." });
     if (mode === "draft") {
       po.receiptDrafts = Array.isArray(po.receiptDrafts) ? po.receiptDrafts : [];
       po.receiptDrafts.unshift(receipt);
@@ -62577,9 +62724,46 @@ async function handleApi(req, res) {
     po.receipts.unshift(receipt);
     po.receivedUnits = Number(po.receivedUnits || 0) + orderedReceivedUnits;
     po.extraReceivedUnits = Number(po.extraReceivedUnits || 0) + extraItemUnits;
+    if (body.closeRemaining === true) {
+      const shortClosedAt = new Date().toISOString();
+      shortShipmentLines = (po.items || []).map((item, lineIndex) => {
+        const shortQty = purchaseOrderOpenQuantity(item);
+        if (!(shortQty > 0)) return null;
+        item.shortClosedQty = Math.max(0, Number(item.shortClosedQty || 0)) + shortQty;
+        item.remainingQty = purchaseOrderOpenQuantity(item);
+        item.status = Number(item.receivedQty || 0) > 0 ? "partially_received_short_closed" : "short_closed";
+        item.shortClosedAt = shortClosedAt;
+        item.shortClosedBy = body.user || "Warehouse";
+        item.shortCloseNote = note;
+        return {
+          lineIndex,
+          routeId: String(item.routeId || ""),
+          orderId: String(item.orderId || ""),
+          orderNumber: String(item.orderNumber || ""),
+          sku: String(item.sku || ""),
+          qty: shortQty
+        };
+      }).filter(Boolean);
+      if (shortShipmentLines.length) {
+        const shortShipment = {
+          id: crypto.randomUUID(),
+          closedAt: shortClosedAt,
+          closedBy: body.user || "Warehouse",
+          note,
+          totalUnits: shortShipmentLines.reduce((sum, item) => sum + Number(item.qty || 0), 0),
+          lines: shortShipmentLines
+        };
+        receipt.shortShipment = shortShipment;
+        po.shortShipmentHistory = [...(Array.isArray(po.shortShipmentHistory) ? po.shortShipmentHistory : []), shortShipment];
+        po.closedAt = shortClosedAt;
+        po.closedBy = body.user || "Warehouse";
+        po.closeReason = "supplier_short_shipment";
+      }
+    }
     const noOpenQuantity = (po.items || []).every((item) => purchaseOrderOpenQuantity(item) <= 0);
     const allOrderedUnitsReceived = (po.items || []).every((item) => Number(item.receivedQty || 0) >= Number(item.qty || 0));
-    if (orderedReceivedUnits > 0) po.status = noOpenQuantity ? (allOrderedUnitsReceived ? "received" : "closed") : "partially_received";
+    if (orderedReceivedUnits > 0 || shortShipmentLines.length) po.status = shortShipmentLines.length ? "closed" : noOpenQuantity ? (allOrderedUnitsReceived ? "received" : "closed") : "partially_received";
+    if (po.status === "closed") po.workflowStage = "history";
     po.openEstimatedCost = purchaseOrderOpenCommitment(po);
     if (orderedReceivedUnits > 0) po.receivedAt = receivedAt;
     po.lastReceiptAt = receivedAt;
@@ -62587,8 +62771,8 @@ async function handleApi(req, res) {
     po.updatedAt = new Date().toISOString();
     addPoTimeline(po, {
       type: "received",
-      title: orderedReceivedUnits <= 0 ? "Extra PO items received" : po.status === "received" ? "PO received" : po.status === "closed" ? "PO closed after receipt" : "PO partially received",
-      message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${extraItemUnits ? `; ${extraItemUnits} marked as extra item${extraItemUnits === 1 ? "" : "s"} not ordered on this PO` : ""}${unresolvedHeldUnits ? `; ${unresolvedHeldUnits} held pending SKU resolution` : ""}${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
+      title: shortShipmentLines.length ? "PO closed with short shipment" : orderedReceivedUnits <= 0 ? "Extra PO items received" : po.status === "received" ? "PO received" : po.status === "closed" ? "PO closed after receipt" : "PO partially received",
+      message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${shortShipmentLines.length ? `; ${shortShipmentLines.reduce((sum, item) => sum + Number(item.qty || 0), 0)} unreceived unit${shortShipmentLines.reduce((sum, item) => sum + Number(item.qty || 0), 0) === 1 ? " was" : "s were"} closed as supplier short shipment` : ""}${extraItemUnits ? `; ${extraItemUnits} marked as extra item${extraItemUnits === 1 ? "" : "s"} not ordered on this PO` : ""}${unresolvedHeldUnits ? `; ${unresolvedHeldUnits} held pending SKU resolution` : ""}${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
       user: body.user || "Luis"
     });
     acknowledgeCanceledDemandReceipt(po, receipt, canceledDemandExceptions, body.user || "Luis");
@@ -62606,6 +62790,24 @@ async function handleApi(req, res) {
           route.receivedQty = Math.min(Number(route.qty || 0), Number(route.receivedQty || 0) + receivedForSku);
           route.status = route.receivedQty >= Number(route.qty || 0) ? "received" : "partially_received";
           route.updatedAt = new Date().toISOString();
+        }
+        const shortLine = shortShipmentLines.find((item) => (item.routeId && String(item.routeId) === String(route.id || ""))
+          || (String(item.sku || "").toLowerCase() === String(route.sku || "").toLowerCase() && (!item.orderId || String(item.orderId) === String(linkedOrder.id || ""))));
+        const unfilledRouteQty = Math.max(0, Number(route.qty || 0) - Number(route.receivedQty || 0));
+        if (shortLine && unfilledRouteQty > 0 && !["fulfilled", "shipped", "delivered"].includes(String(route.status || "").toLowerCase())) {
+          route.status = "buyer_review";
+          route.reviewReason = `${po.poNumber || "The linked PO"} was closed after a supplier short shipment. ${unfilledRouteQty} unit${unfilledRouteQty === 1 ? " requires" : "s require"} replacement sourcing or warehouse allocation.`;
+          route.shortShipmentPurchaseOrderId = po.id;
+          route.shortShipmentPurchaseOrderNumber = po.poNumber;
+          route.shortShipmentQty = unfilledRouteQty;
+          route.updatedAt = new Date().toISOString();
+          const requirement = (db.purchaseRequirements || []).find((entry) => String(entry.routeId || "") === String(route.id || ""));
+          if (requirement) {
+            requirement.status = "buyer_review";
+            requirement.qty = unfilledRouteQty;
+            requirement.reviewReason = route.reviewReason;
+            requirement.updatedAt = route.updatedAt;
+          }
         }
       }
       reroutedOrders.push(linkedOrder);
@@ -62666,7 +62868,7 @@ async function handleApi(req, res) {
     await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [], purchaseRequirements: db.purchaseRequirements || [] });
     await postgres.savePurchaseOrder(po);
     await redisCache.deleteByPrefix("dataplus:purchasing:");
-    return sendJson(res, 200, { purchaseOrder: po, receipt, unresolvedHeldUnits, extraItemUnits, allocation: allocationResult ? receipt.allocation : null });
+    return sendJson(res, 200, { purchaseOrder: po, receipt, unresolvedHeldUnits, extraItemUnits, shortShipment: receipt.shortShipment || null, allocation: allocationResult ? receipt.allocation : null });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "returns" && postgres.isPostgresEnabled()) {

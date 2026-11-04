@@ -12936,6 +12936,40 @@ async function searchReceivingPurchaseOrders(query) {
   return { purchaseOrders: result.rows.slice(0, 20), hasMore: result.rows.length > 20 };
 }
 
+async function listRecentReceivingPurchaseOrders(options = {}) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const limit = Math.max(1, Math.min(25, Number(options.limit || 10)));
+  const result = await client.query(`
+    select po_id as id, po_number as "poNumber", status, supplier,
+      warehouse_name as "warehouseName", received_units as "receivedUnits",
+      received_at as "receivedAt", updated_at as "updatedAt",
+      raw->'activeReceivingAudit' as "activeReceivingAudit",
+      coalesce(raw->>'lastReceiptAt', '') as "lastReceiptAt",
+      coalesce(raw->>'extraReceivedUnits', '0') as "extraReceivedUnits"
+    from purchase_order_records
+    where raw ? 'activeReceivingAudit'
+      or coalesce(raw->>'lastReceiptAt', '') <> ''
+      or lower(coalesce(status, '')) in ('receiving', 'partially_received', 'received', 'closed')
+    order by (raw ? 'activeReceivingAudit') desc, updated_at desc, po_id
+    limit $1
+  `, [limit]);
+  return result.rows.map((row) => ({
+    id: row.id,
+    poNumber: row.poNumber || row.id,
+    status: row.status || "",
+    supplier: row.supplier || "Unassigned supplier",
+    warehouseName: row.warehouseName || "",
+    receivedUnits: Number(row.receivedUnits || 0),
+    extraReceivedUnits: Number(row.extraReceivedUnits || 0),
+    receivedAt: row.receivedAt?.toISOString?.().slice(0, 10) || "",
+    lastReceiptAt: row.lastReceiptAt || "",
+    updatedAt: row.updatedAt?.toISOString?.() || row.updatedAt || "",
+    activeReceivingAudit: row.activeReceivingAudit || null
+  }));
+}
+
 async function findOpenPurchaseOrdersExpectingSkus(skus = [], options = {}) {
   const values = [...new Set((Array.isArray(skus) ? skus : [])
     .map((value) => nullableString(value)?.toLowerCase())
@@ -20503,6 +20537,7 @@ module.exports = {
   readPurchaseOrdersByIds,
   findPurchaseOrderByExternalReference,
   searchReceivingPurchaseOrders,
+  listRecentReceivingPurchaseOrders,
   findOpenPurchaseOrdersExpectingSkus,
   searchUniversal,
   quickSearchProducts,
