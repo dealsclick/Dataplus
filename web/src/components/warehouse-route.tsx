@@ -602,7 +602,7 @@ function InboundReceivingLauncher({ mobile = false, operatorName = "Warehouse" }
 
   const startReceiving = async () => {
     const vendor = vendors.find((row) => row.id === vendorId)
-    if (!warehouseId || (mode === "purchase_order" ? !selectedPo : !vendor || !externalPoNumber.trim())) return
+    if (!warehouseId || (mode === "purchase_order" ? !selectedPo : !vendor)) return
     setLoading(true)
     try {
       const result = await api<{ audit?: Record<string, unknown>; message?: string }>("/api/warehouse-audits", {
@@ -640,7 +640,7 @@ function InboundReceivingLauncher({ mobile = false, operatorName = "Warehouse" }
         </button>
         <button type="button" className="flex min-h-28 items-start gap-3 rounded-md border p-4 text-left transition-colors hover:bg-muted/50" onClick={() => show("manual")}>
           <ScanBarcode className="mt-0.5 size-5 shrink-0 text-primary" />
-          <span><span className="block font-medium">Receive external or manual PO</span><span className="mt-1 block text-sm text-muted-foreground">Receive a shipment ordered outside DataPlus while preserving its supplier, external PO, scans, and packing slips.</span></span>
+          <span><span className="block font-medium">Receive external or manual shipment</span><span className="mt-1 block text-sm text-muted-foreground">Receive inventory ordered outside DataPlus. Add an external PO or reference when one is available.</span></span>
         </button>
       </CardContent>
     </Card>
@@ -648,7 +648,7 @@ function InboundReceivingLauncher({ mobile = false, operatorName = "Warehouse" }
       <DialogContent className="max-h-[100dvh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{mode === "purchase_order" ? "Receive existing purchase order" : "Receive external inbound shipment"}</DialogTitle>
-          <DialogDescription>{mode === "purchase_order" ? "Choose the DataPlus PO and receiving warehouse. Its open lines become the expected quantities for the scan." : "Record the supplier and source-system PO number, then scan the entire shipment."}</DialogDescription>
+          <DialogDescription>{mode === "purchase_order" ? "Choose the DataPlus PO and receiving warehouse. Its open lines become the expected quantities for the scan." : "Choose the supplier and receiving warehouse, then scan the entire shipment. An external PO or reference is optional."}</DialogDescription>
         </DialogHeader>
         <div className="grid gap-4">
           <Tabs value={mode} onValueChange={(value) => { setMode(value as typeof mode); setSelectedPo(null) }}>
@@ -659,12 +659,12 @@ function InboundReceivingLauncher({ mobile = false, operatorName = "Warehouse" }
             {purchaseOrders.length > 0 && <div className="max-h-64 overflow-y-auto rounded-md border divide-y">{purchaseOrders.map((po) => <button type="button" key={po.id} className={cn("flex w-full items-start justify-between gap-3 p-3 text-left hover:bg-muted/50", selectedPo?.id === po.id && "bg-primary/10 ring-1 ring-inset ring-primary")} onClick={() => { setSelectedPo(po); const warehouse = warehouses.find((row) => String(row.name || "").toLowerCase() === String(po.warehouseName || "").toLowerCase()); if (warehouse?.id) setWarehouseId(String(warehouse.id)) }}><span className="min-w-0"><span className="block font-medium">{po.poNumber || po.id}</span><span className="block truncate text-sm text-muted-foreground">{po.supplier || "Supplier not recorded"} · {po.warehouseName || "Warehouse not assigned"}</span></span><Badge variant="outline" className="shrink-0">{String(po.status || "open").replace(/_/g, " ")}</Badge></button>)}</div>}
           </div> : <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Supplier"><Popover open={vendorOpen} onOpenChange={setVendorOpen}><PopoverTrigger asChild><Button type="button" variant="outline" role="combobox" aria-expanded={vendorOpen} className="w-full justify-between font-normal"><span className="truncate">{(() => { const vendor = vendors.find((row) => row.id === vendorId); return vendor ? `${vendor.name}${vendor.code ? ` (${vendor.code})` : ""}` : "Search supplier" })()}</span><ChevronDown className="size-4 shrink-0 opacity-60" /></Button></PopoverTrigger><PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] p-0"><Command><CommandInput placeholder="Search supplier..." /><CommandList className="max-h-72"><CommandEmpty>No supplier found.</CommandEmpty><CommandGroup>{vendors.map((vendor) => { const status = String(vendor.status || "active").trim().toLowerCase(); return <CommandItem key={vendor.id} value={`${vendor.name || ""} ${vendor.code || ""}`} onSelect={() => { setVendorId(vendor.id); setVendorOpen(false) }}><CheckCircle2 className={cn("size-4 shrink-0", vendor.id === vendorId ? "opacity-100" : "opacity-0")} /><span className="min-w-0 flex-1 truncate">{vendor.name}{vendor.code ? ` (${vendor.code})` : ""}</span>{status !== "active" && <Badge variant="outline" className="shrink-0 capitalize">{status}</Badge>}</CommandItem> })}</CommandGroup></CommandList></Command></PopoverContent></Popover></Field>
-            <Field label="External PO number"><Input value={externalPoNumber} onChange={(event) => setExternalPoNumber(event.target.value)} placeholder="PO number from the other system" /></Field>
+            <Field label="External PO or reference (optional)"><Input value={externalPoNumber} onChange={(event) => setExternalPoNumber(event.target.value)} placeholder="PO, invoice, shipment, or other reference" /></Field>
           </div>}
           <Field label="Receiving warehouse"><Select value={warehouseId} onValueChange={setWarehouseId}><SelectTrigger><SelectValue placeholder="Select physical warehouse" /></SelectTrigger><SelectContent>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || "Warehouse")}</SelectItem>)}</SelectContent></Select></Field>
           <Alert><Camera className="size-4" /><AlertTitle>Packing slip required</AlertTitle><AlertDescription>The receiving workspace will ask for a packing-slip photo or upload and compare extracted lines with the scanned items before final posting.</AlertDescription></Alert>
         </div>
-        <DialogFooter><Button variant="outline" disabled={loading} onClick={() => setOpen(false)}>Cancel</Button><Button disabled={loading || !warehouseId || (mode === "purchase_order" ? !selectedPo : !vendorId || !externalPoNumber.trim())} onClick={() => void startReceiving()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <ArrowRight className="size-4" />} Start receiving</Button></DialogFooter>
+        <DialogFooter><Button variant="outline" disabled={loading} onClick={() => setOpen(false)}>Cancel</Button><Button disabled={loading || !warehouseId || (mode === "purchase_order" ? !selectedPo : !vendorId)} onClick={() => void startReceiving()}>{loading ? <Loader2 className="size-4 animate-spin" /> : <ArrowRight className="size-4" />} Start receiving</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   </>
@@ -2373,9 +2373,9 @@ function WarehouseAuditPanel({
             </Select>
           </Field>
           {isReceivingAuditReason(auditReason) && <Field label="Supplier">{receivingSupplierPicker(auditReason === "external_po_receipt")}</Field>}
-          {auditReason === "external_po_receipt" && <Field label="External PO number"><Input value={externalPurchaseOrderNumber} onChange={(event) => setExternalPurchaseOrderNumber(event.target.value)} placeholder="PO number from the other system" /></Field>}
+          {auditReason === "external_po_receipt" && <Field label="External PO or reference (optional)"><Input value={externalPurchaseOrderNumber} onChange={(event) => setExternalPurchaseOrderNumber(event.target.value)} placeholder="PO, invoice, shipment, or other reference" /></Field>}
           <Button
-            disabled={busy || !warehouse.trim() || !auditOwner.trim() || (isReceivingAuditReason(auditReason) && !receivingSupplierId) || (auditReason === "external_po_receipt" && !externalPurchaseOrderNumber.trim())}
+            disabled={busy || !warehouse.trim() || !auditOwner.trim() || (isReceivingAuditReason(auditReason) && !receivingSupplierId)}
             onClick={() => void create()}
           >
             {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} Create audit
@@ -2414,9 +2414,9 @@ function WarehouseAuditPanel({
               </Select>
             </Field>
             {isReceivingAuditReason(auditReason) && <Field label="Supplier">{receivingSupplierPicker(auditReason === "external_po_receipt")}</Field>}
-            {auditReason === "external_po_receipt" && <Field label="External PO number"><Input value={externalPurchaseOrderNumber} onChange={(event) => setExternalPurchaseOrderNumber(event.target.value)} placeholder="PO number from the other system" /></Field>}
+            {auditReason === "external_po_receipt" && <Field label="External PO or reference (optional)"><Input value={externalPurchaseOrderNumber} onChange={(event) => setExternalPurchaseOrderNumber(event.target.value)} placeholder="PO, invoice, shipment, or other reference" /></Field>}
             <Button
-              disabled={busy || !warehouse.trim() || (isReceivingAuditReason(auditReason) && !receivingSupplierId) || (auditReason === "external_po_receipt" && !externalPurchaseOrderNumber.trim())}
+              disabled={busy || !warehouse.trim() || (isReceivingAuditReason(auditReason) && !receivingSupplierId)}
               onClick={() => void create()}
             >
               Start warehouse audit
@@ -2503,8 +2503,8 @@ function WarehouseAuditPanel({
                   </Select>
                 </Field>
                 {isReceivingAuditReason(purposeDraft) && <Field label="Supplier">{receivingSupplierPicker(purposeDraft === "external_po_receipt")}</Field>}
-                {purposeDraft === "external_po_receipt" && <Field label="External PO number"><Input value={externalPurchaseOrderNumber} onChange={(event) => setExternalPurchaseOrderNumber(event.target.value)} placeholder="PO number from the other system" /></Field>}
-                <DialogFooter><Button variant="outline" onClick={() => setPurposeEditorOpen(false)}>Cancel</Button><Button disabled={purposeSaving || !purposeDraft || (isReceivingAuditReason(purposeDraft) && !receivingSupplierId) || (purposeDraft === "external_po_receipt" && !externalPurchaseOrderNumber.trim())} onClick={() => void saveAuditPurpose()}>{purposeSaving && <Loader2 className="size-4 animate-spin" />} Save purpose</Button></DialogFooter>
+                {purposeDraft === "external_po_receipt" && <Field label="External PO or reference (optional)"><Input value={externalPurchaseOrderNumber} onChange={(event) => setExternalPurchaseOrderNumber(event.target.value)} placeholder="PO, invoice, shipment, or other reference" /></Field>}
+                <DialogFooter><Button variant="outline" onClick={() => setPurposeEditorOpen(false)}>Cancel</Button><Button disabled={purposeSaving || !purposeDraft || (isReceivingAuditReason(purposeDraft) && !receivingSupplierId)} onClick={() => void saveAuditPurpose()}>{purposeSaving && <Loader2 className="size-4 animate-spin" />} Save purpose</Button></DialogFooter>
               </DialogContent>
             </Dialog>
 

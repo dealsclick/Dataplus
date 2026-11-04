@@ -55880,7 +55880,6 @@ async function handleApi(req, res) {
     const supplierName = receivingReason ? String(body.supplierName || audit.supplierName || "").trim() : "";
     const externalPurchaseOrderNumber = reason === "external_po_receipt" ? String(body.externalPurchaseOrderNumber || audit.externalPurchaseOrderNumber || "").trim() : "";
     if (receivingReason && !supplierId && reason !== "purchase_order_receipt") return sendJson(res, 400, { error: "Choose the supplier for this receiving audit." });
-    if (reason === "external_po_receipt" && !externalPurchaseOrderNumber) return sendJson(res, 400, { error: "Enter the PO number from the external system." });
     const now = new Date().toISOString();
     const actor = String(body.user || "Luis").trim() || "Luis";
     const previousReason = String(audit.reason || "").trim();
@@ -55992,7 +55991,6 @@ async function handleApi(req, res) {
     const supplierName = receivingReason ? String(linkedPurchaseOrder?.supplier || body.supplierName || "").trim() : "";
     const externalPurchaseOrderNumber = reason === "external_po_receipt" ? String(body.externalPurchaseOrderNumber || "").trim() : "";
     if (receivingReason && !supplierId && !purchaseOrderReceipt) return sendJson(res, 400, { error: "Choose the supplier for this receiving audit." });
-    if (reason === "external_po_receipt" && !externalPurchaseOrderNumber) return sendJson(res, 400, { error: "Enter the PO number from the external system." });
     const linkedProducts = linkedPurchaseOrder
       ? await postgres.readProductsByKeys([...(new Set((linkedPurchaseOrder.items || []).map((line) => String(line.sku || "").trim()).filter(Boolean)))], { includeMarketplaceIds: false }).catch(() => [])
       : [];
