@@ -12865,23 +12865,39 @@ async function saveOrder(order = {}) {
 async function searchReceivingPurchaseOrders(query) {
   const value = String(query || "").trim().toLowerCase();
   if (!value) return { purchaseOrders: [], hasMore: false };
+  const compact = value.replace(/[^a-z0-9]+/g, "");
   const client = getPool();
   if (!client) return { purchaseOrders: [], hasMore: false };
   await initRelationalSchema();
   const result = await client.query(`
     select po_id as id, po_number as "poNumber", status, supplier,
       warehouse_name as "warehouseName",
-      coalesce(raw->>'expectedDeliveryDate', raw->>'expectedAt', '') as "expectedAt"
+      coalesce(raw->>'expectedDeliveryDate', raw->>'expectedAt', '') as "expectedAt",
+      coalesce(nullif(raw->>'ctechId', ''), nullif(raw->>'externalPoNumber', ''), '') as "ctechId",
+      coalesce(raw->>'supplierOrderNumber', '') as "supplierOrderNumber",
+      case when lower(coalesce(po_number, '')) = $1 then 'PO number'
+        when $2 <> '' and regexp_replace(lower(coalesce(nullif(raw->>'ctechId', ''), nullif(raw->>'externalPoNumber', ''), '')), '[^a-z0-9]+', '', 'g') = $2 then 'CTech ID'
+        when $2 <> '' and regexp_replace(lower(coalesce(raw->>'supplierOrderNumber', '')), '[^a-z0-9]+', '', 'g') = $2 then 'Supplier reference'
+        when lower(coalesce(supplier, '')) = $1 then 'Supplier'
+        when strpos(lower(coalesce(supplier, '')), $1) > 0 then 'Supplier'
+        when $2 <> '' and strpos(regexp_replace(lower(coalesce(nullif(raw->>'ctechId', ''), nullif(raw->>'externalPoNumber', ''), '')), '[^a-z0-9]+', '', 'g'), $2) > 0 then 'CTech ID'
+        when $2 <> '' and strpos(regexp_replace(lower(coalesce(raw->>'supplierOrderNumber', '')), '[^a-z0-9]+', '', 'g'), $2) > 0 then 'Supplier reference'
+        else 'Purchase order' end as "matchLabel"
     from purchase_order_records
     where lower(coalesce(status, '')) not in ('received', 'closed', 'canceled', 'cancelled', 'rejected', 'superseded', 'deleted')
       and (strpos(lower(coalesce(po_number, '')), $1) > 0
         or strpos(lower(coalesce(supplier, '')), $1) > 0
         or strpos(lower(coalesce(warehouse_name, '')), $1) > 0
-        or strpos(lower(po_id), $1) > 0)
+        or strpos(lower(po_id), $1) > 0
+        or ($2 <> '' and strpos(regexp_replace(lower(coalesce(nullif(raw->>'ctechId', ''), nullif(raw->>'externalPoNumber', ''), '')), '[^a-z0-9]+', '', 'g'), $2) > 0)
+        or ($2 <> '' and strpos(regexp_replace(lower(coalesce(raw->>'supplierOrderNumber', '')), '[^a-z0-9]+', '', 'g'), $2) > 0))
     order by (lower(coalesce(po_number, '')) = $1) desc,
+      ($2 <> '' and regexp_replace(lower(coalesce(nullif(raw->>'ctechId', ''), nullif(raw->>'externalPoNumber', ''), '')), '[^a-z0-9]+', '', 'g') = $2) desc,
+      ($2 <> '' and regexp_replace(lower(coalesce(raw->>'supplierOrderNumber', '')), '[^a-z0-9]+', '', 'g') = $2) desc,
+      (lower(coalesce(supplier, '')) = $1) desc,
       coalesce(created_at, updated_at) desc, po_id
     limit 21
-  `, [value]);
+  `, [value, compact]);
   return { purchaseOrders: result.rows.slice(0, 20), hasMore: result.rows.length > 20 };
 }
 

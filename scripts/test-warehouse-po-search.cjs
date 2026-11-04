@@ -6,6 +6,7 @@ const {Client}=require('pg');
   await client.query('begin');await client.query("set local statement_timeout='10s'");
   await client.query("create temp table purchase_order_records (po_id text, po_number text, status text, supplier text, warehouse_name text, raw jsonb default '{}', created_at timestamptz default now(), updated_at timestamptz default now()) on commit drop");
   await client.query("insert into purchase_order_records(po_id,po_number,status,supplier,warehouse_name) select 'po-'||n,'PO-'||n,'submitted','Supplier Alpha','Warehouse A' from generate_series(1,25) n");
+  await client.query("update purchase_order_records set raw=jsonb_build_object('ctechId','CT-991-ABC','supplierOrderNumber','SUP-REF-55') where po_id='po-3'");
   for(const status of ['received','closed','canceled','cancelled','rejected','superseded','deleted'])await client.query('insert into purchase_order_records(po_id,po_number,status,supplier) values($1,$1,$2,$3)',['closed-'+status,status,'Supplier Alpha']);
   await client.query("insert into purchase_order_records(po_id,po_number,status,supplier) values('literal','PO%_1','submitted','Literal')");
   const source=fs.readFileSync(path.join(__dirname,'../db.js'),'utf8');const start=source.indexOf('async function searchReceivingPurchaseOrders(');const end=source.indexOf('\nasync function ',start+1);let queries=0;
@@ -13,6 +14,8 @@ const {Client}=require('pg');
   assert.equal((await search('   ')).purchaseOrders.length,0);assert.equal(queries,0);
   const broad=await search('supplier alpha');assert.equal(broad.purchaseOrders.length,20);assert.equal(broad.hasMore,true);assert.ok(broad.purchaseOrders.every(x=>x.status==='submitted'));assert.ok(broad.purchaseOrders.every(x=>!('raw' in x)&&!('items' in x)));
   const exact=await search('PO-2');assert.equal(exact.purchaseOrders[0].poNumber,'PO-2');assert.equal((await search('%_')).purchaseOrders.length,1);assert.equal((await search("' OR 1=1 --")).purchaseOrders.length,0);assert.equal((await search('unmatched')).hasMore,false);
+  const ctech=await search('ct991abc');assert.equal(ctech.purchaseOrders[0].poNumber,'PO-3');assert.equal(ctech.purchaseOrders[0].ctechId,'CT-991-ABC');assert.equal(ctech.purchaseOrders[0].matchLabel,'CTech ID');
+  const supplierReference=await search('sup ref 55');assert.equal(supplierReference.purchaseOrders[0].poNumber,'PO-3');assert.equal(supplierReference.purchaseOrders[0].supplierOrderNumber,'SUP-REF-55');assert.equal(supplierReference.purchaseOrders[0].matchLabel,'Supplier reference');
   assert.equal((await search('warehouse a')).purchaseOrders.length,20);
   console.log('Receiving search: blank lookup skips DB; bounded summaries, closed statuses, literal queries and exact-first ordering passed.');
  }finally{await client.query('rollback');await client.end();}
