@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const {
   createManualPurchaseOrder,
   validatePurchaseOrderReceiptLines,
+  openPurchaseOrderExpectationsFromState,
   applyUnresolvedPurchaseOrderReceipt
 } = require("../server");
 
@@ -57,6 +58,23 @@ assert.equal(
   validatePurchaseOrderReceiptLines(po, [{ lineIndex: 1, sku: "BUSKNOWN", qtyReceived: 1 }]),
   ""
 );
+assert.equal(
+  validatePurchaseOrderReceiptLines(po, [{ sku: "BUSEXTRA", qtyReceived: 2, extraItem: true }]),
+  ""
+);
+assert.match(
+  validatePurchaseOrderReceiptLines(po, [{ sku: "BUSEXTRA", qtyReceived: 2 }]),
+  /Mark it as an extra item/
+);
+
+const extraExpectations = openPurchaseOrderExpectationsFromState([
+  po,
+  { id: "other-po", poNumber: "PO-OTHER", supplier: "Example Supplier", status: "in_transit", items: [{ sku: "BUSEXTRA", qty: 5, receivedQty: 2 }] },
+  { id: "closed-po", poNumber: "PO-CLOSED", status: "received", items: [{ sku: "BUSEXTRA", qty: 5, receivedQty: 0 }] }
+], ["BUSEXTRA"], po.id);
+assert.equal(extraExpectations.length, 1);
+assert.equal(extraExpectations[0].purchaseOrderNumber, "PO-OTHER");
+assert.equal(extraExpectations[0].remainingQty, 3);
 
 assert.equal(applyUnresolvedPurchaseOrderReceipt(po.items[0], {
   qtyReceived: 3,

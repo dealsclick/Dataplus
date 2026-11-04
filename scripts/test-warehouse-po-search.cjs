@@ -5,6 +5,7 @@ const {Client}=require('pg');
  try{
   await client.query('begin');await client.query("set local statement_timeout='10s'");
   await client.query("create temp table purchase_order_records (po_id text, po_number text, status text, supplier text, warehouse_name text, raw jsonb default '{}', created_at timestamptz default now(), updated_at timestamptz default now()) on commit drop");
+  await client.query("create temp table purchase_order_line_items (line_id text, po_id text, sku text, qty numeric default 0, received_qty numeric default 0, remaining_qty numeric default 0, raw jsonb default '{}') on commit drop");
   await client.query("insert into purchase_order_records(po_id,po_number,status,supplier,warehouse_name) select 'po-'||n,'PO-'||n,'submitted','Supplier Alpha','Warehouse A' from generate_series(1,25) n");
   await client.query("update purchase_order_records set raw=jsonb_build_object('ctechId','CT-991-ABC','supplierOrderNumber','SUP-REF-55') where po_id='po-3'");
   for(const status of ['received','closed','canceled','cancelled','rejected','superseded','deleted'])await client.query('insert into purchase_order_records(po_id,po_number,status,supplier) values($1,$1,$2,$3)',['closed-'+status,status,'Supplier Alpha']);
@@ -17,6 +18,10 @@ const {Client}=require('pg');
   const ctech=await search('ct991abc');assert.equal(ctech.purchaseOrders[0].poNumber,'PO-3');assert.equal(ctech.purchaseOrders[0].ctechId,'CT-991-ABC');assert.equal(ctech.purchaseOrders[0].matchLabel,'CTech ID');
   const supplierReference=await search('sup ref 55');assert.equal(supplierReference.purchaseOrders[0].poNumber,'PO-3');assert.equal(supplierReference.purchaseOrders[0].supplierOrderNumber,'SUP-REF-55');assert.equal(supplierReference.purchaseOrders[0].matchLabel,'Supplier reference');
   assert.equal((await search('warehouse a')).purchaseOrders.length,20);
+  await client.query("insert into purchase_order_line_items(line_id,po_id,sku,qty,received_qty,raw) values ('line-2','po-2','SKU-EXTRA',5,2,'{}'),('line-3','po-3','SKU-EXTRA',4,4,'{}'),('closed-line','closed-received','SKU-EXTRA',8,0,'{}')");
+  const expectationStart=source.indexOf('async function findOpenPurchaseOrdersExpectingSkus(');const expectationEnd=source.indexOf('\nasync function ',expectationStart+1);
+  const findExpectations=vm.runInNewContext(`(${source.slice(expectationStart,expectationEnd)})`,{getPool:()=>({query:(...args)=>client.query(...args)}),initRelationalSchema:async()=>{},nullableString:value=>{const normalized=String(value??'').trim();return normalized||null}});
+  const expectations=await findExpectations(['SKU-EXTRA'],{excludePurchaseOrderId:'po-3'});assert.equal(expectations.length,1);assert.equal(expectations[0].purchaseOrderNumber,'PO-2');assert.equal(expectations[0].remainingQty,3);
   console.log('Receiving search: blank lookup skips DB; bounded summaries, closed statuses, literal queries and exact-first ordering passed.');
  }finally{await client.query('rollback');await client.end();}
 })().catch(e=>{console.error(e);process.exitCode=1});

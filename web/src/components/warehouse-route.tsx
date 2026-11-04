@@ -973,6 +973,68 @@ function isReceivingAuditReason(value: unknown) {
   return ["receiving_inventory", "external_po_receipt", "purchase_order_receipt"].includes(String(value || ""));
 }
 
+function receivingIdentifierKeys(value: unknown) {
+  const key = String(value || "").replace(/[^0-9a-z]/gi, "").toLowerCase();
+  if (!key) return [];
+  return [...new Set([key, /^\d+$/.test(key) ? key.replace(/^0+(?=\d)/, "") : key].filter(Boolean))];
+}
+
+function receivingLineMatch(auditLine: Record<string, unknown>, poLine: Record<string, unknown>) {
+  const skuKeys = new Set([auditLine.sku, auditLine.selectedSupplierSku].flatMap(receivingIdentifierKeys));
+  if (receivingIdentifierKeys(poLine.sku).some((key) => skuKeys.has(key))) return "sku";
+  const vendorKeys = new Set([auditLine.selectedVendorSku, auditLine.vendorSku].flatMap(receivingIdentifierKeys));
+  const poVendorKeys = receivingIdentifierKeys(poLine.vendorItemNumber);
+  if (vendorKeys.size && poVendorKeys.some((key) => vendorKeys.has(key))) return "vendor_sku";
+  const upcKeys = new Set([auditLine.selectedSupplierUpc, auditLine.barcode, auditLine.upc].flatMap(receivingIdentifierKeys));
+  return receivingIdentifierKeys(poLine.upc).some((key) => upcKeys.has(key)) ? "upc" : "";
+}
+
+function buildLinkedPurchaseOrderReceiptItems(
+  audit: Record<string, unknown>,
+  expectedLines: Array<Record<string, unknown>>,
+) {
+  const countedLines = (Array.isArray(audit.lines) ? audit.lines as Array<Record<string, unknown>> : [])
+    .filter((line) => Number(line.countedQty || 0) > 0 && String(line.reviewStatus || "") !== "excluded");
+  const allocatedByExpectedId = new Map<string, number>();
+  const items: Array<Record<string, unknown>> = [];
+  for (const line of countedLines) {
+    let remaining = Number(line.countedQty || 0);
+    const candidates = expectedLines.filter((expected) => receivingLineMatch(line, expected));
+    for (const expected of candidates) {
+      if (remaining <= 0) break;
+      const expectedId = String(expected.id || expected.lineIndex || expected.sku || "");
+      const available = Math.max(0, Number(expected.expectedQty || 0) - Number(allocatedByExpectedId.get(expectedId) || 0));
+      const qtyReceived = Math.min(remaining, available);
+      if (qtyReceived <= 0) continue;
+      allocatedByExpectedId.set(expectedId, Number(allocatedByExpectedId.get(expectedId) || 0) + qtyReceived);
+      items.push({
+        lineIndex: Number(expected.lineIndex),
+        routeId: String(expected.routeId || ""),
+        sku: String(expected.sku || line.sku || ""),
+        qtyReceived,
+        locationBin: String(line.locationBin || ""),
+        varianceStatus: qtyReceived === Number(expected.expectedQty || 0) ? "none" : "quantity_variance",
+        varianceNote: qtyReceived === Number(expected.expectedQty || 0) ? "" : `Scanned receipt allocated ${qtyReceived} of ${Number(expected.expectedQty || 0)} open units.`,
+      });
+      remaining -= qtyReceived;
+    }
+    if (remaining > 0) {
+      const sku = String(line.sku || "").trim();
+      items.push({
+        sku,
+        title: String(line.title || sku || line.barcode || "Extra item"),
+        qtyReceived: remaining,
+        locationBin: String(line.locationBin || ""),
+        extraItem: true,
+        sourceAuditLineId: String(line.id || line.productId || ""),
+        varianceStatus: "extra_item",
+        varianceNote: `Not ordered on ${String(audit.linkedPurchaseOrderNumber || "the selected PO")}.`,
+      });
+    }
+  }
+  return items;
+}
+
 function warehouseAuditReasonLabel(value: unknown, savedLabel?: unknown) {
   const explicit = String(savedLabel || "").trim();
   if (explicit) return explicit;
@@ -2050,7 +2112,25 @@ function WarehouseAuditPanel({
       return;
     }
     if (String(resumedAudit.reason || "") === "purchase_order_receipt" && resumedAudit.linkedPurchaseOrderId) {
-      setActionPreviewLoading(false);
+      const expectedLines = Array.isArray(resumedAudit.purchaseOrderExpectedLines) ? resumedAudit.purchaseOrderExpectedLines as Array<Record<string, unknown>> : [];
+      const extraItems = buildLinkedPurchaseOrderReceiptItems(resumedAudit, expectedLines).filter((item) => item.extraItem === true);
+      if (!extraItems.length) {
+        setActionPreview({ extraItems: [], extraUnits: 0 });
+        setActionPreviewLoading(false);
+        return;
+      }
+      setActionPreviewLoading(true);
+      try {
+        const preview = await api<Record<string, unknown>>(`/api/purchase-orders/${encodeURIComponent(String(resumedAudit.linkedPurchaseOrderId))}/extra-items-preview`, {
+          method: "POST",
+          body: JSON.stringify({ items: extraItems }),
+        });
+        setActionPreview(preview);
+      } catch (error) {
+        setActionPreviewError(error instanceof Error ? error.message : "Unable to check whether extra items belong to another open purchase order.");
+      } finally {
+        setActionPreviewLoading(false);
+      }
       return;
     }
     setActionPreviewLoading(true);
@@ -2077,47 +2157,8 @@ function WarehouseAuditPanel({
     try {
       if (String(resumedAudit.reason || "") === "purchase_order_receipt" && resumedAudit.linkedPurchaseOrderId) {
         const expectedLines = Array.isArray(resumedAudit.purchaseOrderExpectedLines) ? resumedAudit.purchaseOrderExpectedLines as Array<Record<string, unknown>> : [];
-        const identifierKeys = (value: unknown) => {
-          const key = String(value || "").replace(/[^0-9a-z]/gi, "").toLowerCase();
-          return key ? [...new Set([key, /^\d+$/.test(key) ? key.replace(/^0+(?=\d)/, "") : key])] : [];
-        };
-        const matchingExpected = (line: Record<string, unknown>) => expectedLines.filter((expected) => {
-          const sku = new Set([line.sku, line.selectedSupplierSku].flatMap(identifierKeys));
-          if (identifierKeys(expected.sku).some((key) => sku.has(key))) return true;
-          const vendor = new Set([line.selectedVendorSku, line.vendorSku].flatMap(identifierKeys));
-          if (identifierKeys(expected.vendorItemNumber).some((key) => vendor.has(key))) return true;
-          const upc = new Set([line.selectedSupplierUpc, line.barcode, line.upc].flatMap(identifierKeys));
-          return identifierKeys(expected.upc).some((key) => upc.has(key));
-        });
-        const countedLines = (Array.isArray(resumedAudit.lines) ? resumedAudit.lines as Array<Record<string, unknown>> : []).filter((line) => Number(line.countedQty || 0) > 0 && String(line.reviewStatus || "") !== "excluded");
-        const unmatched = countedLines.filter((line) => !matchingExpected(line).length);
-        if (unmatched.length) throw new Error(`${unmatched.slice(0, 5).map((line) => String(line.sku || line.barcode || "Unknown item")).join(", ")} ${unmatched.length === 1 ? "is" : "are"} not on this purchase order. Remove the count or receive the shipment as an external PO.`);
-        const allocatedByExpectedId = new Map<string, number>();
-        const items: Array<Record<string, unknown>> = [];
-        for (const line of countedLines) {
-          let remaining = Number(line.countedQty || 0);
-          const candidates = matchingExpected(line);
-          for (const expected of candidates) {
-            if (remaining <= 0) break;
-            const expectedId = String(expected.id || expected.lineIndex || expected.sku || "");
-            const available = Math.max(0, Number(expected.expectedQty || 0) - Number(allocatedByExpectedId.get(expectedId) || 0));
-            const qtyReceived = Math.min(remaining, available);
-            if (qtyReceived <= 0) continue;
-            allocatedByExpectedId.set(expectedId, Number(allocatedByExpectedId.get(expectedId) || 0) + qtyReceived);
-            items.push({
-              lineIndex: Number(expected.lineIndex),
-              routeId: String(expected.routeId || ""),
-              sku: String(expected.sku || line.sku || ""),
-              qtyReceived,
-              locationBin: String(line.locationBin || ""),
-              varianceStatus: qtyReceived === Number(expected.expectedQty || 0) ? "none" : "quantity_variance",
-              varianceNote: qtyReceived === Number(expected.expectedQty || 0) ? "" : `Scanned receipt allocated ${qtyReceived} of ${Number(expected.expectedQty || 0)} open units.`,
-            });
-            remaining -= qtyReceived;
-          }
-          if (remaining > 0) throw new Error(`${String(line.sku || line.barcode || "This item")} has ${remaining} scanned unit${remaining === 1 ? "" : "s"} above the open quantity on ${String(resumedAudit.linkedPurchaseOrderNumber || "this PO")}. Correct the count before posting.`);
-        }
-        const received = await api<{ purchaseOrder?: Record<string, unknown>; receipt?: Record<string, unknown> }>(`/api/purchase-orders/${encodeURIComponent(String(resumedAudit.linkedPurchaseOrderId))}/receive`, {
+        const items = buildLinkedPurchaseOrderReceiptItems(resumedAudit, expectedLines);
+        const received = await api<{ purchaseOrder?: Record<string, unknown>; receipt?: Record<string, unknown>; extraItemUnits?: number }>(`/api/purchase-orders/${encodeURIComponent(String(resumedAudit.linkedPurchaseOrderId))}/receive`, {
           method: "POST",
           body: JSON.stringify({ mode: "final", warehouseId: resumedAudit.warehouseId, items, note: dispositionNote || `Received through ${String(resumedAudit.auditNumber || "inbound receiving")}`, user: operatorName, sourceAuditId: resumedAudit.id, sourceAuditNumber: resumedAudit.auditNumber }),
         });
@@ -2127,7 +2168,8 @@ function WarehouseAuditPanel({
         });
         setActive(finalized.audit || null);
         setDispositionOpen(false);
-        toast.success(finalized.message || "Purchase order receipt completed.");
+        const extraItemUnits = Number(received.extraItemUnits || received.receipt?.extraItemUnits || 0);
+        toast.success(`${finalized.message || "Purchase order receipt completed."}${extraItemUnits > 0 ? ` ${numberLabel(extraItemUnits)} unit${extraItemUnits === 1 ? " was" : "s were"} marked as extra.` : ""}`);
         await load();
         return;
       }
@@ -2247,20 +2289,6 @@ function WarehouseAuditPanel({
   const receivingReviewLines = Array.isArray(receivingReview?.lines) ? receivingReview.lines as Array<Record<string, unknown>> : [];
   const purchaseOrderExpectedLines = Array.isArray(current?.purchaseOrderExpectedLines) ? current.purchaseOrderExpectedLines as Array<Record<string, unknown>> : [];
   const receivingExpectedLines = purchaseOrderExpectedLines.length ? purchaseOrderExpectedLines : receivingReviewLines;
-  const receivingIdentifierKeys = (value: unknown) => {
-    const key = String(value || "").replace(/[^0-9a-z]/gi, "").toLowerCase();
-    if (!key) return [];
-    return [...new Set([key, /^\d+$/.test(key) ? key.replace(/^0+(?=\d)/, "") : key].filter(Boolean))];
-  };
-  const receivingLineMatch = (auditLine: Record<string, unknown>, poLine: Record<string, unknown>) => {
-    const skuKeys = new Set([auditLine.sku, auditLine.selectedSupplierSku].flatMap(receivingIdentifierKeys));
-    if (receivingIdentifierKeys(poLine.sku).some((key) => skuKeys.has(key))) return "sku";
-    const vendorKeys = new Set([auditLine.selectedVendorSku, auditLine.vendorSku].flatMap(receivingIdentifierKeys));
-    const poVendorKeys = receivingIdentifierKeys(poLine.vendorItemNumber);
-    if (vendorKeys.size && poVendorKeys.some((key) => vendorKeys.has(key))) return "vendor_sku";
-    const upcKeys = new Set([auditLine.selectedSupplierUpc, auditLine.barcode, auditLine.upc].flatMap(receivingIdentifierKeys));
-    return receivingIdentifierKeys(poLine.upc).some((key) => upcKeys.has(key)) ? "upc" : "";
-  };
   const baseAuditItems = [...(Array.isArray(current?.lines) ? current.lines as Array<Record<string, unknown>> : []).map(row => ({ ...row, auditItemKind: "known" })), ...(Array.isArray(current?.unknownBarcodes) ? current.unknownBarcodes as Array<Record<string, unknown>> : []).map(row => ({ ...row, auditItemKind: "unknown" }))];
   const matchedReceivingIds = new Set<string>();
   const receivingAuditItems = baseAuditItems.map((row) => {
@@ -2300,8 +2328,13 @@ function WarehouseAuditPanel({
   const compatibleDemandQty = Number(actionPreview?.totalUsableQty || 0);
   const compatibleOrderCount = Number(actionPreview?.affectedOrderCount || compatibleOrders.length || 0);
   const multipleSupplierActionLines = Number(actionPreview?.multipleSupplierLineCount || 0);
+  const linkedPoExtraItems = Array.isArray(actionPreview?.extraItems)
+    ? actionPreview.extraItems as Array<Record<string, unknown>>
+    : [];
+  const linkedPoExtraUnits = Number(actionPreview?.extraUnits || linkedPoExtraItems.reduce((sum, item) => sum + Number(item.qtyReceived || 0), 0));
   const finishActionBlocked = busy
     || (isReceivingAudit && !hasPackingSlip)
+    || (isLinkedPurchaseOrderReceipt && (actionPreviewLoading || Boolean(actionPreviewError)))
     || (!isLinkedPurchaseOrderReceipt && (
       actionPreviewLoading
       || Boolean(actionPreviewError)
@@ -2556,6 +2589,9 @@ function WarehouseAuditPanel({
                   <DialogDescription>{isLinkedPurchaseOrderReceipt ? `Post the scanned quantities to ${String(current.linkedPurchaseOrderNumber || "the linked purchase order")} and add the packing-slip evidence to its receipt history.` : isReceivingAudit ? "Post the scanned shipment as new inbound inventory. The receiving audit and original packing slips remain attached as evidence." : "The audit is the review record. DataPlus checks supplier-equivalent SKUs against open orders before inventory can be returned."}</DialogDescription>
                 </DialogHeader>
                 {isLinkedPurchaseOrderReceipt && <div className="grid gap-3 rounded-md border bg-muted/30 p-4 sm:grid-cols-3"><div><p className="text-xs text-muted-foreground">Purchase order</p><p className="font-medium">{String(current.linkedPurchaseOrderNumber || "-")}</p></div><div><p className="text-xs text-muted-foreground">Scanned units</p><p className="font-medium">{numberLabel(lines.reduce((sum, line) => sum + Number(line.countedQty || 0), 0))}</p></div><div><p className="text-xs text-muted-foreground">Packing slips</p><p className="font-medium">{numberLabel(receivingDocuments.filter((document) => String(document.documentType || "") === "packing_slip").length)}</p></div></div>}
+                {isLinkedPurchaseOrderReceipt && actionPreviewLoading && <div className="flex items-center gap-2 rounded-md border bg-muted/30 p-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Checking extra items against other open purchase orders...</div>}
+                {isLinkedPurchaseOrderReceipt && actionPreviewError && <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Extra-item check failed</AlertTitle><AlertDescription>{actionPreviewError}</AlertDescription></Alert>}
+                {isLinkedPurchaseOrderReceipt && !actionPreviewLoading && !actionPreviewError && linkedPoExtraItems.length > 0 && <Alert className="border-amber-400 bg-amber-50/80 dark:border-amber-700 dark:bg-amber-950/30"><AlertTriangle className="size-4 text-amber-700 dark:text-amber-300" /><AlertTitle>{numberLabel(linkedPoExtraUnits)} extra unit{linkedPoExtraUnits === 1 ? "" : "s"} will be received</AlertTitle><AlertDescription className="mt-2 grid gap-2"><p>These products are not part of {String(current.linkedPurchaseOrderNumber || "the selected PO")}. They will be stocked and marked as extra items without changing its ordered quantities.</p>{linkedPoExtraItems.map((item, index) => { const expectedPurchaseOrders = Array.isArray(item.expectedPurchaseOrders) ? item.expectedPurchaseOrders as Array<Record<string, unknown>> : []; return <div key={`${String(item.sku)}-${index}`} className="rounded-md border border-amber-300 bg-background/90 p-3 dark:border-amber-800"><div className="flex flex-wrap items-center justify-between gap-2"><a className="font-mono font-medium text-primary hover:underline" href={`/products/${encodeURIComponent(String(item.sku || ""))}`} target="_blank" rel="noreferrer">{String(item.sku || "Extra item")}</a><Badge variant="outline">{numberLabel(Number(item.qtyReceived || 0))} unit{Number(item.qtyReceived || 0) === 1 ? "" : "s"}</Badge></div>{expectedPurchaseOrders.length > 0 ? <div className="mt-2"><p className="text-xs font-medium">Expected on another open PO</p><div className="mt-1 flex flex-wrap gap-1.5">{expectedPurchaseOrders.map((purchaseOrder) => <a key={String(purchaseOrder.purchaseOrderId)} href={`/purchase-orders/${encodeURIComponent(String(purchaseOrder.purchaseOrderId || ""))}`} target="_blank" rel="noreferrer"><Badge className="hover:bg-muted" variant="secondary">{String(purchaseOrder.purchaseOrderNumber || "Open PO")} · {numberLabel(Number(purchaseOrder.remainingQty || 0))} open</Badge></a>)}</div></div> : <p className="mt-2 text-xs text-muted-foreground">No other open purchase order currently expects this SKU.</p>}</div> })}</AlertDescription></Alert>}
                 {!isLinkedPurchaseOrderReceipt && <>
                 {actionPreviewLoading && <div className="flex items-center gap-2 rounded-md border bg-muted/30 p-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Checking open orders across supplier-equivalent SKUs...</div>}
                 {actionPreviewError && <div className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">{actionPreviewError}</div>}
@@ -3115,8 +3151,8 @@ function WarehouseAuditPanel({
                     const poNumber = String(poLine?.poNumber || receivingReview?.documentNumber || "").trim();
                     const expectedQty = poLine ? Number(poLine.expectedQty ?? poLine.quantity ?? 0) : 0;
                     const rowCountedQty = Number(line.countedQty ?? line.count ?? 0);
-                    const poMatchBadge = poLine ? <Badge className="border-yellow-400 bg-yellow-100 text-yellow-950 dark:border-yellow-600 dark:bg-yellow-400/20 dark:text-yellow-100" variant="outline" title={line.receivingMatchBasis === "vendor_sku" ? "Matched by vendor SKU" : line.receivingMatchBasis === "upc" ? "Matched by UPC" : line.receivingMatchBasis === "sku" ? "Matched by catalog SKU" : "Expected from packing slip"}><CheckCircle2 className="mr-1 size-3" /> Yes</Badge> : <span className="text-xs text-muted-foreground">No</span>;
-                    const poStatusBadge = poLine ? rowCountedQty === expectedQty ? <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Matched</Badge> : <Badge variant="destructive">Variance {rowCountedQty - expectedQty > 0 ? "+" : ""}{numberLabel(rowCountedQty - expectedQty)}</Badge> : null;
+                    const poMatchBadge = poLine ? <Badge className="border-yellow-400 bg-yellow-100 text-yellow-950 dark:border-yellow-600 dark:bg-yellow-400/20 dark:text-yellow-100" variant="outline" title={line.receivingMatchBasis === "vendor_sku" ? "Matched by vendor SKU" : line.receivingMatchBasis === "upc" ? "Matched by UPC" : line.receivingMatchBasis === "sku" ? "Matched by catalog SKU" : "Expected from packing slip"}><CheckCircle2 className="mr-1 size-3" /> Yes</Badge> : isLinkedPurchaseOrderReceipt && rowCountedQty > 0 ? <Badge className="border-amber-400 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline"><AlertTriangle className="mr-1 size-3" /> Extra item</Badge> : <span className="text-xs text-muted-foreground">No</span>;
+                    const poStatusBadge = poLine ? rowCountedQty === expectedQty ? <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Matched</Badge> : <Badge variant="destructive">Variance {rowCountedQty - expectedQty > 0 ? "+" : ""}{numberLabel(rowCountedQty - expectedQty)}</Badge> : isLinkedPurchaseOrderReceipt && rowCountedQty > 0 ? <Badge className="border-amber-400 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Extra item</Badge> : null;
                     if (line.auditItemKind === "po_expected") {
                       return (<TableRow className="bg-yellow-50/50 dark:bg-yellow-400/5" key={`po-expected-${String(line.id)}`}>
                         <TableCell><span className="grid size-8 place-items-center rounded-full border border-yellow-400 bg-yellow-100 text-yellow-800 dark:border-yellow-700 dark:bg-yellow-400/15 dark:text-yellow-200"><FileText className="size-4" /></span></TableCell>

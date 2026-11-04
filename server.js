@@ -15178,6 +15178,7 @@ async function purchaseOrdersForReturn(record = {}) {
 }
 
 function findPurchaseOrderReceiptLine(po = {}, input = {}) {
+  if (input.extraItem === true) return null;
   const lines = Array.isArray(po.items) ? po.items : [];
   const routeId = String(input.routeId || "").trim();
   if (routeId) {
@@ -15199,7 +15200,11 @@ function validatePurchaseOrderReceiptLines(po = {}, receivedLines = []) {
     const qty = Number(input.qtyReceived || 0);
     if (!Number.isFinite(qty) || qty <= 0) continue;
     const poLine = findPurchaseOrderReceiptLine(po, input);
-    if (!poLine) return `SKU ${String(input.sku || "unknown")} is not an open line on this purchase order.`;
+    if (!poLine && input.extraItem === true) {
+      if (!String(input.sku || "").trim()) return "Every extra receipt item needs a catalog SKU.";
+      continue;
+    }
+    if (!poLine) return `SKU ${String(input.sku || "unknown")} is not an open line on this purchase order. Mark it as an extra item to receive it without changing the PO quantity.`;
     const previous = Number(requestedByLine.get(poLine) || 0);
     requestedByLine.set(poLine, previous + qty);
   }
@@ -15210,6 +15215,33 @@ function validatePurchaseOrderReceiptLines(po = {}, receivedLines = []) {
     }
   }
   return "";
+}
+
+function openPurchaseOrderExpectationsFromState(purchaseOrders = [], skus = [], excludePurchaseOrderId = "") {
+  const requested = new Set((Array.isArray(skus) ? skus : []).map((sku) => String(sku || "").trim().toLowerCase()).filter(Boolean));
+  if (!requested.size) return [];
+  const terminalStatuses = new Set(["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"]);
+  const rows = [];
+  for (const purchaseOrder of Array.isArray(purchaseOrders) ? purchaseOrders : []) {
+    if (String(purchaseOrder.id || "") === String(excludePurchaseOrderId || "") || terminalStatuses.has(String(purchaseOrder.status || "").toLowerCase())) continue;
+    for (const line of Array.isArray(purchaseOrder.items) ? purchaseOrder.items : []) {
+      const lookupSku = String(line.sku || "").trim().toLowerCase();
+      const remainingQty = purchaseOrderOpenQuantity(line);
+      if (!requested.has(lookupSku) || remainingQty <= 0) continue;
+      rows.push({
+        sku: String(line.sku || ""),
+        lookupSku,
+        purchaseOrderId: purchaseOrder.id,
+        purchaseOrderNumber: purchaseOrder.poNumber || purchaseOrder.id,
+        supplier: purchaseOrder.supplier || "Unassigned supplier",
+        status: purchaseOrder.status || "",
+        warehouseName: purchaseOrder.warehouseName || "",
+        expectedAt: purchaseOrder.expectedAt || "",
+        remainingQty
+      });
+    }
+  }
+  return rows;
 }
 
 function applyUnresolvedPurchaseOrderReceipt(poLine = {}, input = {}) {
@@ -17630,7 +17662,7 @@ function inventoryPurchaseOrderRows(purchaseOrders = [], item = {}) {
     const receiptItems = [...(po.receipts || []), ...(po.receiptDrafts || [])]
       .flatMap((receipt) => (receipt.items || []).map((line) => ({ ...line, receiptNumber: receipt.receiptNumber, receivedAt: receipt.receivedAt, receiptStatus: receipt.status })));
     return (po.items || po.lines || []).filter((line) => inventorySkuMatch(line.sku, item).matches).map((line) => {
-      const receivedFromReceipts = receiptItems.filter((receiptLine) => inventorySkuMatch(receiptLine.sku, item).matches && receiptLine.receiptStatus !== "draft").reduce((sum, receiptLine) => sum + Number(receiptLine.qtyReceived || 0), 0);
+      const receivedFromReceipts = receiptItems.filter((receiptLine) => receiptLine.extraItem !== true && inventorySkuMatch(receiptLine.sku, item).matches && receiptLine.receiptStatus !== "draft").reduce((sum, receiptLine) => sum + Number(receiptLine.qtyReceived || 0), 0);
       const orderedQty = Number(line.qty || line.quantity || 0);
       const receivedQty = Math.max(Number(line.receivedQty || line.qtyReceived || 0), receivedFromReceipts);
       return {
@@ -62113,6 +62145,37 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { purchaseOrder: po, message: `${po.poNumber || "PO"} was deleted and retained in audit history.` });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "extra-items-preview" && postgres.isPostgresEnabled()) {
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const body = await parseBody(req);
+    const requested = (Array.isArray(body.items) ? body.items : [])
+      .map((item) => ({
+        sku: String(item.sku || "").trim(),
+        title: String(item.title || item.sku || "Extra item").trim(),
+        qtyReceived: Math.max(0, Number(item.qtyReceived || 0))
+      }))
+      .filter((item) => item.sku && item.qtyReceived > 0);
+    const expectationRows = await postgres.findOpenPurchaseOrdersExpectingSkus(requested.map((item) => item.sku), { excludePurchaseOrderId: po.id });
+    const expectationsBySku = new Map();
+    for (const row of expectationRows) {
+      const key = String(row.lookupSku || row.sku || "").trim().toLowerCase();
+      if (!expectationsBySku.has(key)) expectationsBySku.set(key, []);
+      expectationsBySku.get(key).push(row);
+    }
+    const extraItems = requested.map((item) => ({
+      ...item,
+      extraItem: true,
+      expectedPurchaseOrders: expectationsBySku.get(item.sku.toLowerCase()) || []
+    }));
+    return sendJson(res, 200, {
+      purchaseOrderId: po.id,
+      purchaseOrderNumber: po.poNumber || po.id,
+      extraItems,
+      extraUnits: extraItems.reduce((sum, item) => sum + item.qtyReceived, 0)
+    });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "receive" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
@@ -62138,6 +62201,16 @@ async function handleApi(req, res) {
     const receivedLines = Array.isArray(body.items) ? body.items : [];
     const receiptValidationError = validatePurchaseOrderReceiptLines(po, receivedLines);
     if (receiptValidationError) return sendJson(res, 400, { error: receiptValidationError });
+    const extraExpectationRows = await postgres.findOpenPurchaseOrdersExpectingSkus(
+      receivedLines.filter((line) => line.extraItem === true).map((line) => line.sku),
+      { excludePurchaseOrderId: po.id }
+    );
+    const extraExpectationsBySku = new Map();
+    for (const row of extraExpectationRows) {
+      const key = String(row.lookupSku || row.sku || "").trim().toLowerCase();
+      if (!extraExpectationsBySku.has(key)) extraExpectationsBySku.set(key, []);
+      extraExpectationsBySku.get(key).push(row);
+    }
     const receivedAt = String(body.receivedAt || new Date().toISOString().slice(0, 10));
     const note = String(body.note || "").trim();
     const mode = String(body.mode || "final").toLowerCase() === "draft" ? "draft" : "final";
@@ -62169,6 +62242,8 @@ async function handleApi(req, res) {
     }
     const touchedProducts = [];
     let totalReceived = 0;
+    let orderedReceivedUnits = 0;
+    let extraItemUnits = 0;
     const receipt = {
       id: crypto.randomUUID(),
       receiptNumber: `${mode === "draft" ? "DRF" : "RCV"}-${String(((mode === "draft" ? po.receiptDrafts : po.receipts) || []).length + 1).padStart(4, "0")}`,
@@ -62188,16 +62263,20 @@ async function handleApi(req, res) {
     for (const line of receivedLines) {
       const qtyReceived = Number(line.qtyReceived || 0);
       if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) continue;
+      const extraItem = line.extraItem === true;
       const poLine = findPurchaseOrderReceiptLine(po, line);
-      if (!poLine) continue;
-      const sku = String(poLine.sku || line.sku || "").trim();
-      const unresolved = !sku || poLine.resolutionStatus === "unresolved";
+      if (!poLine && !extraItem) continue;
+      const sku = String(poLine?.sku || line.sku || "").trim();
+      const unresolved = !extraItem && (!sku || poLine?.resolutionStatus === "unresolved");
       const product = unresolved ? null : await postgres.readProductByKey(sku);
-      const inventoryMultiplier = product ? purchaseReceiptInventoryMultiplier(product) : 1;
+      const inventoryMultiplier = product && !extraItem ? purchaseReceiptInventoryMultiplier(product) : 1;
       const inventoryQtyReceived = qtyReceived * inventoryMultiplier;
-      const varianceStatus = String(line.varianceStatus || "none").toLowerCase();
-      const varianceNote = String(line.varianceNote || "").trim();
+      const varianceStatus = extraItem ? "extra_item" : String(line.varianceStatus || "none").toLowerCase();
+      const varianceNote = extraItem
+        ? String(line.varianceNote || `Not ordered on ${po.poNumber || "the selected PO"}.`).trim()
+        : String(line.varianceNote || "").trim();
       const locationBin = String(line.locationBin || defaultLocationBin || "").trim();
+      const expectedPurchaseOrders = extraItem ? extraExpectationsBySku.get(sku.toLowerCase()) || [] : [];
       const providedSerials = Array.isArray(line.serials) ? line.serials : [];
       const serials = [];
       for (let index = 0; !unresolved && index < qtyReceived; index += 1) {
@@ -62236,6 +62315,9 @@ async function handleApi(req, res) {
         inventoryMultiplier,
         orderedQty: Number(poLine?.qty || 0),
         receivedBefore: Number(poLine?.receivedQty || 0),
+        extraItem,
+        extraItemStatus: extraItem ? "unexpected_on_selected_po" : "",
+        expectedPurchaseOrders,
         varianceStatus,
         varianceNote,
         locationBin,
@@ -62245,16 +62327,20 @@ async function handleApi(req, res) {
 
       if (mode === "draft") {
         totalReceived += qtyReceived;
+        if (extraItem) extraItemUnits += qtyReceived;
+        else orderedReceivedUnits += qtyReceived;
         continue;
       }
 
       if (unresolved) {
-        totalReceived += applyUnresolvedPurchaseOrderReceipt(poLine, { qtyReceived, receivedAt, locationBin, varianceStatus, varianceNote });
+        const appliedQty = applyUnresolvedPurchaseOrderReceipt(poLine, { qtyReceived, receivedAt, locationBin, varianceStatus, varianceNote });
+        totalReceived += appliedQty;
+        orderedReceivedUnits += appliedQty;
         continue;
       }
 
       if (!product) {
-        return sendJson(res, 409, { error: `${sku} is no longer available in the catalog. Receive it as an unresolved line or restore the catalog product first.` });
+        return sendJson(res, 409, { error: extraItem ? `${sku} must be matched to a catalog product before it can be received as an extra item.` : `${sku} is no longer available in the catalog. Receive it as an unresolved line or restore the catalog product first.` });
       }
 
       product.serialUnits = Array.isArray(product.serialUnits) ? product.serialUnits : [];
@@ -62286,7 +62372,7 @@ async function handleApi(req, res) {
         qtyAfter: Number(warehouseStockRow?.qty ?? product.qty)
       });
       addInventoryLedger(db, product, {
-        type: varianceStatus === "damaged" ? "po_receipt_damaged" : "po_receipt",
+        type: extraItem ? "po_receipt_extra" : varianceStatus === "damaged" ? "po_receipt_damaged" : "po_receipt",
         source: "purchase_order",
         referenceId: po.id,
         referenceNumber: po.poNumber,
@@ -62299,15 +62385,18 @@ async function handleApi(req, res) {
         reservedBefore,
         reservedAfter: Number(warehouseStockRow?.reserved ?? product.reserved ?? 0),
         serials,
-        reason: `${note || `Received on ${po.poNumber}`}${inventoryMultiplier > 1 ? ` / ${qtyReceived} purchase unit${qtyReceived === 1 ? "" : "s"} = ${inventoryQtyReceived} pieces` : ""}${varianceStatus !== "none" ? ` / variance: ${varianceStatus}${varianceNote ? ` (${varianceNote})` : ""}` : ""}${locationBin ? ` / bin: ${locationBin}` : ""}`,
+        reason: `${note || `Received on ${po.poNumber}`}${extraItem ? ` / extra item not ordered on this PO${expectedPurchaseOrders.length ? `; expected on ${expectedPurchaseOrders.map((entry) => entry.purchaseOrderNumber).join(", ")}` : ""}` : ""}${inventoryMultiplier > 1 ? ` / ${qtyReceived} purchase unit${qtyReceived === 1 ? "" : "s"} = ${inventoryQtyReceived} pieces` : ""}${varianceStatus !== "none" ? ` / variance: ${varianceStatus}${varianceNote ? ` (${varianceNote})` : ""}` : ""}${locationBin ? ` / bin: ${locationBin}` : ""}`,
         user: body.user || "Luis"
       });
       touchedProducts.push(product);
       totalReceived += qtyReceived;
+      if (extraItem) extraItemUnits += qtyReceived;
+      else orderedReceivedUnits += qtyReceived;
     }
 
     const unresolvedHeldUnits = mode === "final" ? receipt.items.filter((item) => item.inventoryStatus === "held_unresolved").reduce((sum, item) => sum + Number(item.qtyReceived || 0), 0) : 0;
     receipt.unresolvedHeldUnits = unresolvedHeldUnits;
+    receipt.extraItemUnits = extraItemUnits;
     if (!totalReceived) return sendJson(res, 400, { error: mode === "draft" ? "Enter at least one line to save a draft receipt." : "Enter at least one received quantity." });
     if (mode === "draft") {
       po.receiptDrafts = Array.isArray(po.receiptDrafts) ? po.receiptDrafts : [];
@@ -62327,17 +62416,19 @@ async function handleApi(req, res) {
 
     po.receipts = Array.isArray(po.receipts) ? po.receipts : [];
     po.receipts.unshift(receipt);
-    po.receivedUnits = Number(po.receivedUnits || 0) + totalReceived;
+    po.receivedUnits = Number(po.receivedUnits || 0) + orderedReceivedUnits;
+    po.extraReceivedUnits = Number(po.extraReceivedUnits || 0) + extraItemUnits;
     const noOpenQuantity = (po.items || []).every((item) => purchaseOrderOpenQuantity(item) <= 0);
     const allOrderedUnitsReceived = (po.items || []).every((item) => Number(item.receivedQty || 0) >= Number(item.qty || 0));
-    po.status = noOpenQuantity ? (allOrderedUnitsReceived ? "received" : "closed") : "partially_received";
+    if (orderedReceivedUnits > 0) po.status = noOpenQuantity ? (allOrderedUnitsReceived ? "received" : "closed") : "partially_received";
     po.openEstimatedCost = purchaseOrderOpenCommitment(po);
-    po.receivedAt = receivedAt;
+    if (orderedReceivedUnits > 0) po.receivedAt = receivedAt;
+    po.lastReceiptAt = receivedAt;
     po.updatedAt = new Date().toISOString();
     addPoTimeline(po, {
       type: "received",
-      title: po.status === "received" ? "PO received" : po.status === "closed" ? "PO closed after receipt" : "PO partially received",
-      message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${unresolvedHeldUnits ? `; ${unresolvedHeldUnits} held pending SKU resolution` : ""}${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
+      title: orderedReceivedUnits <= 0 ? "Extra PO items received" : po.status === "received" ? "PO received" : po.status === "closed" ? "PO closed after receipt" : "PO partially received",
+      message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${extraItemUnits ? `; ${extraItemUnits} marked as extra item${extraItemUnits === 1 ? "" : "s"} not ordered on this PO` : ""}${unresolvedHeldUnits ? `; ${unresolvedHeldUnits} held pending SKU resolution` : ""}${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
       user: body.user || "Luis"
     });
     acknowledgeCanceledDemandReceipt(po, receipt, canceledDemandExceptions, body.user || "Luis");
@@ -62388,7 +62479,7 @@ async function handleApi(req, res) {
     if (releasedProducts.length) { const unique = [...new Map(releasedProducts.map((product) => [product.id, product])).values()]; await postgres.upsertProductsFromState(unique); await postgres.upsertInventoryLevelsFromProducts(unique); }
     await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [], purchaseRequirements: db.purchaseRequirements || [] });
     await postgres.savePurchaseOrder(po);
-    return sendJson(res, 200, { purchaseOrder: po, receipt, unresolvedHeldUnits });
+    return sendJson(res, 200, { purchaseOrder: po, receipt, unresolvedHeldUnits, extraItemUnits });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "returns" && postgres.isPostgresEnabled()) {
@@ -73909,6 +74000,24 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { purchaseOrder: po, state: publicState(db), message: action === "mark_inbound" ? `${po.poNumber || "Purchase order"} moved to Incoming${po.expectedAt ? ` for expected delivery ${po.expectedAt}` : ""}.` : undefined });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[3] === "extra-items-preview") {
+    const po = (db.purchaseOrders || []).find((row) => row.id === parts[2]);
+    if (!po) return notFound(res);
+    const body = await parseBody(req);
+    const requested = (Array.isArray(body.items) ? body.items : [])
+      .map((item) => ({ sku: String(item.sku || "").trim(), title: String(item.title || item.sku || "Extra item").trim(), qtyReceived: Math.max(0, Number(item.qtyReceived || 0)) }))
+      .filter((item) => item.sku && item.qtyReceived > 0);
+    const expectationRows = openPurchaseOrderExpectationsFromState(db.purchaseOrders, requested.map((item) => item.sku), po.id);
+    const expectationsBySku = new Map();
+    for (const row of expectationRows) {
+      const key = String(row.lookupSku || row.sku || "").toLowerCase();
+      if (!expectationsBySku.has(key)) expectationsBySku.set(key, []);
+      expectationsBySku.get(key).push(row);
+    }
+    const extraItems = requested.map((item) => ({ ...item, extraItem: true, expectedPurchaseOrders: expectationsBySku.get(item.sku.toLowerCase()) || [] }));
+    return sendJson(res, 200, { purchaseOrderId: po.id, purchaseOrderNumber: po.poNumber || po.id, extraItems, extraUnits: extraItems.reduce((sum, item) => sum + item.qtyReceived, 0) });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[3] === "receive") {
     const body = await parseBody(req);
     const po = (db.purchaseOrders || []).find((row) => row.id === parts[2]);
@@ -73920,6 +74029,13 @@ async function handleApi(req, res) {
     const receivedLines = Array.isArray(body.items) ? body.items : [];
     const receiptValidationError = validatePurchaseOrderReceiptLines(po, receivedLines);
     if (receiptValidationError) return sendJson(res, 400, { error: receiptValidationError });
+    const extraExpectationRows = openPurchaseOrderExpectationsFromState(db.purchaseOrders, receivedLines.filter((line) => line.extraItem === true).map((line) => line.sku), po.id);
+    const extraExpectationsBySku = new Map();
+    for (const row of extraExpectationRows) {
+      const key = String(row.lookupSku || row.sku || "").toLowerCase();
+      if (!extraExpectationsBySku.has(key)) extraExpectationsBySku.set(key, []);
+      extraExpectationsBySku.get(key).push(row);
+    }
     const receivedAt = String(body.receivedAt || new Date().toISOString().slice(0, 10));
     const note = String(body.note || "").trim();
     const mode = String(body.mode || "final").toLowerCase() === "draft" ? "draft" : "final";
@@ -73939,6 +74055,8 @@ async function handleApi(req, res) {
     }
     const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReceiptAttachment(file, body.user || "Luis"));
     let totalReceived = 0;
+    let orderedReceivedUnits = 0;
+    let extraItemUnits = 0;
     const receipt = {
       id: crypto.randomUUID(),
       receiptNumber: `${mode === "draft" ? "DRF" : "RCV"}-${String(((mode === "draft" ? po.receiptDrafts : po.receipts) || []).length + 1).padStart(4, "0")}`,
@@ -73956,14 +74074,16 @@ async function handleApi(req, res) {
     for (const line of receivedLines) {
       const qtyReceived = Number(line.qtyReceived || 0);
       if (!Number.isFinite(qtyReceived) || qtyReceived <= 0) continue;
+      const extraItem = line.extraItem === true;
       const poLine = findPurchaseOrderReceiptLine(po, line);
-      if (!poLine) continue;
-      const sku = String(poLine.sku || line.sku || "").trim();
-      const unresolved = !sku || poLine.resolutionStatus === "unresolved";
+      if (!poLine && !extraItem) continue;
+      const sku = String(poLine?.sku || line.sku || "").trim();
+      const unresolved = !extraItem && (!sku || poLine?.resolutionStatus === "unresolved");
       const product = unresolved ? null : db.inventory.find((item) => String(item.sku || "").toLowerCase() === sku.toLowerCase());
-      const varianceStatus = String(line.varianceStatus || "none").toLowerCase();
-      const varianceNote = String(line.varianceNote || "").trim();
+      const varianceStatus = extraItem ? "extra_item" : String(line.varianceStatus || "none").toLowerCase();
+      const varianceNote = extraItem ? String(line.varianceNote || `Not ordered on ${po.poNumber || "the selected PO"}.`).trim() : String(line.varianceNote || "").trim();
       const locationBin = String(line.locationBin || defaultLocationBin || "").trim();
+      const expectedPurchaseOrders = extraItem ? extraExpectationsBySku.get(sku.toLowerCase()) || [] : [];
       const providedSerials = Array.isArray(line.serials) ? line.serials : [];
       const serials = [];
       for (let index = 0; !unresolved && index < qtyReceived; index += 1) {
@@ -74001,6 +74121,9 @@ async function handleApi(req, res) {
         qtyReceived,
         orderedQty: Number(poLine?.qty || 0),
         receivedBefore: Number(poLine?.receivedQty || 0),
+        extraItem,
+        extraItemStatus: extraItem ? "unexpected_on_selected_po" : "",
+        expectedPurchaseOrders,
         varianceStatus,
         varianceNote,
         locationBin,
@@ -74010,15 +74133,19 @@ async function handleApi(req, res) {
 
       if (mode === "draft") {
         totalReceived += qtyReceived;
+        if (extraItem) extraItemUnits += qtyReceived;
+        else orderedReceivedUnits += qtyReceived;
         continue;
       }
 
       if (unresolved) {
-        totalReceived += applyUnresolvedPurchaseOrderReceipt(poLine, { qtyReceived, receivedAt, locationBin, varianceStatus, varianceNote });
+        const appliedQty = applyUnresolvedPurchaseOrderReceipt(poLine, { qtyReceived, receivedAt, locationBin, varianceStatus, varianceNote });
+        totalReceived += appliedQty;
+        orderedReceivedUnits += appliedQty;
         continue;
       }
 
-      if (!product) return sendJson(res, 409, { error: `${sku} is no longer available in the catalog. Receive it as an unresolved line or restore the catalog product first.` });
+      if (!product) return sendJson(res, 409, { error: extraItem ? `${sku} must be matched to a catalog product before it can be received as an extra item.` : `${sku} is no longer available in the catalog. Receive it as an unresolved line or restore the catalog product first.` });
 
       product.serialUnits = Array.isArray(product.serialUnits) ? product.serialUnits : [];
       serials.forEach((serialRecord) => product.serialUnits.push(serialRecord));
@@ -74047,7 +74174,7 @@ async function handleApi(req, res) {
         qtyAfter: Number(warehouseStockRow?.qty ?? product.qty)
       });
       addInventoryLedger(db, product, {
-        type: varianceStatus === "damaged" ? "po_receipt_damaged" : "po_receipt",
+        type: extraItem ? "po_receipt_extra" : varianceStatus === "damaged" ? "po_receipt_damaged" : "po_receipt",
         source: "purchase_order",
         referenceId: po.id,
         referenceNumber: po.poNumber,
@@ -74060,14 +74187,17 @@ async function handleApi(req, res) {
         reservedBefore,
         reservedAfter: Number(warehouseStockRow?.reserved ?? product.reserved ?? 0),
         serials,
-        reason: `${note || `Received on ${po.poNumber}`}${varianceStatus !== "none" ? ` / variance: ${varianceStatus}${varianceNote ? ` (${varianceNote})` : ""}` : ""}${locationBin ? ` / bin: ${locationBin}` : ""}`,
+        reason: `${note || `Received on ${po.poNumber}`}${extraItem ? ` / extra item not ordered on this PO${expectedPurchaseOrders.length ? `; expected on ${expectedPurchaseOrders.map((entry) => entry.purchaseOrderNumber).join(", ")}` : ""}` : ""}${varianceStatus !== "none" ? ` / variance: ${varianceStatus}${varianceNote ? ` (${varianceNote})` : ""}` : ""}${locationBin ? ` / bin: ${locationBin}` : ""}`,
         user: body.user || "Luis"
       });
       totalReceived += qtyReceived;
+      if (extraItem) extraItemUnits += qtyReceived;
+      else orderedReceivedUnits += qtyReceived;
     }
 
     const unresolvedHeldUnits = mode === "final" ? receipt.items.filter((item) => item.inventoryStatus === "held_unresolved").reduce((sum, item) => sum + Number(item.qtyReceived || 0), 0) : 0;
     receipt.unresolvedHeldUnits = unresolvedHeldUnits;
+    receipt.extraItemUnits = extraItemUnits;
     if (!totalReceived) return sendJson(res, 400, { error: mode === "draft" ? "Enter at least one line to save a draft receipt." : "Enter at least one received quantity." });
     if (mode === "draft") {
       po.receiptDrafts = Array.isArray(po.receiptDrafts) ? po.receiptDrafts : [];
@@ -74087,23 +74217,25 @@ async function handleApi(req, res) {
 
     po.receipts = Array.isArray(po.receipts) ? po.receipts : [];
     po.receipts.unshift(receipt);
-    po.receivedUnits = Number(po.receivedUnits || 0) + totalReceived;
+    po.receivedUnits = Number(po.receivedUnits || 0) + orderedReceivedUnits;
+    po.extraReceivedUnits = Number(po.extraReceivedUnits || 0) + extraItemUnits;
     const noOpenQuantity = (po.items || []).every((item) => purchaseOrderOpenQuantity(item) <= 0);
     const allOrderedUnitsReceived = (po.items || []).every((item) => Number(item.receivedQty || 0) >= Number(item.qty || 0));
-    po.status = noOpenQuantity ? (allOrderedUnitsReceived ? "received" : "closed") : "partially_received";
+    if (orderedReceivedUnits > 0) po.status = noOpenQuantity ? (allOrderedUnitsReceived ? "received" : "closed") : "partially_received";
     po.openEstimatedCost = purchaseOrderOpenCommitment(po);
-    po.receivedAt = receivedAt;
+    if (orderedReceivedUnits > 0) po.receivedAt = receivedAt;
+    po.lastReceiptAt = receivedAt;
     po.updatedAt = new Date().toISOString();
     addPoTimeline(po, {
       type: "received",
-      title: po.status === "received" ? "PO received" : po.status === "closed" ? "PO closed after receipt" : "PO partially received",
-      message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${unresolvedHeldUnits ? `; ${unresolvedHeldUnits} held pending SKU resolution` : ""}${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
+      title: orderedReceivedUnits <= 0 ? "Extra PO items received" : po.status === "received" ? "PO received" : po.status === "closed" ? "PO closed after receipt" : "PO partially received",
+      message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${extraItemUnits ? `; ${extraItemUnits} marked as extra item${extraItemUnits === 1 ? "" : "s"} not ordered on this PO` : ""}${unresolvedHeldUnits ? `; ${unresolvedHeldUnits} held pending SKU resolution` : ""}${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
       user: body.user || "Luis"
     });
     acknowledgeCanceledDemandReceipt(po, receipt, canceledDemandExceptions, body.user || "Luis");
 
     await writeDb(db);
-    return sendJson(res, 200, { purchaseOrder: po, unresolvedHeldUnits, state: publicState(db) });
+    return sendJson(res, 200, { purchaseOrder: po, receipt, unresolvedHeldUnits, extraItemUnits, state: publicState(db) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[3] === "returns") {
@@ -76482,6 +76614,7 @@ module.exports = {
   createManualPurchaseOrder,
   manualPurchaseOrderDraftIssues,
   validatePurchaseOrderReceiptLines,
+  openPurchaseOrderExpectationsFromState,
   applyUnresolvedPurchaseOrderReceipt,
   parseExternalOperationalPoText,
   matchExternalOperationalPoItems,

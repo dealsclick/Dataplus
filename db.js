@@ -12901,6 +12901,58 @@ async function searchReceivingPurchaseOrders(query) {
   return { purchaseOrders: result.rows.slice(0, 20), hasMore: result.rows.length > 20 };
 }
 
+async function findOpenPurchaseOrdersExpectingSkus(skus = [], options = {}) {
+  const values = [...new Set((Array.isArray(skus) ? skus : [])
+    .map((value) => nullableString(value)?.toLowerCase())
+    .filter(Boolean))].slice(0, 250);
+  const excludedPurchaseOrderId = nullableString(options.excludePurchaseOrderId);
+  const client = getPool();
+  if (!client || !values.length) return [];
+  await initRelationalSchema();
+  const result = await client.query(`
+    select
+      lower(coalesce(line.sku, '')) as lookup_sku,
+      line.sku,
+      purchase_order.po_id,
+      purchase_order.po_number,
+      purchase_order.supplier,
+      purchase_order.status,
+      purchase_order.warehouse_name,
+      coalesce(purchase_order.raw->>'expectedDeliveryDate', purchase_order.raw->>'expectedAt', '') as expected_at,
+      greatest(
+        0,
+        coalesce(line.qty, 0) - coalesce(line.received_qty, 0)
+          - case when coalesce(line.raw->>'reSourcedQty', '') ~ '^[0-9]+([.][0-9]+)?$' then (line.raw->>'reSourcedQty')::numeric else 0 end
+          - case when coalesce(line.raw->>'canceledQty', '') ~ '^[0-9]+([.][0-9]+)?$' then (line.raw->>'canceledQty')::numeric else 0 end
+      ) as remaining_qty
+    from purchase_order_line_items line
+    join purchase_order_records purchase_order on purchase_order.po_id = line.po_id
+    where lower(coalesce(line.sku, '')) = any($1::text[])
+      and ($2::text is null or purchase_order.po_id <> $2)
+      and lower(coalesce(purchase_order.status, '')) not in (
+        'received', 'closed', 'canceled', 'cancelled', 'rejected', 'superseded', 'deleted'
+      )
+      and greatest(
+        0,
+        coalesce(line.qty, 0) - coalesce(line.received_qty, 0)
+          - case when coalesce(line.raw->>'reSourcedQty', '') ~ '^[0-9]+([.][0-9]+)?$' then (line.raw->>'reSourcedQty')::numeric else 0 end
+          - case when coalesce(line.raw->>'canceledQty', '') ~ '^[0-9]+([.][0-9]+)?$' then (line.raw->>'canceledQty')::numeric else 0 end
+      ) > 0
+    order by lower(coalesce(line.sku, '')), coalesce(purchase_order.created_at, purchase_order.updated_at), purchase_order.po_id
+  `, [values, excludedPurchaseOrderId]);
+  return result.rows.map((row) => ({
+    sku: row.sku || "",
+    lookupSku: row.lookup_sku || "",
+    purchaseOrderId: row.po_id,
+    purchaseOrderNumber: row.po_number || row.po_id,
+    supplier: row.supplier || "Unassigned supplier",
+    status: row.status || "",
+    warehouseName: row.warehouse_name || "",
+    expectedAt: row.expected_at || "",
+    remainingQty: Number(row.remaining_qty || 0)
+  }));
+}
+
 async function listPurchaseOrders(options = {}) {
   const client = getPool();
   if (!client) return null;
@@ -20341,6 +20393,7 @@ module.exports = {
   readPurchaseOrdersByIds,
   findPurchaseOrderByExternalReference,
   searchReceivingPurchaseOrders,
+  findOpenPurchaseOrdersExpectingSkus,
   searchUniversal,
   quickSearchProducts,
   quickSearchOperations,
