@@ -37667,8 +37667,28 @@ async function applyReceiptAllocation(db, product, warehouse, receipt, options =
   const now = new Date().toISOString();
   const touchedPurchaseOrders = new Map();
   const touchedOrders = new Map();
+  const allocatedByOrder = new Map();
   let available = Math.max(0, Number(stock.qty || 0) - Number(stock.reserved || 0));
-  if (Number.isFinite(Number(options.maxAllocationQty))) available = Math.min(available, Math.max(0, Number(options.maxAllocationQty)));
+  const previouslyAllocatedByOrder = new Map();
+  let previouslyAllocatedQty = 0;
+  for (const order of orders) {
+    const allocationQty = (order.inventoryAllocations || []).filter((entry) => (
+      String(entry.receiptId || "") === String(receipt.id || "")
+        && (String(entry.productId || "") === String(product.id || "") || String(entry.sku || "").toLowerCase() === String(product.sku || "").toLowerCase())
+        && String(entry.status || "").toLowerCase() !== "released"
+    )).reduce((allocationSum, entry) => allocationSum + Math.max(0, Number(entry.qty || 0)), 0);
+    const routeQty = (order.fulfillmentRoutes || []).filter((route) => (
+      String(route.sourceReceiptId || "") === String(receipt.id || "")
+        && (String(route.productId || "") === String(product.id || "") || String(route.sku || "").toLowerCase() === String(product.sku || "").toLowerCase())
+        && !["canceled", "cancelled", "released", "void"].includes(String(route.status || "").toLowerCase())
+    )).reduce((routeSum, route) => routeSum + Math.max(0, Number(route.inventoryQty || route.qty || 0)), 0);
+    const orderQty = Math.max(allocationQty, routeQty);
+    if (orderQty > 0) previouslyAllocatedByOrder.set(String(order.id), { order, allocatedQty: orderQty });
+    previouslyAllocatedQty += orderQty;
+  }
+  if (Number.isFinite(Number(options.maxAllocationQty))) {
+    available = Math.min(available, Math.max(0, Number(options.maxAllocationQty) - previouslyAllocatedQty));
+  }
   let allocatedQty = 0;
   let poAdjustmentQty = 0;
   for (const candidate of candidates) {
@@ -37724,6 +37744,7 @@ async function applyReceiptAllocation(db, product, warehouse, receipt, options =
     recalculateOrderOperationalStatus(order);
     order.updatedAt = now;
     touchedOrders.set(order.id, order);
+    allocatedByOrder.set(String(order.id), Number(allocatedByOrder.get(String(order.id)) || 0) + qty);
     allocatedQty += qty;
     available -= qty;
   }
@@ -37737,7 +37758,60 @@ async function applyReceiptAllocation(db, product, warehouse, receipt, options =
   product.updatedAt = now;
   for (const order of touchedOrders.values()) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
   for (const po of touchedPurchaseOrders.values()) await postgres.savePurchaseOrder(po);
-  return { preview, allocatedQty, remainingQty: available, poAdjustmentQty, orders: [...touchedOrders.values()].map((order) => ({ id: order.id, orderNumber: order.orderNumber || order.id, operationalStatus: order.operationalStatus })) };
+  const allocationOrders = new Map([...previouslyAllocatedByOrder.entries()].map(([orderId, entry]) => [orderId, { id: entry.order.id, orderNumber: entry.order.orderNumber || entry.order.id, operationalStatus: entry.order.operationalStatus, allocatedQty: entry.allocatedQty, newlyAllocatedQty: 0 }]));
+  for (const order of touchedOrders.values()) {
+    const previous = allocationOrders.get(String(order.id)) || {};
+    const newlyAllocatedQty = Number(allocatedByOrder.get(String(order.id)) || 0);
+    allocationOrders.set(String(order.id), { ...previous, id: order.id, orderNumber: order.orderNumber || order.id, operationalStatus: order.operationalStatus, allocatedQty: Number(previous.allocatedQty || 0) + newlyAllocatedQty, newlyAllocatedQty });
+  }
+  return { preview, allocatedQty, previouslyAllocatedQty, totalAllocatedQty: previouslyAllocatedQty + allocatedQty, remainingQty: available, poAdjustmentQty, orders: [...allocationOrders.values()] };
+}
+
+async function allocatePurchaseOrderReceiptInventory(db, receipt, warehouse, products = [], options = {}) {
+  if (receipt.allocation?.status === "completed") return { ...receipt.allocation, duplicate: true };
+  const productBySku = new Map((products || []).map((product) => [String(product.sku || "").trim().toLowerCase(), product]).filter(([sku]) => sku));
+  const receivedBySku = new Map();
+  for (const item of receipt.items || []) {
+    if (String(item.inventoryStatus || "posted") !== "posted") continue;
+    const sku = String(item.sku || "").trim();
+    const quantity = Math.max(0, Number(item.inventoryQtyReceived || item.qtyReceived || 0));
+    if (!sku || !quantity) continue;
+    receivedBySku.set(sku.toLowerCase(), Number(receivedBySku.get(sku.toLowerCase()) || 0) + quantity);
+  }
+  const results = [];
+  const allocatedOrders = new Map();
+  let allocatedQty = 0;
+  let previouslyAllocatedQty = 0;
+  let poAdjustmentQty = 0;
+  for (const [skuKey, maxAllocationQty] of receivedBySku.entries()) {
+    let product = productBySku.get(skuKey);
+    if (!product) product = await postgres.readProductByKey(skuKey);
+    if (!product) continue;
+    productBySku.set(skuKey, product);
+    const result = await applyReceiptAllocation(db, product, warehouse, receipt, { user: options.user || "Warehouse", maxAllocationQty });
+    allocatedQty += Number(result.allocatedQty || 0);
+    previouslyAllocatedQty += Number(result.previouslyAllocatedQty || 0);
+    poAdjustmentQty += Number(result.poAdjustmentQty || 0);
+    for (const order of result.orders || []) {
+      const previous = allocatedOrders.get(String(order.id)) || {};
+      allocatedOrders.set(String(order.id), { ...previous, ...order, allocatedQty: Number(previous.allocatedQty || 0) + Number(order.allocatedQty || 0) });
+    }
+    results.push({ sku: product.sku, maxAllocationQty, ...result });
+  }
+  receipt.allocation = {
+    status: "completed",
+    allocatedAt: new Date().toISOString(),
+    allocatedBy: options.user || "Warehouse",
+    allocatedQty: allocatedQty + previouslyAllocatedQty,
+    newlyAllocatedQty: allocatedQty,
+    previouslyAllocatedQty,
+    totalAllocatedQty: allocatedQty + previouslyAllocatedQty,
+    poAdjustmentQty,
+    orderCount: allocatedOrders.size,
+    orders: [...allocatedOrders.values()],
+    products: results.map((result) => ({ sku: result.sku, receivedQty: result.maxAllocationQty, allocatedQty: result.allocatedQty, previouslyAllocatedQty: result.previouslyAllocatedQty }))
+  };
+  return { ...receipt.allocation, results, touchedProducts: [...productBySku.values()] };
 }
 
 function isPhysicalFulfillmentWarehouse(warehouse = {}) {
@@ -57057,13 +57131,19 @@ async function handleApi(req, res) {
       audit.approvedAt = now;
       audit.approvedBy = String(body.user || "Warehouse").trim() || "Warehouse";
       audit.appliedLines = (audit.lines || []).filter((line) => Number(line.countedQty || 0) > 0).length;
+      const linkedAllocation = linkedReceipt.allocation && typeof linkedReceipt.allocation === "object" ? linkedReceipt.allocation : null;
+      const allocatedQty = Number(linkedAllocation?.allocatedQty || 0);
       audit.disposition = {
-        type: "purchase_order_receipt",
-        label: "Received against DataPlus PO",
+        type: linkedAllocation ? "fulfill_orders" : "purchase_order_receipt",
+        label: linkedAllocation ? "Received against DataPlus PO and checked open orders" : "Received against DataPlus PO",
         purchaseOrderId: linkedPo.id,
         purchaseOrderNumber: linkedPo.poNumber,
         receiptId: linkedReceipt.id,
         receiptNumber: linkedReceipt.receiptNumber,
+        allocatedQty,
+        blockedQty: 0,
+        poAdjustmentQty: Number(linkedAllocation?.poAdjustmentQty || 0),
+        routedOrders: Array.isArray(linkedAllocation?.orders) ? linkedAllocation.orders : [],
         note: String(body.dispositionNote || linkedReceipt.note || "").trim(),
         appliedAt: now,
         appliedBy: audit.approvedBy
@@ -57072,7 +57152,7 @@ async function handleApi(req, res) {
       audit.updatedAt = now;
       await postgres.saveWarehouseAudit(audit);
       await syncPurchaseOrderReceivingProgress(audit, { clear: true });
-      return sendJson(res, 200, { audit, purchaseOrder: linkedPo, receipt: linkedReceipt, message: `${audit.auditNumber} completed and ${linkedReceipt.receiptNumber} was posted to ${linkedPo.poNumber}.` });
+      return sendJson(res, 200, { audit, purchaseOrder: linkedPo, receipt: linkedReceipt, message: `${audit.auditNumber} completed and ${linkedReceipt.receiptNumber} was posted to ${linkedPo.poNumber}.${linkedAllocation ? allocatedQty > 0 ? ` ${allocatedQty} received unit${allocatedQty === 1 ? " was" : "s were"} allocated to ${Number(linkedAllocation.orderCount || 0)} open order${Number(linkedAllocation.orderCount || 0) === 1 ? "" : "s"}.` : " No eligible open order demand remained." : ""}` });
     }
     const db = await readDbFast({ skipInventory: true });
     db.inventoryLedger = await postgres.readStateField("inventoryLedger").catch(() => []) || [];
@@ -62557,10 +62637,36 @@ async function handleApi(req, res) {
       clearOrderApiCache(linkedOrder.id);
     }
     if (releasedProducts.length) { const unique = [...new Map(releasedProducts.map((product) => [product.id, product])).values()]; await postgres.upsertProductsFromState(unique); await postgres.upsertInventoryLevelsFromProducts(unique); }
+    let allocationResult = null;
+    if (body.allocateOpenOrders === true && warehouse) {
+      const [purchaseRequirements, purchaseOrders, inventoryLedger] = await Promise.all([
+        postgres.readStateField("purchaseRequirements").catch(() => []),
+        postgres.listPurchaseOrders({ limit: 5000 }),
+        postgres.readStateField("inventoryLedger").catch(() => [])
+      ]);
+      db.purchaseRequirements = purchaseRequirements || [];
+      db.purchaseOrders = purchaseOrders || [];
+      db.inventoryLedger = inventoryLedger || [];
+      const allocationProducts = [...new Map(touchedProducts.map((product) => [String(product.sku || product.id), product])).values()];
+      allocationResult = await allocatePurchaseOrderReceiptInventory(db, receipt, warehouse, allocationProducts, { user: body.user || "Warehouse" });
+      const allocationTouchedProducts = allocationResult.touchedProducts || allocationProducts;
+      if (allocationTouchedProducts.length) {
+        await postgres.upsertProductsFromState(allocationTouchedProducts);
+        await postgres.upsertInventoryLevelsFromProducts(allocationTouchedProducts);
+      }
+      addPoTimeline(po, {
+        type: "receipt_allocation",
+        title: Number(allocationResult.allocatedQty || 0) > 0 ? "Received stock allocated" : "Open-order allocation checked",
+        message: Number(allocationResult.allocatedQty || 0) > 0
+          ? `${allocationResult.allocatedQty} received unit${Number(allocationResult.allocatedQty) === 1 ? " was" : "s were"} allocated to ${allocationResult.orderCount} eligible open order${Number(allocationResult.orderCount) === 1 ? "" : "s"}.${Number(allocationResult.poAdjustmentQty || 0) > 0 ? ` ${allocationResult.poAdjustmentQty} unit${Number(allocationResult.poAdjustmentQty) === 1 ? " requires" : "s require"} purchasing review.` : ""}`
+          : "No eligible open order demand remained after the receipt was posted. The stock remains available in the receiving warehouse.",
+        user: body.user || "Warehouse"
+      });
+    }
     await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [], purchaseRequirements: db.purchaseRequirements || [] });
     await postgres.savePurchaseOrder(po);
     await redisCache.deleteByPrefix("dataplus:purchasing:");
-    return sendJson(res, 200, { purchaseOrder: po, receipt, unresolvedHeldUnits, extraItemUnits });
+    return sendJson(res, 200, { purchaseOrder: po, receipt, unresolvedHeldUnits, extraItemUnits, allocation: allocationResult ? receipt.allocation : null });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "returns" && postgres.isPostgresEnabled()) {

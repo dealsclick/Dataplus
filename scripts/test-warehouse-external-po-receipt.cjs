@@ -15,6 +15,9 @@ assert.match(server, /purchase_order_receipt:\s*"DataPlus PO receipt"/, 'server 
 assert.match(server, /purchaseOrderExpectedLines/, 'linked PO receipts save their open expected lines');
 assert.match(server, /existingAuditReceipt/, 'PO receipt posting is idempotent by source audit');
 assert.match(server, /sourceAuditId/, 'PO receipts retain their inbound audit identity');
+assert.match(server, /allocatePurchaseOrderReceiptInventory/, 'PO receipts can allocate newly received inventory to eligible open orders');
+assert.match(server, /previouslyAllocatedQty/, 'receipt allocation retries subtract reservations already created by the same receipt');
+assert.match(server, /body\.allocateOpenOrders === true/, 'PO receipt allocation runs only when the operator explicitly selects it');
 assert.match(server, /extraItemStatus:\s*extraItem \? "unexpected_on_selected_po"/, 'PO receipts persist unexpected products as extra items');
 assert.match(server, /findOpenPurchaseOrdersExpectingSkus/, 'PO extra-item receipts check whether another open PO expects each SKU');
 assert.match(server, /syncPurchaseOrderReceivingProgress\(audit\)/, 'linked PO scans publish live receiving progress');
@@ -37,6 +40,8 @@ assert.match(warehouseUi, /compressEvidenceImage/, 'packing-slip photos are comp
 assert.match(warehouseUi, /Packing slip required/, 'the UI explains the packing-slip completion safeguard');
 assert.match(warehouseUi, /Extra item[\s\S]*Expected on another open PO/, 'linked PO receiving flags extra items and shows other open PO expectations');
 assert.match(warehouseUi, /Ready to post, not received yet/, 'the receipt preview clearly distinguishes saved scans from posted inventory');
+assert.match(warehouseUi, /Post receipt & allocate remaining/, 'linked PO audits offer an explicit receive-and-allocate outcome');
+assert.match(warehouseUi, /allocateOpenOrders: dispositionType === "fulfill_orders"/, 'linked PO audits send the selected allocation outcome to the receipt API');
 assert.match(warehouseUi, /Type \/ reference/, 'the audit register visibly identifies every audit type and PO reference');
 assert.match(warehouseUi, /All PO receipts/, 'the audit register can isolate DataPlus and external PO receipts');
 assert.match(warehouseUi, /Search audit, PO, supplier, or counter/, 'the audit register exposes operational search');
@@ -47,5 +52,7 @@ assert.match(db, /reason === "po_receipts"[\s\S]*purchase_order_receipt[\s\S]*ex
 assert.match(db, /linkedPurchaseOrderNumber[\s\S]*externalPurchaseOrderNumber/, 'audit summaries return PO references without loading full audit lines');
 assert.match(purchasingUi, /Receiving now[\s\S]*Receipt not posted yet/, 'the purchasing queue displays active warehouse receiving work');
 assert.match(purchaseOrderUi, /Receiving in progress[\s\S]*activeReceivingAudit\.scannedUnits/, 'the PO detail displays live scan progress');
+assert.match(purchaseOrderUi, /Allocate remaining received stock to additional open orders/, 'direct PO receiving exposes the open-order allocation option');
+assert.match(purchaseOrderUi, /allocateOpenOrders: receiptMode === "final" && allocateReceivedInventory/, 'draft receipts remain allocation-free and final receipts honor the operator choice');
 
 console.log('Inbound receiving supports linked and external POs, additive inventory, scanner reuse, packing-slip evidence, OCR comparison, and idempotent PO posting.');
