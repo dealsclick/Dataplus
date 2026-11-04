@@ -148,6 +148,7 @@ type PurchasingWorkData = {
   poolSummary?: Record<string, unknown>
   workflowSettings?: Record<string, unknown>
   pagination?: { page?: number; pageSize?: number; total?: number; totalPages?: number }
+  generatedAt?: string
 }
 
 function purchaseOrderHasSubmission(po: Record<string, unknown>) {
@@ -910,6 +911,8 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const [data, setData] = useState<PurchasingWorkData>(cachedPurchasingWork || {})
   const [loading, setLoading] = useState(!cachedPurchasingWork)
   const [initialLoadComplete, setInitialLoadComplete] = useState(false)
+  const receivingSyncCursorRef = useRef(new Date().toISOString())
+  const receivingSyncBusyRef = useRef(false)
   const [loadedHistoryScopes, setLoadedHistoryScopes] = useState<Set<string>>(new Set())
   const [historyLoadingScope, setHistoryLoadingScope] = useState("")
   const [creatingOrderId, setCreatingOrderId] = useState("")
@@ -984,6 +987,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   }
   const load = async () => {
     if (!readWorkspaceCache("purchasing:work")) setLoading(true)
+    const loadStartedAt = new Date().toISOString()
     try {
       const activeResult = await api<PurchasingWorkData>("/api/purchasing/work?pageSize=500")
       const activePurchaseOrders = await loadRemainingPurchaseOrderPages(activeResult)
@@ -992,8 +996,38 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
         purchaseOrders: activePurchaseOrders,
       })
       writeWorkspaceCache("purchasing:work", activeResult)
+      receivingSyncCursorRef.current = loadStartedAt
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load purchasing work.") }
     finally { setLoading(false); setInitialLoadComplete(true) }
+  }
+  const syncReceivingChanges = async () => {
+    if (receivingSyncBusyRef.current || document.visibilityState !== "visible") return
+    receivingSyncBusyRef.current = true
+    const since = receivingSyncCursorRef.current
+    try {
+      const result = await api<{ updates?: Array<Record<string, unknown>>; cursor?: string }>(`/api/purchasing/receiving-sync?${new URLSearchParams({ since })}`)
+      const updates = result.updates || []
+      if (updates.length) {
+        const updatesById = new Map(updates.map((update) => [String(update.id || ""), update]))
+        setData((current) => ({
+          ...current,
+          purchaseOrders: (current.purchaseOrders || []).map((po) => {
+            const update = updatesById.get(String(po.id || ""))
+            return update ? { ...po, ...update } : po
+          })
+        }))
+        setQuickViewPo((current) => {
+          if (!current) return current
+          const update = updatesById.get(String(current.id || ""))
+          return update ? { ...current, ...update } : current
+        })
+      }
+      receivingSyncCursorRef.current = String(result.cursor || new Date().toISOString())
+    } catch {
+      // The next poll retries from the same cursor; ordinary receiving remains available.
+    } finally {
+      receivingSyncBusyRef.current = false
+    }
   }
   const loadHistoryScope = async (scope: string, page = 1) => {
     if (!purchasingHistoryStatusesByScope[scope]) return
@@ -1022,6 +1056,13 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   useEffect(() => {
     if (initialLoadComplete && purchasingHistoryStatusesByScope[tab]) void loadHistoryScope(tab, currentPage)
   }, [tab, currentPage, initialLoadComplete])
+  useEffect(() => {
+    if (!initialLoadComplete) return
+    const timer = window.setInterval(() => { void syncReceivingChanges() }, 10000)
+    const handleVisibility = () => { if (document.visibilityState === "visible") void syncReceivingChanges() }
+    document.addEventListener("visibilitychange", handleVisibility)
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", handleVisibility) }
+  }, [initialLoadComplete])
   useEffect(() => {
     if (!quickViewPo) return
     setQuickViewStatusAction("")
@@ -1226,7 +1267,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const waitingSupplierGroups = groupWaitingPurchaseOrders(collectingPurchaseOrders)
   const waitingOrderIds = new Set(collectingPurchaseOrders.flatMap((po) => purchaseOrderItems(po).map((line) => String(line.orderId || "")).filter(Boolean)))
   const waitingUnits = collectingPurchaseOrders.reduce((sum, po) => sum + purchaseOrderItems(po).reduce((lineSum, line) => lineSum + Number(line.qty || 0), 0), 0)
-  const receivingPos = allPos.filter((po) => !isDropshipPo(po) && (["partially_received", "receiving"].includes(String(po.status || "").toLowerCase()) || (Array.isArray(po.receiptDrafts) && po.receiptDrafts.length > 0)))
+  const receivingPos = allPos.filter((po) => !isDropshipPo(po) && (["partially_received", "receiving"].includes(String(po.status || "").toLowerCase()) || Boolean((po.activeReceivingAudit as Record<string, unknown> | undefined)?.auditId) || (Array.isArray(po.receiptDrafts) && po.receiptDrafts.length > 0)))
   const incomingPos = allPos.filter((po) => !isDropshipPo(po) && !receivingPos.includes(po) && (String(po.status || "").toLowerCase() === "in_transit" || String(po.workflowStage || "").toLowerCase() === "incoming"))
   const awaitingTrackingPos = allPos.filter((po) => {
     const status = String(po.status || "").toLowerCase()
@@ -1462,7 +1503,10 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
         {!inboundPos.length && <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">No warehouse purchase orders are currently inbound.</TableCell></TableRow>}
       </TableBody></Table></div></CardContent></Card></TabsContent>
       <TabsContent value="receiving" className="mt-4"><Card><CardHeader className="border-b"><CardTitle className="text-base">Receiving</CardTitle><CardDescription>Purchase orders where a warehouse count has started or stock was partially received. Open a PO to receive the remaining quantities.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Destination</TableHead><TableHead>Orders</TableHead><TableHead>Units</TableHead><TableHead>Status</TableHead><TableHead>Expected</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
-        {pageRows(receivingPos, "receiving").map((po) => <TableRow key={String(po.id)}><TableCell className="font-medium"><a className="hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>{String(po.poNumber || po.id)}</a></TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell>{String(po.warehouseName || "-")}</TableCell><TableCell>{numberLabel(Array.isArray(po.orderIds) ? po.orderIds.length : 0)}</TableCell><TableCell>{numberLabel(Number(po.totalUnits || 0))}</TableCell><TableCell><Badge variant="secondary">{String(po.status || "receiving").replace(/_/g, " ")}</Badge></TableCell><TableCell>{po.expectedAt ? dateLabel(String(po.expectedAt)) : "-"}</TableCell><TableCell className="text-right"><Button size="sm" asChild><a href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>Receive PO</a></Button></TableCell></TableRow>)}
+        {pageRows(receivingPos, "receiving").map((po) => {
+          const progress = (po.activeReceivingAudit || {}) as Record<string, unknown>
+          return <TableRow key={String(po.id)}><TableCell className="font-medium"><a className="hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>{String(po.poNumber || po.id)}</a>{progress.auditNumber ? <p className="mt-1 text-xs text-emerald-700 dark:text-emerald-300">{String(progress.auditNumber)}</p> : null}</TableCell><TableCell>{String(po.supplier || "Unassigned")}</TableCell><TableCell>{String(po.warehouseName || "-")}</TableCell><TableCell>{numberLabel(Array.isArray(po.orderIds) ? po.orderIds.length : 0)}</TableCell><TableCell>{numberLabel(Number(po.totalUnits || 0))}</TableCell><TableCell>{progress.auditId ? <div className="grid gap-1"><Badge variant="success" className="w-fit">Receiving now</Badge><span className="text-xs text-muted-foreground">{numberLabel(Number(progress.scannedUnits || 0))} scanned · {String(progress.startedBy || "Warehouse user")}</span><span className="text-xs font-medium text-amber-700 dark:text-amber-300">Receipt not posted yet</span></div> : <Badge variant="secondary">{String(po.status || "receiving").replace(/_/g, " ")}</Badge>}</TableCell><TableCell>{po.expectedAt ? dateLabel(String(po.expectedAt)) : "-"}</TableCell><TableCell className="text-right"><Button size="sm" asChild><a href={`/purchase-orders/${encodeURIComponent(String(po.id || ""))}`}>{progress.auditId ? "View progress" : "Receive PO"}</a></Button></TableCell></TableRow>
+        })}
         {!receivingPos.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No purchase orders are currently being received.</TableCell></TableRow>}
       </TableBody></Table></div></CardContent></Card></TabsContent>
       <TabsContent value="rejected" className="mt-4"><Card><CardHeader className="border-b"><CardTitle className="text-base">Rejected purchase orders</CardTitle><CardDescription>Rejected POs were declined before supplier commitment. They remain separate from canceled POs and retain the buyer's selected disposition for linked demand.</CardDescription></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>PO</TableHead><TableHead>Supplier</TableHead><TableHead>Order#</TableHead><TableHead>Disposition</TableHead><TableHead>Reason</TableHead><TableHead>Rejected by</TableHead><TableHead>Date</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>

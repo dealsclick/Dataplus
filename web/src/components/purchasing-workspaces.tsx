@@ -778,6 +778,7 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
   const [scanMessage, setScanMessage] = useState("")
   const scanRef = useRef<HTMLInputElement>(null)
   const openedMobileReceipt = useRef(false)
+  const detailSyncBusyRef = useRef(false)
   const id = mobileId || decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
   const [data, setData] = useState<{ purchaseOrder?: Record<string, unknown>; linkedOrders?: Array<Record<string, unknown>>; dropshipShipFromWarehouse?: Record<string, unknown> | null; shipFromWarehouses?: Array<Record<string, unknown>>; fulfillmentSettings?: Record<string, unknown>; supplierSubmission?: SupplierSubmissionCapability }>({})
   const [loading, setLoading] = useState(true)
@@ -845,12 +846,12 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
   const dropshipServiceOptions = enabledCarrierServices(fulfillmentCarriers, dropshipTracking.carrier, dropshipTracking.service)
   const inboundServiceOptions = enabledCarrierServices(fulfillmentCarriers, inboundTracking.carrier, inboundTracking.service)
   const [documentDraft, setDocumentDraft] = useState({ name: "", url: "", type: "supplier acknowledgement", note: "" })
-  const load = async (initial = false) => {
+  const load = async (initial = false, silent = false) => {
     if (initial) setLoading(true)
-    else setRefreshing(true)
+    else if (!silent) setRefreshing(true)
     try { setData(await api(`/api/purchase-orders/${encodeURIComponent(id)}`)) }
-    catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load purchase order.") }
-    finally { setLoading(false); setRefreshing(false) }
+    catch (error) { if (!silent) toast.error(error instanceof Error ? error.message : "Unable to load purchase order.") }
+    finally { setLoading(false); if (!silent) setRefreshing(false) }
   }
   const loadReferenceData = async () => {
     if (referenceData.vendors?.length && referenceData.warehouses?.length) return
@@ -858,6 +859,17 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
     catch { toast.error("Unable to load supplier and warehouse choices.") }
   }
   useEffect(() => { void load(true) }, [id])
+  useEffect(() => {
+    const sync = async () => {
+      if (detailSyncBusyRef.current || document.visibilityState !== "visible") return
+      detailSyncBusyRef.current = true
+      try { await load(false, true) } finally { detailSyncBusyRef.current = false }
+    }
+    const timer = window.setInterval(() => { void sync() }, 8000)
+    const handleVisibility = () => { if (document.visibilityState === "visible") void sync() }
+    document.addEventListener("visibilitychange", handleVisibility)
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", handleVisibility) }
+  }, [id])
   useEffect(() => {
     if (!catalogLine || catalogLineMode !== "link" || catalogLineQuery.trim().length < 2) { setCatalogLineResults([]); return }
     const controller = new AbortController()
@@ -876,6 +888,8 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
   const shipFromWarehouses = data.shipFromWarehouses || (data.dropshipShipFromWarehouse ? [data.dropshipShipFromWarehouse] : [])
   const defaultShipFromWarehouseId = String(data.fulfillmentSettings?.defaultShipFromWarehouseId || "")
   const lines = Array.isArray(po.items) ? po.items as Array<Record<string, unknown>> : Array.isArray(po.lines) ? po.lines as Array<Record<string, unknown>> : []
+  const activeReceivingAudit = (po.activeReceivingAudit || {}) as Record<string, unknown>
+  const activeReceivingNotice = activeReceivingAudit.auditId ? <Alert className="border-emerald-500/40 bg-emerald-500/5"><PackageCheck className="size-4" /><AlertTitle>Receiving in progress · {String(activeReceivingAudit.auditNumber || "Warehouse audit")}</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>{numberLabel(Number(activeReceivingAudit.scannedUnits || 0))} unit{Number(activeReceivingAudit.scannedUnits || 0) === 1 ? "" : "s"} scanned by {String(activeReceivingAudit.startedBy || "a warehouse user")} at {String(activeReceivingAudit.warehouseName || po.warehouseName || "the receiving warehouse")}. This is live count progress; inventory and PO received quantities will update only after Post PO receipt is completed.</span><Button size="sm" variant="outline" asChild><a href={`/warehouse/mobile/audits/${encodeURIComponent(String(activeReceivingAudit.auditId))}`}>Open receiving audit</a></Button></AlertDescription></Alert> : null
   const unresolvedCatalogLines = lines.map((line, index) => ({ line, index })).filter(({ line }) => !String(line.sku || "").trim() || line.resolutionStatus === "unresolved")
   const receivingExceptions = Array.isArray(po.receivingExceptions) ? po.receivingExceptions as Array<Record<string, unknown>> : []
   const canceledDemandExceptions = receivingExceptions.filter((entry) => String(entry.type || "") === "canceled_customer_demand" && !["resolved", "returned", "closed"].includes(String(entry.status || "open")))
@@ -1134,7 +1148,7 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
       </AlertDialogContent>
     </AlertDialog>
   )
-  if (mobile && !loading) return <div className="grid gap-4"><h1 className="text-xl font-semibold">{String(po.poNumber || id)}</h1><p>{String(po.supplier || "")} · {String(po.warehouseName || "")}</p>{!po.id ? <Alert variant="destructive"><AlertTitle>PO unavailable</AlertTitle><AlertDescription>Check your access or retry.<Button variant="outline" onClick={() => void load()}>Retry</Button></AlertDescription></Alert> : <><p className="text-sm text-muted-foreground">{String(po.status || "").replaceAll("_", " ")} · {lines.reduce((total, line) => total + purchaseOrderLineRemaining(line), 0)} units remaining</p><div className="flex flex-wrap gap-2"><Button disabled={saving || ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(po.status).toLowerCase())} onClick={openReceiving}>Scan / receive items</Button>{lines.some((line) => Number(line.receivedQty || 0) > 0) ? <Button variant="outline" onClick={openReceiptCorrection}>Correct receipt</Button> : null}{!purchaseOrderHasSubmission(po) && String(po.status || "").toLowerCase() !== "deleted" ? <Button variant="destructive" onClick={() => { setDeletePoReason(""); setDeletePoOpen(true) }}><Trash2 className="size-4" /> Delete test PO</Button> : null}</div>{lines.map((line, index) => <Card key={purchaseOrderLineKey(line, index)}><CardContent className="grid gap-2 p-4"><strong>{String(line.sku)}</strong><p className="text-sm" title={String(line.title || "")}>{compactPurchaseItemTitle(line.title)}</p><p>{purchaseOrderLineRemaining(line)} remaining</p></CardContent></Card>)}{receivingDialog}{receiptCorrectionDialog}{deletePoDialog}</>}</div>
+  if (mobile && !loading) return <div className="grid gap-4"><h1 className="text-xl font-semibold">{String(po.poNumber || id)}</h1><p>{String(po.supplier || "")} · {String(po.warehouseName || "")}</p>{!po.id ? <Alert variant="destructive"><AlertTitle>PO unavailable</AlertTitle><AlertDescription>Check your access or retry.<Button variant="outline" onClick={() => void load()}>Retry</Button></AlertDescription></Alert> : <>{activeReceivingNotice}<p className="text-sm text-muted-foreground">{String(po.status || "").replaceAll("_", " ")} · {lines.reduce((total, line) => total + purchaseOrderLineRemaining(line), 0)} units remaining</p><div className="flex flex-wrap gap-2"><Button disabled={saving || ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(po.status).toLowerCase())} onClick={openReceiving}>Scan / receive items</Button>{lines.some((line) => Number(line.receivedQty || 0) > 0) ? <Button variant="outline" onClick={openReceiptCorrection}>Correct receipt</Button> : null}{!purchaseOrderHasSubmission(po) && String(po.status || "").toLowerCase() !== "deleted" ? <Button variant="destructive" onClick={() => { setDeletePoReason(""); setDeletePoOpen(true) }}><Trash2 className="size-4" /> Delete test PO</Button> : null}</div>{lines.map((line, index) => <Card key={purchaseOrderLineKey(line, index)}><CardContent className="grid gap-2 p-4"><strong>{String(line.sku)}</strong><p className="text-sm" title={String(line.title || "")}>{compactPurchaseItemTitle(line.title)}</p><p>{purchaseOrderLineRemaining(line)} remaining</p></CardContent></Card>)}{receivingDialog}{receiptCorrectionDialog}{deletePoDialog}</>}</div>
   if (loading) return <div className="grid gap-3"><Skeleton className="h-28" /><Skeleton className="h-64" /></div>
   const receipts = Array.isArray(po.receipts) ? po.receipts as Array<Record<string, unknown>> : []
   const history = Array.isArray(po.timeline) ? po.timeline as Array<Record<string, unknown>> : []
@@ -1244,6 +1258,7 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
     <PurchaseOrderProgress po={po} />
     {draftMissingFields.length > 0 ? <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Draft saved, details still needed</AlertTitle><AlertDescription className="flex flex-wrap items-start justify-between gap-3"><span>{draftMissingFields.join(" ")} You can keep editing this draft, but it cannot be approved or sent yet.</span><Button size="sm" variant="outline" onClick={openEditor}><Pencil className="size-4" /> Continue draft</Button></AlertDescription></Alert> : null}
     <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-5"><Detail label="Status" value={String(po.status || "draft").replace(/_/g, " ")} /><Detail label="Supplier" value={String(po.supplier || "Unassigned")} />{ctechId ? <Detail label="CTech PO #" value={ctechId} /> : null}{po.placedFromExternalSource === true ? <Detail label={`${String(po.externalSourceSystem || "External source")} PO #`} value={String(po.externalPoNumber || "Not recorded")} /> : null}<Detail label="Destination" value={String(po.warehouseName || "-")} /><Detail label="Units" value={numberLabel(Number(po.totalUnits || lines.reduce((sum, line) => sum + Number(line.qty || 0), 0)))} /><Detail label="Created by" value={String(po.creationActor || po.createdBy || "System")} /><Detail label="Creation path" value={String(po.creationOperation || po.source || "manual").replace(/_/g, " ")} /><Detail label="Merchandise cost" value={moneyLabel(Number(po.merchandiseCost ?? po.estimatedCost ?? 0))} /><Detail label="Dropship fee" value={moneyLabel(Number(po.dropShipFee || 0))} /><Detail label="Total PO cost" value={moneyLabel(Number(po.estimatedTotalCost ?? po.estimatedCost ?? 0))} /><Detail label="Expected delivery" value={purchaseScheduleDateLabel(po.expectedDeliveryDate || po.expectedAt)} /></div>
+    {activeReceivingNotice}
     {!isDropship && purchaseOrderHasSubmission(po) && !["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase()) ? <Alert className="border-blue-500/30 bg-blue-500/5"><Truck className="size-4" /><AlertTitle>{po.noTrackingNeeded === true ? "Incoming without tracking" : po.trackingNumber ? "Inbound shipment tracking" : "Awaiting supplier tracking"}</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>{po.noTrackingNeeded === true ? `${String(po.supplier || "The supplier")} does not provide tracking. Start receiving when this PO arrives${po.expectedAt ? `; expected ${purchaseScheduleDateLabel(po.expectedAt)}` : ""}.` : po.trackingNumber ? `${String(po.shippingCarrier || "Carrier")} ${String(po.trackingNumber)} is shipping to ${String(po.warehouseName || "the receiving warehouse")}.` : `Record tracking when ${String(po.supplier || "the supplier")} ships this PO to ${String(po.warehouseName || "the receiving warehouse")}.`}</span><span className="flex flex-wrap gap-2">{canMarkInbound ? <Button size="sm" onClick={() => void markInbound()}><Truck className="size-4" /> Mark inbound</Button> : null}{po.noTrackingNeeded === true ? null : <Button size="sm" variant="outline" onClick={openInboundTracking}>{po.trackingNumber ? "Edit inbound tracking" : "Add inbound tracking"}</Button>}</span></AlertDescription></Alert> : null}
     {supplierAmendment.status === "pending_supplier_confirmation" ? <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Supplier amendment pending</AlertTitle><AlertDescription>This sent PO was changed in DataPlus. Send the amendment to the supplier and record their acknowledgement before relying on the revised quantities or dates.</AlertDescription></Alert> : null}
     <Alert variant={nextStep.variant === "destructive" ? "destructive" : "default"} className={nextStep.variant === "default" ? "border-blue-500/30 bg-blue-500/5" : nextStep.variant === "secondary" ? "border-muted-foreground/20 bg-muted/40" : ""}>

@@ -13480,6 +13480,81 @@ async function savePurchaseOrder(po = {}, options = {}) {
   return upsertPurchaseOrdersFromState([po], { ...options, replace: false });
 }
 
+async function updatePurchaseOrderReceivingProgress(purchaseOrderId = "", progress = null) {
+  const client = getPool();
+  const poId = nullableString(purchaseOrderId);
+  if (!client || !poId) return null;
+  await initRelationalSchema();
+  const result = progress && typeof progress === "object"
+    ? await client.query(`
+        update purchase_order_records
+        set raw = jsonb_set(coalesce(raw, '{}'::jsonb), '{activeReceivingAudit}', $2::jsonb, true),
+          updated_at = now()
+        where po_id = $1
+        returning po_id, status, received_units, received_at, updated_at,
+          raw->'activeReceivingAudit' as active_receiving_audit,
+          raw->>'workflowStage' as workflow_stage,
+          raw->>'lastReceiptAt' as last_receipt_at,
+          raw->>'extraReceivedUnits' as extra_received_units
+      `, [poId, JSON.stringify(progress)])
+    : await client.query(`
+        update purchase_order_records
+        set raw = coalesce(raw, '{}'::jsonb) - 'activeReceivingAudit',
+          updated_at = now()
+        where po_id = $1
+        returning po_id, status, received_units, received_at, updated_at,
+          null::jsonb as active_receiving_audit,
+          raw->>'workflowStage' as workflow_stage,
+          raw->>'lastReceiptAt' as last_receipt_at,
+          raw->>'extraReceivedUnits' as extra_received_units
+      `, [poId]);
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    id: row.po_id,
+    status: row.status || "",
+    receivedUnits: Number(row.received_units || 0),
+    receivedAt: row.received_at?.toISOString?.().slice(0, 10) || "",
+    updatedAt: row.updated_at?.toISOString?.() || row.updated_at || "",
+    activeReceivingAudit: row.active_receiving_audit || null,
+    workflowStage: row.workflow_stage || "",
+    lastReceiptAt: row.last_receipt_at || "",
+    extraReceivedUnits: Number(row.extra_received_units || 0)
+  };
+}
+
+async function listPurchaseOrderUpdatesSince(since = "", options = {}) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const parsedSince = new Date(String(since || ""));
+  const fallbackSince = new Date(Date.now() - 5 * 60 * 1000);
+  const sinceIso = Number.isNaN(parsedSince.getTime()) ? fallbackSince.toISOString() : parsedSince.toISOString();
+  const limit = Math.max(1, Math.min(1000, Number(options.limit || 500)));
+  const result = await client.query(`
+    select po_id, status, received_units, received_at, updated_at,
+      raw->'activeReceivingAudit' as active_receiving_audit,
+      raw->>'workflowStage' as workflow_stage,
+      raw->>'lastReceiptAt' as last_receipt_at,
+      raw->>'extraReceivedUnits' as extra_received_units
+    from purchase_order_records
+    where updated_at >= $1::timestamptz
+    order by updated_at, po_id
+    limit $2
+  `, [sinceIso, limit]);
+  return result.rows.map((row) => ({
+    id: row.po_id,
+    status: row.status || "",
+    receivedUnits: Number(row.received_units || 0),
+    receivedAt: row.received_at?.toISOString?.().slice(0, 10) || "",
+    updatedAt: row.updated_at?.toISOString?.() || row.updated_at || "",
+    activeReceivingAudit: row.active_receiving_audit || null,
+    workflowStage: row.workflow_stage || "",
+    lastReceiptAt: row.last_receipt_at || "",
+    extraReceivedUnits: Number(row.extra_received_units || 0)
+  }));
+}
+
 async function readPurchaseOrderCreationRequest(requestKey) {
   const client = getPool();
   const key = nullableString(requestKey);
@@ -20512,6 +20587,8 @@ module.exports = {
   replaceProductQualityRows,
   saveOrder,
   savePurchaseOrder,
+  updatePurchaseOrderReceivingProgress,
+  listPurchaseOrderUpdatesSince,
   readPurchaseOrderCreationRequest,
   prunePurchaseOrderCreationRequests,
   savePurchaseOrderMutation,

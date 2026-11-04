@@ -45832,6 +45832,40 @@ function auditExpectedQuantity(product, audit, locationBin = "") {
   return Array.isArray(product?.warehouseStock) && product.warehouseStock.length ? 0 : Number(product?.qty || 0);
 }
 
+function purchaseOrderReceivingProgressFromAudit(audit = {}) {
+  const countedLines = (Array.isArray(audit.lines) ? audit.lines : []).filter((line) => Number(line.countedQty || 0) > 0);
+  const unknownBarcodes = (Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes : []).filter((entry) => Number(entry.count || 0) > 0);
+  const scannedUnits = countedLines.reduce((sum, line) => sum + Number(line.countedQty || 0), 0);
+  const unknownUnits = unknownBarcodes.reduce((sum, entry) => sum + Number(entry.count || 0), 0);
+  const documents = Array.isArray(audit.receivingDocuments) ? audit.receivingDocuments : [];
+  return {
+    auditId: String(audit.id || ""),
+    auditNumber: String(audit.auditNumber || ""),
+    status: String(audit.status || "in_progress"),
+    startedAt: String(audit.createdAt || audit.purchaseOrderLinkedAt || ""),
+    startedBy: String(audit.createdBy || "Warehouse user"),
+    updatedAt: String(audit.updatedAt || audit.createdAt || new Date().toISOString()),
+    warehouseId: String(audit.warehouseId || ""),
+    warehouseName: String(audit.warehouseName || ""),
+    scannedUnits: scannedUnits + unknownUnits,
+    matchedUnits: scannedUnits,
+    unknownUnits,
+    scannedSkuCount: countedLines.length,
+    unknownBarcodeCount: unknownBarcodes.length,
+    documentCount: documents.length,
+    packingSlipCount: documents.filter((document) => String(document.documentType || "") === "packing_slip").length,
+    receiptPosted: false
+  };
+}
+
+async function syncPurchaseOrderReceivingProgress(audit = {}, options = {}) {
+  if (String(audit.reason || "") !== "purchase_order_receipt" || !audit.linkedPurchaseOrderId) return null;
+  return postgres.updatePurchaseOrderReceivingProgress(
+    String(audit.linkedPurchaseOrderId),
+    options.clear === true ? null : purchaseOrderReceivingProgressFromAudit(audit)
+  );
+}
+
 function normalizeReturnAttachment(file = {}, user = "Luis") {
   return {
     id: file.id || crypto.randomUUID(),
@@ -56050,6 +56084,7 @@ async function handleApi(req, res) {
     const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", reason, reasonLabel: reasonOptions[reason], supplierId, supplierName, externalPurchaseOrderNumber, linkedPurchaseOrderId: String(linkedPurchaseOrder?.id || ""), linkedPurchaseOrderNumber: String(linkedPurchaseOrder?.poNumber || ""), purchaseOrderLinkedAt: linkedPurchaseOrder ? now : "", purchaseOrderExpectedLines, receivingDocuments: [], packingSlipReview: null, warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], createdAt: now, createdBy: body.user || "Luis", reviewer: String(body.reviewer || "").trim() };
     audits.unshift(audit);
     await postgres.saveWarehouseAudit(audit);
+    await syncPurchaseOrderReceivingProgress(audit);
     return sendJson(res, 201, { audit, message: `${audit.auditNumber} started.` });
   }
 
@@ -56101,6 +56136,7 @@ async function handleApi(req, res) {
     audit.receivingDocuments.push(document);
     audit.updatedAt = document.createdAt;
     await postgres.saveWarehouseAudit(audit);
+    await syncPurchaseOrderReceivingProgress(audit);
     return sendJson(res, 201, { audit, document, message: `${name} added to ${audit.auditNumber}.` });
   }
 
@@ -56592,6 +56628,7 @@ async function handleApi(req, res) {
       if (localLineIndex >= 0) audit.lines[localLineIndex] = savedLine;
       else (audit.lines || (audit.lines = [])).push(savedLine);
       audit.updatedAt = now;
+      await syncPurchaseOrderReceivingProgress(audit);
       return sendJson(res, 200, {
         audit,
         product: { ...product, uom: scannedUomInfo.code, uomName: scannedUomInfo.name, uomQty: scannedUomInfo.qty, casePack: scannedUomInfo.qty, uomDisplay: scannedUomInfo.display },
@@ -56610,6 +56647,7 @@ async function handleApi(req, res) {
     if (!unknownResult) return sendJson(res, 500, { error: "The unknown barcode could not be saved." });
     audit.unknownBarcodes = unknownResult.unknownBarcodes;
     audit.updatedAt = now;
+    await syncPurchaseOrderReceivingProgress(audit);
     return sendJson(res, 200, { audit, matched: false, barcode, sourceItem: lookup.sourceItem, message: lookup.sourceItem ? `${barcode} was found in the source catalog as ${lookup.sourceItem.sku || lookup.sourceItem.vendorSku || "a source SKU"}, but is not yet an approved catalog SKU.` : `${barcode} saved as an unknown UPC.` });
   }
 
@@ -56729,6 +56767,7 @@ async function handleApi(req, res) {
     };
     audit.updatedAt = audit.submittedForReviewAt;
     await postgres.saveWarehouseAudit(audit);
+    await syncPurchaseOrderReceivingProgress(audit);
     return sendJson(res, 200, { audit, message: `${audit.auditNumber} is ready for review. Inventory has not been changed.` });
   }
 
@@ -56743,6 +56782,7 @@ async function handleApi(req, res) {
     audit.returnNote = String(body.note || "").trim();
     audit.updatedAt = audit.returnedForCountAt;
     await postgres.saveWarehouseAudit(audit);
+    await syncPurchaseOrderReceivingProgress(audit);
     return sendJson(res, 200, { audit, message: `${audit.auditNumber} was returned to counting. Inventory remains unchanged.` });
   }
 
@@ -56937,6 +56977,7 @@ async function handleApi(req, res) {
     line.countAdjustments = [...(Array.isArray(line.countAdjustments) ? line.countAdjustments : []), adjustment].slice(-50);
     audit.updatedAt = now;
     await postgres.saveWarehouseAudit(audit);
+    await syncPurchaseOrderReceivingProgress(audit);
     return sendJson(res, 200, { audit, line, message: `${line.sku || "Audit line"} saved: ${countedQty} counted in ${locationBin || "no bin"}.` });
   }
 
@@ -56963,6 +57004,7 @@ async function handleApi(req, res) {
       audit.returnNote = line.reviewNote || `Recount requested for ${line.sku || "audit line"}.`;
     }
     await postgres.saveWarehouseAudit(audit);
+    await syncPurchaseOrderReceivingProgress(audit);
     return sendJson(res, 200, { audit, line, message: decision === "recount" ? `${audit.auditNumber} was returned to counting for ${line.sku}.` : `${line.sku || "Audit line"} marked ${decision}.` });
   }
 
@@ -57007,6 +57049,7 @@ async function handleApi(req, res) {
       audit.lifecycleEvents = [...(Array.isArray(audit.lifecycleEvents) ? audit.lifecycleEvents : []), { type: "purchase_order_receipt_posted", at: now, user: audit.approvedBy, purchaseOrderId: linkedPo.id, purchaseOrderNumber: linkedPo.poNumber, receiptId: linkedReceipt.id, receiptNumber: linkedReceipt.receiptNumber }].slice(-100);
       audit.updatedAt = now;
       await postgres.saveWarehouseAudit(audit);
+      await syncPurchaseOrderReceivingProgress(audit, { clear: true });
       return sendJson(res, 200, { audit, purchaseOrder: linkedPo, receipt: linkedReceipt, message: `${audit.auditNumber} completed and ${linkedReceipt.receiptNumber} was posted to ${linkedPo.poNumber}.` });
     }
     const db = await readDbFast({ skipInventory: true });
@@ -58594,6 +58637,13 @@ async function handleApi(req, res) {
     if (!query) return sendJson(res, 200, { purchaseOrders: [], hasMore: false });
     if (query.length > 120) return sendJson(res, 400, { error: "Use a search of 120 characters or fewer." });
     return sendJson(res, 200, await postgres.searchReceivingPurchaseOrders(query));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/purchasing/receiving-sync" && postgres.isPostgresEnabled()) {
+    const cursor = new Date().toISOString();
+    const since = String(url.searchParams.get("since") || "").trim();
+    const updates = await postgres.listPurchaseOrderUpdatesSince(since, { limit: 1000 });
+    return sendJson(res, 200, { updates, cursor });
   }
 
   if (req.method === "GET" && url.pathname === "/api/purchasing/work" && postgres.isPostgresEnabled()) {
@@ -62184,7 +62234,14 @@ async function handleApi(req, res) {
     const existingAuditReceipt = sourceAuditId
       ? [...(Array.isArray(po.receipts) ? po.receipts : []), ...(Array.isArray(po.receiptDrafts) ? po.receiptDrafts : [])].find((receipt) => String(receipt.sourceAuditId || "") === sourceAuditId)
       : null;
-    if (existingAuditReceipt) return sendJson(res, 200, { purchaseOrder: po, receipt: existingAuditReceipt, duplicate: true, message: `${existingAuditReceipt.receiptNumber || "Receipt"} was already posted from this inbound receiving audit.` });
+    if (existingAuditReceipt) {
+      if (String(po.activeReceivingAudit?.auditId || "") === sourceAuditId) {
+        delete po.activeReceivingAudit;
+        po.updatedAt = new Date().toISOString();
+        await postgres.savePurchaseOrder(po);
+      }
+      return sendJson(res, 200, { purchaseOrder: po, receipt: existingAuditReceipt, duplicate: true, message: `${existingAuditReceipt.receiptNumber || "Receipt"} was already posted from this inbound receiving audit.` });
+    }
     const sourceAudit = sourceAuditId ? await postgres.readWarehouseAudit(sourceAuditId) : null;
     if (sourceAuditId && !sourceAudit) return sendJson(res, 404, { error: "The linked inbound receiving audit no longer exists." });
     if (sourceAudit && String(sourceAudit.linkedPurchaseOrderId || "") !== String(po.id || "")) return sendJson(res, 409, { error: "This inbound receiving audit is linked to a different purchase order." });
@@ -62424,6 +62481,7 @@ async function handleApi(req, res) {
     po.openEstimatedCost = purchaseOrderOpenCommitment(po);
     if (orderedReceivedUnits > 0) po.receivedAt = receivedAt;
     po.lastReceiptAt = receivedAt;
+    if (sourceAuditId && String(po.activeReceivingAudit?.auditId || "") === sourceAuditId) delete po.activeReceivingAudit;
     po.updatedAt = new Date().toISOString();
     addPoTimeline(po, {
       type: "received",
@@ -62479,6 +62537,7 @@ async function handleApi(req, res) {
     if (releasedProducts.length) { const unique = [...new Map(releasedProducts.map((product) => [product.id, product])).values()]; await postgres.upsertProductsFromState(unique); await postgres.upsertInventoryLevelsFromProducts(unique); }
     await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [], purchaseRequirements: db.purchaseRequirements || [] });
     await postgres.savePurchaseOrder(po);
+    await redisCache.deleteByPrefix("dataplus:purchasing:");
     return sendJson(res, 200, { purchaseOrder: po, receipt, unresolvedHeldUnits, extraItemUnits });
   }
 
