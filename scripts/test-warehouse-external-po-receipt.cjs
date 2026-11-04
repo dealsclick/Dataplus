@@ -17,6 +17,7 @@ assert.match(server, /sourceAuditId/, 'PO receipts retain their inbound audit id
 assert.match(server, /extraItemStatus:\s*extraItem \? "unexpected_on_selected_po"/, 'PO receipts persist unexpected products as extra items');
 assert.match(server, /findOpenPurchaseOrdersExpectingSkus/, 'PO extra-item receipts check whether another open PO expects each SKU');
 assert.match(server, /syncPurchaseOrderReceivingProgress\(audit\)/, 'linked PO scans publish live receiving progress');
+assert.match(server, /existingLinkedAudit[\s\S]*Resuming that session/, 'starting linked receiving resumes the active PO audit instead of creating a duplicate');
 assert.match(server, /delete po\.activeReceivingAudit/, 'posting a linked receipt clears its live progress marker');
 assert.match(server, /\/api\/purchasing\/receiving-sync/, 'desktop purchasing has a lightweight cross-user receiving sync endpoint');
 assert.match(server, /stockRow\.qty = receivingAudit \? qtyBefore \+ countedQty : countedQty/, 'inbound receipts add inventory while ordinary audits preserve count semantics');

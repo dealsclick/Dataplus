@@ -56053,6 +56053,25 @@ async function handleApi(req, res) {
     if (purchaseOrderReceipt && !linkedPurchaseOrder) return sendJson(res, 404, { error: "Choose an open DataPlus purchase order to receive." });
     if (linkedPurchaseOrder && (String(linkedPurchaseOrder.fulfillmentMode || "").toLowerCase() === "dropship_per_order" || linkedPurchaseOrder.directToCustomer === true)) return sendJson(res, 400, { error: "Dropship purchase orders bypass warehouse receiving." });
     if (linkedPurchaseOrder && ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(linkedPurchaseOrder.status || "").toLowerCase())) return sendJson(res, 409, { error: `PO ${linkedPurchaseOrder.poNumber || linkedPurchaseOrder.id} is no longer open for receiving.` });
+    const existingLinkedAudit = linkedPurchaseOrder
+      ? audits
+        .filter((candidate) => String(candidate.reason || "") === "purchase_order_receipt"
+          && String(candidate.linkedPurchaseOrderId || "") === String(linkedPurchaseOrder.id || "")
+          && ["in_progress", "pending_review"].includes(String(candidate.status || "").toLowerCase()))
+        .sort((left, right) => {
+          const leftActivity = (left.lines || []).reduce((sum, line) => sum + Number(line.countedQty || 0), 0) + (left.receivingDocuments || []).length;
+          const rightActivity = (right.lines || []).reduce((sum, line) => sum + Number(line.countedQty || 0), 0) + (right.receivingDocuments || []).length;
+          return rightActivity - leftActivity || new Date(String(right.updatedAt || right.createdAt || 0)).getTime() - new Date(String(left.updatedAt || left.createdAt || 0)).getTime();
+        })[0]
+      : null;
+    if (existingLinkedAudit) {
+      await syncPurchaseOrderReceivingProgress(existingLinkedAudit);
+      return sendJson(res, 200, {
+        audit: existingLinkedAudit,
+        resumed: true,
+        message: `${existingLinkedAudit.auditNumber || "The receiving audit"} is already receiving ${linkedPurchaseOrder.poNumber || linkedPurchaseOrder.id}. Resuming that session.`
+      });
+    }
     const supplierId = receivingReason ? String(linkedPurchaseOrder?.vendorId || body.supplierId || "").trim() : "";
     const supplierName = receivingReason ? String(linkedPurchaseOrder?.supplier || body.supplierName || "").trim() : "";
     const externalPurchaseOrderNumber = reason === "external_po_receipt" ? String(body.externalPurchaseOrderNumber || "").trim() : "";
