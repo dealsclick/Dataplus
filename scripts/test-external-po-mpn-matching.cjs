@@ -19,17 +19,21 @@ postgres.getPool = () => ({
   }
 });
 
-const { matchExternalOperationalPoItems } = require("../server");
+const { matchExternalOperationalPoItems, catalogVendorForSupplier, vendorCatalogLookupKeys } = require("../server");
 
 (async () => {
   try {
     const vendor = { id: "mil", name: "MILWAUKEE TOOL", code: "MIL" };
+    const distributor = { id: "cei", name: "CEI", catalogSettings: { sourceCodes: ["CEI", "MIL"] } };
+    assert.equal(catalogVendorForSupplier({ vendors: [vendor, distributor] }, { ...vendor, distributorVendorId: distributor.id }), distributor);
+    assert.deepEqual(vendorCatalogLookupKeys(distributor), ["cei", "mil"]);
     const sourceItems = [
       { manufacturerPartNumber: "48-32-4094", description: "Driver Bit Set", qty: 30, unitCost: 25.22 },
       { manufacturerPartNumber: "48-32-4403", description: "18 Piece Hex Drive Bit Set", qty: 30, unitCost: 9.88 },
     ];
 
     const preview = await matchExternalOperationalPoItems(vendor, sourceItems);
+    assert.match(capturedSql, /lower\(vci\.vendor_id\) = any\(\$2::text\[\]\)/);
     assert.match(capturedSql, /regexp_replace\(lower\(coalesce\(p\.mfr_part_number/);
     assert.match(capturedSql, /manufacturer part number \(catalog suggestion\)/);
     assert.equal(preview[0].matchStatus, "review");

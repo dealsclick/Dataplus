@@ -577,6 +577,7 @@ export type Vendor = {
   id: string
   name: string
   code?: string
+  distributorVendorId?: string
   status?: string
   retirement?: { retiredAt: string; reason: string; actor: string; jobId: string } | null
   type?: string

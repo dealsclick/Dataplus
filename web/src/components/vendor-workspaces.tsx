@@ -313,7 +313,7 @@ export function VendorsPage({ vendors, onSaveVendor, onVendorCreated }: { vendor
     if (!pathVendor) return <div className="grid gap-4"><PageHeader eyebrow="Suppliers" title="Supplier not found" description="This supplier link is no longer available or you do not have access." action={<Button asChild variant="outline"><a href="/vendors">Back to suppliers</a></Button>} /></div>
     return <div className="grid gap-5">
       <PageHeader eyebrow="Suppliers / Supplier profile" title={pathVendor.name} description="A dedicated, shareable supplier workspace for rules, locations, feeds, purchasing, and catalog controls." action={<div className="flex flex-wrap gap-2"><Button asChild variant="outline"><a href="/vendors"><ArrowLeft className="size-4" /> All suppliers</a></Button><Button variant="outline" onClick={() => void navigator.clipboard.writeText(window.location.href).then(() => toast.success("Supplier link copied."))}><Share2 className="size-4" /> Copy link</Button></div>} />
-      <VendorDetail vendor={pathVendor} onSave={onSaveVendor} marketplaceCoverage={coverageByVendor.get(pathVendor.id) || emptyVendorMarketplaceCoverage} marketplaceLoading={marketplaceLoading} />
+      <VendorDetail vendor={pathVendor} vendors={vendors} onSave={onSaveVendor} marketplaceCoverage={coverageByVendor.get(pathVendor.id) || emptyVendorMarketplaceCoverage} marketplaceLoading={marketplaceLoading} />
     </div>
   }
 
@@ -569,7 +569,7 @@ function emptyVendorSupplierLocation(priority: number): VendorSupplierLocation {
   }
 }
 
-function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketplaceCoverage, marketplaceLoading = false }: { vendor: Vendor; onSave: (id: string, patch: Record<string, unknown>) => Promise<void>; marketplaceCoverage?: VendorMarketplaceCoverage; marketplaceLoading?: boolean }) {
+function VendorDetail({ vendor, vendors, onSave, marketplaceCoverage = emptyVendorMarketplaceCoverage, marketplaceLoading = false }: { vendor: Vendor; vendors: Vendor[]; onSave: (id: string, patch: Record<string, unknown>) => Promise<void>; marketplaceCoverage?: VendorMarketplaceCoverage; marketplaceLoading?: boolean }) {
   const [catalogRefreshOpen, setCatalogRefreshOpen] = useState(false)
   const [retirementOpen, setRetirementOpen] = useState(false)
   const [dropshipConversionOpen, setDropshipConversionOpen] = useState(false)
@@ -638,6 +638,8 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
   const supplierDropshipAllOrders = Boolean(draft["purchaseOrderRules.dropShipAllOrders"] ?? purchaseOrderRules.dropShipAllOrders ?? (String(purchaseOrderRules.fulfillmentMode || "pooled") === "dropship_per_order"))
   const sourcePriority = vendor.sourcePriority || {}
   const catalogSettings = vendor.catalogSettings || {}
+  const distributorVendorId = String(draft.distributorVendorId ?? vendor.distributorVendorId ?? "")
+  const distributorVendor = vendors.find((entry) => entry.id === distributorVendorId)
   const catalogSourceCodesValue = draft["catalogSettings.sourceCodes"] ?? catalogSettings.sourceCodes ?? []
   const catalogSourceCodes = Array.isArray(catalogSourceCodesValue) ? catalogSourceCodesValue.join(" | ") : String(catalogSourceCodesValue || "")
   const deliverySchedule = normalizeVendorDeliverySchedule(draft["purchaseOrderRules.deliverySchedule"] ?? purchaseOrderRules.deliverySchedule)
@@ -775,6 +777,7 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
             <CardDescription>{vendor.code || vendor.type || "Supplier"} / {vendor.status || "active"}</CardDescription>
             <div className="mt-3 flex flex-wrap gap-1">
               <Badge variant={catalogSettings.enabled === true ? "success" : "outline"}>{catalogSettings.enabled === true ? "Included in catalog" : "Excluded from catalog"}</Badge>
+              {distributorVendor && <Badge variant="info">Catalog via {distributorVendor.name}</Badge>}
               {marketplaceLoading ? <Badge variant="outline">Checking marketplace coverage</Badge> : <>
                 <Badge variant="secondary">{numberLabel(marketplaceCoverage.productCount)} products</Badge>
                 {marketplaceCoverage.shopifyLive > 0 && <Badge variant="success">Shopify {numberLabel(marketplaceCoverage.shopifyLive)} live</Badge>}
@@ -859,6 +862,16 @@ function VendorDetail({ vendor, onSave, marketplaceCoverage = emptyVendorMarketp
                   <p className="mt-1 text-xs text-muted-foreground">Inactive vendors remain available for review but are excluded from active catalog and workflow participation.</p>
                 </Field>
                 <ToggleField label="Include supplier in catalog" checked={Boolean(draft["catalogSettings.enabled"] ?? (catalogSettings.enabled === true))} disabled={!editing} onCheckedChange={(next) => update("catalogSettings.enabled", next)} />
+                <Field label="Purchasing distributor">
+                  <Select disabled={!editing} value={distributorVendorId || "none"} onValueChange={(next) => update("distributorVendorId", next === "none" ? "" : next)}>
+                    <SelectTrigger aria-label="Purchasing distributor"><SelectValue placeholder="Direct supplier" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">Direct supplier</SelectItem>
+                      {vendors.filter((entry) => entry.id !== vendor.id && !entry.retirement?.retiredAt).sort((left, right) => left.name.localeCompare(right.name)).map((entry) => <SelectItem key={entry.id} value={entry.id}>{entry.name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">POs retain this supplier name while catalog matching and receiving use the distributor's SKUs.</p>
+                </Field>
                 <Field label="Source / feed codes">
                   <Input disabled={!editing} value={catalogSourceCodes} onChange={(event) => update("catalogSettings.sourceCodes", event.target.value.split(/[|,\n]/).map((entry) => entry.trim()).filter(Boolean))} placeholder="TRV | USS" />
                   <p className="text-xs text-muted-foreground">Stable codes from incoming feeds are mapped to this supplier. Brands are not used as supplier identities.</p>

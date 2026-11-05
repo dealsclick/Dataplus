@@ -13451,6 +13451,8 @@ function createManualPurchaseOrder(db, options = {}) {
     fulfillmentMode: "warehouse_replenishment",
     vendorId: vendor?.id || "",
     supplier: vendor?.name || "",
+    catalogVendorId: String(options.catalogVendorId || vendor?.distributorVendorId || "").trim(),
+    catalogSupplier: String(options.catalogSupplier || "").trim(),
     warehouseId: warehouse?.id || "",
     warehouseName: warehouse?.name || "",
     source: isExternalPurchaseOrder ? "external_purchase_order_pdf" : "manual_purchasing",
@@ -16512,6 +16514,7 @@ function normalizeVendor(db, vendor) {
     // vendor records did not carry this setting and otherwise looked active.
     status: vendor.status || "inactive",
     retirement: vendor.retirement || null,
+    distributorVendorId: String(vendor.distributorVendorId || "").trim(),
     type: vendor.type || "Supplier",
     contactName: vendor.contactName || "",
     email: vendor.email || "",
@@ -16632,6 +16635,27 @@ function normalizeVendor(db, vendor) {
 
 function findVendorById(db, id) {
   return (db.vendors || []).find((vendor) => vendor.id === id);
+}
+
+function distributorVendorFor(db, vendor = {}) {
+  const distributorVendorId = String(vendor?.distributorVendorId || "").trim();
+  if (!distributorVendorId || distributorVendorId === String(vendor?.id || "")) return null;
+  return findVendorById(db, distributorVendorId) || null;
+}
+
+function catalogVendorForSupplier(db, vendor = {}) {
+  return distributorVendorFor(db, vendor) || vendor || null;
+}
+
+function vendorCatalogLookupKeys(vendor = {}) {
+  const values = [
+    vendor.id,
+    vendor.code,
+    vendor.supplierCode,
+    ...(Array.isArray(vendor.catalogSettings?.sourceCodes) ? vendor.catalogSettings.sourceCodes : []),
+    String(vendor.name || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
+  ];
+  return [...new Set(values.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))];
 }
 
 function addVendorChange(vendor, event) {
@@ -31365,11 +31389,22 @@ function externalOperationalPoIdentifierKey(value = "") {
   return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+async function resolveWarehouseAuditBarcode(audit = {}, barcode = "") {
+  let lookup = await resolveScannedCatalogBarcode(barcode);
+  if (String(audit.reason || "") !== "purchase_order_receipt") return lookup;
+  const scannedIdentifier = externalOperationalPoIdentifierKey(barcode);
+  const expectedLine = (audit.purchaseOrderExpectedLines || []).find((line) => [line.sku, line.upc, line.barcode, line.vendorItemNumber, line.manufacturerSku]
+    .some((value) => externalOperationalPoIdentifierKey(value) === scannedIdentifier));
+  if (!expectedLine?.sku || String(lookup.product?.sku || "").toLowerCase() === String(expectedLine.sku).toLowerCase()) return lookup;
+  const expectedProduct = await postgres.readProductByKey(expectedLine.sku).catch(() => null);
+  return expectedProduct ? { ...lookup, product: expectedProduct, purchaseOrderExpectedLine: expectedLine } : lookup;
+}
+
 async function matchExternalOperationalPoItems(vendor, items = [], selectedMatches = []) {
   const identifiers = [...new Set(items.map((item) => String(item.manufacturerPartNumber || "").trim()).filter(Boolean))];
   if (!identifiers.length) return [];
-  const vendorId = String(vendor?.id || "").trim();
-  const vendorCode = String(vendor?.code || vendor?.supplierCode || "").replace(/[^a-z0-9]/gi, "").toUpperCase();
+  const vendorCatalogKeys = vendorCatalogLookupKeys(vendor);
+  const vendorCode = String(vendor?.code || vendor?.supplierCode || vendor?.catalogSettings?.sourceCodes?.[0] || "").replace(/[^a-z0-9]/gi, "").toUpperCase();
   const generatedByIdentifier = new Map(identifiers.map((identifier) => [externalOperationalPoIdentifierKey(identifier), `BUS${identifier.replace(/[^a-z0-9]/gi, "").toUpperCase()}${vendorCode}`]));
   const generatedProducts = await postgres.readProductsByKeys([...generatedByIdentifier.values()], { includeMarketplaceIds: false, includeVendorOffers: true });
   const generatedBySku = new Map(generatedProducts.map((product) => [String(product.sku || "").toLowerCase(), product]));
@@ -31389,7 +31424,7 @@ async function matchExternalOperationalPoItems(vendor, items = [], selectedMatch
           lower(coalesce(vci.source_sku, '')), lower(coalesce(vci.vendor_sku, '')), lower(coalesce(vci.mfr_part_number, ''))
         ) then 'supplier item number' else 'supplier item number (format normalized)' end as match_basis
       from requested
-      join vendor_catalog_items vci on vci.vendor_id = $2
+      join vendor_catalog_items vci on lower(vci.vendor_id) = any($2::text[])
         and requested.identifier_key <> ''
         and requested.identifier_key in (
           regexp_replace(lower(coalesce(vci.source_sku, '')), '[^a-z0-9]', '', 'g'),
@@ -31403,7 +31438,7 @@ async function matchExternalOperationalPoItems(vendor, items = [], selectedMatch
         case when lower(vo.vendor_sku) = lower(requested.identifier)
           then 'supplier offer SKU' else 'supplier offer SKU (format normalized)' end
       from requested
-      join vendor_offers vo on vo.vendor_id = $2
+      join vendor_offers vo on lower(vo.vendor_id) = any($2::text[])
         and requested.identifier_key <> ''
         and regexp_replace(lower(coalesce(vo.vendor_sku, '')), '[^a-z0-9]', '', 'g') = requested.identifier_key
       join products p on p.product_id = vo.product_id
@@ -31433,7 +31468,7 @@ async function matchExternalOperationalPoItems(vendor, items = [], selectedMatch
         and regexp_replace(lower(coalesce(p.mfr_part_number, '')), '[^a-z0-9]', '', 'g') = requested.identifier_key
     )
     select * from candidates order by identifier, match_rank, sku
-  `, [identifiers, vendorId, String(vendor?.name || ""), vendorCode]) : { rows: [] };
+  `, [identifiers, vendorCatalogKeys, String(vendor?.name || ""), vendorCode]) : { rows: [] };
   const candidatesByIdentifier = new Map();
   for (const row of result.rows || []) {
     const key = String(row.identifier || "").toLowerCase();
@@ -31480,6 +31515,7 @@ async function matchExternalOperationalPoItems(vendor, items = [], selectedMatch
 async function previewExternalOperationalPo(input = {}, db = {}) {
   const vendor = findVendorById(db, String(input.vendorId || "").trim());
   if (!vendor) throw Object.assign(new Error("Choose a valid supplier before uploading the PO."), { statusCode: 400 });
+  const catalogVendor = catalogVendorForSupplier(db, vendor);
   const encoded = String(input.pdfBase64 || "").replace(/^data:application\/pdf;base64,/, "");
   if (!encoded) throw Object.assign(new Error("Choose an external purchase-order PDF first."), { statusCode: 400 });
   const buffer = Buffer.from(encoded, "base64");
@@ -31494,7 +31530,7 @@ async function previewExternalOperationalPo(input = {}, db = {}) {
   } finally { await parser?.destroy().catch(() => {}); }
   const document = parseExternalOperationalPoText(parsed.text);
   if (!document.poNumber || !document.items.length) throw Object.assign(new Error("This PO format was not recognized. Confirm the PDF contains selectable text and a QTY / ITEM / UNIT PRICE table."), { statusCode: 400 });
-  const items = await matchExternalOperationalPoItems(vendor, document.items, input.selectedMatches);
+  const items = await matchExternalOperationalPoItems(catalogVendor, document.items, input.selectedMatches);
   const duplicate = postgres.isPostgresEnabled()
     ? await postgres.findPurchaseOrderByExternalReference(vendor.id, document.poNumber)
     : (db.purchaseOrders || []).find((po) => String(po.ctechId || po.externalPoNumber || "").trim().toLowerCase() === document.poNumber.toLowerCase() && String(po.vendorId || "") === String(vendor.id || ""));
@@ -31502,6 +31538,9 @@ async function previewExternalOperationalPo(input = {}, db = {}) {
     document: { ...document, items: undefined },
     items,
     vendor: { id: vendor.id, name: vendor.name, code: vendor.code || vendor.supplierCode || "" },
+    catalogSupplier: catalogVendor && String(catalogVendor.id || "") !== String(vendor.id || "")
+      ? { id: catalogVendor.id, name: catalogVendor.name, code: catalogVendor.code || catalogVendor.supplierCode || "" }
+      : null,
     file: { name: String(input.fileName || "purchase-order.pdf").slice(0, 240), size: buffer.length, sha256: crypto.createHash("sha256").update(buffer).digest("hex") },
     duplicate: duplicate ? { id: duplicate.id, poNumber: duplicate.poNumber } : null,
     readyToCreate: !duplicate && items.length > 0,
@@ -57033,7 +57072,7 @@ async function handleApi(req, res) {
     if (!audit) return notFound(res);
     if (audit.status !== "in_progress") return sendJson(res, 400, { error: "This warehouse audit is closed." });
     if (!barcode) return sendJson(res, 400, { error: "Scan a UPC or SKU first." });
-    const lookup = await resolveScannedCatalogBarcode(barcode);
+    const lookup = await resolveWarehouseAuditBarcode(audit, barcode);
     const product = lookup.product || null;
     const uomInfo = product ? productUomInfo({
       ...product,
@@ -57086,7 +57125,7 @@ async function handleApi(req, res) {
     const binCheck = validateWarehouseBin(auditWarehouse, locationBin);
     if (binCheck.error) return sendJson(res, 400, { error: binCheck.error });
     const resolvedLocationBin = binCheck.value || locationBin;
-    const lookup = await resolveScannedCatalogBarcode(barcode);
+    const lookup = await resolveWarehouseAuditBarcode(audit, barcode);
     const product = lookup.product;
     const scanSupplierCoverage = product
       ? (await postgres.readVendorCatalogSupplierCoverageBySkus([product.id, product.sku]).catch(() => []))
@@ -62344,6 +62383,8 @@ async function handleApi(req, res) {
           shipVia: preview.document.shipVia,
           manufacturerAccount: preview.document.manufacturerAccount,
           sourceDocument: preview.file,
+          catalogVendorId: preview.catalogSupplier?.id || "",
+          catalogSupplier: preview.catalogSupplier?.name || "",
           user: actor
         });
         const unresolved = Number(po.unresolvedLineCount || 0);
@@ -65567,6 +65608,18 @@ async function handleApi(req, res) {
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
     for (const [field, rawValue] of Object.entries(body)) {
+      if (field === "distributorVendorId") {
+        const value = String(rawValue || "").trim();
+        const distributor = value ? findVendorById(db, value) : null;
+        if (value && !distributor) return sendJson(res, 400, { error: "Choose a valid purchasing distributor." });
+        if (value === String(vendor.id || "")) return sendJson(res, 400, { error: "A supplier cannot be its own purchasing distributor." });
+        if (distributor && String(distributor.distributorVendorId || "") === String(vendor.id || "")) return sendJson(res, 409, { error: "This distributor relationship would create a cycle." });
+        if (String(vendor.distributorVendorId || "") !== value) {
+          changes.push(`purchasing distributor changed to ${distributor?.name || "none"}`);
+          vendor.distributorVendorId = value;
+        }
+        continue;
+      }
       if (field === "receivingDocumentTemplate") {
         const value = normalizeReceivingDocumentTemplate(rawValue, vendor);
         if (JSON.stringify(vendor.receivingDocumentTemplate || {}) !== JSON.stringify(value)) {
@@ -75171,6 +75224,18 @@ async function handleApi(req, res) {
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
     for (const [field, rawValue] of Object.entries(body)) {
+      if (field === "distributorVendorId") {
+        const value = String(rawValue || "").trim();
+        const distributor = value ? findVendorById(db, value) : null;
+        if (value && !distributor) return sendJson(res, 400, { error: "Choose a valid purchasing distributor." });
+        if (value === String(vendor.id || "")) return sendJson(res, 400, { error: "A supplier cannot be its own purchasing distributor." });
+        if (distributor && String(distributor.distributorVendorId || "") === String(vendor.id || "")) return sendJson(res, 409, { error: "This distributor relationship would create a cycle." });
+        if (String(vendor.distributorVendorId || "") !== value) {
+          changes.push(`purchasing distributor changed to ${distributor?.name || "none"}`);
+          vendor.distributorVendorId = value;
+        }
+        continue;
+      }
       if (field === "receivingDocumentTemplate") {
         const value = normalizeReceivingDocumentTemplate(rawValue, vendor);
         if (JSON.stringify(vendor.receivingDocumentTemplate || {}) !== JSON.stringify(value)) {
@@ -77327,6 +77392,8 @@ module.exports = {
   applyUnresolvedPurchaseOrderReceipt,
   parseExternalOperationalPoText,
   matchExternalOperationalPoItems,
+  catalogVendorForSupplier,
+  vendorCatalogLookupKeys,
   previewExternalOperationalPo,
   supplierDropshipConversionPlan,
   normalizeVendorFeedSchedule,
