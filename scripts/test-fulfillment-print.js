@@ -76,6 +76,25 @@ test("purchased labels are assembled by the isolated print worker", async () => 
   }
 });
 
+test("carrier PDF pages are normalized to the selected 4x6 print size", async () => {
+  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "dataplus-print-size-test-"));
+  const labelPath = path.join(directory, "temu-label.pdf");
+  try {
+    const source = await PDFDocument.create();
+    const sourcePage = source.addPage([284, 426]);
+    sourcePage.drawRectangle({ x: 8, y: 8, width: 268, height: 410, borderWidth: 1 });
+    await fs.promises.writeFile(labelPath, await source.save());
+    const result = await buildLabelPacketIsolated([{ orderId: "ORDER-PR", orderNumber: "88617", filePath: labelPath, mimeType: "application/pdf", lines: [] }], { size: "4x6", includePackingSlips: false });
+    const packet = await PDFDocument.load(result.buffer);
+    assert.equal(packet.getPageCount(), 1);
+    assert.equal(packet.getPage(0).getWidth(), 288);
+    assert.equal(packet.getPage(0).getHeight(), 432);
+    assert.deepEqual(result.failures, []);
+  } finally {
+    await fs.promises.rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("print preview includes a sample label and packing slip at the selected size", async () => {
   const buffer = await buildPrintPreview([{
     orderId: "ORDER-1",
