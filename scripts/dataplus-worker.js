@@ -2211,7 +2211,7 @@ async function runProductDumpImportJob(job) {
           }
           current = normalizeJobPatch(current, {
             phase: "discovering_new_skus", discovery,
-            message: `New SKU discovery: ${Number(discovery.scanned).toLocaleString()} scanned, ${Number(discovery.added).toLocaleString()} added, ${Number(discovery.needsReview).toLocaleString()} need review.`
+            message: `New SKU discovery: ${Number(discovery.scanned).toLocaleString()} scanned, ${Number(discovery.added).toLocaleString()} added, ${Number(discovery.needsReview).toLocaleString()} identifier similarities flagged.`
           });
         } catch { /* A partial output line will be followed by the next cumulative update. */ }
       }
@@ -2451,7 +2451,7 @@ async function runVendorCatalogRefresh(job) {
       progress: async counts => {
         current = await persistJob(current, { processedRows: counts.scanned, changed: counts.added, discovery: counts,
           progressPercent: Math.min(99, Math.round(counts.scanned / Math.max(1, summary.total) * 100)),
-          message: `${counts.added} added; ${counts.existing} existing; ${counts.needsReview} need review; ${counts.excluded} excluded.` });
+          message: `${counts.added} added; ${counts.existing} existing; ${counts.needsReview} identifier similarities flagged; ${counts.excluded} excluded.` });
       }
     });
     current = await persistJob(current, {
@@ -2460,10 +2460,10 @@ async function runVendorCatalogRefresh(job) {
     });
     const supplierCoverage = await postgres.refreshVendorExactSupplierLinks(keys);
     writer.end(); await done;
-    current = await persistJob(current, { status: counts.needsReview ? 'warning' : 'success', phase: 'complete', progressPercent: 100,
+    current = await persistJob(current, { status: 'success', phase: 'complete', progressPercent: 100,
       processedRows: counts.scanned, totalRows: counts.scanned, changed: counts.added, discovery: counts, finishedAt: new Date().toISOString(),
-      message: `${vendor.name}: ${counts.added} added, ${counts.existing} already in catalog, ${counts.needsReview} need review, ${counts.excluded} excluded.`,
-      details: `Read stored source records only. Existing catalog products and marketplace listings were not updated. Refreshed ${Number(supplierCoverage.supplierLinks || 0).toLocaleString()} supplier-scoped exact UPC/SKU links; review the downloadable per-SKU results.` });
+      message: `${vendor.name}: ${counts.added} added, ${counts.existing} already in catalog, ${counts.needsReview} identifier similarities flagged, ${counts.excluded} excluded.`,
+      details: `Read stored source records only. Existing catalog products and marketplace listings were not updated. Refreshed ${Number(supplierCoverage.supplierLinks || 0).toLocaleString()} supplier-scoped exact UPC/SKU links; identifier similarities are informational and do not block SKU creation.` });
   } catch (error) {
     writer.end(); await done.catch(() => {});
     current = await persistJob(current, { status: /stopped/i.test(error.message) ? 'stopped' : 'failed', phase: 'stopped_or_failed', message: error.message, errors: [error.message], finishedAt: new Date().toISOString() });
