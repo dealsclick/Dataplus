@@ -31400,10 +31400,11 @@ async function resolveWarehouseAuditBarcode(audit = {}, barcode = "") {
   return expectedProduct ? { ...lookup, product: expectedProduct, purchaseOrderExpectedLine: expectedLine } : lookup;
 }
 
-async function matchExternalOperationalPoItems(vendor, items = [], selectedMatches = []) {
+async function matchExternalOperationalPoItems(vendor, items = [], selectedMatches = [], options = {}) {
   const identifiers = [...new Set(items.map((item) => String(item.manufacturerPartNumber || "").trim()).filter(Boolean))];
   if (!identifiers.length) return [];
   const vendorCatalogKeys = vendorCatalogLookupKeys(vendor);
+  const allowCrossSupplierSuggestions = options.allowCrossSupplierSuggestions !== false;
   const vendorCode = String(vendor?.code || vendor?.supplierCode || vendor?.catalogSettings?.sourceCodes?.[0] || "").replace(/[^a-z0-9]/gi, "").toUpperCase();
   const generatedByIdentifier = new Map(identifiers.map((identifier) => [externalOperationalPoIdentifierKey(identifier), `BUS${identifier.replace(/[^a-z0-9]/gi, "").toUpperCase()}${vendorCode}`]));
   const generatedProducts = await postgres.readProductsByKeys([...generatedByIdentifier.values()], { includeMarketplaceIds: false, includeVendorOffers: true });
@@ -31466,9 +31467,10 @@ async function matchExternalOperationalPoItems(vendor, items = [], selectedMatch
       from requested
       join products p on length(requested.identifier_key) >= 4
         and regexp_replace(lower(coalesce(p.mfr_part_number, '')), '[^a-z0-9]', '', 'g') = requested.identifier_key
+      where $5::boolean
     )
     select * from candidates order by identifier, match_rank, sku
-  `, [identifiers, vendorCatalogKeys, String(vendor?.name || ""), vendorCode]) : { rows: [] };
+  `, [identifiers, vendorCatalogKeys, String(vendor?.name || ""), vendorCode, allowCrossSupplierSuggestions]) : { rows: [] };
   const candidatesByIdentifier = new Map();
   for (const row of result.rows || []) {
     const key = String(row.identifier || "").toLowerCase();
@@ -31530,7 +31532,9 @@ async function previewExternalOperationalPo(input = {}, db = {}) {
   } finally { await parser?.destroy().catch(() => {}); }
   const document = parseExternalOperationalPoText(parsed.text);
   if (!document.poNumber || !document.items.length) throw Object.assign(new Error("This PO format was not recognized. Confirm the PDF contains selectable text and a QTY / ITEM / UNIT PRICE table."), { statusCode: 400 });
-  const items = await matchExternalOperationalPoItems(catalogVendor, document.items, input.selectedMatches);
+  const items = await matchExternalOperationalPoItems(catalogVendor, document.items, input.selectedMatches, {
+    allowCrossSupplierSuggestions: !distributorVendorFor(db, vendor)
+  });
   const duplicate = postgres.isPostgresEnabled()
     ? await postgres.findPurchaseOrderByExternalReference(vendor.id, document.poNumber)
     : (db.purchaseOrders || []).find((po) => String(po.ctechId || po.externalPoNumber || "").trim().toLowerCase() === document.poNumber.toLowerCase() && String(po.vendorId || "") === String(vendor.id || ""));

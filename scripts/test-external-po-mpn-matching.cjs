@@ -4,11 +4,13 @@ const postgres = require("../db");
 const originalGetPool = postgres.getPool;
 const originalReadProductsByKeys = postgres.readProductsByKeys;
 let capturedSql = "";
+let capturedParams = [];
 
 postgres.readProductsByKeys = async () => [];
 postgres.getPool = () => ({
-  query: async (sql) => {
+  query: async (sql, params) => {
     capturedSql = sql;
+    capturedParams = params;
     return {
       rows: [
         { identifier: "48-32-4094", product_id: "product-1", sku: "BUS142489TRV", title: "80PC Impact Driver Bit Set", supplier: "True Value", match_rank: 3, match_basis: "manufacturer part number (catalog suggestion)" },
@@ -34,6 +36,7 @@ const { matchExternalOperationalPoItems, catalogVendorForSupplier, vendorCatalog
 
     const preview = await matchExternalOperationalPoItems(vendor, sourceItems);
     assert.match(capturedSql, /lower\(vci\.vendor_id\) = any\(\$2::text\[\]\)/);
+    assert.equal(capturedParams[4], true);
     assert.match(capturedSql, /regexp_replace\(lower\(coalesce\(p\.mfr_part_number/);
     assert.match(capturedSql, /manufacturer part number \(catalog suggestion\)/);
     assert.equal(preview[0].matchStatus, "review");
@@ -59,6 +62,9 @@ const { matchExternalOperationalPoItems, catalogVendorForSupplier, vendorCatalog
     ]);
     assert.equal(rejectedInjection[0].matchStatus, "review");
     assert.equal(rejectedInjection[0].sku, "");
+
+    await matchExternalOperationalPoItems(distributor, sourceItems, [], { allowCrossSupplierSuggestions: false });
+    assert.equal(capturedParams[4], false);
   } finally {
     postgres.getPool = originalGetPool;
     postgres.readProductsByKeys = originalReadProductsByKeys;
