@@ -1297,6 +1297,33 @@ export type SupplierCoverageResponse = {
   supplierCount?: number
   pendingReviewCount?: number
   matches?: SupplierCoverageEntry[]
+  relatedSkuCount?: number
+  relatedSkus?: Array<{
+    productId?: string
+    sku?: string
+    title?: string
+    supplier?: string
+    supplierCode?: string
+    vendorSku?: string
+    mfrPartNumber?: string
+    barcode?: string
+    cost?: number | null
+    price?: number | null
+    supplierQty?: number
+    physicalOnHand?: number
+    physicalAvailable?: number
+    physicalReserved?: number
+    active?: boolean
+    discontinued?: boolean
+    stockStatus?: string
+    defaultImage?: string
+    isCurrent?: boolean
+    matchTypes?: string[]
+    matchType?: "current" | "upc" | "manufacturer-part-number" | "vendor-sku"
+    confidence?: number
+    requiresReview?: boolean
+    updatedAt?: string
+  }>
 }
 
 type CatalogStatusFilter = "" | "source-only" | "managed"

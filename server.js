@@ -53676,13 +53676,13 @@ async function handleApi(req, res) {
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "suppliers" && parts.length === 4 && postgres.isPostgresEnabled()) {
     const product = await postgres.readProductByKey(parts[2]);
     if (!product) return notFound(res);
-    const cacheKey = `dataplus:supplier-coverage:v1:${crypto.createHash("sha1").update(`${String(product.sku || parts[2]).toLowerCase()}|${String(product.updatedAt || "")}`).digest("hex")}`;
+    const cacheKey = `dataplus:supplier-coverage:v2:${crypto.createHash("sha1").update(`${String(product.sku || parts[2]).toLowerCase()}|${String(product.updatedAt || "")}`).digest("hex")}`;
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
-    const coverage = await postgres.readProductSupplierLinks({
-      productId: product.id,
-      sku: product.sku,
-    });
+    const [coverage, similarity] = await Promise.all([
+      postgres.readProductSupplierLinks({ productId: product.id, sku: product.sku }),
+      postgres.readProductSimilarityGroup({ productId: product.id, sku: product.sku })
+    ]);
     const primarySupplier = product.supplier || product.vendor || "";
     const primarySku = product.vendorSku || product.sku || "";
     const exists = (coverage.matches || []).some((row) => {
@@ -53721,7 +53721,15 @@ async function handleApi(req, res) {
     }, ...(coverage.matches || [])];
     const confirmedMatches = matches.filter((row) => ["confirmed", "approved", ""].includes(String(row.matchStatus || "").toLowerCase()));
     const supplierCount = new Set(confirmedMatches.map((row) => String(row.supplierCode || row.supplier || "").trim().toLowerCase()).filter(Boolean)).size;
-    const payload = { matchType: coverage.matchType, supplierCount, pendingReviewCount: Number(coverage.pendingReviewCount || 0), matches };
+    const relatedSkus = Array.isArray(similarity.members) ? similarity.members : [];
+    const payload = {
+      matchType: coverage.matchType,
+      supplierCount,
+      pendingReviewCount: Number(coverage.pendingReviewCount || 0),
+      matches,
+      relatedSkuCount: Math.max(0, relatedSkus.length - 1),
+      relatedSkus
+    };
     await redisCache.setJson(cacheKey, payload, 300);
     return sendJson(res, 200, payload);
   }

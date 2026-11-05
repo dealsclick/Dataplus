@@ -8301,6 +8301,162 @@ async function readProductSupplierLinks(identity = {}) {
   };
 }
 
+async function readProductSimilarityGroup(identity = {}) {
+  const client = getPool();
+  if (!client) return { productId: "", sku: "", members: [], indexed: false };
+  await initRelationalSchema();
+  const productId = nullableString(identity.productId || identity.id || "");
+  const sku = nullableString(identity.sku || identity.internalSku || "");
+  if (!productId && !sku) return { productId: "", sku: "", members: [], indexed: true };
+
+  const barcodeValue = (alias) => `coalesce(
+    nullif(trim(${alias}.barcode), ''),
+    nullif(trim(${alias}.raw ->> 'upc'), ''),
+    nullif(trim(${alias}.raw ->> 'gtin'), ''),
+    nullif(trim(${alias}.raw ->> 'upcCode'), ''),
+    ''
+  )`;
+  const normalizedPartNumber = (alias) => `regexp_replace(
+    lower(trim(coalesce(
+      nullif(${alias}.mfr_part_number, ''),
+      nullif(${alias}.raw ->> 'mfrPartNumber', ''),
+      nullif(${alias}.raw ->> 'manufacturerPartNumber', ''),
+      ''
+    ))),
+    '[^a-z0-9]+', '', 'g'
+  )`;
+  const normalizedVendorSku = (alias) => `regexp_replace(
+    lower(trim(coalesce(nullif(${alias}.vendor_sku, ''), nullif(${alias}.raw ->> 'vendorSku', ''), ''))),
+    '[^a-z0-9]+', '', 'g'
+  )`;
+  const result = await client.query(`
+    with target as materialized (
+      select
+        product.*,
+        ${canonicalSupplierBarcodeSql(barcodeValue("product"))} as barcode_key,
+        ${normalizedPartNumber("product")} as mpn_key,
+        ${normalizedVendorSku("product")} as vendor_sku_key
+      from products product
+      where ($1 <> '' and product.product_id = $1)
+         or ($2 <> '' and lower(product.sku) = lower($2))
+      order by case when product.product_id = $1 then 0 else 1 end
+      limit 1
+    )
+    select
+      candidate.product_id,
+      candidate.sku,
+      candidate.title,
+      candidate.marketplace_title,
+      candidate.supplier,
+      candidate.supplier_code,
+      candidate.vendor_sku,
+      candidate.mfr_part_number,
+      candidate.barcode,
+      candidate.cost,
+      candidate.price,
+      candidate.qty as supplier_qty,
+      candidate.active,
+      candidate.to_be_discontinued,
+      candidate.default_image,
+      candidate.updated_at,
+      coalesce(candidate.raw ->> 'stockStatus', candidate.raw ->> 'stock_status', '') as stock_status,
+      coalesce(stock.physical_on_hand, 0) as physical_on_hand,
+      coalesce(stock.physical_available, 0) as physical_available,
+      coalesce(stock.physical_reserved, 0) as physical_reserved,
+      candidate.product_id = target.product_id as is_current,
+      target.barcode_key <> ''
+        and length(target.barcode_key) >= 8
+        and candidate_identity.barcode_key = target.barcode_key as upc_match,
+      length(target.mpn_key) >= 4
+        and target.mpn_key not in ('none', 'unknown', 'na', 'null', 'misc')
+        and candidate_identity.mpn_key = target.mpn_key as mpn_match,
+      length(target.vendor_sku_key) >= 4
+        and target.vendor_sku_key not in ('none', 'unknown', 'na', 'null', 'misc')
+        and candidate_identity.vendor_sku_key = target.vendor_sku_key as vendor_sku_match
+    from target
+    join products candidate on true
+    cross join lateral (
+      select
+        ${canonicalSupplierBarcodeSql(barcodeValue("candidate"))} as barcode_key,
+        ${normalizedPartNumber("candidate")} as mpn_key,
+        ${normalizedVendorSku("candidate")} as vendor_sku_key
+    ) candidate_identity
+    left join lateral (
+      select
+        sum(level.on_hand)::numeric as physical_on_hand,
+        sum(level.available)::numeric as physical_available,
+        sum(level.reserved)::numeric as physical_reserved
+      from inventory_levels level
+      where level.product_id = candidate.product_id
+    ) stock on true
+    where candidate.product_id = target.product_id
+      or (
+        target.barcode_key <> ''
+        and length(target.barcode_key) >= 8
+        and candidate_identity.barcode_key = target.barcode_key
+      )
+      or (
+        length(target.mpn_key) >= 4
+        and target.mpn_key not in ('none', 'unknown', 'na', 'null', 'misc')
+        and candidate_identity.mpn_key = target.mpn_key
+      )
+      or (
+        length(target.vendor_sku_key) >= 4
+        and target.vendor_sku_key not in ('none', 'unknown', 'na', 'null', 'misc')
+        and candidate_identity.vendor_sku_key = target.vendor_sku_key
+      )
+    order by
+      (candidate.product_id = target.product_id) desc,
+      (target.barcode_key <> '' and candidate_identity.barcode_key = target.barcode_key) desc,
+      (target.mpn_key <> '' and candidate_identity.mpn_key = target.mpn_key) desc,
+      coalesce(stock.physical_available, 0) desc,
+      coalesce(candidate.qty, 0) desc,
+      candidate.sku
+    limit 50
+  `, [productId || "", sku || ""]);
+  const members = result.rows.map((row) => {
+    const matchTypes = [];
+    if (row.upc_match) matchTypes.push("upc");
+    if (row.mpn_match) matchTypes.push("manufacturer-part-number");
+    if (row.vendor_sku_match) matchTypes.push("vendor-sku");
+    const isCurrent = Boolean(row.is_current);
+    const numeric = (value) => value === null || value === undefined ? null : Number(value);
+    return {
+      productId: row.product_id,
+      sku: row.sku || "",
+      title: row.marketplace_title || row.title || row.sku || "",
+      supplier: canonicalSupplierName(row.supplier || row.supplier_code, row.supplier_code),
+      supplierCode: row.supplier_code || "",
+      vendorSku: row.vendor_sku || "",
+      mfrPartNumber: row.mfr_part_number || "",
+      barcode: row.barcode || "",
+      cost: numeric(row.cost),
+      price: numeric(row.price),
+      supplierQty: numeric(row.supplier_qty) ?? 0,
+      physicalOnHand: numeric(row.physical_on_hand) ?? 0,
+      physicalAvailable: numeric(row.physical_available) ?? 0,
+      physicalReserved: numeric(row.physical_reserved) ?? 0,
+      active: row.active !== false,
+      discontinued: Boolean(row.to_be_discontinued),
+      stockStatus: row.stock_status || "",
+      defaultImage: row.default_image || "",
+      isCurrent,
+      matchTypes: isCurrent ? ["current"] : matchTypes,
+      matchType: isCurrent ? "current" : matchTypes.includes("upc") ? "upc" : matchTypes.includes("manufacturer-part-number") ? "manufacturer-part-number" : "vendor-sku",
+      confidence: isCurrent || matchTypes.includes("upc") ? 1 : matchTypes.includes("manufacturer-part-number") ? 0.82 : 0.74,
+      requiresReview: !isCurrent && !matchTypes.includes("upc"),
+      updatedAt: row.updated_at?.toISOString?.() || row.updated_at || ""
+    };
+  });
+  const current = members.find((row) => row.isCurrent) || null;
+  return {
+    productId: current?.productId || productId || "",
+    sku: current?.sku || sku || "",
+    members,
+    indexed: true
+  };
+}
+
 async function reviewSupplierMatch({ matchId, productId, status, reviewedBy = "DataPlus user" } = {}) {
   const client = getPool();
   if (!client) return null;
@@ -20591,6 +20747,7 @@ module.exports = {
   refreshVendorExactSupplierLinks,
   findVendorCatalogSupplierMatches,
   readProductSupplierLinks,
+  readProductSimilarityGroup,
   reviewSupplierMatch,
   sourceCatalogSearchIndexStatus,
   readOperationJobs,
