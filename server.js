@@ -31291,36 +31291,76 @@ function parseExternalOperationalPoText(text = "") {
   };
 }
 
-async function matchExternalOperationalPoItems(vendor, items = []) {
+function externalOperationalPoIdentifierKey(value = "") {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+async function matchExternalOperationalPoItems(vendor, items = [], selectedMatches = []) {
   const identifiers = [...new Set(items.map((item) => String(item.manufacturerPartNumber || "").trim()).filter(Boolean))];
   if (!identifiers.length) return [];
   const vendorId = String(vendor?.id || "").trim();
   const vendorCode = String(vendor?.code || vendor?.supplierCode || "").replace(/[^a-z0-9]/gi, "").toUpperCase();
-  const generatedByIdentifier = new Map(identifiers.map((identifier) => [identifier.toLowerCase(), `BUS${identifier.replace(/[^a-z0-9]/gi, "").toUpperCase()}${vendorCode}`]));
+  const generatedByIdentifier = new Map(identifiers.map((identifier) => [externalOperationalPoIdentifierKey(identifier), `BUS${identifier.replace(/[^a-z0-9]/gi, "").toUpperCase()}${vendorCode}`]));
   const generatedProducts = await postgres.readProductsByKeys([...generatedByIdentifier.values()], { includeMarketplaceIds: false, includeVendorOffers: true });
   const generatedBySku = new Map(generatedProducts.map((product) => [String(product.sku || "").toLowerCase(), product]));
+  const selectedByLine = new Map((Array.isArray(selectedMatches) ? selectedMatches : []).map((selection) => [Number(selection?.line), {
+    identifierKey: externalOperationalPoIdentifierKey(selection?.manufacturerPartNumber),
+    sku: String(selection?.sku || "").trim().toLowerCase()
+  }]));
   const pool = postgres.getPool();
   const result = pool ? await pool.query(`
-    with requested(identifier) as (select unnest($1::text[])), candidates as (
+    with requested as (
+      select identifier, regexp_replace(lower(identifier), '[^a-z0-9]', '', 'g') as identifier_key
+      from unnest($1::text[]) as input(identifier)
+    ), candidates as (
       select requested.identifier, p.product_id, p.sku, p.title, p.brand, p.manufacturer,
-        p.mfr_part_number, p.vendor_sku, p.cost, 1 as match_rank, 'supplier item number' as match_basis
+        p.mfr_part_number, p.vendor_sku, p.supplier, p.cost, 1 as match_rank,
+        case when lower(requested.identifier) in (
+          lower(coalesce(vci.source_sku, '')), lower(coalesce(vci.vendor_sku, '')), lower(coalesce(vci.mfr_part_number, ''))
+        ) then 'supplier item number' else 'supplier item number (format normalized)' end as match_basis
       from requested
       join vendor_catalog_items vci on vci.vendor_id = $2
-        and lower(requested.identifier) in (lower(coalesce(vci.source_sku, '')), lower(coalesce(vci.vendor_sku, '')), lower(coalesce(vci.mfr_part_number, '')))
+        and requested.identifier_key <> ''
+        and requested.identifier_key in (
+          regexp_replace(lower(coalesce(vci.source_sku, '')), '[^a-z0-9]', '', 'g'),
+          regexp_replace(lower(coalesce(vci.vendor_sku, '')), '[^a-z0-9]', '', 'g'),
+          regexp_replace(lower(coalesce(vci.mfr_part_number, '')), '[^a-z0-9]', '', 'g')
+        )
       join products p on lower(p.sku) = lower(vci.internal_sku)
       union all
       select requested.identifier, p.product_id, p.sku, p.title, p.brand, p.manufacturer,
-        p.mfr_part_number, p.vendor_sku, coalesce(vo.cost, p.cost), 1, 'supplier offer SKU'
+        p.mfr_part_number, p.vendor_sku, p.supplier, coalesce(vo.cost, p.cost), 1,
+        case when lower(vo.vendor_sku) = lower(requested.identifier)
+          then 'supplier offer SKU' else 'supplier offer SKU (format normalized)' end
       from requested
-      join vendor_offers vo on vo.vendor_id = $2 and lower(vo.vendor_sku) = lower(requested.identifier)
+      join vendor_offers vo on vo.vendor_id = $2
+        and requested.identifier_key <> ''
+        and regexp_replace(lower(coalesce(vo.vendor_sku, '')), '[^a-z0-9]', '', 'g') = requested.identifier_key
       join products p on p.product_id = vo.product_id
       union all
       select requested.identifier, p.product_id, p.sku, p.title, p.brand, p.manufacturer,
-        p.mfr_part_number, p.vendor_sku, p.cost, 2,
-        case when lower(p.vendor_sku) = lower(requested.identifier) then 'vendor SKU' else 'manufacturer part number' end
+        p.mfr_part_number, p.vendor_sku, p.supplier, p.cost, 2,
+        case
+          when lower(p.vendor_sku) = lower(requested.identifier) then 'vendor SKU'
+          when lower(p.mfr_part_number) = lower(requested.identifier) then 'manufacturer part number'
+          when regexp_replace(lower(coalesce(p.vendor_sku, '')), '[^a-z0-9]', '', 'g') = requested.identifier_key then 'vendor SKU (format normalized)'
+          else 'manufacturer part number (format normalized)'
+        end
       from requested
-      join products p on (lower(p.vendor_sku) = lower(requested.identifier) or lower(p.mfr_part_number) = lower(requested.identifier))
+      join products p on requested.identifier_key <> '' and (
+        regexp_replace(lower(coalesce(p.vendor_sku, '')), '[^a-z0-9]', '', 'g') = requested.identifier_key
+        or regexp_replace(lower(coalesce(p.mfr_part_number, '')), '[^a-z0-9]', '', 'g') = requested.identifier_key
+      )
         and (lower(coalesce(p.supplier, '')) = lower($3) or lower(coalesce(p.supplier_code, '')) = lower($4))
+      union all
+      select requested.identifier, p.product_id, p.sku, p.title, p.brand, p.manufacturer,
+        p.mfr_part_number, p.vendor_sku, p.supplier, p.cost, 3,
+        case when lower(p.mfr_part_number) = lower(requested.identifier)
+          then 'manufacturer part number (catalog suggestion)'
+          else 'manufacturer part number (format-normalized catalog suggestion)' end
+      from requested
+      join products p on length(requested.identifier_key) >= 4
+        and regexp_replace(lower(coalesce(p.mfr_part_number, '')), '[^a-z0-9]', '', 'g') = requested.identifier_key
     )
     select * from candidates order by identifier, match_rank, sku
   `, [identifiers, vendorId, String(vendor?.name || ""), vendorCode]) : { rows: [] };
@@ -31333,15 +31373,22 @@ async function matchExternalOperationalPoItems(vendor, items = []) {
   }
   return items.map((item, index) => {
     const identifier = String(item.manufacturerPartNumber || "").trim();
-    const generatedSku = generatedByIdentifier.get(identifier.toLowerCase()) || "";
+    const identifierKey = externalOperationalPoIdentifierKey(identifier);
+    const generatedSku = generatedByIdentifier.get(identifierKey) || "";
     const generated = generatedBySku.get(generatedSku.toLowerCase());
     const candidates = candidatesByIdentifier.get(identifier.toLowerCase()) || [];
     if (generated && !candidates.some((candidate) => String(candidate.product_id) === String(generated.id))) {
-      candidates.unshift({ product_id: generated.id, sku: generated.sku, title: generated.title || generated.marketplaceTitle, brand: generated.brand, manufacturer: generated.manufacturer, mfr_part_number: generated.mfrPartNumber, vendor_sku: generated.vendorSku, cost: generated.cost, match_rank: 1, match_basis: "vendor SKU convention" });
+      candidates.unshift({ product_id: generated.id, sku: generated.sku, title: generated.title || generated.marketplaceTitle, brand: generated.brand, manufacturer: generated.manufacturer, mfr_part_number: generated.mfrPartNumber, vendor_sku: generated.vendorSku, supplier: generated.supplier, cost: generated.cost, match_rank: 1, match_basis: "vendor SKU convention" });
     }
     const bestRank = candidates.length ? Number(candidates[0].match_rank || 99) : 99;
     const best = candidates.filter((candidate) => Number(candidate.match_rank || 99) === bestRank);
-    const match = best.length === 1 ? best[0] : null;
+    const selected = selectedByLine.get(index + 1);
+    const reviewedMatch = selected && selected.identifierKey === identifierKey
+      ? best.find((candidate) => String(candidate.sku || "").trim().toLowerCase() === selected.sku)
+      : null;
+    const automaticMatch = bestRank < 3 && best.length === 1 ? best[0] : null;
+    const match = reviewedMatch || automaticMatch;
+    const reviewRequired = !match && bestRank === 3 && best.length > 0;
     return {
       ...item,
       line: index + 1,
@@ -31352,9 +31399,10 @@ async function matchExternalOperationalPoItems(vendor, items = []) {
       manufacturer: String(match?.manufacturer || ""),
       vendorSku: String(match?.vendor_sku || identifier),
       catalogUnitCost: match?.cost == null ? null : Number(match.cost),
-      matchBasis: String(match?.match_basis || ""),
-      matchStatus: match ? "matched" : best.length > 1 ? "ambiguous" : "unmatched",
-      candidates: best.slice(0, 5).map((candidate) => ({ sku: candidate.sku, title: candidate.title, matchBasis: candidate.match_basis }))
+      matchBasis: String(match ? `${match.match_basis}${reviewedMatch ? " (reviewed)" : ""}` : ""),
+      matchStatus: match ? "matched" : reviewRequired && best.length === 1 ? "review" : best.length > 1 ? "ambiguous" : "unmatched",
+      reviewedMatch: Boolean(reviewedMatch),
+      candidates: best.slice(0, 8).map((candidate) => ({ sku: candidate.sku, title: candidate.title, supplier: candidate.supplier, matchBasis: candidate.match_basis }))
     };
   });
 }
@@ -31376,7 +31424,7 @@ async function previewExternalOperationalPo(input = {}, db = {}) {
   } finally { await parser?.destroy().catch(() => {}); }
   const document = parseExternalOperationalPoText(parsed.text);
   if (!document.poNumber || !document.items.length) throw Object.assign(new Error("This PO format was not recognized. Confirm the PDF contains selectable text and a QTY / ITEM / UNIT PRICE table."), { statusCode: 400 });
-  const items = await matchExternalOperationalPoItems(vendor, document.items);
+  const items = await matchExternalOperationalPoItems(vendor, document.items, input.selectedMatches);
   const duplicate = postgres.isPostgresEnabled()
     ? await postgres.findPurchaseOrderByExternalReference(vendor.id, document.poNumber)
     : (db.purchaseOrders || []).find((po) => String(po.ctechId || po.externalPoNumber || "").trim().toLowerCase() === document.poNumber.toLowerCase() && String(po.vendorId || "") === String(vendor.id || ""));

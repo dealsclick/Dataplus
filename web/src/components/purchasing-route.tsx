@@ -1157,13 +1157,56 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     } catch (error) { setExternalPoPreview(null); toast.error(error instanceof Error ? error.message : "Unable to read this external PO.") }
     finally { setExternalPoPreviewing(false) }
   }
+  const chooseExternalPoMatch = (lineIndex: number, sku: string) => {
+    setExternalPoPreview((current) => {
+      if (!current) return current
+      const items = current.items.map((line, index) => {
+        if (index !== lineIndex) return line
+        const candidates = (Array.isArray(line.candidates) ? line.candidates : []) as Array<Record<string, unknown>>
+        const match = candidates.find((candidate) => String(candidate.sku || "").toLowerCase() === sku.toLowerCase())
+        if (!match) return line
+        return {
+          ...line,
+          sku: String(match.sku || ""),
+          title: String(match.title || line.description || ""),
+          matchStatus: "matched",
+          matchBasis: `${String(match.matchBasis || "manufacturer part number")} (reviewed)`,
+          reviewedMatch: true,
+        }
+      })
+      return { ...current, items, unresolvedLineCount: items.filter((line) => line.matchStatus !== "matched").length }
+    })
+  }
+  const applyUniqueExternalPoMatches = () => {
+    setExternalPoPreview((current) => {
+      if (!current) return current
+      const items = current.items.map((line) => {
+        if (line.matchStatus === "matched") return line
+        const candidates = (Array.isArray(line.candidates) ? line.candidates : []) as Array<Record<string, unknown>>
+        if (candidates.length !== 1) return line
+        const match = candidates[0]
+        return {
+          ...line,
+          sku: String(match.sku || ""),
+          title: String(match.title || line.description || ""),
+          matchStatus: "matched",
+          matchBasis: `${String(match.matchBasis || "manufacturer part number")} (reviewed)`,
+          reviewedMatch: true,
+        }
+      })
+      return { ...current, items, unresolvedLineCount: items.filter((line) => line.matchStatus !== "matched").length }
+    })
+  }
   const saveExternalPo = async () => {
     if (!createPoForm.vendorId || !createPoForm.warehouseId || !externalPoFile || !externalPoPreview?.readyToCreate) return toast.error("Preview a valid PDF before adding this purchase order.")
     setCreatePoSaving(true)
     const requestId = createPoRequestIdRef.current || crypto.randomUUID()
     createPoRequestIdRef.current = requestId
     try {
-      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ requestId, external: true, vendorId: createPoForm.vendorId, warehouseId: createPoForm.warehouseId, notes: createPoForm.notes, fileName: externalPoFile.name, pdfBase64: await externalPoBase64(externalPoFile), user: operatorName }) })
+      const selectedMatches = externalPoPreview.items
+        .filter((line) => line.reviewedMatch === true && line.sku)
+        .map((line, index) => ({ line: Number(line.line || index + 1), manufacturerPartNumber: String(line.manufacturerPartNumber || ""), sku: String(line.sku || "") }))
+      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ requestId, external: true, vendorId: createPoForm.vendorId, warehouseId: createPoForm.warehouseId, notes: createPoForm.notes, fileName: externalPoFile.name, pdfBase64: await externalPoBase64(externalPoFile), selectedMatches, user: operatorName }) })
       const poId = String(result.purchaseOrder?.id || "")
       toast.success(result.message || "External purchase order added.")
       createPoRequestIdRef.current = ""
@@ -1619,7 +1662,23 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
             {externalPoPreview ? <div className="grid gap-4">
               <div className="grid gap-3 rounded-md border bg-muted/20 p-4 sm:grid-cols-2 lg:grid-cols-5"><Detail label="CTech PO #" value={String(externalPoPreview.document.poNumber || "-")} /><Detail label="Supplier" value={String(externalPoPreview.vendor.name || "-")} /><Detail label="PO date" value={String(externalPoPreview.document.orderedAt || "-")} /><Detail label="Expected" value={String(externalPoPreview.document.expectedAt || "-")} /><Detail label="Total" value={moneyLabel(Number(externalPoPreview.document.total || 0))} /></div>
               {externalPoPreview.duplicate ? <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>PO already exists</AlertTitle><AlertDescription>CTech PO {String(externalPoPreview.document.poNumber || "")} is already linked to {String(externalPoPreview.duplicate.poNumber || "an existing DataPlus PO")}.</AlertDescription></Alert> : null}
-              <div className="max-h-72 overflow-auto rounded-md border"><Table><TableHeader className="sticky top-0 z-10 bg-background"><TableRow><TableHead>ITEM / MPN</TableHead><TableHead>Matched SKU</TableHead><TableHead>Description</TableHead><TableHead>Match</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">Unit cost</TableHead><TableHead className="text-right">Total</TableHead></TableRow></TableHeader><TableBody>{externalPoPreview.items.map((line, index) => <TableRow key={`${String(line.manufacturerPartNumber)}-${index}`}><TableCell className="font-mono text-xs">{String(line.manufacturerPartNumber || "-")}</TableCell><TableCell>{line.sku ? <a className="font-mono text-xs font-medium text-primary hover:underline" href={`/products/${encodeURIComponent(String(line.sku))}`} target="_blank" rel="noreferrer">{String(line.sku)}</a> : <span className="text-destructive">Not found</span>}</TableCell><TableCell className="max-w-72"><p className="truncate" title={String(line.description || "")}>{String(line.description || "-")}</p></TableCell><TableCell><Badge variant={line.matchStatus === "matched" ? "success" : "destructive"}>{line.matchStatus === "matched" ? String(line.matchBasis || "Matched") : line.matchStatus === "ambiguous" ? "Multiple matches" : "No catalog match"}</Badge></TableCell><TableCell className="text-right">{numberLabel(Number(line.qty || 0))}</TableCell><TableCell className="text-right">{moneyLabel(Number(line.unitCost || 0))}</TableCell><TableCell className="text-right font-medium">{moneyLabel(Number(line.lineTotal || 0))}</TableCell></TableRow>)}</TableBody></Table></div>
+              {externalPoPreview.items.some((line) => line.matchStatus !== "matched" && Array.isArray(line.candidates) && line.candidates.length === 1) ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-blue-500/30 bg-blue-500/10 p-3"><div><p className="text-sm font-medium">Unique manufacturer-part matches found</p><p className="text-xs text-muted-foreground">Review and apply catalog SKUs whose MPN matches after spaces, dashes, and punctuation are removed.</p></div><Button type="button" size="sm" variant="outline" onClick={applyUniqueExternalPoMatches}><ListChecks className="size-4" /> Use unique MPN matches</Button></div> : null}
+              <div className="max-h-80 overflow-auto rounded-md border">
+                <Table>
+                  <TableHeader className="sticky top-0 z-10 bg-background"><TableRow><TableHead>ITEM / MPN</TableHead><TableHead className="min-w-56">Matched SKU</TableHead><TableHead>Description</TableHead><TableHead>Match</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">Unit cost</TableHead><TableHead className="text-right">Total</TableHead></TableRow></TableHeader>
+                  <TableBody>{externalPoPreview.items.map((line, index) => {
+                    const candidates = (Array.isArray(line.candidates) ? line.candidates : []) as Array<Record<string, unknown>>
+                    const reviewable = candidates.length > 0 && (line.matchStatus !== "matched" || line.reviewedMatch === true)
+                    return <TableRow key={`${String(line.manufacturerPartNumber)}-${index}`}>
+                      <TableCell className="font-mono text-xs">{String(line.manufacturerPartNumber || "-")}</TableCell>
+                      <TableCell>{reviewable ? <Select value={line.reviewedMatch === true ? String(line.sku || "") : undefined} onValueChange={(sku) => chooseExternalPoMatch(index, sku)}><SelectTrigger className="h-8 min-w-52"><SelectValue placeholder={candidates.length === 1 ? "Review suggested SKU" : "Choose catalog SKU"} /></SelectTrigger><SelectContent>{candidates.map((candidate) => <SelectItem key={String(candidate.sku)} value={String(candidate.sku)}><span className="font-mono text-xs">{String(candidate.sku)}</span>{candidate.supplier ? <span className="ml-2 text-xs text-muted-foreground">{String(candidate.supplier)}</span> : null}</SelectItem>)}</SelectContent></Select> : line.sku ? <a className="font-mono text-xs font-medium text-primary hover:underline" href={`/products/${encodeURIComponent(String(line.sku))}`} target="_blank" rel="noreferrer">{String(line.sku)}</a> : <span className="text-destructive">Not found</span>}</TableCell>
+                      <TableCell className="max-w-72"><p className="truncate" title={String(line.description || "")}>{String(line.description || "-")}</p></TableCell>
+                      <TableCell><Badge variant={line.matchStatus === "matched" ? "success" : line.matchStatus === "review" || line.matchStatus === "ambiguous" ? "secondary" : "destructive"}>{line.matchStatus === "matched" ? String(line.matchBasis || "Matched") : line.matchStatus === "review" ? "Review MPN match" : line.matchStatus === "ambiguous" ? "Choose catalog SKU" : "No catalog match"}</Badge></TableCell>
+                      <TableCell className="text-right">{numberLabel(Number(line.qty || 0))}</TableCell><TableCell className="text-right">{moneyLabel(Number(line.unitCost || 0))}</TableCell><TableCell className="text-right font-medium">{moneyLabel(Number(line.lineTotal || 0))}</TableCell>
+                    </TableRow>
+                  })}</TableBody>
+                </Table>
+              </div>
               {externalPoPreview.duplicate ? null : Number(externalPoPreview.unresolvedLineCount || 0) > 0 ? <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Ready to add with SKU follow-up</AlertTitle><AlertDescription>{numberLabel(Number(externalPoPreview.unresolvedLineCount || 0))} line{Number(externalPoPreview.unresolvedLineCount || 0) === 1 ? "" : "s"} will be saved as unresolved. The warehouse can receive those lines immediately; their quantities remain on SKU-resolution hold until an existing SKU is linked or the missing SKU is created.</AlertDescription></Alert> : <Alert><CheckCircle2 className="size-4" /><AlertTitle>Ready to add</AlertTitle><AlertDescription>All {numberLabel(externalPoPreview.items.length)} line{externalPoPreview.items.length === 1 ? "" : "s"} matched. DataPlus will preserve the CTech PO number and create a separate internal DataPlus PO number.</AlertDescription></Alert>}
             </div> : null}
             <FormField><FieldLabel>Internal notes</FieldLabel><Textarea className="min-h-20" value={createPoForm.notes} onChange={(event) => setCreatePoForm((current) => ({ ...current, notes: event.target.value }))} placeholder="Optional import or receiving context" /></FormField>
