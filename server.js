@@ -16645,7 +16645,23 @@ function distributorVendorFor(db, vendor = {}) {
 }
 
 function catalogVendorForSupplier(db, vendor = {}) {
-  return distributorVendorFor(db, vendor) || vendor || null;
+  const distributor = distributorVendorFor(db, vendor);
+  if (!distributor) return vendor || null;
+  const sourceCodes = [...new Set([
+    ...vendorCatalogSourceCodes(distributor),
+    ...vendorCatalogSourceCodes(vendor),
+    distributor.code,
+    distributor.supplierCode,
+    vendor.code,
+    vendor.supplierCode
+  ].map((value) => String(value || "").trim()).filter(Boolean))];
+  return {
+    ...distributor,
+    catalogSettings: {
+      ...(distributor.catalogSettings || {}),
+      sourceCodes
+    }
+  };
 }
 
 function applyVendorDistributorSettings(db, vendor = {}, body = {}, changes = [], actor = "Luis") {

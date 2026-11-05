@@ -6326,7 +6326,12 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
       }
       const mainConflictClause = catalogOnly
         ? "on conflict (vendor_id, source_sku) do nothing"
-        : syncMode === "full"
+        // Split imports still own the current supplier-source row. Refresh its
+        // identifiers and descriptive evidence while change events remain
+        // limited to commercial fields. Reconciliation is the only mode that
+        // deliberately updates commercial values without replacing source
+        // identity data.
+        : !reconciliationOnly
           ? `on conflict (vendor_id, source_sku) do update set
           internal_sku = excluded.internal_sku,
           vendor_sku = excluded.vendor_sku,

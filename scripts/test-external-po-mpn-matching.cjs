@@ -25,16 +25,17 @@ const { matchExternalOperationalPoItems, catalogVendorForSupplier, applyVendorDi
 
 (async () => {
   try {
-    const vendor = { id: "mil", name: "MILWAUKEE TOOL", code: "MIL" };
-    const distributor = { id: "cei", name: "CEI", catalogSettings: { sourceCodes: ["CEI", "MIL"] } };
+    const vendor = { id: "mil", name: "MILWAUKEE TOOL", code: "MIL", catalogSettings: { sourceCodes: ["MIL"] } };
+    const distributor = { id: "cei", name: "CEI", catalogSettings: { sourceCodes: ["CEI"] } };
     const relationshipDb = { vendors: [vendor, distributor, { id: "dib", name: "Do It Best" }] };
     const relationshipChanges = [];
     assert.equal(applyVendorDistributorSettings(relationshipDb, distributor, { isDistributor: true, distributorSupplierIds: [vendor.id] }, relationshipChanges, "Test user"), null);
     assert.equal(distributor.isDistributor, true);
     assert.equal(vendor.distributorVendorId, distributor.id);
     assert.match(relationshipChanges.join(" "), /MILWAUKEE TOOL/);
-    assert.equal(catalogVendorForSupplier({ vendors: [vendor, distributor] }, { ...vendor, distributorVendorId: distributor.id }), distributor);
-    assert.deepEqual(vendorCatalogLookupKeys(distributor), ["cei", "mil"]);
+    const catalogVendor = catalogVendorForSupplier({ vendors: [vendor, distributor] }, { ...vendor, distributorVendorId: distributor.id });
+    assert.equal(catalogVendor.id, distributor.id);
+    assert.deepEqual(vendorCatalogLookupKeys(catalogVendor), ["cei", "mil"]);
     const sourceItems = [
       { manufacturerPartNumber: "48-32-4094", description: "Driver Bit Set", qty: 30, unitCost: 25.22 },
       { manufacturerPartNumber: "48-32-4403", description: "18 Piece Hex Drive Bit Set", qty: 30, unitCost: 9.88 },
