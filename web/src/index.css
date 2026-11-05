@@ -222,8 +222,12 @@ main img:not([data-no-image-preview]) {
   .warehouse-mobile .warehouse-audit-table tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: .25rem .75rem; }
   .warehouse-mobile .warehouse-audit-table td { padding: .2rem 0; }
   .warehouse-mobile .warehouse-audit-table .warehouse-mobile-cell-label { margin-bottom: .1rem; font-size: .6875rem; }
-  .warehouse-mobile .warehouse-audit-table .warehouse-audit-unknown > td:is(:nth-child(1), :nth-child(3), :nth-child(4), :nth-child(5), :nth-child(6), :nth-child(7)) { display: none; }
-  .warehouse-mobile .warehouse-audit-table td:last-child { align-self: end; }
+  .warehouse-mobile .warehouse-audit-table .warehouse-audit-product-title { grid-column: 1 / -1; grid-row: 1; min-width: 0; padding-bottom: .45rem; border-bottom: 1px solid color-mix(in oklab, var(--border) 70%, transparent); }
+  .warehouse-mobile .warehouse-audit-table .warehouse-audit-product-title .warehouse-mobile-cell-label { display: none; }
+  .warehouse-mobile .warehouse-audit-table .warehouse-audit-product-title p { max-width: calc(100vw - 4.5rem); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .warehouse-mobile .warehouse-audit-table .warehouse-audit-secondary { display: none; }
+  .warehouse-mobile .warehouse-audit-table .warehouse-audit-working-sku a { min-height: 32px; }
+  .warehouse-mobile .warehouse-audit-table td:last-child { grid-column: 1 / -1; align-self: end; padding-top: .45rem; }
   .warehouse-mobile .warehouse-audit-panel > [data-slot="card-content"] { padding-top: 0; }
   .warehouse-audit-sku-fields > :last-child { grid-column: 1 / -1; }
 }

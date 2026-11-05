@@ -56,6 +56,9 @@ assert.match(warehouseUi, /Orders this receipt can move forward/, 'PO receiving 
 assert.match(warehouseUi, /Recent PO receiving/, 'mobile receiving shows recent and resumable PO sessions');
 assert.match(warehouseUi, /activeReceivingParticipants/, 'the shared scanner shows teammates who are actively receiving the PO');
 assert.match(warehouseUi, /receivingContributors/, 'PO receipt posting carries scan attribution into each received line');
+assert.match(warehouseUi, /receiving-live-activity/, 'desktop receiving shows current shared PO activity');
+assert.match(warehouseUi, /refreshReceivingActivity[\s\S]*6_000/, 'desktop receiving refreshes shared scan activity without a page reload');
+assert.match(warehouseUi, /receiving-item-title[\s\S]*truncate/, 'receiving rows prioritize a one-line product title');
 assert.match(warehouseUi, /Type \/ reference/, 'the audit register visibly identifies every audit type and PO reference');
 assert.match(warehouseUi, /All PO receiving/, 'the audit register can isolate DataPlus and external PO receiving');
 assert.match(warehouseUi, /Search audit, PO, supplier, or counter/, 'the audit register exposes operational search');
