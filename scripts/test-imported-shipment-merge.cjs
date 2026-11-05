@@ -42,4 +42,28 @@ const storedByPackage = { id: "local-package", packageSnList: ["PK-200"], shippi
 const importedByPackage = { id: "remote-package", packageSn: "pk-200", status: "shipped" };
 assert.equal(mergeImportedShipments([storedByPackage], [importedByPackage]).length, 1);
 
+const storedTemuLabel = {
+  id: "local-temu-label",
+  packageSnList: ["PK-300"],
+  trackingNumber: "GFUS01082103544067",
+  trackingUrl: "https://example.test/GFUS01082103544067",
+  carrier: "GOFO",
+  carrierName: "GOFO",
+  service: "Standard"
+};
+const importedTemuShipment = {
+  id: "remote-temu-shipment",
+  packageSn: "PK-300",
+  trackingNumber: "",
+  carrier: "Temu",
+  carrierName: "Temu",
+  service: "Temu fulfillment",
+  status: "fulfilled"
+};
+const mergedTemuShipment = mergeImportedShipments([storedTemuLabel], [importedTemuShipment])[0];
+assert.equal(mergedTemuShipment.status, "fulfilled", "the marketplace remains authoritative for shipment status");
+assert.equal(mergedTemuShipment.trackingNumber, "GFUS01082103544067", "a blank marketplace refresh must not erase purchased-label tracking");
+assert.equal(mergedTemuShipment.carrierName, "GOFO", "the purchased label carrier stays attached when the marketplace omits tracking");
+assert.equal(mergedTemuShipment.service, "Standard");
+
 console.log("Imported shipment merge checks passed.");
