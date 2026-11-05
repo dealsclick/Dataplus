@@ -8317,30 +8317,56 @@ async function readProductSimilarityGroup(identity = {}) {
     ''
   )`;
   const normalizedPartNumber = (alias) => `regexp_replace(
-    lower(trim(coalesce(
-      nullif(${alias}.mfr_part_number, ''),
-      nullif(${alias}.raw ->> 'mfrPartNumber', ''),
-      nullif(${alias}.raw ->> 'manufacturerPartNumber', ''),
-      ''
-    ))),
+    lower(trim(coalesce(${alias}.mfr_part_number, ''))),
     '[^a-z0-9]+', '', 'g'
   )`;
   const normalizedVendorSku = (alias) => `regexp_replace(
-    lower(trim(coalesce(nullif(${alias}.vendor_sku, ''), nullif(${alias}.raw ->> 'vendorSku', ''), ''))),
+    lower(trim(coalesce(${alias}.vendor_sku, ''))),
     '[^a-z0-9]+', '', 'g'
   )`;
+  const targetResult = await client.query(`
+    select product_id, sku, barcode, mfr_part_number, vendor_sku, raw
+    from products
+    where ($1 <> '' and product_id = $1)
+       or ($2 <> '' and lower(sku) = lower($2))
+    order by case when product_id = $1 then 0 else 1 end
+    limit 1
+  `, [productId || "", sku || ""]);
+  const target = targetResult.rows[0];
+  if (!target) return { productId: productId || "", sku: sku || "", members: [], indexed: true };
+
+  const normalizePeerIdentifier = (value) => String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const validPeerIdentifier = (value) => value.length >= 4 && !["none", "unknown", "na", "null", "misc"].includes(value);
+  const targetBarcode = target.barcode || target.raw?.upc || target.raw?.gtin || target.raw?.upcCode || "";
+  const barcodeKey = canonicalSupplierBarcode(targetBarcode);
+  const barcodeVariants = supplierBarcodeVariants(targetBarcode);
+  const normalizedMpn = normalizePeerIdentifier(target.mfr_part_number || target.raw?.mfrPartNumber || target.raw?.manufacturerPartNumber);
+  const normalizedVendorSkuValue = normalizePeerIdentifier(target.vendor_sku || target.raw?.vendorSku);
+  const mpnKey = validPeerIdentifier(normalizedMpn) ? normalizedMpn : "";
+  const vendorSkuKey = validPeerIdentifier(normalizedVendorSkuValue) ? normalizedVendorSkuValue : "";
   const result = await client.query(`
-    with target as materialized (
-      select
-        product.*,
-        ${canonicalSupplierBarcodeSql(barcodeValue("product"))} as barcode_key,
-        ${normalizedPartNumber("product")} as mpn_key,
-        ${normalizedVendorSku("product")} as vendor_sku_key
-      from products product
-      where ($1 <> '' and product.product_id = $1)
-         or ($2 <> '' and lower(product.sku) = lower($2))
-      order by case when product.product_id = $1 then 0 else 1 end
-      limit 1
+    with candidate_ids as materialized (
+      select product_id from products where product_id = $1
+      union
+      select product_id from products where cardinality($5::text[]) > 0 and barcode = any($5::text[])
+      union
+      select product_id from products where cardinality($5::text[]) > 0 and raw ->> 'upc' = any($5::text[])
+      union
+      select product_id from products where cardinality($5::text[]) > 0 and raw ->> 'gtin' = any($5::text[])
+      union
+      select product_id from products where cardinality($5::text[]) > 0 and raw ->> 'upcCode' = any($5::text[])
+      union
+      select candidate.product_id
+      from products candidate
+      where $3 <> ''
+        and length(${normalizedPartNumber("candidate")}) >= 4
+        and ${normalizedPartNumber("candidate")} = $3
+      union
+      select candidate.product_id
+      from products candidate
+      where $4 <> ''
+        and length(${normalizedVendorSku("candidate")}) >= 4
+        and ${normalizedVendorSku("candidate")} = $4
     )
     select
       candidate.product_id,
@@ -8363,18 +8389,12 @@ async function readProductSimilarityGroup(identity = {}) {
       coalesce(stock.physical_on_hand, 0) as physical_on_hand,
       coalesce(stock.physical_available, 0) as physical_available,
       coalesce(stock.physical_reserved, 0) as physical_reserved,
-      candidate.product_id = target.product_id as is_current,
-      target.barcode_key <> ''
-        and length(target.barcode_key) >= 8
-        and candidate_identity.barcode_key = target.barcode_key as upc_match,
-      length(target.mpn_key) >= 4
-        and target.mpn_key not in ('none', 'unknown', 'na', 'null', 'misc')
-        and candidate_identity.mpn_key = target.mpn_key as mpn_match,
-      length(target.vendor_sku_key) >= 4
-        and target.vendor_sku_key not in ('none', 'unknown', 'na', 'null', 'misc')
-        and candidate_identity.vendor_sku_key = target.vendor_sku_key as vendor_sku_match
-    from target
-    join products candidate on true
+      candidate.product_id = $1 as is_current,
+      $2 <> '' and candidate_identity.barcode_key = $2 as upc_match,
+      $3 <> '' and candidate_identity.mpn_key = $3 as mpn_match,
+      $4 <> '' and candidate_identity.vendor_sku_key = $4 as vendor_sku_match
+    from candidate_ids ids
+    join products candidate on candidate.product_id = ids.product_id
     cross join lateral (
       select
         ${canonicalSupplierBarcodeSql(barcodeValue("candidate"))} as barcode_key,
@@ -8389,31 +8409,15 @@ async function readProductSimilarityGroup(identity = {}) {
       from inventory_levels level
       where level.product_id = candidate.product_id
     ) stock on true
-    where candidate.product_id = target.product_id
-      or (
-        target.barcode_key <> ''
-        and length(target.barcode_key) >= 8
-        and candidate_identity.barcode_key = target.barcode_key
-      )
-      or (
-        length(target.mpn_key) >= 4
-        and target.mpn_key not in ('none', 'unknown', 'na', 'null', 'misc')
-        and candidate_identity.mpn_key = target.mpn_key
-      )
-      or (
-        length(target.vendor_sku_key) >= 4
-        and target.vendor_sku_key not in ('none', 'unknown', 'na', 'null', 'misc')
-        and candidate_identity.vendor_sku_key = target.vendor_sku_key
-      )
     order by
-      (candidate.product_id = target.product_id) desc,
-      (target.barcode_key <> '' and candidate_identity.barcode_key = target.barcode_key) desc,
-      (target.mpn_key <> '' and candidate_identity.mpn_key = target.mpn_key) desc,
+      (candidate.product_id = $1) desc,
+      ($2 <> '' and candidate_identity.barcode_key = $2) desc,
+      ($3 <> '' and candidate_identity.mpn_key = $3) desc,
       coalesce(stock.physical_available, 0) desc,
       coalesce(candidate.qty, 0) desc,
       candidate.sku
     limit 50
-  `, [productId || "", sku || ""]);
+  `, [target.product_id, barcodeKey, mpnKey, vendorSkuKey, barcodeVariants]);
   const members = result.rows.map((row) => {
     const matchTypes = [];
     if (row.upc_match) matchTypes.push("upc");
