@@ -11,6 +11,11 @@ function loadServerFunction(name, context) {
   const end = serverSource.indexOf("\n}\n", start) + 2;
   return vm.runInNewContext(`(${serverSource.slice(start, end)})`, context);
 }
+function loadServerSyncFunction(name, context) {
+  const start = serverSource.indexOf(`function ${name}(`);
+  const end = serverSource.indexOf("\n}\n", start) + 2;
+  return vm.runInNewContext(`(${serverSource.slice(start, end)})`, context);
+}
 
 test("repeated SKUs require a line index and reopen only that line", () => {
   const lines = [{ sku: "A", qty: 2 }, { sku: "A", qty: 3 }];
@@ -57,6 +62,56 @@ test("label purchase sends tracking immediately for eBay and Walmart only", asyn
   assert.equal(await sync({}, { source: "Temu" }, { trackingNumber: "9300" }, "Luis"), null);
   assert.equal(await sync({}, { source: "eBay" }, { trackingNumber: "" }, "Luis"), null);
   assert.equal(calls.length, 2);
+});
+
+test("combined label purchase sends tracking to every linked marketplace order", async () => {
+  const calls = [];
+  const saved = [];
+  const sync = loadServerFunction("syncPurchasedShipmentGroupMembers", {
+    syncPurchasedMarketplaceShipment: async (_db, order, shipment) => {
+      calls.push({ order: order.orderNumber, tracking: shipment.trackingNumber });
+      return { status: "sent" };
+    },
+    postgres: { saveOrder: async (order) => saved.push(order.orderNumber) },
+    clearOrderApiCache: () => {}
+  });
+  const results = await sync({}, { linked: [
+    { order: { id: "child-1", orderNumber: "88361" }, shipment: { id: "shipment-1", trackingNumber: "9400" } },
+    { order: { id: "child-2", orderNumber: "88364" }, shipment: { id: "shipment-2", trackingNumber: "9400" } }
+  ] }, "Luis");
+  assert.deepEqual(calls, [{ order: "88361", tracking: "9400" }, { order: "88364", tracking: "9400" }]);
+  assert.deepEqual(saved, ["88361", "88364"]);
+  assert.deepEqual(Array.from(results, (entry) => entry.status), ["sent", "sent"]);
+});
+
+test("eBay access token hydrates persisted connector state before a tracking write", async () => {
+  let reads = 0;
+  const accessToken = loadServerFunction("ebayAccessToken", {
+    getEbayConfig: (db) => ({
+      accessToken: db.connectorState?.ebayAccessToken || "",
+      refreshToken: db.connectorState?.ebayRefreshToken || "",
+      accessTokenExpiresAt: db.connectorState?.ebayAccessTokenExpiresAt || ""
+    }),
+    postgres: { isPostgresEnabled: () => true },
+    readConnectorStateStore: async () => {
+      reads += 1;
+      return { ebayAccessToken: "persisted-access", ebayRefreshToken: "persisted-refresh", ebayAccessTokenExpiresAt: "2099-01-01T00:00:00.000Z" };
+    },
+    refreshEbayAccessToken: async () => { throw new Error("refresh should not run"); }
+  });
+  const db = {};
+  assert.equal(await accessToken(db), "persisted-access");
+  assert.equal(reads, 1);
+  assert.equal(db.connectorState.ebayRefreshToken, "persisted-refresh");
+});
+
+test("eBay Trading errors retain codes and messages for operator review", () => {
+  const message = loadServerSyncFunction("ebayTradingErrorMessage", {
+    ebayTradingArray: (value) => Array.isArray(value) ? value : value ? [value] : [],
+    ebayTradingText: (value) => String(value ?? "")
+  });
+  assert.equal(message({ Errors: { ErrorCode: "21917053", LongMessage: "The order line item is invalid." } }), "Error 21917053: The order line item is invalid.");
+  assert.equal(message({ Errors: { Error: [{ ErrorCode: "10007", ShortMessage: "Internal error." }] } }), "Error 10007: Internal error.");
 });
 
 test("aggregate duplicate package rows without reopening other quantities", () => {

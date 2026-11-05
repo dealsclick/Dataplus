@@ -34296,6 +34296,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
       row.ratedAt = result.rate.quotedAt || new Date().toISOString();
     }
     if (result.pending) throw new Error("The label purchase is still pending at the provider. Retry after its status is refreshed.");
+    let groupLink = null;
     if (result.shipment) {
       const effectiveLabelSource = String(selection.rate.provider || "").toLowerCase() === "temu" ? "temu" : labelSource;
       recordPurchasedPackage(result.shipment, ratesResult.package || packageForShippingRates(request, readSystemSettingsStore(db.systemSettings || {})));
@@ -34309,7 +34310,7 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
       result.shipment.labelSource = effectiveLabelSource;
       result.shipment.labelSourceLabel = effectiveLabelSource === "temu" ? "Temu marketplace label" : effectiveLabelSource === "outsourced" ? "Outsourced label" : "Purchased from DataPlus";
       try {
-        const groupLink = await linkPurchasedShipmentToGroup(order, result.shipment, actor, { at: new Date().toISOString() });
+        groupLink = await linkPurchasedShipmentToGroup(order, result.shipment, actor, { at: new Date().toISOString() });
         row.shipmentGroupId = groupLink.groupId || "";
         row.shipmentGroupOrderIds = groupLink.orders?.map((candidate) => candidate.id) || [];
       } catch (error) {
@@ -34340,6 +34341,12 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
       row.channelSyncStatus = channelResult.status || "";
       row.channelSyncError = channelResult.error || "";
       await postgres.saveOrder(order);
+    }
+    const groupChannelResults = await syncPurchasedShipmentGroupMembers(db, groupLink, actor);
+    if (groupChannelResults.length) {
+      row.groupChannelSync = groupChannelResults;
+      const groupFailures = groupChannelResults.filter((entry) => !["sent", "already_synced"].includes(String(entry.status || "").toLowerCase()));
+      if (groupFailures.length) row.groupChannelSyncError = groupFailures.map((entry) => `${entry.orderNumber}: ${entry.error || entry.status}`).join("; ");
     }
     clearOrderApiCache(order.id);
   };
@@ -40452,8 +40459,14 @@ function ebayRawXmlRequest(urlString, options = {}) {
 }
 
 function ebayTradingErrorMessage(payload = {}) {
-  return ebayTradingArray(payload.Errors?.Error)
-    .map((error) => ebayTradingText(error.LongMessage || error.ShortMessage || error.ErrorCode))
+  return ebayTradingArray(payload.Errors?.Error ?? payload.Errors)
+    .map((error) => {
+      const code = ebayTradingText(error?.ErrorCode);
+      const shortMessage = ebayTradingText(error?.ShortMessage);
+      const longMessage = ebayTradingText(error?.LongMessage);
+      const message = longMessage || shortMessage;
+      return [code ? `Error ${code}` : "", message].filter(Boolean).join(": ");
+    })
     .filter(Boolean)
     .join("; ");
 }
@@ -40484,6 +40497,8 @@ async function ebayTradingRequest(db, callName, requestXml, options = {}) {
         throw new Error(`eBay Trading API returned unreadable XML (${result.response.status}): ${(result.text || "").slice(0, 180)}`);
       }
       const apiMessage = ebayTradingErrorMessage(payload);
+      const ack = ebayTradingText(payload.Ack);
+      const apiAccepted = Boolean(result.response.ok) && (!ack || /^(success|warning)$/i.test(ack));
       appendChannelApiLog({
         channel: "eBay",
         transport: "OAuth Seller / Trading",
@@ -40491,9 +40506,9 @@ async function ebayTradingRequest(db, callName, requestXml, options = {}) {
         path: resourcePath,
         operation: options.operation || callName,
         statusCode: result.response.status || 0,
-        ok: Boolean(result.response.ok),
+        ok: apiAccepted,
         durationMs: Date.now() - startedAt,
-        message: result.response.ok ? (ebayTradingText(payload.Ack) || "OK") : (apiMessage || (result.text || "").slice(0, 1200)),
+        message: apiAccepted ? (ack || "OK") : (apiMessage || ack || (result.text || "").slice(0, 1200)),
         requestId: String(result.response.headers?.["x-ebay-c-request-id"] || result.response.headers?.rlogid || ""),
         jobId: options.jobId || ""
       });
@@ -40839,7 +40854,12 @@ async function refreshEbayAccessToken(db) {
 }
 
 async function ebayAccessToken(db) {
-  const config = getEbayConfig(db);
+  let config = getEbayConfig(db);
+  if (postgres.isPostgresEnabled() && (!config.accessToken || !config.refreshToken)) {
+    const persistedConnectorState = await readConnectorStateStore();
+    db.connectorState = { ...(db.connectorState || {}), ...persistedConnectorState };
+    config = getEbayConfig(db);
+  }
   if (config.accessToken && config.accessTokenExpiresAt) {
     const expiresAt = new Date(config.accessTokenExpiresAt).getTime();
     if (Number.isFinite(expiresAt) && expiresAt > Date.now() + 120000) return config.accessToken;
@@ -50315,6 +50335,25 @@ async function syncPurchasedMarketplaceShipment(db, order, shipment, actor = "Da
   if (!["ebay", "walmart"].includes(source)) return null;
   if (!String(shipment?.trackingNumber || "").trim()) return null;
   return syncDropshipShipmentToChannel(db, order, shipment, actor);
+}
+
+async function syncPurchasedShipmentGroupMembers(db, groupLink, actor = "DataPlus") {
+  const results = [];
+  for (const linked of groupLink?.linked || []) {
+    const result = await syncPurchasedMarketplaceShipment(db, linked.order, linked.shipment, actor);
+    if (!result) continue;
+    linked.order.updatedAt = new Date().toISOString();
+    await postgres.saveOrder(linked.order);
+    clearOrderApiCache(linked.order.id);
+    results.push({
+      orderId: linked.order.id,
+      orderNumber: linked.order.orderNumber || linked.order.id,
+      shipmentId: linked.shipment.id,
+      status: result.status || "",
+      error: result.error || ""
+    });
+  }
+  return results;
 }
 
 function shopifyLabelPurchaseSummary(result = {}) {
@@ -59872,8 +59911,19 @@ async function handleApi(req, res) {
       } else {
         return sendJson(res, 400, { error: "Choose a shipping rate before printing a label." });
       }
+      let purchasedGroupLink = null;
+      if (!dropshipPo && result.shipment?.trackingNumber) {
+        try {
+          purchasedGroupLink = await linkPurchasedShipmentToGroup(order, result.shipment, authUser?.name || authUser?.username || "DataPlus", { at: new Date().toISOString() });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          result.shipment.shipmentGroupLink = { status: "failed", attemptedAt: new Date().toISOString(), message };
+          addOrderTimeline(order, { type: "shipping_label", title: "Combined label linkage needs review", message: `The label was purchased, but the combined orders need linkage review: ${message}`, user: authUser?.name || authUser?.username || "DataPlus" });
+        }
+      }
       await postgres.saveOrder(order);
       let channelResult = null;
+      let groupChannelResults = [];
       if (dropshipPo && result.shipment?.trackingNumber) {
         dropshipPo.dropshipShipments = Array.isArray(dropshipPo.dropshipShipments) ? dropshipPo.dropshipShipments : [];
         const existingPoShipment = dropshipPo.dropshipShipments.find((entry) => String(entry.orderId || "") === String(order.id));
@@ -59893,6 +59943,7 @@ async function handleApi(req, res) {
         await postgres.savePurchaseOrder(dropshipPo);
       } else {
         channelResult = await syncPurchasedMarketplaceShipment(db, order, result.shipment, authUser?.name || authUser?.username || "DataPlus");
+        groupChannelResults = await syncPurchasedShipmentGroupMembers(db, purchasedGroupLink, authUser?.name || authUser?.username || "DataPlus");
       }
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
@@ -59909,7 +59960,7 @@ async function handleApi(req, res) {
         : walmartOrder && channelResult
           ? `Shipping label attached, but Walmart was not marked shipped: ${channelResult.error || result.shipment?.channelSync?.message || channelResult.status}.`
           : "Shipping label attached. Opening it for print.";
-      return sendJson(res, pending ? 202 : 200, { order, purchaseOrder: dropshipPo, document: result.document, shipment: result.shipment || null, purchase: result.purchase || null, channelResult, message: pending ? "Shopify label purchase started. Check status shortly if the label does not appear immediately." : dropshipPo ? dropshipMessage : labelMessage });
+      return sendJson(res, pending ? 202 : 200, { order, purchaseOrder: dropshipPo, document: result.document, shipment: result.shipment || null, purchase: result.purchase || null, channelResult, groupChannelResults, message: pending ? "Shopify label purchase started. Check status shortly if the label does not appear immediately." : dropshipPo ? dropshipMessage : labelMessage });
     } catch (error) {
       appendOrderShippingEvent(order, { provider: provider || "shipping", action: "label_purchase", status: "failed", message: error.message || "Unknown shipping label error." });
       appendChannelApiLog({ channel: provider === "veeqo" ? "Veeqo" : orderSourceChannelName(order), transport: "HTTP", method: "POST", path: "shipping/labels", operation: "Universal shipping label failed", statusCode: 502, ok: false, entityType: "order", entityId: order.id, message: error.message || "Unknown shipping label error." });
@@ -77054,5 +77105,9 @@ module.exports = {
   createFulfillmentRecoveryBatch,
   recoverTemuFulfillmentBatch,
   recoverExistingTemuLabelsForOrders,
+  ebayTradingErrorMessage,
+  syncDropshipShipmentToChannel,
+  syncPurchasedMarketplaceShipment,
+  syncPurchasedShipmentGroupMembers,
   startServer
 };
