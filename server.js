@@ -28734,6 +28734,39 @@ function activeShippingLabelShipments(order = {}) {
   });
 }
 
+function purchasedTrackingConflict(order = {}, trackingNumber = "", candidates = []) {
+  const sought = normalizeTrackingNumber(trackingNumber);
+  if (!sought) return null;
+  const currentOrderId = String(order.id || "").trim();
+  const currentGroupId = String(order.shipmentGroupId || "").trim();
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const candidateOrder = candidate?.order || candidate || {};
+    if (!candidateOrder.id || String(candidateOrder.id) === currentOrderId) continue;
+    const candidateGroupId = String(candidateOrder.shipmentGroupId || "").trim();
+    if (currentGroupId && candidateGroupId === currentGroupId) continue;
+    const activeTracking = [
+      candidateOrder.trackingNumber,
+      ...activeShippingLabelShipments(candidateOrder).map((shipment) => shipment.trackingNumber)
+    ].map(normalizeTrackingNumber).filter(Boolean);
+    if (!activeTracking.includes(sought)) continue;
+    return {
+      orderId: candidateOrder.id,
+      orderNumber: candidateOrder.orderNumber || candidateOrder.id,
+      marketplaceOrderId: candidateOrder.ebayOrderId || candidateOrder.marketplaceOrderId || candidateOrder.marketplaceOrderNumber || "",
+      buyer: candidateOrder.buyer || candidateOrder.customerName || "",
+      shipmentId: candidate.shipmentId || "",
+      trackingNumber: sought
+    };
+  }
+  return null;
+}
+
+async function findPurchasedTrackingConflict(order = {}, trackingNumber = "") {
+  if (!postgres.isPostgresEnabled() || !normalizeTrackingNumber(trackingNumber)) return null;
+  const candidates = await postgres.readOrdersByTrackingCandidates([trackingNumber], { limit: 50 });
+  return purchasedTrackingConflict(order, trackingNumber, candidates);
+}
+
 function temuVeeqoDuplicateLabelEvidence(order = {}, live = {}) {
   if (String(order.source || order.channelSource || order.channel || "").trim().toLowerCase() !== "temu") {
     return { blocked: false, status: "", trackingNumbers: [], packageSnList: [], labelSources: [] };
@@ -35562,6 +35595,51 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
     ? { content: Buffer.from(labelContent, "base64"), contentType: format === "PDF" ? "application/pdf" : `image/${format.toLowerCase()}` }
     : await veeqoRequest(/^https?:\/\//i.test(labelUrl) ? labelUrl : `${veeqoConfig(settings).baseUrl}${labelUrl.startsWith("/") ? "" : "/"}${labelUrl}`, { raw: true, headers: { accept: format === "PDF" ? "application/pdf" : "*/*" } }, settings);
   if (!downloaded.content?.length) throw new Error("Veeqo returned an empty label document.");
+  const purchaseTracking = veeqoShipmentTrackingDetails(shipment, {
+    carrier: purchaseRate.carrier || "Veeqo"
+  });
+  const trackingNumber = purchaseTracking.trackingNumber
+    || await trackingNumberFromShippingLabel(downloaded.content, purchaseTracking.carrier || purchaseRate.carrier);
+  const trackingUrl = purchaseTracking.trackingUrl || trackingUrlForCarrier(purchaseTracking.carrier || purchaseRate.carrier, trackingNumber);
+  const trackingConflict = await findPurchasedTrackingConflict(order, trackingNumber);
+  if (trackingConflict) {
+    const purchasedShipment = {
+      remoteShipmentId: String(shipment.remote_shipment_id || purchaseRate.remoteShipmentId || shipment.id || shipment.shipment_id || ""),
+      veeqoShipmentId: String(response.id || shipment.id || shipment.shipment_id || ""),
+      veeqoOrderId: String(purchaseRate.veeqoOrderId || purchaseRate.raw?.veeqo_order_id || ""),
+      allocationId: String(purchaseRate.allocationId || purchaseRate.raw?.allocation_id || ""),
+      rateSource: String(purchaseRate.rateSource || (purchaseRate.raw?.allocation_id ? "veeqo_allocation" : "rate_shopping")),
+      trackingNumber
+    };
+    let cancellationPath = "";
+    let canceled = false;
+    let cancellationError = "";
+    try {
+      cancellationPath = await veeqoCancellationPath(purchasedShipment, settings);
+      await veeqoRequest(cancellationPath, { method: "DELETE", signal: AbortSignal.timeout(20000) }, settings);
+      canceled = true;
+    } catch (error) {
+      cancellationError = error.message || String(error);
+    }
+    appendChannelApiLog({
+      channel: "Veeqo",
+      transport: "HTTP",
+      method: "DELETE",
+      path: cancellationPath || "duplicate-tracking-label",
+      operation: canceled ? "Cancel duplicate tracking label" : "Cancel duplicate tracking label failed",
+      statusCode: canceled ? 204 : 502,
+      ok: canceled,
+      entityType: "order",
+      entityId: order.id,
+      message: canceled
+        ? `Canceled label with tracking ${trackingNumber}; it already belongs to order ${trackingConflict.orderNumber}.`
+        : `Tracking ${trackingNumber} already belongs to order ${trackingConflict.orderNumber}. Automatic Veeqo cancellation failed: ${cancellationError}`,
+      details: { trackingConflict, remoteShipmentId: purchasedShipment.remoteShipmentId, veeqoShipmentId: purchasedShipment.veeqoShipmentId }
+    });
+    throw new Error(canceled
+      ? `Veeqo returned tracking ${trackingNumber}, which is already active on order ${trackingConflict.orderNumber} for ${trackingConflict.buyer || "another buyer"}. The duplicate label was canceled; load fresh rates and purchase a new label.`
+      : `Veeqo returned tracking ${trackingNumber}, which is already active on order ${trackingConflict.orderNumber} for ${trackingConflict.buyer || "another buyer"}. Do not use this label. Automatic cancellation failed: ${cancellationError}`);
+  }
   const now = new Date().toISOString();
   const attachmentId = crypto.randomUUID();
   const mimeType = orderAttachmentMimeType(downloaded.contentType || (format === "PDF" ? "application/pdf" : "application/octet-stream"));
@@ -35571,12 +35649,6 @@ async function attachVeeqoShippingLabel(order, db = {}, selectedRate = {}, optio
   fs.writeFileSync(path.join(ORDER_ATTACHMENT_DIR, storageKey), downloaded.content);
   const document = { id: attachmentId, name, type: "shipping_label", note: `${purchaseRate.carrier || "Veeqo"} ${purchaseRate.service || "shipping label"}`, mimeType, size: downloaded.content.length, storage: "local", storageKey, ...(labelUrl ? { sourceUrl: labelUrl } : {}), url: `/api/orders/${encodeURIComponent(order.id)}/attachments/${attachmentId}`, createdAt: now, createdBy: "Veeqo" };
   order.documents = [document, ...(Array.isArray(order.documents) ? order.documents : [])];
-  const purchaseTracking = veeqoShipmentTrackingDetails(shipment, {
-    carrier: purchaseRate.carrier || "Veeqo"
-  });
-  const trackingNumber = purchaseTracking.trackingNumber
-    || await trackingNumberFromShippingLabel(downloaded.content, purchaseTracking.carrier || purchaseRate.carrier);
-  const trackingUrl = purchaseTracking.trackingUrl || trackingUrlForCarrier(purchaseTracking.carrier || purchaseRate.carrier, trackingNumber);
   order.shipments = Array.isArray(order.shipments) ? order.shipments : [];
   const shipmentRecord = {
     id: crypto.randomUUID(),

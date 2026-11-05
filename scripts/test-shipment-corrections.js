@@ -114,6 +114,23 @@ test("eBay Trading errors retain codes and messages for operator review", () => 
   assert.equal(message({ Errors: { Error: [{ ErrorCode: "10007", ShortMessage: "Internal error." }] } }), "Error 10007: Internal error.");
 });
 
+test("a newly purchased label rejects tracking already active on an unrelated order", () => {
+  const conflict = loadServerSyncFunction("purchasedTrackingConflict", {
+    normalizeTrackingNumber,
+    activeShippingLabelShipments: (order) => (order.shipments || []).filter((shipment) => shipment.voidStatus !== "voided")
+  });
+  const current = { id: "current", orderNumber: "88328", shipmentGroupId: "group-karen" };
+  const candidates = [
+    { order: { id: "same-group", orderNumber: "88353", shipmentGroupId: "group-karen", shipments: [{ trackingNumber: "1Z DUPLICATE" }] } },
+    { shipmentId: "old-shipment", order: { id: "unrelated", orderNumber: "55582", buyer: "Daniel", shipments: [{ trackingNumber: "1Z DUPLICATE" }] } }
+  ];
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(conflict(current, "1zduplicate", candidates))),
+    { orderId: "unrelated", orderNumber: "55582", marketplaceOrderId: "", buyer: "Daniel", shipmentId: "old-shipment", trackingNumber: "1ZDUPLICATE" }
+  );
+  assert.equal(conflict(current, "1zduplicate", [{ order: { id: "voided", shipments: [{ trackingNumber: "1Z DUPLICATE", voidStatus: "voided" }] } }]), null);
+});
+
 test("aggregate duplicate package rows without reopening other quantities", () => {
   assert.deepEqual(shipmentReopenPlan([{ sku: "A", qty: 3 }], { lines: [{ sku: "A", qty: 1 }, { sku: "A", qty: 1 }] }), [{ lineIndex: 0, qty: 2 }]);
 });
