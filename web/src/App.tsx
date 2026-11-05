@@ -577,6 +577,7 @@ export type Vendor = {
   id: string
   name: string
   code?: string
+  isDistributor?: boolean
   distributorVendorId?: string
   status?: string
   retirement?: { retiredAt: string; reason: string; actor: string; jobId: string } | null
@@ -1582,6 +1583,8 @@ function vendorReferenceSummary(vendor: Vendor): Vendor {
     id: vendor.id,
     name: vendor.name,
     code: vendor.code || "",
+    isDistributor: vendor.isDistributor === true,
+    distributorVendorId: vendor.distributorVendorId || "",
     status: vendor.status || "active",
     type: vendor.type || "",
     retirement: vendor.retirement || null,
@@ -2546,12 +2549,14 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
 
   async function saveVendor(vendorId: string, patch: Record<string, unknown>) {
     try {
-      const result = await api<{ vendor: Vendor; catalogRefreshJob?: ImportJob | null }>(`/api/vendors/${encodeURIComponent(vendorId)}`, {
+      const result = await api<{ vendor: Vendor; vendors?: Vendor[]; catalogRefreshJob?: ImportJob | null }>(`/api/vendors/${encodeURIComponent(vendorId)}`, {
         method: "PATCH",
         body: JSON.stringify(patch),
       })
       setState((current) => {
-        const vendors = (current.vendors || []).map((vendor) => vendor.id === vendorId ? result.vendor : vendor)
+        const vendors = result.vendors?.length
+          ? result.vendors
+          : (current.vendors || []).map((vendor) => vendor.id === vendorId ? result.vendor : vendor)
         updateAppReference("vendorDetails", vendors)
         updateAppReference("vendors", vendors.map(vendorReferenceSummary))
         return { ...current, vendors }

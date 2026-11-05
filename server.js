@@ -16514,6 +16514,7 @@ function normalizeVendor(db, vendor) {
     // vendor records did not carry this setting and otherwise looked active.
     status: vendor.status || "inactive",
     retirement: vendor.retirement || null,
+    isDistributor: vendor.isDistributor === true || (db.vendors || []).some((entry) => String(entry.id || "") !== String(vendor.id || "") && String(entry.distributorVendorId || "") === String(vendor.id || "")),
     distributorVendorId: String(vendor.distributorVendorId || "").trim(),
     type: vendor.type || "Supplier",
     contactName: vendor.contactName || "",
@@ -16645,6 +16646,79 @@ function distributorVendorFor(db, vendor = {}) {
 
 function catalogVendorForSupplier(db, vendor = {}) {
   return distributorVendorFor(db, vendor) || vendor || null;
+}
+
+function applyVendorDistributorSettings(db, vendor = {}, body = {}, changes = [], actor = "Luis") {
+  const hasDistributorFlag = Object.prototype.hasOwnProperty.call(body, "isDistributor");
+  const hasLinkedSuppliers = Object.prototype.hasOwnProperty.call(body, "distributorSupplierIds");
+  if (!hasDistributorFlag && !hasLinkedSuppliers) return null;
+
+  const vendors = Array.isArray(db.vendors) ? db.vendors : [];
+  const existingLinkedIds = vendors
+    .filter((entry) => String(entry.distributorVendorId || "") === String(vendor.id || ""))
+    .map((entry) => String(entry.id || ""));
+  const isDistributor = hasDistributorFlag ? body.isDistributor === true : vendor.isDistributor === true;
+  const linkedSupplierIds = hasLinkedSuppliers
+    ? [...new Set((Array.isArray(body.distributorSupplierIds) ? body.distributorSupplierIds : [])
+      .map((id) => String(id || "").trim())
+      .filter(Boolean))]
+    : existingLinkedIds;
+
+  if (linkedSupplierIds.includes(String(vendor.id || ""))) {
+    return { statusCode: 400, error: "A distributor cannot be linked to itself." };
+  }
+  if (!isDistributor && linkedSupplierIds.length) {
+    return { statusCode: 409, error: "Remove linked suppliers before turning off distributor mode." };
+  }
+  if (isDistributor && String(vendor.distributorVendorId || "")) {
+    return { statusCode: 409, error: "A supplier linked to another distributor cannot also be a distributor." };
+  }
+
+  const linkedSuppliers = linkedSupplierIds.map((id) => findVendorById(db, id));
+  if (linkedSuppliers.some((entry) => !entry)) {
+    return { statusCode: 400, error: "One or more linked suppliers no longer exist. Refresh and try again." };
+  }
+  const nestedDistributor = linkedSuppliers.find((entry) => entry.isDistributor === true
+    || vendors.some((candidate) => String(candidate.distributorVendorId || "") === String(entry.id || "")));
+  if (nestedDistributor) {
+    return { statusCode: 409, error: `${nestedDistributor.name} is already a distributor and cannot be linked beneath another distributor.` };
+  }
+
+  if (vendor.isDistributor !== isDistributor) {
+    vendor.isDistributor = isDistributor;
+    changes.push(`distributor mode ${isDistributor ? "enabled" : "disabled"}`);
+  }
+
+  const linkedSet = new Set(linkedSupplierIds);
+  const beforeSet = new Set(existingLinkedIds);
+  for (const supplier of vendors) {
+    if (String(supplier.id || "") === String(vendor.id || "")) continue;
+    const shouldLink = linkedSet.has(String(supplier.id || ""));
+    const currentlyLinkedHere = String(supplier.distributorVendorId || "") === String(vendor.id || "");
+    if (shouldLink && !currentlyLinkedHere) {
+      const previousDistributor = distributorVendorFor(db, supplier);
+      supplier.distributorVendorId = String(vendor.id || "");
+      addVendorChange(supplier, {
+        title: "Purchasing distributor linked",
+        message: `${vendor.name} replaced ${previousDistributor?.name || "direct purchasing"} as the catalog distributor.`,
+        user: actor
+      });
+    } else if (!shouldLink && currentlyLinkedHere) {
+      supplier.distributorVendorId = "";
+      addVendorChange(supplier, {
+        title: "Purchasing distributor removed",
+        message: `${vendor.name} was removed as the catalog distributor.`,
+        user: actor
+      });
+    }
+  }
+
+  if (linkedSupplierIds.length !== existingLinkedIds.length
+    || linkedSupplierIds.some((id) => !beforeSet.has(id))) {
+    const names = linkedSuppliers.map((entry) => entry.name).sort((left, right) => left.localeCompare(right));
+    changes.push(`linked supplier names changed to ${names.length ? names.join(", ") : "none"}`);
+  }
+  return null;
 }
 
 function vendorCatalogLookupKeys(vendor = {}) {
@@ -65611,7 +65685,10 @@ async function handleApi(req, res) {
     const booleanCatalogSettingsFields = new Set(["enabled"]);
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
+    const distributorSettingsError = applyVendorDistributorSettings(db, vendor, body, changes, body.user || "Luis");
+    if (distributorSettingsError) return sendJson(res, distributorSettingsError.statusCode, { error: distributorSettingsError.error });
     for (const [field, rawValue] of Object.entries(body)) {
+      if (field === "isDistributor" || field === "distributorSupplierIds") continue;
       if (field === "distributorVendorId") {
         const value = String(rawValue || "").trim();
         const distributor = value ? findVendorById(db, value) : null;
@@ -65787,6 +65864,7 @@ async function handleApi(req, res) {
       : null;
     return sendJson(res, 200, {
       vendor: normalizedVendor,
+      vendors: db.vendors || [],
       catalogRefreshJob: catalogRefreshJob ? clientImportJob(catalogRefreshJob) : null
     });
   }
@@ -75227,7 +75305,10 @@ async function handleApi(req, res) {
     const booleanCatalogSettingsFields = new Set(["enabled"]);
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
     const changes = [];
+    const distributorSettingsError = applyVendorDistributorSettings(db, vendor, body, changes, body.user || "Luis");
+    if (distributorSettingsError) return sendJson(res, distributorSettingsError.statusCode, { error: distributorSettingsError.error });
     for (const [field, rawValue] of Object.entries(body)) {
+      if (field === "isDistributor" || field === "distributorSupplierIds") continue;
       if (field === "distributorVendorId") {
         const value = String(rawValue || "").trim();
         const distributor = value ? findVendorById(db, value) : null;
@@ -75384,7 +75465,7 @@ async function handleApi(req, res) {
     if (vendorIndex >= 0) db.vendors[vendorIndex] = normalizedVendor;
     syncVendorFeedWarehouses(db);
     await writeDb(db);
-    return sendJson(res, 200, { vendor: normalizedVendor, state: publicState(db) });
+    return sendJson(res, 200, { vendor: normalizedVendor, vendors: db.vendors || [], state: publicState(db) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "vendors" && parts.length === 2) {
@@ -77397,6 +77478,7 @@ module.exports = {
   parseExternalOperationalPoText,
   matchExternalOperationalPoItems,
   catalogVendorForSupplier,
+  applyVendorDistributorSettings,
   vendorCatalogLookupKeys,
   previewExternalOperationalPo,
   supplierDropshipConversionPlan,

@@ -21,12 +21,18 @@ postgres.getPool = () => ({
   }
 });
 
-const { matchExternalOperationalPoItems, catalogVendorForSupplier, vendorCatalogLookupKeys } = require("../server");
+const { matchExternalOperationalPoItems, catalogVendorForSupplier, applyVendorDistributorSettings, vendorCatalogLookupKeys } = require("../server");
 
 (async () => {
   try {
     const vendor = { id: "mil", name: "MILWAUKEE TOOL", code: "MIL" };
     const distributor = { id: "cei", name: "CEI", catalogSettings: { sourceCodes: ["CEI", "MIL"] } };
+    const relationshipDb = { vendors: [vendor, distributor, { id: "dib", name: "Do It Best" }] };
+    const relationshipChanges = [];
+    assert.equal(applyVendorDistributorSettings(relationshipDb, distributor, { isDistributor: true, distributorSupplierIds: [vendor.id] }, relationshipChanges, "Test user"), null);
+    assert.equal(distributor.isDistributor, true);
+    assert.equal(vendor.distributorVendorId, distributor.id);
+    assert.match(relationshipChanges.join(" "), /MILWAUKEE TOOL/);
     assert.equal(catalogVendorForSupplier({ vendors: [vendor, distributor] }, { ...vendor, distributorVendorId: distributor.id }), distributor);
     assert.deepEqual(vendorCatalogLookupKeys(distributor), ["cei", "mil"]);
     const sourceItems = [
@@ -65,6 +71,11 @@ const { matchExternalOperationalPoItems, catalogVendorForSupplier, vendorCatalog
 
     await matchExternalOperationalPoItems(distributor, sourceItems, [], { allowCrossSupplierSuggestions: false });
     assert.equal(capturedParams[4], false);
+
+    const unlinkChanges = [];
+    assert.equal(applyVendorDistributorSettings(relationshipDb, distributor, { isDistributor: false, distributorSupplierIds: [] }, unlinkChanges, "Test user"), null);
+    assert.equal(distributor.isDistributor, false);
+    assert.equal(vendor.distributorVendorId, "");
   } finally {
     postgres.getPool = originalGetPool;
     postgres.readProductsByKeys = originalReadProductsByKeys;

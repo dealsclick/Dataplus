@@ -581,6 +581,7 @@ function VendorDetail({ vendor, vendors, onSave, marketplaceCoverage = emptyVend
   const [schedulePreviewLoading, setSchedulePreviewLoading] = useState(false)
   const [supplierLocationOpen, setSupplierLocationOpen] = useState(false)
   const [supplierLocationDraft, setSupplierLocationDraft] = useState<VendorSupplierLocation>(() => emptyVendorSupplierLocation(1))
+  const [distributorSupplierSearch, setDistributorSupplierSearch] = useState("")
   const value = (field: string, fallback = "") => String(draft[field] ?? (vendor as unknown as Record<string, unknown>)[field] ?? fallback)
   const addressValue = (field: string, fallback = "") => String(draft[`address.${field}`] ?? vendor.address?.[field as keyof NonNullable<Vendor["address"]>] ?? fallback)
 
@@ -590,6 +591,7 @@ function VendorDetail({ vendor, vendors, onSave, marketplaceCoverage = emptyVend
     setCatalogRefreshOpen(false)
     setDropshipConversionOpen(false)
     setSupplierLocationOpen(false)
+    setDistributorSupplierSearch("")
     setDraft({})
     setSchedulePreview([])
   }, [vendor.id])
@@ -640,6 +642,19 @@ function VendorDetail({ vendor, vendors, onSave, marketplaceCoverage = emptyVend
   const catalogSettings = vendor.catalogSettings || {}
   const distributorVendorId = String(draft.distributorVendorId ?? vendor.distributorVendorId ?? "")
   const distributorVendor = vendors.find((entry) => entry.id === distributorVendorId)
+  const existingDistributorSuppliers = vendors.filter((entry) => String(entry.distributorVendorId || "") === vendor.id)
+  const draftDistributorSupplierIds = draft.distributorSupplierIds
+  const linkedDistributorSupplierIds = new Set((Array.isArray(draftDistributorSupplierIds)
+    ? draftDistributorSupplierIds
+    : existingDistributorSuppliers.map((entry) => entry.id))
+    .map((id) => String(id || ""))
+    .filter(Boolean))
+  const isDistributor = Boolean(draft.isDistributor ?? vendor.isDistributor ?? (existingDistributorSuppliers.length > 0))
+  const distributorSupplierQuery = distributorSupplierSearch.trim().toLowerCase()
+  const distributorSupplierCandidates = vendors
+    .filter((entry) => entry.id !== vendor.id && (!entry.retirement?.retiredAt || linkedDistributorSupplierIds.has(entry.id)))
+    .filter((entry) => !distributorSupplierQuery || `${entry.name} ${entry.code || ""}`.toLowerCase().includes(distributorSupplierQuery))
+    .sort((left, right) => Number(linkedDistributorSupplierIds.has(right.id)) - Number(linkedDistributorSupplierIds.has(left.id)) || left.name.localeCompare(right.name))
   const catalogSourceCodesValue = draft["catalogSettings.sourceCodes"] ?? catalogSettings.sourceCodes ?? []
   const catalogSourceCodes = Array.isArray(catalogSourceCodesValue) ? catalogSourceCodesValue.join(" | ") : String(catalogSourceCodesValue || "")
   const deliverySchedule = normalizeVendorDeliverySchedule(draft["purchaseOrderRules.deliverySchedule"] ?? purchaseOrderRules.deliverySchedule)
@@ -657,6 +672,21 @@ function VendorDetail({ vendor, vendors, onSave, marketplaceCoverage = emptyVend
     ["poNumber", "PO number"],
     ["cartonNumber", "Carton number"],
   ] as const
+
+  function setDistributorMode(next: boolean) {
+    setDraft((current) => ({
+      ...current,
+      isDistributor: next,
+      ...(!next ? { distributorSupplierIds: [] } : {}),
+    }))
+  }
+
+  function setDistributorSupplierLinked(supplierId: string, linked: boolean) {
+    const next = new Set(linkedDistributorSupplierIds)
+    if (linked) next.add(supplierId)
+    else next.delete(supplierId)
+    update("distributorSupplierIds", [...next])
+  }
 
   function updateReceivingTemplate(field: string, next: unknown) {
     update("receivingDocumentTemplate", { ...receivingDocumentTemplate, [field]: next })
@@ -777,6 +807,7 @@ function VendorDetail({ vendor, vendors, onSave, marketplaceCoverage = emptyVend
             <CardDescription>{vendor.code || vendor.type || "Supplier"} / {vendor.status || "active"}</CardDescription>
             <div className="mt-3 flex flex-wrap gap-1">
               <Badge variant={catalogSettings.enabled === true ? "success" : "outline"}>{catalogSettings.enabled === true ? "Included in catalog" : "Excluded from catalog"}</Badge>
+              {isDistributor && <Badge variant="info">Distributor - {linkedDistributorSupplierIds.size} linked</Badge>}
               {distributorVendor && <Badge variant="info">Catalog via {distributorVendor.name}</Badge>}
               {marketplaceLoading ? <Badge variant="outline">Checking marketplace coverage</Badge> : <>
                 <Badge variant="secondary">{numberLabel(marketplaceCoverage.productCount)} products</Badge>
@@ -862,16 +893,37 @@ function VendorDetail({ vendor, vendors, onSave, marketplaceCoverage = emptyVend
                   <p className="mt-1 text-xs text-muted-foreground">Inactive vendors remain available for review but are excluded from active catalog and workflow participation.</p>
                 </Field>
                 <ToggleField label="Include supplier in catalog" checked={Boolean(draft["catalogSettings.enabled"] ?? (catalogSettings.enabled === true))} disabled={!editing} onCheckedChange={(next) => update("catalogSettings.enabled", next)} />
-                <Field label="Purchasing distributor">
-                  <Select disabled={!editing} value={distributorVendorId || "none"} onValueChange={(next) => update("distributorVendorId", next === "none" ? "" : next)}>
-                    <SelectTrigger aria-label="Purchasing distributor"><SelectValue placeholder="Direct supplier" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="none">Direct supplier</SelectItem>
-                      {vendors.filter((entry) => entry.id !== vendor.id && !entry.retirement?.retiredAt).sort((left, right) => left.name.localeCompare(right.name)).map((entry) => <SelectItem key={entry.id} value={entry.id}>{entry.name}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">POs retain this supplier name while catalog matching and receiving use the distributor's SKUs.</p>
-                </Field>
+                <ToggleField label="This supplier is a distributor" checked={isDistributor} disabled={!editing || Boolean(distributorVendor)} onCheckedChange={setDistributorMode} />
+                {isDistributor && <div className="grid gap-3 rounded-md border p-3 md:col-span-2">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <Label>Supplier names fulfilled by {vendor.name}</Label>
+                      <p className="mt-1 text-xs text-muted-foreground">Their POs keep the ship-from supplier name, while catalog matching and receiving use {vendor.name} SKUs.</p>
+                    </div>
+                    <Badge variant={linkedDistributorSupplierIds.size ? "success" : "outline"}>{linkedDistributorSupplierIds.size} linked</Badge>
+                  </div>
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                    <Input disabled={!editing} className="pl-9" value={distributorSupplierSearch} onChange={(event) => setDistributorSupplierSearch(event.target.value)} placeholder="Search supplier name or code" />
+                  </div>
+                  <div className="max-h-64 overflow-y-auto rounded-md border">
+                    {distributorSupplierCandidates.length ? distributorSupplierCandidates.map((entry) => {
+                      const linked = linkedDistributorSupplierIds.has(entry.id)
+                      const assignedDistributor = entry.distributorVendorId && entry.distributorVendorId !== vendor.id
+                        ? vendors.find((candidate) => candidate.id === entry.distributorVendorId)
+                        : null
+                      const entryIsDistributor = entry.isDistributor === true || vendors.some((candidate) => candidate.distributorVendorId === entry.id)
+                      return <label key={entry.id} className="flex min-h-12 items-center gap-3 border-b px-3 py-2 last:border-b-0">
+                        <Checkbox disabled={!editing || entryIsDistributor} checked={linked} onCheckedChange={(checked) => setDistributorSupplierLinked(entry.id, checked === true)} />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-medium">{entry.name}</span>
+                          <span className="block truncate text-xs text-muted-foreground">{entry.code || "No supplier code"}{assignedDistributor ? ` - Currently linked to ${assignedDistributor.name}` : ""}</span>
+                        </span>
+                        {linked ? <Badge variant="success">Linked</Badge> : entryIsDistributor ? <Badge variant="outline">Distributor</Badge> : null}
+                      </label>
+                    }) : <p className="p-4 text-sm text-muted-foreground">No supplier names match this search.</p>}
+                  </div>
+                </div>}
                 <Field label="Source / feed codes">
                   <Input disabled={!editing} value={catalogSourceCodes} onChange={(event) => update("catalogSettings.sourceCodes", event.target.value.split(/[|,\n]/).map((entry) => entry.trim()).filter(Boolean))} placeholder="TRV | USS" />
                   <p className="text-xs text-muted-foreground">Stable codes from incoming feeds are mapped to this supplier. Brands are not used as supplier identities.</p>
