@@ -67351,7 +67351,7 @@ async function handleApi(req, res) {
     const duplicate = existingJobs.find((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase()) && ["product-dump-import", "vendor-feed-import"].includes(String(job.workerTask || "")) && String(job.workerPayload?.feedId || "") === feed.id);
     if (duplicate) return sendJson(res, 200, { queued: true, duplicate: true, job: clientImportJob(duplicate), message: `${feed.name} is already queued or running.` });
     const requestedMode = String(url.searchParams.get("mode") || "refresh").toLowerCase();
-    const syncMode = requestedMode === "full" ? "full" : "reconciliation";
+    const syncMode = requestedMode === "full" ? "full" : "split";
     const job = queueVendorFeedImportJob(db, feed, {
       syncMode,
       jobLabel: `${feed.name} ${syncMode === "full" ? "full catalog import" : "refresh"}`
