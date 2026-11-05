@@ -3060,6 +3060,82 @@ async function saveWarehouseAuditMetadata(audit = {}, options = {}) {
   return result.rowCount > 0;
 }
 
+function warehouseAuditReceivingUser(value = "") {
+  return String(value || "").trim() || "Warehouse user";
+}
+
+function mergeWarehouseAuditReceivingContributors(contributors = [], user = "", quantity = 0, at = "") {
+  const actor = warehouseAuditReceivingUser(user);
+  const timestamp = nullableString(at) || new Date().toISOString();
+  const rows = Array.isArray(contributors) ? contributors.map((entry) => ({ ...entry })) : [];
+  const match = rows.find((entry) => warehouseAuditReceivingUser(entry.user).toLowerCase() === actor.toLowerCase());
+  if (match) {
+    match.user = actor;
+    match.quantity = Math.max(0, Number(match.quantity || match.scannedUnits || 0)) + Math.max(0, Number(quantity || 0));
+    match.lastScannedAt = timestamp;
+    match.firstScannedAt = nullableString(match.firstScannedAt) || timestamp;
+  } else {
+    rows.push({ user: actor, quantity: Math.max(0, Number(quantity || 0)), firstScannedAt: timestamp, lastScannedAt: timestamp });
+  }
+  return rows;
+}
+
+function touchWarehouseAuditReceivingParticipantPayload(payload = {}, user = "", options = {}) {
+  const actor = warehouseAuditReceivingUser(user);
+  const timestamp = nullableString(options.at) || new Date().toISOString();
+  const participants = Array.isArray(payload.receivingParticipants) ? payload.receivingParticipants.map((entry) => ({ ...entry })) : [];
+  const match = participants.find((entry) => warehouseAuditReceivingUser(entry.user).toLowerCase() === actor.toLowerCase());
+  const scannedUnits = Math.max(0, Number(options.scannedUnits || 0));
+  if (match) {
+    match.user = actor;
+    match.firstActiveAt = nullableString(match.firstActiveAt) || timestamp;
+    match.lastActiveAt = timestamp;
+    match.scannedUnits = Math.max(0, Number(match.scannedUnits || 0)) + scannedUnits;
+  } else {
+    participants.push({ user: actor, firstActiveAt: timestamp, lastActiveAt: timestamp, scannedUnits });
+  }
+  payload.receivingParticipants = participants;
+  payload.updatedAt = timestamp;
+  return participants;
+}
+
+async function touchWarehouseAuditReceivingParticipant(auditId = "", user = "", options = {}) {
+  const pool = getPool();
+  const normalizedAuditId = nullableString(auditId);
+  if (!pool || !normalizedAuditId) return null;
+  await initRelationalSchema();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const result = await client.query(`
+      select audit_payload
+      from warehouse_audits
+      where audit_id = $1
+      for update
+    `, [normalizedAuditId]);
+    if (!result.rows.length) {
+      await client.query("rollback");
+      return null;
+    }
+    const payload = result.rows[0].audit_payload && typeof result.rows[0].audit_payload === "object"
+      ? { ...result.rows[0].audit_payload }
+      : {};
+    touchWarehouseAuditReceivingParticipantPayload(payload, user, options);
+    await client.query(`
+      update warehouse_audits
+      set audit_payload = $2::jsonb, updated_at = now()
+      where audit_id = $1
+    `, [normalizedAuditId, JSON.stringify(payload)]);
+    await client.query("commit");
+    return payload;
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function applyWarehouseAuditScan(auditId = "", input = {}) {
   const pool = getPool();
   const normalizedAuditId = nullableString(auditId);
@@ -3068,12 +3144,22 @@ async function applyWarehouseAuditScan(auditId = "", input = {}) {
   const locationBin = String(input.locationBin || "").trim();
   const quantity = Math.max(1, Math.floor(Number(input.quantity || 1) || 1));
   const template = input.line && typeof input.line === "object" ? { ...input.line } : {};
+  const actor = warehouseAuditReceivingUser(input.user || template.lastScannedBy);
+  const scannedAt = nullableString(input.updatedAt) || new Date().toISOString();
   if (!pool || !normalizedAuditId || (!productId && !sku)) return null;
   await initRelationalSchema();
   const client = await pool.connect();
   try {
     await client.query("begin");
-    await client.query("select 1 from warehouse_audits where audit_id = $1 for update", [normalizedAuditId]);
+    const auditResult = await client.query("select audit_payload from warehouse_audits where audit_id = $1 for update", [normalizedAuditId]);
+    if (!auditResult.rows.length) {
+      await client.query("rollback");
+      return null;
+    }
+    const auditPayload = auditResult.rows[0].audit_payload && typeof auditResult.rows[0].audit_payload === "object"
+      ? { ...auditResult.rows[0].audit_payload }
+      : {};
+    touchWarehouseAuditReceivingParticipantPayload(auditPayload, actor, { at: scannedAt, scannedUnits: quantity });
     const existing = await client.query(`
       select line_id, position, line_payload
       from warehouse_audit_lines
@@ -3095,7 +3181,10 @@ async function applyWarehouseAuditScan(auditId = "", input = {}) {
         ...current,
         ...template,
         id: row.line_id,
-        countedQty: Number(current.countedQty || 0) + quantity
+        countedQty: Number(current.countedQty || 0) + quantity,
+        lastScannedBy: actor,
+        lastScannedAt: scannedAt,
+        receivingContributors: mergeWarehouseAuditReceivingContributors(current.receivingContributors, actor, quantity, scannedAt)
       };
       await client.query(`
         update warehouse_audit_lines
@@ -3104,7 +3193,14 @@ async function applyWarehouseAuditScan(auditId = "", input = {}) {
       `, [normalizedAuditId, row.line_id, nullableString(line.sku), nullableString(line.barcode), JSON.stringify(line)]);
     } else {
       const lineId = warehouseAuditLineId(normalizedAuditId, template, Date.now());
-      line = { ...template, id: lineId, countedQty: quantity };
+      line = {
+        ...template,
+        id: lineId,
+        countedQty: quantity,
+        lastScannedBy: actor,
+        lastScannedAt: scannedAt,
+        receivingContributors: mergeWarehouseAuditReceivingContributors(template.receivingContributors, actor, quantity, scannedAt)
+      };
       await client.query(`
         insert into warehouse_audit_lines (audit_id, line_id, position, sku, barcode, line_payload, updated_at)
         values (
@@ -3116,10 +3212,10 @@ async function applyWarehouseAuditScan(auditId = "", input = {}) {
     }
     await client.query(`
       update warehouse_audits
-      set audit_payload = jsonb_set(coalesce(audit_payload, '{}'::jsonb), '{updatedAt}', to_jsonb($2::text), true),
+      set audit_payload = $2::jsonb,
         updated_at = now()
       where audit_id = $1
-    `, [normalizedAuditId, nullableString(input.updatedAt) || new Date().toISOString()]);
+    `, [normalizedAuditId, JSON.stringify(auditPayload)]);
     await client.query("commit");
     return line;
   } catch (error) {
@@ -3136,6 +3232,8 @@ async function recordWarehouseAuditUnknownScan(auditId = "", input = {}) {
   const barcode = nullableString(input.barcode);
   const locationBin = String(input.locationBin || "").trim();
   const quantity = Math.max(1, Math.floor(Number(input.quantity || 1) || 1));
+  const actor = warehouseAuditReceivingUser(input.user);
+  const scannedAt = nullableString(input.scannedAt) || new Date().toISOString();
   if (!pool || !normalizedAuditId || !barcode) return null;
   await initRelationalSchema();
   const client = await pool.connect();
@@ -3154,18 +3252,25 @@ async function recordWarehouseAuditUnknownScan(auditId = "", input = {}) {
     const payload = result.rows[0].audit_payload && typeof result.rows[0].audit_payload === "object"
       ? { ...result.rows[0].audit_payload }
       : {};
+    touchWarehouseAuditReceivingParticipantPayload(payload, actor, { at: scannedAt, scannedUnits: quantity });
     const unknownBarcodes = Array.isArray(payload.unknownBarcodes) ? payload.unknownBarcodes.map((entry) => ({ ...entry })) : [];
     const match = unknownBarcodes.find((entry) => String(entry.barcode || "") === barcode
       && String(entry.locationBin || "").trim().toLowerCase() === locationBin.toLowerCase());
     if (match) {
       match.count = Number(match.count || 0) + quantity;
       if (input.sourceMatch) match.sourceMatch = input.sourceMatch;
+      match.lastScannedBy = actor;
+      match.lastScannedAt = scannedAt;
+      match.receivingContributors = mergeWarehouseAuditReceivingContributors(match.receivingContributors, actor, quantity, scannedAt);
     } else {
       unknownBarcodes.push({
         barcode,
         count: quantity,
         locationBin,
-        scannedAt: nullableString(input.scannedAt) || new Date().toISOString(),
+        scannedAt,
+        lastScannedBy: actor,
+        lastScannedAt: scannedAt,
+        receivingContributors: mergeWarehouseAuditReceivingContributors([], actor, quantity, scannedAt),
         sourceMatch: input.sourceMatch || null
       });
     }
@@ -20632,6 +20737,7 @@ module.exports = {
   replaceWarehouseAudits,
   saveWarehouseAudit,
   saveWarehouseAuditMetadata,
+  touchWarehouseAuditReceivingParticipant,
   applyWarehouseAuditScan,
   recordWarehouseAuditUnknownScan,
   saveWarehouseAuditLine,

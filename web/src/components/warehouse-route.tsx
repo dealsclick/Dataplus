@@ -553,7 +553,7 @@ type ReceivingPurchaseOrder = {
   receivedAt?: string
   lastReceiptAt?: string
   updatedAt?: string
-  activeReceivingAudit?: { auditId?: string; auditNumber?: string; startedAt?: string; startedBy?: string } | null
+  activeReceivingAudit?: { auditId?: string; auditNumber?: string; startedAt?: string; startedBy?: string; activeReceivers?: Array<{ user?: string; lastActiveAt?: string }> } | null
 }
 
 function InboundReceivingLauncher({ mobile = false, operatorName = "Warehouse" }: { mobile?: boolean; operatorName?: string } = {}) {
@@ -682,8 +682,9 @@ function InboundReceivingLauncher({ mobile = false, operatorName = "Warehouse" }
           const activeAuditId = String(po.activeReceivingAudit?.auditId || "")
           const href = activeAuditId ? `/warehouse/mobile/audits/${encodeURIComponent(activeAuditId)}` : `/warehouse/mobile/receiving/${encodeURIComponent(po.id)}`
           const status = activeAuditId ? "receiving" : String(po.status || "received").replace(/_/g, " ")
+          const activeReceivers = (po.activeReceivingAudit?.activeReceivers || []).filter((receiver) => new Date(String(receiver.lastActiveAt || 0)).getTime() >= Date.now() - 2 * 60 * 1000).map((receiver) => String(receiver.user || "").trim()).filter(Boolean)
           return <a key={po.id} href={href} className="flex min-w-0 items-start justify-between gap-3 rounded-md border p-3 hover:bg-muted/50">
-            <span className="min-w-0"><span className="block font-medium">{po.poNumber || po.id}</span><span className="block truncate text-sm text-muted-foreground">{po.supplier || "Unassigned supplier"}{po.warehouseName ? ` · ${po.warehouseName}` : ""}</span><span className="mt-1 block text-xs text-muted-foreground">{numberLabel(Number(po.receivedUnits || 0))} received{Number(po.extraReceivedUnits || 0) > 0 ? ` · ${numberLabel(Number(po.extraReceivedUnits))} extra` : ""} · {dateLabel(po.activeReceivingAudit?.startedAt || po.lastReceiptAt || po.updatedAt)}</span></span>
+            <span className="min-w-0"><span className="block font-medium">{po.poNumber || po.id}</span><span className="block truncate text-sm text-muted-foreground">{po.supplier || "Unassigned supplier"}{po.warehouseName ? ` · ${po.warehouseName}` : ""}</span>{activeReceivers.length ? <span className="mt-1 block text-xs font-medium text-emerald-700 dark:text-emerald-300">Active now: {activeReceivers.join(", ")}</span> : null}<span className="mt-1 block text-xs text-muted-foreground">{numberLabel(Number(po.receivedUnits || 0))} received{Number(po.extraReceivedUnits || 0) > 0 ? ` · ${numberLabel(Number(po.extraReceivedUnits))} extra` : ""} · {dateLabel(po.activeReceivingAudit?.startedAt || po.lastReceiptAt || po.updatedAt)}</span></span>
             <Badge variant="outline" className="shrink-0 capitalize">{status}</Badge>
           </a>
         })}
@@ -1190,6 +1191,36 @@ function receivingLineMatch(auditLine: Record<string, unknown>, poLine: Record<s
   return receivingIdentifierKeys(poLine.upc).some((key) => upcKeys.has(key)) ? "upc" : "";
 }
 
+function receivingContributorAllocator(line: Record<string, unknown>, fallbackUser: string) {
+  const contributors = (Array.isArray(line.receivingContributors) ? line.receivingContributors as Array<Record<string, unknown>> : [])
+    .map((entry) => ({
+      user: String(entry.user || "").trim(),
+      remaining: Math.max(0, Number(entry.quantity || entry.scannedUnits || 0)),
+      firstScannedAt: String(entry.firstScannedAt || ""),
+      lastScannedAt: String(entry.lastScannedAt || ""),
+    }))
+    .filter((entry) => entry.user && entry.remaining > 0);
+  const fallback = String(line.lastScannedBy || fallbackUser || "Warehouse user").trim() || "Warehouse user";
+  return (quantity: number) => {
+    let remaining = Math.max(0, Number(quantity || 0));
+    const allocated: Array<Record<string, unknown>> = [];
+    for (const contributor of contributors) {
+      if (remaining <= 0) break;
+      const assigned = Math.min(remaining, contributor.remaining);
+      if (assigned <= 0) continue;
+      contributor.remaining -= assigned;
+      remaining -= assigned;
+      allocated.push({ user: contributor.user, quantity: assigned, firstScannedAt: contributor.firstScannedAt, lastScannedAt: contributor.lastScannedAt });
+    }
+    if (remaining > 0) {
+      const existing = allocated.find((entry) => String(entry.user).toLowerCase() === fallback.toLowerCase());
+      if (existing) existing.quantity = Number(existing.quantity || 0) + remaining;
+      else allocated.push({ user: fallback, quantity: remaining, firstScannedAt: "", lastScannedAt: String(line.lastScannedAt || "") });
+    }
+    return allocated;
+  };
+}
+
 function buildLinkedPurchaseOrderReceiptItems(
   audit: Record<string, unknown>,
   expectedLines: Array<Record<string, unknown>>,
@@ -1200,6 +1231,7 @@ function buildLinkedPurchaseOrderReceiptItems(
   const items: Array<Record<string, unknown>> = [];
   for (const line of countedLines) {
     let remaining = Number(line.countedQty || 0);
+    const allocateContributors = receivingContributorAllocator(line, String(audit.createdBy || "Warehouse user"));
     const candidates = expectedLines.filter((expected) => receivingLineMatch(line, expected));
     for (const expected of candidates) {
       if (remaining <= 0) break;
@@ -1208,11 +1240,14 @@ function buildLinkedPurchaseOrderReceiptItems(
       const qtyReceived = Math.min(remaining, available);
       if (qtyReceived <= 0) continue;
       allocatedByExpectedId.set(expectedId, Number(allocatedByExpectedId.get(expectedId) || 0) + qtyReceived);
+      const receivingContributors = allocateContributors(qtyReceived);
       items.push({
         lineIndex: Number(expected.lineIndex),
         routeId: String(expected.routeId || ""),
         sku: String(expected.sku || line.sku || ""),
         qtyReceived,
+        receivedBy: receivingContributors.map((entry) => String(entry.user)).join(", "),
+        receivingContributors,
         locationBin: String(line.locationBin || ""),
         varianceStatus: qtyReceived === Number(expected.expectedQty || 0) ? "none" : "quantity_variance",
         varianceNote: qtyReceived === Number(expected.expectedQty || 0) ? "" : `Scanned receipt allocated ${qtyReceived} of ${Number(expected.expectedQty || 0)} open units.`,
@@ -1221,10 +1256,13 @@ function buildLinkedPurchaseOrderReceiptItems(
     }
     if (remaining > 0) {
       const sku = String(line.sku || "").trim();
+      const receivingContributors = allocateContributors(remaining);
       items.push({
         sku,
         title: String(line.title || sku || line.barcode || "Extra item"),
         qtyReceived: remaining,
+        receivedBy: receivingContributors.map((entry) => String(entry.user)).join(", "),
+        receivingContributors,
         locationBin: String(line.locationBin || ""),
         extraItem: true,
         sourceAuditLineId: String(line.id || line.productId || ""),
@@ -1502,6 +1540,22 @@ function WarehouseAuditPanel({
     if (!resumedAudit?.id) return;
     setOfflineScanCount(readOfflineScans().filter((scan) => scan.auditId === String(resumedAudit.id)).length);
   }, [resumedAudit?.id]);
+  useEffect(() => {
+    const receivingAuditId = String(resumedAudit?.id || "");
+    if (!receivingAuditId || String(resumedAudit?.reason || "") !== "purchase_order_receipt" || !["in_progress", "pending_review"].includes(String(resumedAudit?.status || "").toLowerCase())) return;
+    let canceled = false;
+    const heartbeat = async () => {
+      if (canceled || document.visibilityState !== "visible") return;
+      try {
+        await api(`/api/warehouse-audits/${encodeURIComponent(receivingAuditId)}/presence`, { method: "POST", body: JSON.stringify({ user: operatorName }) });
+      } catch { /* Presence must never interrupt scanner work. */ }
+    };
+    void heartbeat();
+    const timer = window.setInterval(() => { void heartbeat(); }, 30_000);
+    const handleVisibility = () => { if (document.visibilityState === "visible") void heartbeat(); };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => { canceled = true; window.clearInterval(timer); document.removeEventListener("visibilitychange", handleVisibility); };
+  }, [resumedAudit?.id, resumedAudit?.reason, resumedAudit?.status, operatorName]);
   useEffect(() => {
     const auditSupplierId = String(resumedAudit?.supplierId || "");
     const auditSupplierName = String(resumedAudit?.supplierName || receivingSupplier || "").trim().toLowerCase()
@@ -1829,7 +1883,7 @@ function WarehouseAuditPanel({
         product?: { sku?: string; title?: string; marketplaceTitle?: string; uom?: string; uomName?: string; casePack?: number; uomQty?: number } | null;
       }>(
         `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/scan`,
-        { method: "POST", body: JSON.stringify({ barcode: value, locationBin: activeBin, quantity }) },
+        { method: "POST", body: JSON.stringify({ barcode: value, locationBin: activeBin, quantity, user: operatorName }) },
       );
       const matched = result.matched === true;
       const message =
@@ -1979,7 +2033,7 @@ function WarehouseAuditPanel({
       for (let index = 0; index < mine.length; index += 1) {
         const scan = mine[index];
         try {
-          const result = await api<{ audit?: Record<string, unknown> }>(`/api/warehouse-audits/${encodeURIComponent(scan.auditId)}/scan`, { method: "POST", body: JSON.stringify({ barcode: scan.barcode, locationBin: scan.locationBin, quantity: scan.quantity || 1 }) });
+          const result = await api<{ audit?: Record<string, unknown> }>(`/api/warehouse-audits/${encodeURIComponent(scan.auditId)}/scan`, { method: "POST", body: JSON.stringify({ barcode: scan.barcode, locationBin: scan.locationBin, quantity: scan.quantity || 1, user: operatorName }) });
           if (result.audit) applyAuditUpdate(result.audit);
           synced += 1;
         } catch {
@@ -2502,6 +2556,10 @@ function WarehouseAuditPanel({
   const lines = sortWarehouseAuditRows(Array.isArray(current?.lines) ? current.lines as Array<Record<string, unknown>> : [], itemSort, true);
   const unknowns = sortWarehouseAuditRows(Array.isArray(current?.unknownBarcodes) ? current.unknownBarcodes as Array<Record<string, unknown>> : [], itemSort, true);
   const isReceivingAudit = isReceivingAuditReason(current?.reason);
+  const activeReceivingParticipants = (Array.isArray(current?.receivingParticipants) ? current.receivingParticipants as Array<Record<string, unknown>> : []).filter((participant) => {
+    const lastActiveAt = new Date(String(participant.lastActiveAt || 0)).getTime();
+    return Number.isFinite(lastActiveAt) && lastActiveAt >= Date.now() - 2 * 60 * 1000;
+  });
   const isEbayOneTimeAudit = String(current?.reason || "") === "ebay_one_time_listing";
   const receivingDocuments = Array.isArray(current?.receivingDocuments) ? current.receivingDocuments as Array<Record<string, unknown>> : [];
   const hasPackingSlip = receivingDocuments.some((document) => String(document.documentType || "") === "packing_slip");
@@ -2702,6 +2760,7 @@ function WarehouseAuditPanel({
                   )}
                   {String(current.externalPurchaseOrderNumber || "") && <Badge variant="outline">External PO {String(current.externalPurchaseOrderNumber)}</Badge>}
                   {String(current.linkedPurchaseOrderNumber || "") && <Badge variant="outline">DataPlus PO {String(current.linkedPurchaseOrderNumber)}</Badge>}
+                  {String(current.reason || "") === "purchase_order_receipt" && activeReceivingParticipants.map((participant) => <Badge key={String(participant.user)} variant="success"><Users className="mr-1 size-3" />{String(participant.user)} active</Badge>)}
                   {auditDisposition && <Badge variant="secondary">{String(auditDisposition.label || "Inventory outcome applied")}</Badge>}
                   {Boolean(auditDisposition?.supplierReturnNumber) && <Badge variant="outline">{String(auditDisposition?.supplierReturnNumber)} draft</Badge>}
                   {offlineScanCount > 0 && <Badge variant="outline">{syncingOfflineScans ? "Syncing offline scans" : `${offlineScanCount} scan${offlineScanCount === 1 ? "" : "s"} queued offline`}</Badge>}

@@ -21,6 +21,12 @@ assert.match(server, /body\.allocateOpenOrders === true/, 'PO receipt allocation
 assert.match(server, /extraItemStatus:\s*extraItem \? "unexpected_on_selected_po"/, 'PO receipts persist unexpected products as extra items');
 assert.match(server, /findOpenPurchaseOrdersExpectingSkus/, 'PO extra-item receipts check whether another open PO expects each SKU');
 assert.match(server, /syncPurchaseOrderReceivingProgress\(audit\)/, 'linked PO scans publish live receiving progress');
+assert.match(server, /activeReceivers/, 'linked PO progress identifies users active in the shared receiving session');
+assert.match(server, /parts\[3\] === "presence"/, 'warehouse receiving maintains lightweight user presence without blocking scans');
+assert.match(server, /applyPurchaseOrderLineReceivingAttribution/, 'posted PO receipt lines preserve every receiving contributor');
+assert.match(server, /refreshPurchaseOrderReceiverSummary/, 'the PO preserves a durable one-or-many receiver summary');
+assert.match(db, /touchWarehouseAuditReceivingParticipant/, 'receiving presence is persisted transactionally on the shared audit');
+assert.match(db, /receivingContributors:\s*mergeWarehouseAuditReceivingContributors/, 'each scan increments per-user line attribution in the scan transaction');
 assert.match(server, /existingLinkedAudit[\s\S]*Resuming that session/, 'starting linked receiving resumes the active PO audit instead of creating a duplicate');
 assert.match(server, /delete po\.activeReceivingAudit/, 'posting a linked receipt clears its live progress marker');
 assert.match(server, /\/api\/purchasing\/receiving-sync/, 'desktop purchasing has a lightweight cross-user receiving sync endpoint');
@@ -48,6 +54,8 @@ assert.match(warehouseUi, /allocateOpenOrders: dispositionType === "fulfill_orde
 assert.match(warehouseUi, /closeRemaining: closeShortPurchaseOrder/, 'linked PO receiving can explicitly close a supplier short shipment');
 assert.match(warehouseUi, /Orders this receipt can move forward/, 'PO receiving shows pending, allocated, and label-purchased orders that can move forward');
 assert.match(warehouseUi, /Recent PO receiving/, 'mobile receiving shows recent and resumable PO sessions');
+assert.match(warehouseUi, /activeReceivingParticipants/, 'the shared scanner shows teammates who are actively receiving the PO');
+assert.match(warehouseUi, /receivingContributors/, 'PO receipt posting carries scan attribution into each received line');
 assert.match(warehouseUi, /Type \/ reference/, 'the audit register visibly identifies every audit type and PO reference');
 assert.match(warehouseUi, /All PO receiving/, 'the audit register can isolate DataPlus and external PO receiving');
 assert.match(warehouseUi, /Search audit, PO, supplier, or counter/, 'the audit register exposes operational search');
@@ -57,7 +65,9 @@ assert.match(server, /warehouse: url\.searchParams\.get\("warehouse"\)/, 'the pa
 assert.match(db, /reason === "po_receipts"[\s\S]*purchase_order_receipt[\s\S]*external_po_receipt/, 'the audit query groups both PO receipt sources');
 assert.match(db, /linkedPurchaseOrderNumber[\s\S]*externalPurchaseOrderNumber/, 'audit summaries return PO references without loading full audit lines');
 assert.match(purchasingUi, /Receiving now[\s\S]*Receipt not posted yet/, 'the purchasing queue displays active warehouse receiving work');
+assert.match(purchasingUi, /Active: \$\{activeUsers\.join/, 'the purchasing queue identifies all users active on a PO');
 assert.match(purchaseOrderUi, /PO receiving in progress[\s\S]*activeReceivingAudit\.scannedUnits/, 'the PO detail displays live scan progress');
+assert.match(purchaseOrderUi, /PO received by[\s\S]*purchaseOrderLineReceiverNames/, 'the PO detail shows overall and per-line receiver attribution');
 assert.match(purchaseOrderUi, /Allocate remaining received stock to additional open orders/, 'direct PO receiving exposes the open-order allocation option');
 assert.match(purchaseOrderUi, /allocateOpenOrders: receiptMode === "final" && allocateReceivedInventory/, 'draft receipts remain allocation-free and final receipts honor the operator choice');
 

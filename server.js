@@ -15245,6 +15245,76 @@ function openPurchaseOrderExpectationsFromState(purchaseOrders = [], skus = [], 
   return rows;
 }
 
+function normalizeReceiptReceivingContributors(contributors = [], fallbackUser = "Warehouse user", totalQuantity = 0) {
+  const requested = new Map();
+  for (const entry of Array.isArray(contributors) ? contributors : []) {
+    const user = String(entry?.user || entry?.name || "").trim();
+    if (!user) continue;
+    const key = user.toLowerCase();
+    const current = requested.get(key) || { user, quantity: 0, firstScannedAt: "", lastScannedAt: "" };
+    current.quantity += Math.max(0, Number(entry.quantity || entry.qty || entry.scannedUnits || 0));
+    current.firstScannedAt = current.firstScannedAt || String(entry.firstScannedAt || entry.firstActiveAt || "");
+    current.lastScannedAt = String(entry.lastScannedAt || entry.lastActiveAt || current.lastScannedAt || "");
+    requested.set(key, current);
+  }
+  const fallback = String(fallbackUser || "Warehouse user").trim() || "Warehouse user";
+  let remaining = Math.max(0, Number(totalQuantity || 0));
+  const normalized = [];
+  for (const entry of requested.values()) {
+    if (remaining <= 0) break;
+    const quantity = entry.quantity > 0 ? Math.min(remaining, entry.quantity) : 0;
+    if (quantity <= 0) continue;
+    normalized.push({ ...entry, quantity });
+    remaining -= quantity;
+  }
+  if (remaining > 0 || !normalized.length) {
+    const existing = normalized.find((entry) => entry.user.toLowerCase() === fallback.toLowerCase());
+    if (existing) existing.quantity += remaining;
+    else normalized.push({ user: fallback, quantity: remaining || Math.max(0, Number(totalQuantity || 0)), firstScannedAt: "", lastScannedAt: "" });
+  }
+  return normalized;
+}
+
+function applyPurchaseOrderLineReceivingAttribution(poLine = {}, contributors = [], input = {}) {
+  if (!poLine || typeof poLine !== "object") return;
+  const receivedAt = String(input.receivedAt || new Date().toISOString());
+  const existing = new Map((Array.isArray(poLine.receivingContributors) ? poLine.receivingContributors : []).map((entry) => [String(entry.user || "").trim().toLowerCase(), { ...entry }]));
+  for (const contributor of contributors) {
+    const user = String(contributor.user || "").trim();
+    if (!user) continue;
+    const key = user.toLowerCase();
+    const current = existing.get(key) || { user, quantity: 0, firstReceivedAt: receivedAt, lastReceivedAt: receivedAt };
+    current.user = user;
+    current.quantity = Math.max(0, Number(current.quantity || 0)) + Math.max(0, Number(contributor.quantity || 0));
+    current.firstReceivedAt = String(current.firstReceivedAt || receivedAt);
+    current.lastReceivedAt = receivedAt;
+    current.lastReceiptId = String(input.receiptId || current.lastReceiptId || "");
+    existing.set(key, current);
+  }
+  poLine.receivingContributors = [...existing.values()];
+  poLine.receivedByUsers = poLine.receivingContributors.map((entry) => entry.user);
+  poLine.lastReceivedBy = contributors.map((entry) => String(entry.user || "").trim()).filter(Boolean).join(", ");
+}
+
+function refreshPurchaseOrderReceiverSummary(po = {}, fallbackUser = "") {
+  const users = new Map();
+  const add = (value) => {
+    const user = String(value || "").trim();
+    if (user && !users.has(user.toLowerCase())) users.set(user.toLowerCase(), user);
+  };
+  for (const receipt of Array.isArray(po.receipts) ? po.receipts : []) {
+    for (const user of Array.isArray(receipt.receivedByUsers) ? receipt.receivedByUsers : []) add(user);
+    for (const item of Array.isArray(receipt.items) ? receipt.items : []) {
+      for (const contributor of Array.isArray(item.receivingContributors) ? item.receivingContributors : []) add(contributor.user);
+    }
+    if (!Array.isArray(receipt.receivedByUsers) || !receipt.receivedByUsers.length) add(receipt.receivedBy);
+  }
+  if (!users.size) add(fallbackUser);
+  po.receivedByUsers = [...users.values()];
+  po.receivedBy = po.receivedByUsers.join(", ");
+  return po.receivedByUsers;
+}
+
 function applyUnresolvedPurchaseOrderReceipt(poLine = {}, input = {}) {
   const qtyReceived = Math.max(0, Number(input.qtyReceived || 0));
   if (!qtyReceived) return 0;
@@ -46047,18 +46117,46 @@ function auditExpectedQuantity(product, audit, locationBin = "") {
   return Array.isArray(product?.warehouseStock) && product.warehouseStock.length ? 0 : Number(product?.qty || 0);
 }
 
+const PURCHASE_ORDER_RECEIVING_ACTIVE_MS = 2 * 60 * 1000;
+
+function warehouseReceivingActor(body = {}, authUser = null) {
+  return String(authUser?.name || authUser?.username || body.user || "Warehouse user").trim() || "Warehouse user";
+}
+
+function purchaseOrderReceivingParticipants(audit = {}) {
+  const participants = Array.isArray(audit.receivingParticipants) ? audit.receivingParticipants.map((entry) => ({ ...entry })) : [];
+  const seen = new Set(participants.map((entry) => String(entry.user || "").trim().toLowerCase()).filter(Boolean));
+  for (const line of [...(Array.isArray(audit.lines) ? audit.lines : []), ...(Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes : [])]) {
+    for (const contributor of Array.isArray(line.receivingContributors) ? line.receivingContributors : []) {
+      const user = String(contributor.user || "").trim();
+      if (!user || seen.has(user.toLowerCase())) continue;
+      seen.add(user.toLowerCase());
+      participants.push({ user, firstActiveAt: contributor.firstScannedAt || "", lastActiveAt: contributor.lastScannedAt || line.lastScannedAt || "", scannedUnits: Number(contributor.quantity || 0) });
+    }
+  }
+  return participants;
+}
+
 function purchaseOrderReceivingProgressFromAudit(audit = {}) {
   const countedLines = (Array.isArray(audit.lines) ? audit.lines : []).filter((line) => Number(line.countedQty || 0) > 0);
   const unknownBarcodes = (Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes : []).filter((entry) => Number(entry.count || 0) > 0);
   const scannedUnits = countedLines.reduce((sum, line) => sum + Number(line.countedQty || 0), 0);
   const unknownUnits = unknownBarcodes.reduce((sum, entry) => sum + Number(entry.count || 0), 0);
   const documents = Array.isArray(audit.receivingDocuments) ? audit.receivingDocuments : [];
+  const receivers = purchaseOrderReceivingParticipants(audit);
+  const activeCutoff = Date.now() - PURCHASE_ORDER_RECEIVING_ACTIVE_MS;
+  const activeReceivers = receivers.filter((entry) => {
+    const lastActiveAt = new Date(String(entry.lastActiveAt || 0)).getTime();
+    return Number.isFinite(lastActiveAt) && lastActiveAt >= activeCutoff;
+  });
   return {
     auditId: String(audit.id || ""),
     auditNumber: String(audit.auditNumber || ""),
     status: String(audit.status || "in_progress"),
     startedAt: String(audit.createdAt || audit.purchaseOrderLinkedAt || ""),
     startedBy: String(audit.createdBy || "Warehouse user"),
+    receivers,
+    activeReceivers,
     updatedAt: String(audit.updatedAt || audit.createdAt || new Date().toISOString()),
     warehouseId: String(audit.warehouseId || ""),
     warehouseName: String(audit.warehouseName || ""),
@@ -56399,6 +56497,7 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && url.pathname === "/api/warehouse-audits" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    const receivingActor = warehouseReceivingActor(body, authUser);
     const db = await readDbFast({ skipInventory: true });
     const requestedWarehouse = String(body.warehouseId || body.warehouseName || "").trim().toLowerCase();
     const warehouse = (db.warehouses || []).find((row) => String(row.id || "").toLowerCase() === requestedWarehouse || String(row.name || "").toLowerCase() === requestedWarehouse) || null;
@@ -56435,11 +56534,13 @@ async function handleApi(req, res) {
         })[0]
       : null;
     if (existingLinkedAudit) {
-      await syncPurchaseOrderReceivingProgress(existingLinkedAudit);
+      await postgres.touchWarehouseAuditReceivingParticipant(existingLinkedAudit.id, receivingActor, { at: new Date().toISOString() });
+      const resumedAudit = await postgres.readWarehouseAudit(existingLinkedAudit.id) || existingLinkedAudit;
+      await syncPurchaseOrderReceivingProgress(resumedAudit);
       return sendJson(res, 200, {
-        audit: existingLinkedAudit,
+        audit: resumedAudit,
         resumed: true,
-        message: `${existingLinkedAudit.auditNumber || "The receiving audit"} is already receiving ${linkedPurchaseOrder.poNumber || linkedPurchaseOrder.id}. Resuming that session.`
+        message: `${resumedAudit.auditNumber || "The receiving audit"} is already receiving ${linkedPurchaseOrder.poNumber || linkedPurchaseOrder.id}. Resuming that session.`
       });
     }
     const supplierId = receivingReason ? String(linkedPurchaseOrder?.vendorId || body.supplierId || "").trim() : "";
@@ -56470,7 +56571,7 @@ async function handleApi(req, res) {
     }).filter((line) => line.expectedQty > 0) : [];
     if (purchaseOrderReceipt && !purchaseOrderExpectedLines.length) return sendJson(res, 409, { error: `PO ${linkedPurchaseOrder.poNumber || linkedPurchaseOrder.id} has no open quantities to receive.` });
     const now = new Date().toISOString();
-    const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", reason, reasonLabel: reasonOptions[reason], supplierId, supplierName, externalPurchaseOrderNumber, linkedPurchaseOrderId: String(linkedPurchaseOrder?.id || ""), linkedPurchaseOrderNumber: String(linkedPurchaseOrder?.poNumber || ""), purchaseOrderLinkedAt: linkedPurchaseOrder ? now : "", purchaseOrderExpectedLines, receivingDocuments: [], packingSlipReview: null, warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], createdAt: now, createdBy: body.user || "Luis", reviewer: String(body.reviewer || "").trim() };
+    const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", reason, reasonLabel: reasonOptions[reason], supplierId, supplierName, externalPurchaseOrderNumber, linkedPurchaseOrderId: String(linkedPurchaseOrder?.id || ""), linkedPurchaseOrderNumber: String(linkedPurchaseOrder?.poNumber || ""), purchaseOrderLinkedAt: linkedPurchaseOrder ? now : "", purchaseOrderExpectedLines, receivingDocuments: [], packingSlipReview: null, warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], receivingParticipants: receivingReason ? [{ user: receivingActor, firstActiveAt: now, lastActiveAt: now, scannedUnits: 0 }] : [], createdAt: now, createdBy: receivingActor, reviewer: String(body.reviewer || "").trim() };
     audits.unshift(audit);
     await postgres.saveWarehouseAudit(audit);
     await syncPurchaseOrderReceivingProgress(audit);
@@ -56946,8 +57047,24 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "presence" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const audit = await postgres.readWarehouseAudit(parts[2]);
+    if (!audit) return notFound(res);
+    if (String(audit.reason || "") !== "purchase_order_receipt" || !["in_progress", "pending_review"].includes(String(audit.status || "").toLowerCase())) {
+      return sendJson(res, 200, { active: false });
+    }
+    const actor = warehouseReceivingActor(body, authUser);
+    await postgres.touchWarehouseAuditReceivingParticipant(audit.id, actor, { at: new Date().toISOString() });
+    const savedAudit = await postgres.readWarehouseAudit(audit.id) || audit;
+    const progress = purchaseOrderReceivingProgressFromAudit(savedAudit);
+    await syncPurchaseOrderReceivingProgress(savedAudit);
+    return sendJson(res, 200, { active: true, progress });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "scan" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    const receivingActor = warehouseReceivingActor(body, authUser);
     const barcode = String(body.barcode || "").replace(/[^0-9A-Za-z-]/g, "").trim();
     const locationBin = String(body.locationBin || "").trim();
     const quantity = Math.max(1, Math.min(100000, Math.floor(Number(body.quantity || 1) || 0)));
@@ -57009,17 +57126,15 @@ async function handleApi(req, res) {
         sku: lineTemplate.sku,
         locationBin: resolvedLocationBin,
         quantity,
+        user: receivingActor,
         updatedAt: now,
         line: lineTemplate
       });
       if (!savedLine) return sendJson(res, 500, { error: "The scanned item could not be saved." });
-      const localLineIndex = (audit.lines || []).findIndex((entry) => String(entry.id || "") === String(savedLine.id || ""));
-      if (localLineIndex >= 0) audit.lines[localLineIndex] = savedLine;
-      else (audit.lines || (audit.lines = [])).push(savedLine);
-      audit.updatedAt = now;
-      await syncPurchaseOrderReceivingProgress(audit);
+      const savedAudit = await postgres.readWarehouseAudit(audit.id) || audit;
+      await syncPurchaseOrderReceivingProgress(savedAudit);
       return sendJson(res, 200, {
-        audit,
+        audit: savedAudit,
         product: { ...product, uom: scannedUomInfo.code, uomName: scannedUomInfo.name, uomQty: scannedUomInfo.qty, casePack: scannedUomInfo.qty, uomDisplay: scannedUomInfo.display },
         matched: true,
         message: `${product.sku} counted: ${quantity}.`
@@ -57028,16 +57143,16 @@ async function handleApi(req, res) {
     const unknownResult = await postgres.recordWarehouseAuditUnknownScan(audit.id, {
       barcode,
       quantity,
+      user: receivingActor,
       locationBin: resolvedLocationBin,
       scannedAt: now,
       updatedAt: now,
       sourceMatch: lookup.sourceItem || null
     });
     if (!unknownResult) return sendJson(res, 500, { error: "The unknown barcode could not be saved." });
-    audit.unknownBarcodes = unknownResult.unknownBarcodes;
-    audit.updatedAt = now;
-    await syncPurchaseOrderReceivingProgress(audit);
-    return sendJson(res, 200, { audit, matched: false, barcode, sourceItem: lookup.sourceItem, message: lookup.sourceItem ? `${barcode} was found in the source catalog as ${lookup.sourceItem.sku || lookup.sourceItem.vendorSku || "a source SKU"}, but is not yet an approved catalog SKU.` : `${barcode} saved as an unknown UPC.` });
+    const savedAudit = await postgres.readWarehouseAudit(audit.id) || audit;
+    await syncPurchaseOrderReceivingProgress(savedAudit);
+    return sendJson(res, 200, { audit: savedAudit, matched: false, barcode, sourceItem: lookup.sourceItem, message: lookup.sourceItem ? `${barcode} was found in the source catalog as ${lookup.sourceItem.sku || lookup.sourceItem.vendorSku || "a source SKU"}, but is not yet an approved catalog SKU.` : `${barcode} saved as an unknown UPC.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "research-upc" && postgres.isPostgresEnabled()) {
@@ -62647,6 +62762,7 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "receive" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
+    const receivingUser = warehouseReceivingActor(body, authUser);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
     const sourceAuditId = String(body.sourceAuditId || "").trim();
@@ -62702,7 +62818,7 @@ async function handleApi(req, res) {
     const defaultLocationBin = String(body.defaultLocationBin || "").trim();
     const warehouse = (db.warehouses || []).find((row) => isPhysicalWarehouse(row) && (row.id === body.warehouseId || row.id === po.warehouseId)) || null;
     if (mode === "final" && !warehouse) return sendJson(res, 400, { error: "Choose a physical receiving warehouse. DataWarehouse cannot receive physical PO stock." });
-    const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReceiptAttachment(file, body.user || "Luis"));
+    const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReceiptAttachment(file, receivingUser));
     for (const document of sourceAudit?.receivingDocuments || []) {
       attachments.push({
         id: String(document.id || crypto.randomUUID()),
@@ -62713,7 +62829,7 @@ async function handleApi(req, res) {
         url: String(document.url || `/api/warehouse-audits/${encodeURIComponent(sourceAudit.id)}/attachments/${encodeURIComponent(String(document.id || ""))}`),
         sourceAuditId,
         uploadedAt: String(document.createdAt || new Date().toISOString()),
-        uploadedBy: String(document.createdBy || body.user || "Warehouse")
+        uploadedBy: String(document.createdBy || receivingUser)
       });
     }
     const touchedProducts = [];
@@ -62726,7 +62842,9 @@ async function handleApi(req, res) {
       receiptNumber: `${mode === "draft" ? "DRF" : "RCV"}-${String(((mode === "draft" ? po.receiptDrafts : po.receipts) || []).length + 1).padStart(4, "0")}`,
       status: mode,
       receivedAt,
-      receivedBy: body.user || "Luis",
+      receivedBy: receivingUser,
+      receivedByUsers: [receivingUser],
+      postedBy: receivingUser,
       note,
       sourceAuditId,
       sourceAuditNumber: String(body.sourceAuditNumber || sourceAudit?.auditNumber || ""),
@@ -62755,6 +62873,7 @@ async function handleApi(req, res) {
       const locationBin = String(line.locationBin || defaultLocationBin || "").trim();
       const expectedPurchaseOrders = extraItem ? extraExpectationsBySku.get(sku.toLowerCase()) || [] : [];
       const providedSerials = Array.isArray(line.serials) ? line.serials : [];
+      const receivingContributors = normalizeReceiptReceivingContributors(line.receivingContributors, line.receivedBy || receivingUser, qtyReceived);
       const serials = [];
       for (let index = 0; !unresolved && index < qtyReceived; index += 1) {
         const serialInput = providedSerials[index] || {};
@@ -62788,6 +62907,8 @@ async function handleApi(req, res) {
         orderId: String(poLine?.orderId || ""),
         title: product?.title || poLine?.title || sku,
         qtyReceived,
+        receivedBy: receivingContributors.map((entry) => entry.user).join(", "),
+        receivingContributors,
         inventoryQtyReceived,
         inventoryMultiplier,
         orderedQty: Number(poLine?.qty || 0),
@@ -62808,6 +62929,8 @@ async function handleApi(req, res) {
         else orderedReceivedUnits += qtyReceived;
         continue;
       }
+
+      if (poLine) applyPurchaseOrderLineReceivingAttribution(poLine, receivingContributors, { receivedAt, receiptId: receipt.id });
 
       if (unresolved) {
         const appliedQty = applyUnresolvedPurchaseOrderReceipt(poLine, { qtyReceived, receivedAt, locationBin, varianceStatus, varianceNote });
@@ -62863,7 +62986,7 @@ async function handleApi(req, res) {
         reservedAfter: Number(warehouseStockRow?.reserved ?? product.reserved ?? 0),
         serials,
         reason: `${note || `Received on ${po.poNumber}`}${extraItem ? ` / extra item not ordered on this PO${expectedPurchaseOrders.length ? `; expected on ${expectedPurchaseOrders.map((entry) => entry.purchaseOrderNumber).join(", ")}` : ""}` : ""}${inventoryMultiplier > 1 ? ` / ${qtyReceived} purchase unit${qtyReceived === 1 ? "" : "s"} = ${inventoryQtyReceived} pieces` : ""}${varianceStatus !== "none" ? ` / variance: ${varianceStatus}${varianceNote ? ` (${varianceNote})` : ""}` : ""}${locationBin ? ` / bin: ${locationBin}` : ""}`,
-        user: body.user || "Luis"
+        user: receivingUser
       });
       touchedProducts.push(product);
       totalReceived += qtyReceived;
@@ -62885,7 +63008,7 @@ async function handleApi(req, res) {
         type: "draft",
         title: "Receipt draft saved",
         message: `${receipt.receiptNumber} saved with ${totalReceived} unit${totalReceived === 1 ? "" : "s"} planned${note ? `: ${note}` : "."}`,
-        user: body.user || "Luis"
+        user: receivingUser
       });
       await postgres.savePurchaseOrder(po);
       return sendJson(res, 200, { purchaseOrder: po });
@@ -62893,6 +63016,11 @@ async function handleApi(req, res) {
 
     po.receipts = Array.isArray(po.receipts) ? po.receipts : [];
     po.receipts.unshift(receipt);
+    receipt.receivedByUsers = [...new Set(receipt.items.flatMap((item) => (Array.isArray(item.receivingContributors) ? item.receivingContributors : []).map((entry) => String(entry.user || "").trim())).filter(Boolean))];
+    if (!receipt.receivedByUsers.length) receipt.receivedByUsers = [receivingUser];
+    receipt.receivedBy = receipt.receivedByUsers.join(", ");
+    refreshPurchaseOrderReceiverSummary(po, receivingUser);
+    po.lastReceivedBy = receivingUser;
     po.receivedUnits = Number(po.receivedUnits || 0) + orderedReceivedUnits;
     po.extraReceivedUnits = Number(po.extraReceivedUnits || 0) + extraItemUnits;
     if (body.closeRemaining === true) {
@@ -62904,7 +63032,7 @@ async function handleApi(req, res) {
         item.remainingQty = purchaseOrderOpenQuantity(item);
         item.status = Number(item.receivedQty || 0) > 0 ? "partially_received_short_closed" : "short_closed";
         item.shortClosedAt = shortClosedAt;
-        item.shortClosedBy = body.user || "Warehouse";
+        item.shortClosedBy = receivingUser;
         item.shortCloseNote = note;
         return {
           lineIndex,
@@ -62919,7 +63047,7 @@ async function handleApi(req, res) {
         const shortShipment = {
           id: crypto.randomUUID(),
           closedAt: shortClosedAt,
-          closedBy: body.user || "Warehouse",
+          closedBy: receivingUser,
           note,
           totalUnits: shortShipmentLines.reduce((sum, item) => sum + Number(item.qty || 0), 0),
           lines: shortShipmentLines
@@ -62927,7 +63055,7 @@ async function handleApi(req, res) {
         receipt.shortShipment = shortShipment;
         po.shortShipmentHistory = [...(Array.isArray(po.shortShipmentHistory) ? po.shortShipmentHistory : []), shortShipment];
         po.closedAt = shortClosedAt;
-        po.closedBy = body.user || "Warehouse";
+        po.closedBy = receivingUser;
         po.closeReason = "supplier_short_shipment";
       }
     }
@@ -62944,9 +63072,9 @@ async function handleApi(req, res) {
       type: "received",
       title: shortShipmentLines.length ? "PO closed with short shipment" : orderedReceivedUnits <= 0 ? "Extra PO items received" : po.status === "received" ? "PO received" : po.status === "closed" ? "PO closed after receipt" : "PO partially received",
       message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${shortShipmentLines.length ? `; ${shortShipmentLines.reduce((sum, item) => sum + Number(item.qty || 0), 0)} unreceived unit${shortShipmentLines.reduce((sum, item) => sum + Number(item.qty || 0), 0) === 1 ? " was" : "s were"} closed as supplier short shipment` : ""}${extraItemUnits ? `; ${extraItemUnits} marked as extra item${extraItemUnits === 1 ? "" : "s"} not ordered on this PO` : ""}${unresolvedHeldUnits ? `; ${unresolvedHeldUnits} held pending SKU resolution` : ""}${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
-      user: body.user || "Luis"
+      user: receivingUser
     });
-    acknowledgeCanceledDemandReceipt(po, receipt, canceledDemandExceptions, body.user || "Luis");
+    acknowledgeCanceledDemandReceipt(po, receipt, canceledDemandExceptions, receivingUser);
     // A receipt satisfies linked purchase demand first. Re-route only those customer orders
     // after stock has been posted, which turns received supply into reserved warehouse work.
     const linkedOrderIds = [...new Set([...(po.orderIds || []), po.orderId].filter(Boolean))];
@@ -63001,7 +63129,7 @@ async function handleApi(req, res) {
         continue;
       }
       if (shouldRerouteAfterReceiving) {
-        const reroute = await routeOrderForFulfillment(db, linkedOrder, { user: body.user || "System", workflowSettings, sourceReceiptId: receipt.id, sourceReceiptNumber: receipt.receiptNumber });
+          const reroute = await routeOrderForFulfillment(db, linkedOrder, { user: receivingUser, workflowSettings, sourceReceiptId: receipt.id, sourceReceiptNumber: receipt.receiptNumber });
         releasedProducts.push(...(reroute.touchedProducts || []));
       }
       recalculateOrderOperationalStatus(linkedOrder);
@@ -74580,6 +74708,7 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[3] === "receive") {
     const body = await parseBody(req);
+    const receivingUser = warehouseReceivingActor(body, authUser);
     const po = (db.purchaseOrders || []).find((row) => row.id === parts[2]);
     if (!po) return notFound(res);
     if (["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())) {
@@ -74613,7 +74742,7 @@ async function handleApi(req, res) {
     if (mode === "final" && !warehouse) {
       return sendJson(res, 400, { error: "Choose a physical receiving warehouse. DataWarehouse supplier-feed availability cannot receive a purchase order." });
     }
-    const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReceiptAttachment(file, body.user || "Luis"));
+    const attachments = (Array.isArray(body.attachments) ? body.attachments : []).map((file) => normalizeReceiptAttachment(file, receivingUser));
     let totalReceived = 0;
     let orderedReceivedUnits = 0;
     let extraItemUnits = 0;
@@ -74622,7 +74751,9 @@ async function handleApi(req, res) {
       receiptNumber: `${mode === "draft" ? "DRF" : "RCV"}-${String(((mode === "draft" ? po.receiptDrafts : po.receipts) || []).length + 1).padStart(4, "0")}`,
       status: mode,
       receivedAt,
-      receivedBy: body.user || "Luis",
+      receivedBy: receivingUser,
+      receivedByUsers: [receivingUser],
+      postedBy: receivingUser,
       note,
       defaultLocationBin,
       warehouseId: warehouse?.id || po.warehouseId || "",
@@ -74645,6 +74776,7 @@ async function handleApi(req, res) {
       const locationBin = String(line.locationBin || defaultLocationBin || "").trim();
       const expectedPurchaseOrders = extraItem ? extraExpectationsBySku.get(sku.toLowerCase()) || [] : [];
       const providedSerials = Array.isArray(line.serials) ? line.serials : [];
+      const receivingContributors = normalizeReceiptReceivingContributors(line.receivingContributors, line.receivedBy || receivingUser, qtyReceived);
       const serials = [];
       for (let index = 0; !unresolved && index < qtyReceived; index += 1) {
         const serialInput = providedSerials[index] || {};
@@ -74679,6 +74811,8 @@ async function handleApi(req, res) {
         orderId: String(poLine?.orderId || ""),
         title: product?.title || poLine?.title || sku,
         qtyReceived,
+        receivedBy: receivingContributors.map((entry) => entry.user).join(", "),
+        receivingContributors,
         orderedQty: Number(poLine?.qty || 0),
         receivedBefore: Number(poLine?.receivedQty || 0),
         extraItem,
@@ -74697,6 +74831,8 @@ async function handleApi(req, res) {
         else orderedReceivedUnits += qtyReceived;
         continue;
       }
+
+      if (poLine) applyPurchaseOrderLineReceivingAttribution(poLine, receivingContributors, { receivedAt, receiptId: receipt.id });
 
       if (unresolved) {
         const appliedQty = applyUnresolvedPurchaseOrderReceipt(poLine, { qtyReceived, receivedAt, locationBin, varianceStatus, varianceNote });
@@ -74748,7 +74884,7 @@ async function handleApi(req, res) {
         reservedAfter: Number(warehouseStockRow?.reserved ?? product.reserved ?? 0),
         serials,
         reason: `${note || `Received on ${po.poNumber}`}${extraItem ? ` / extra item not ordered on this PO${expectedPurchaseOrders.length ? `; expected on ${expectedPurchaseOrders.map((entry) => entry.purchaseOrderNumber).join(", ")}` : ""}` : ""}${varianceStatus !== "none" ? ` / variance: ${varianceStatus}${varianceNote ? ` (${varianceNote})` : ""}` : ""}${locationBin ? ` / bin: ${locationBin}` : ""}`,
-        user: body.user || "Luis"
+        user: receivingUser
       });
       totalReceived += qtyReceived;
       if (extraItem) extraItemUnits += qtyReceived;
@@ -74769,7 +74905,7 @@ async function handleApi(req, res) {
         type: "draft",
         title: "Receipt draft saved",
         message: `${receipt.receiptNumber} saved with ${totalReceived} unit${totalReceived === 1 ? "" : "s"} planned${note ? `: ${note}` : "."}`,
-        user: body.user || "Luis"
+        user: receivingUser
       });
       await writeDb(db);
       return sendJson(res, 200, { purchaseOrder: po, state: publicState(db) });
@@ -74777,6 +74913,11 @@ async function handleApi(req, res) {
 
     po.receipts = Array.isArray(po.receipts) ? po.receipts : [];
     po.receipts.unshift(receipt);
+    receipt.receivedByUsers = [...new Set(receipt.items.flatMap((item) => (Array.isArray(item.receivingContributors) ? item.receivingContributors : []).map((entry) => String(entry.user || "").trim())).filter(Boolean))];
+    if (!receipt.receivedByUsers.length) receipt.receivedByUsers = [receivingUser];
+    receipt.receivedBy = receipt.receivedByUsers.join(", ");
+    refreshPurchaseOrderReceiverSummary(po, receivingUser);
+    po.lastReceivedBy = receivingUser;
     po.receivedUnits = Number(po.receivedUnits || 0) + orderedReceivedUnits;
     po.extraReceivedUnits = Number(po.extraReceivedUnits || 0) + extraItemUnits;
     const noOpenQuantity = (po.items || []).every((item) => purchaseOrderOpenQuantity(item) <= 0);
@@ -74790,9 +74931,9 @@ async function handleApi(req, res) {
       type: "received",
       title: orderedReceivedUnits <= 0 ? "Extra PO items received" : po.status === "received" ? "PO received" : po.status === "closed" ? "PO closed after receipt" : "PO partially received",
       message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${extraItemUnits ? `; ${extraItemUnits} marked as extra item${extraItemUnits === 1 ? "" : "s"} not ordered on this PO` : ""}${unresolvedHeldUnits ? `; ${unresolvedHeldUnits} held pending SKU resolution` : ""}${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
-      user: body.user || "Luis"
+      user: receivingUser
     });
-    acknowledgeCanceledDemandReceipt(po, receipt, canceledDemandExceptions, body.user || "Luis");
+    acknowledgeCanceledDemandReceipt(po, receipt, canceledDemandExceptions, receivingUser);
 
     await writeDb(db);
     return sendJson(res, 200, { purchaseOrder: po, receipt, unresolvedHeldUnits, extraItemUnits, state: publicState(db) });
