@@ -107,7 +107,7 @@ export function JobsPage({
       owner: feed.vendorName || "DataWarehouse",
       enabled: Boolean(feed.refreshEnabled ?? feed.enabled),
       timing: scheduleDescription(feed.refreshScheduleType || feed.scheduleType, feed.refreshScheduleTimes || feed.scheduleTimes, feed.refreshScheduleEveryHours || feed.scheduleEveryHours, "02:00"),
-      behavior: "Refreshes existing SKUs for changed inventory, pricing, availability, and discontinuation fields.",
+      behavior: "Imports new source SKUs and refreshes inventory, pricing, availability, and discontinuation fields.",
       location: "/settings?tab=data-sources",
       managed: true,
     },

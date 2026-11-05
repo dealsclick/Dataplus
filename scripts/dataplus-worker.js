@@ -718,7 +718,7 @@ async function checkScheduledVendorFeedImports(force = false) {
             key: "refresh",
             enabled: feed.refreshEnabled === undefined ? Boolean(feed.enabled) : Boolean(feed.refreshEnabled),
             label: "refresh",
-            syncMode: "reconciliation",
+            syncMode: "split",
             schedule: { scheduleType: feed.refreshScheduleType || feed.scheduleType, scheduleTimes: feed.refreshScheduleTimes || feed.scheduleTimes, scheduleEveryHours: feed.refreshScheduleEveryHours || feed.scheduleEveryHours }
           },
           {

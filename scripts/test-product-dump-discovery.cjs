@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const { createDiscovery } = require("../lib/product-dump-discovery");
 
 async function main() {
-  const saved = [], reports = [];
+  const saved = [], savedSources = [], reports = [];
   const options = {
     vendors: [
       { name: "True Value", status: "active", catalogSettings: { enabled: true, sourceCodes: ["TRV"] } },
@@ -12,7 +12,7 @@ async function main() {
     settings: {},
     identities: { products: [{ sku: "EXISTING", barcode: "123", mfr_part_number: "PART", vendor_sku: "51173", supplier_code: "TRV" }], aliases: ["ALIAS"] },
     normalize: (row) => ({ ...row }),
-    save: async (rows, sources) => { assert.equal(rows.length, sources.length); saved.push(...rows); return { products: rows.length }; },
+    save: async (rows, sources) => { saved.push(...rows); savedSources.push(...sources); return { products: rows.length }; },
     report: async (row) => reports.push(row)
   };
   const run = createDiscovery(options);
@@ -28,6 +28,10 @@ async function main() {
   ]);
   await run.batch([product("NEW"), product("DUPLICATE-UPC", { barcode: "999" })]);
   assert.deepEqual(saved.map((row) => row.sku), ["NEW", "CROSS-SUPPLIER-VENDOR-SKU", "DISCONTINUED", "SOURCE-INACTIVE"]);
+  assert.deepEqual(savedSources.map((row) => row.sku), [
+    "NEW", "UPC-MATCH", "MPN-MATCH", "VENDOR-MATCH", "CROSS-SUPPLIER-VENDOR-SKU",
+    "DISCONTINUED", "SOURCE-INACTIVE", "DUPLICATE-UPC"
+  ]);
   assert.equal(saved.find((row) => row.sku === "SOURCE-INACTIVE").active, false);
   assert.equal(saved.find((row) => row.sku === "DISCONTINUED").toBeDiscontinued, true);
   assert.equal(run.counts.needsReview, 4);
@@ -65,6 +69,6 @@ async function main() {
   assert.deepEqual(lookupSaved.map((row) => row.sku), ["LOOKUP-NEW"]);
   assert.equal(lookupRun.counts.existing, 2);
   assert.equal(lookupRun.counts.needsReview, 3);
-  console.log("Discovery: supplier eligibility, inactive/discontinued creation, identifier review, duplicate batches, disabled creation and retry checks passed.");
+  console.log("Discovery: source persistence, supplier eligibility, inactive/discontinued creation, identifier review, duplicate batches, disabled creation and retry checks passed.");
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });
