@@ -6918,6 +6918,15 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
         supplier.match_type
       from product_identities product_identity
       join vendor_supplier_identity_next supplier on supplier.match_key = product_identity.match_key
+      where not (
+        supplier.match_type = 'upc'
+        and lower(trim(supplier.source_sku)) <> lower(trim(product_identity.product_sku))
+        and exists (
+          select 1
+          from products source_product
+          where lower(trim(source_product.sku)) = lower(trim(supplier.source_sku))
+        )
+      )
       union
       select distinct
         review.product_id,
@@ -8046,7 +8055,16 @@ async function ensureProductSupplierIdentifierMatches(client, { productId = "", 
       with candidates as (
         select item.vendor_id, item.source_sku, 'upc'::text as match_type, 'barcode:' || $2 as match_key, 0 as priority
         from vendor_catalog_items item
-        where cardinality($1::text[]) > 0 and lower(item.barcode) = any($1::text[])
+        where cardinality($1::text[]) > 0
+          and lower(item.barcode) = any($1::text[])
+          and (
+            lower(item.source_sku) = $3
+            or not exists (
+              select 1
+              from products source_product
+              where lower(source_product.sku) = lower(item.source_sku)
+            )
+          )
         union all
         select item.vendor_id, item.source_sku, 'vendor-sku', 'sku:' || $3, 1
         from vendor_catalog_items item
@@ -15703,6 +15721,7 @@ async function readProductByKey(key) {
           updated_at desc
         limit 1
       )
+    order by case when product_id = $1 or lower(sku) = lower($1) then 0 else 1 end
     limit 1
   `, [value]);
   let productRow = result.rows[0] || null;

@@ -27,13 +27,19 @@ async function main() {
     product("UNAPPROVED", { supplierCode: "OTHER" })
   ]);
   await run.batch([product("NEW"), product("DUPLICATE-UPC", { barcode: "999" })]);
-  assert.deepEqual(saved.map((row) => row.sku), ["NEW", "CROSS-SUPPLIER-VENDOR-SKU", "DISCONTINUED", "SOURCE-INACTIVE"]);
+  assert.deepEqual(saved.map((row) => row.sku), [
+    "NEW", "UPC-MATCH", "MPN-MATCH", "VENDOR-MATCH", "CROSS-SUPPLIER-VENDOR-SKU",
+    "DISCONTINUED", "SOURCE-INACTIVE", "DUPLICATE-UPC"
+  ]);
   assert.deepEqual(savedSources.map((row) => row.sku), [
     "NEW", "UPC-MATCH", "MPN-MATCH", "VENDOR-MATCH", "CROSS-SUPPLIER-VENDOR-SKU",
     "DISCONTINUED", "SOURCE-INACTIVE", "DUPLICATE-UPC"
   ]);
   assert.equal(saved.find((row) => row.sku === "SOURCE-INACTIVE").active, false);
   assert.equal(saved.find((row) => row.sku === "DISCONTINUED").toBeDiscontinued, true);
+  assert.equal(saved.find((row) => row.sku === "UPC-MATCH").catalogAttentionRequired, true);
+  assert.match(saved.find((row) => row.sku === "UPC-MATCH").catalogAttentionReason, /independent product/i);
+  assert.equal(run.counts.added, 8);
   assert.equal(run.counts.needsReview, 4);
   assert.equal(run.counts.existing, 3);
   assert.equal(run.counts.excluded, 2);
@@ -43,7 +49,8 @@ async function main() {
   const retry = createDiscovery({ ...options, identities: { products: [...options.identities.products, { sku: "NEW", barcode: "999" }], aliases: ["ALIAS"] } });
   await retry.batch([product("NEW", { barcode: "999" })]);
   assert.equal(retry.counts.added, 0);
-  assert.equal(reports.filter((row) => row.status === "needs_review").length, 4);
+  assert.equal(reports.filter((row) => row.status === "needs_review").length, 0);
+  assert.equal(reports.filter((row) => row.status === "processed").length, 8);
   assert.equal(retry.precheckIdentity(product("NEW")), false);
   assert.equal(retry.precheckIdentity(product("OUTSIDE", { supplierCode: "OFF" })), false);
   assert.equal(retry.precheckIdentity(product("NEXT")), true);
@@ -66,9 +73,9 @@ async function main() {
     product("DATABASE-VENDOR-SKU", { vendorSku: "DATABASE-VENDOR" }),
     product("LOOKUP-NEW")
   ]);
-  assert.deepEqual(lookupSaved.map((row) => row.sku), ["LOOKUP-NEW"]);
+  assert.deepEqual(lookupSaved.map((row) => row.sku), ["DATABASE-BARCODE", "DATABASE-IDENTIFIER", "DATABASE-VENDOR-SKU", "LOOKUP-NEW"]);
   assert.equal(lookupRun.counts.existing, 2);
   assert.equal(lookupRun.counts.needsReview, 3);
-  console.log("Discovery: source persistence, supplier eligibility, inactive/discontinued creation, identifier review, duplicate batches, disabled creation and retry checks passed.");
+  console.log("Discovery: independent SKU creation, source persistence, supplier eligibility, inactive/discontinued creation, identifier review signals, duplicate batches, disabled creation and retry checks passed.");
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });
