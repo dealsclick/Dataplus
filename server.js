@@ -18303,6 +18303,7 @@ function normalizeOrderDraft(db, draft = {}) {
     phone: String(draft.phone || "").trim(),
     marketplaceOrderNumber: String(draft.marketplaceOrderNumber || "").trim(),
     note: String(draft.note || "").trim(),
+    customerNote: String(draft.customerNote || "").trim(),
     shippingAddress: normalizeAddress(draft.shippingAddress || draft.address || {}, "shipping"),
     billingAddress: normalizeAddress(draft.billingAddress || draft.shippingAddress || draft.address || {}, "billing"),
     items,
@@ -18353,6 +18354,7 @@ function buildOrderFromDraft(db, draft, user = "Luis") {
     shippingCost: 0,
     refundAmount: 0,
     notes: draft.note || "",
+    customerNote: draft.customerNote || "",
     items,
     marketplaceOrderNumber: draft.marketplaceOrderNumber || "",
     marketplaceOrderId: draft.marketplaceOrderNumber || "",
@@ -70229,6 +70231,7 @@ async function handleApi(req, res) {
       phone: body.phone,
       marketplaceOrderNumber: body.marketplaceOrderNumber,
       note: body.note,
+      customerNote: body.customerNote,
       shippingAddress: body.shippingAddress,
       billingAddress: body.billingAddress,
       items: body.items,
@@ -70276,6 +70279,7 @@ async function handleApi(req, res) {
       phone: body.phone ?? current.phone,
       marketplaceOrderNumber: body.marketplaceOrderNumber ?? current.marketplaceOrderNumber,
       note: body.note ?? current.note,
+      customerNote: body.customerNote ?? current.customerNote,
       shippingAddress: body.shippingAddress ?? current.shippingAddress,
       billingAddress: body.billingAddress ?? current.billingAddress,
       items: body.items ?? current.items,
@@ -70563,7 +70567,7 @@ async function handleApi(req, res) {
         unitPrice: Number(item.price || 0),
         lineTotal: Number(item.qty || 0) * Number(item.price || 0),
         shipTo,
-        note: draft.note || ""
+        customerNote: draft.customerNote || ""
       })) : [{
         quoteNumber: draft.draftNumber,
         status: draft.status || "draft",
@@ -70577,12 +70581,13 @@ async function handleApi(req, res) {
         unitPrice: 0,
         lineTotal: 0,
         shipTo,
-        note: draft.note || ""
+        customerNote: draft.customerNote || ""
       }];
       return sendCsv(res, rowsToCsv(rows), `${draft.draftNumber || "draft-quote"}.csv`);
     }
     if (format !== "pdf") return sendJson(res, 400, { error: "Unsupported export format." });
-    const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(draft.draftNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse;margin-top:16px}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}dl{display:grid;grid-template-columns:180px 1fr;gap:8px 16px;margin-top:20px}</style></head><body><h1>${escapeHtml(draft.draftNumber)}</h1><p class="muted">Manual draft / ${escapeHtml(draft.source || "Manual")}</p><p><strong>${escapeHtml(draft.buyer || "Unknown customer")}</strong><br>${escapeHtml(draft.buyerEmail || "")}<br>${escapeHtml(draft.phone || "")}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.price || 0).toFixed(2))}</td><td>${escapeHtml((Number(item.qty || 0) * Number(item.price || 0)).toFixed(2))}</td></tr>`).join("")}</tbody></table><dl><dt>Subtotal</dt><dd>${escapeHtml(subtotal.toFixed(2))}</dd><dt>External reference</dt><dd>${escapeHtml(draft.marketplaceOrderNumber || "N/A")}</dd><dt>Shipping</dt><dd>${escapeHtml([address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(", "), address.country].filter(Boolean).join(" / "))}</dd><dt>Notes</dt><dd>${escapeHtml(draft.note || "None")}</dd></dl></body></html>`;
+    const customerNoteSection = draft.customerNote ? `<dt>Message</dt><dd class="note">${escapeHtml(draft.customerNote)}</dd>` : "";
+    const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(draft.draftNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse;margin-top:16px}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}dl{display:grid;grid-template-columns:180px 1fr;gap:8px 16px;margin-top:20px}.note{white-space:pre-wrap}</style></head><body><h1>${escapeHtml(draft.draftNumber)}</h1><p class="muted">Manual draft / ${escapeHtml(draft.source || "Manual")}</p><p><strong>${escapeHtml(draft.buyer || "Unknown customer")}</strong><br>${escapeHtml(draft.buyerEmail || "")}<br>${escapeHtml(draft.phone || "")}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.price || 0).toFixed(2))}</td><td>${escapeHtml((Number(item.qty || 0) * Number(item.price || 0)).toFixed(2))}</td></tr>`).join("")}</tbody></table><dl><dt>Subtotal</dt><dd>${escapeHtml(subtotal.toFixed(2))}</dd><dt>External reference</dt><dd>${escapeHtml(draft.marketplaceOrderNumber || "N/A")}</dd><dt>Shipping</dt><dd>${escapeHtml([address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(", "), address.country].filter(Boolean).join(" / "))}</dd>${customerNoteSection}</dl></body></html>`;
     res.writeHead(200, htmlResponseHeaders({
       "Content-Disposition": `attachment; filename=${draft.draftNumber}.html`
     }));
@@ -73713,7 +73718,7 @@ async function handleApi(req, res) {
         unitPrice: Number(item.price || 0),
         lineTotal: Number(item.qty || 0) * Number(item.price || 0),
         shipTo,
-        note: draft.note || ""
+        customerNote: draft.customerNote || ""
       })) : [{
         quoteNumber: draft.draftNumber,
         status: draft.status || "draft",
@@ -73727,12 +73732,13 @@ async function handleApi(req, res) {
         unitPrice: 0,
         lineTotal: 0,
         shipTo,
-        note: draft.note || ""
+        customerNote: draft.customerNote || ""
       }];
       return sendCsv(res, rowsToCsv(rows), `${draft.draftNumber || "draft-quote"}.csv`);
     }
     if (format !== "pdf") return sendJson(res, 400, { error: "Unsupported export format." });
-    const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(draft.draftNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse;margin-top:16px}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}dl{display:grid;grid-template-columns:180px 1fr;gap:8px 16px;margin-top:20px}</style></head><body><h1>${escapeHtml(draft.draftNumber)}</h1><p class="muted">Manual draft / ${escapeHtml(draft.source || "Manual")}</p><p><strong>${escapeHtml(draft.buyer || "Unknown customer")}</strong><br>${escapeHtml(draft.buyerEmail || "")}<br>${escapeHtml(draft.phone || "")}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.price || 0).toFixed(2))}</td><td>${escapeHtml((Number(item.qty || 0) * Number(item.price || 0)).toFixed(2))}</td></tr>`).join("")}</tbody></table><dl><dt>Subtotal</dt><dd>${escapeHtml(subtotal.toFixed(2))}</dd><dt>External reference</dt><dd>${escapeHtml(draft.marketplaceOrderNumber || "N/A")}</dd><dt>Shipping</dt><dd>${escapeHtml([address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(", "), address.country].filter(Boolean).join(" / "))}</dd><dt>Notes</dt><dd>${escapeHtml(draft.note || "None")}</dd></dl></body></html>`;
+    const customerNoteSection = draft.customerNote ? `<dt>Message</dt><dd class="note">${escapeHtml(draft.customerNote)}</dd>` : "";
+    const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(draft.draftNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse;margin-top:16px}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}dl{display:grid;grid-template-columns:180px 1fr;gap:8px 16px;margin-top:20px}.note{white-space:pre-wrap}</style></head><body><h1>${escapeHtml(draft.draftNumber)}</h1><p class="muted">Manual draft / ${escapeHtml(draft.source || "Manual")}</p><p><strong>${escapeHtml(draft.buyer || "Unknown customer")}</strong><br>${escapeHtml(draft.buyerEmail || "")}<br>${escapeHtml(draft.phone || "")}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.price || 0).toFixed(2))}</td><td>${escapeHtml((Number(item.qty || 0) * Number(item.price || 0)).toFixed(2))}</td></tr>`).join("")}</tbody></table><dl><dt>Subtotal</dt><dd>${escapeHtml(subtotal.toFixed(2))}</dd><dt>External reference</dt><dd>${escapeHtml(draft.marketplaceOrderNumber || "N/A")}</dd><dt>Shipping</dt><dd>${escapeHtml([address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(", "), address.country].filter(Boolean).join(" / "))}</dd>${customerNoteSection}</dl></body></html>`;
     res.writeHead(200, htmlResponseHeaders({
       "Content-Disposition": `attachment; filename=${draft.draftNumber}.html`
     }));
@@ -74409,6 +74415,7 @@ async function handleApi(req, res) {
       phone: body.phone,
       marketplaceOrderNumber: body.marketplaceOrderNumber,
       note: body.note,
+      customerNote: body.customerNote,
       shippingAddress: body.shippingAddress,
       billingAddress: body.billingAddress,
       items: body.items,
@@ -74453,6 +74460,7 @@ async function handleApi(req, res) {
       phone: body.phone ?? current.phone,
       marketplaceOrderNumber: body.marketplaceOrderNumber ?? current.marketplaceOrderNumber,
       note: body.note ?? current.note,
+      customerNote: body.customerNote ?? current.customerNote,
       shippingAddress: body.shippingAddress ?? current.shippingAddress,
       billingAddress: body.billingAddress ?? current.billingAddress,
       items: body.items ?? current.items,

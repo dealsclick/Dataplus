@@ -21,6 +21,21 @@ test('quote totals follow edited lines, including removal of all lines',()=>{
   assert.equal(draftFunctions.normalizeOrderDraft(db,{...edited,items:[]}).total,0);
 });
 
+test('quote customer messages remain separate from internal notes',()=>{
+  const db={inventory:[],orders:[],orderDrafts:[],sequence:{order:1000,draft:1000}};
+  const draft=draftFunctions.normalizeOrderDraft(db,{
+    buyer:'Buyer',
+    note:'Staff follow-up only',
+    customerNote:'Pricing is valid for 14 days.',
+    items:[{sku:'A',qty:1,price:10}],
+  });
+  assert.equal(draft.note,'Staff follow-up only');
+  assert.equal(draft.customerNote,'Pricing is valid for 14 days.');
+  const order=draftFunctions.buildOrderFromDraft(db,draft,'Sales user');
+  assert.equal(order.notes,'Staff follow-up only');
+  assert.equal(order.customerNote,'Pricing is valid for 14 days.');
+});
+
 test('company membership routes require user permission management before reading or writing', async () => {
   let response;
   const handler=createCompanyHandler({store:{},parseBody:async()=>{throw new Error('Unauthorized body must not be processed');},sendJson:(_res,status,data)=>{response={status,data};},canManageMembers:()=>false});
