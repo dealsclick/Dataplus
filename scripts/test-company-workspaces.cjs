@@ -4,8 +4,10 @@ const { Pool } = require('pg');
 const { createCompanyStore, LEGACY_TENANT: tenantId, LEGACY_COMPANY, LEGACY_COMPANY_NUMBER, money } = require('../lib/company-workspaces');
 const { createCompanyHandler } = require('../lib/company-http');
 const {parseFile,normalize}=require('../lib/manual-order-import');
+const { PDFDocument } = require('pdf-lib');
+const quoteDocuments=require('../lib/quote-documents');
 const serverSource=require('node:fs').readFileSync(require.resolve('../server'),'utf8');
-const draftFunctions={crypto:require('node:crypto'),normalizeAddress:value=>value};
+const draftFunctions={crypto:require('node:crypto'),normalizeAddress:value=>value,...quoteDocuments};
 require('node:vm').createContext(draftFunctions);
 for(const name of ['nextDraftNumber','nextOrderNumber','normalizeDraftLine','orderDraftTotals','normalizeOrderDraft','buildOrderFromDraft']) {
   const start=serverSource.indexOf(`function ${name}(`);
@@ -34,6 +36,34 @@ test('quote customer messages remain separate from internal notes',()=>{
   const order=draftFunctions.buildOrderFromDraft(db,draft,'Sales user');
   assert.equal(order.notes,'Staff follow-up only');
   assert.equal(order.customerNote,'Pricing is valid for 14 days.');
+});
+
+test('quote expiration, terms, MSRP, and savings remain structured',()=>{
+  const db={inventory:[{sku:'A',title:'Item A',price:80,listPrice:100,cost:40}],orders:[],orderDrafts:[],sequence:{order:1000,draft:1000}};
+  const draft=draftFunctions.normalizeOrderDraft(db,{
+    expiresAt:'2026-12-05',
+    selectedTermIds:['taxes','net_30','unknown','taxes'],
+    customTerms:'Installation is excluded.',
+    items:[{sku:'A',qty:2}],
+  });
+  assert.equal(draft.expiresAt,'2026-12-05');
+  assert.deepEqual(Array.from(draft.selectedTermIds),['taxes','net_30']);
+  assert.equal(draft.customTerms,'Installation is excluded.');
+  assert.equal(draft.items[0].msrp,100);
+  assert.equal(draft.items[0].price,80);
+  assert.deepEqual(quoteDocuments.quoteSavingsTotals(draft.items),{quoteTotal:160,msrpTotal:200,savingsTotal:40,hasMsrp:true});
+  assert.deepEqual(quoteDocuments.quoteSavingsTotals([{qty:1,price:25,msrp:0}]),{quoteTotal:25,msrpTotal:0,savingsTotal:0,hasMsrp:false});
+  assert.equal(quoteDocuments.defaultQuoteExpiration(30,new Date('2026-11-05T12:00:00Z')),'2026-12-05');
+});
+
+test('all customer quote versions generate real multi-page-capable PDFs',async()=>{
+  const draft={draftNumber:'QUOTE-1001',buyer:'Test customer',buyerEmail:'buyer@example.com',createdAt:'2026-11-05T12:00:00Z',expiresAt:'2026-12-05',selectedTermIds:['availability','taxes','net_30'],customTerms:'Installation is excluded.',customerNote:'Thank you for the opportunity.',shippingAddress:{line1:'1 Main St',city:'Staten Island',state:'NY',postalCode:'10303',country:'US'},items:Array.from({length:28},(_,index)=>({sku:`SKU-${index+1}`,title:`Product ${index+1} with a descriptive customer-facing title`,qty:2,msrp:25,price:20}))};
+  for(const variant of quoteDocuments.QUOTE_EXPORT_VARIANTS){
+    const buffer=await quoteDocuments.buildQuotePdf(draft,variant);
+    assert.equal(buffer.subarray(0,4).toString(),'%PDF');
+    const pdf=await PDFDocument.load(buffer);
+    assert.ok(pdf.getPageCount()>=2);
+  }
 });
 
 test('company membership routes require user permission management before reading or writing', async () => {

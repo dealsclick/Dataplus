@@ -28,6 +28,7 @@ const { operationJobChannel, operationJobTrigger } = require('./lib/job-classifi
 const { evaluateFulfillmentIntervention } = require("./lib/fulfillment-intervention");
 const { splitFulfillmentRoutes } = require("./lib/fulfillment-package-split");
 const { fulfillmentRowVisibleInAllShipments, orderVisibleInAllShipments } = require("./lib/fulfillment-shipment-visibility");
+const { QUOTE_EXPORT_VARIANTS, buildQuotePdf, defaultQuoteExpiration, normalizeQuoteExpiration, normalizeQuoteTermIds, quoteTerms } = require("./lib/quote-documents");
 const { createCompanyHandler } = require("./lib/company-http");
 const { resolveMentionedUsers } = require("./lib/order-mentions");
 const companyStore = createCompanyStore(() => postgres.getPool(), {
@@ -18271,6 +18272,7 @@ function normalizeDraftLine(db, line = {}, index = 0) {
     title: String(line.title || inventoryItem?.title || "").trim(),
     qty: Math.max(1, Number(line.qty || 1)),
     price: Number(line.price ?? inventoryItem?.price ?? 0),
+    msrp: Math.max(0, Number(line.msrp ?? inventoryItem?.listPrice ?? inventoryItem?.msrp ?? 0)),
     cost: Number(line.cost ?? inventoryItem?.cost ?? 0),
     note: String(line.note || "").trim(),
     sortOrder: Number(line.sortOrder ?? index)
@@ -18304,6 +18306,9 @@ function normalizeOrderDraft(db, draft = {}) {
     marketplaceOrderNumber: String(draft.marketplaceOrderNumber || "").trim(),
     note: String(draft.note || "").trim(),
     customerNote: String(draft.customerNote || "").trim(),
+    expiresAt: normalizeQuoteExpiration(draft.expiresAt),
+    selectedTermIds: normalizeQuoteTermIds(draft.selectedTermIds),
+    customTerms: String(draft.customTerms || "").trim(),
     shippingAddress: normalizeAddress(draft.shippingAddress || draft.address || {}, "shipping"),
     billingAddress: normalizeAddress(draft.billingAddress || draft.shippingAddress || draft.address || {}, "billing"),
     items,
@@ -18311,6 +18316,65 @@ function normalizeOrderDraft(db, draft = {}) {
     createdAt,
     updatedAt: draft.updatedAt || createdAt
   };
+}
+
+async function sendOrderDraftExport(res, draft, format = "pdf", variant = "standard") {
+  const address = draft.shippingAddress || {};
+  const items = Array.isArray(draft.items) ? draft.items : [];
+  if (format === "csv") {
+    const shipTo = [address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(" "), address.country].filter(Boolean).join(" | ");
+    const terms = quoteTerms(draft).join(" | ");
+    const rows = items.length ? items.map((item) => ({
+      quoteNumber: draft.draftNumber,
+      status: draft.status || "draft",
+      expiresAt: draft.expiresAt || "",
+      customer: draft.buyer || "",
+      email: draft.buyerEmail || "",
+      phone: draft.phone || "",
+      source: draft.source || "Manual",
+      sku: item.sku || "",
+      title: item.title || "",
+      qty: Number(item.qty || 0),
+      msrp: Number(item.msrp || 0),
+      unitPrice: Number(item.price || 0),
+      lineSavings: Math.max(0, Number(item.msrp || 0) - Number(item.price || 0)) * Number(item.qty || 0),
+      lineTotal: Number(item.qty || 0) * Number(item.price || 0),
+      shipTo,
+      customerNote: draft.customerNote || "",
+      terms
+    })) : [{
+      quoteNumber: draft.draftNumber,
+      status: draft.status || "draft",
+      expiresAt: draft.expiresAt || "",
+      customer: draft.buyer || "",
+      email: draft.buyerEmail || "",
+      phone: draft.phone || "",
+      source: draft.source || "Manual",
+      sku: "",
+      title: "",
+      qty: 0,
+      msrp: 0,
+      unitPrice: 0,
+      lineSavings: 0,
+      lineTotal: 0,
+      shipTo,
+      customerNote: draft.customerNote || "",
+      terms
+    }];
+    return sendCsv(res, rowsToCsv(rows), `${draft.draftNumber || "draft-quote"}.csv`);
+  }
+  if (format !== "pdf") return sendJson(res, 400, { error: "Unsupported export format." });
+  if (!QUOTE_EXPORT_VARIANTS.includes(variant)) return sendJson(res, 400, { error: "Unsupported quote PDF version." });
+  if (variant === "savings" && (!items.length || items.some((item) => !(Number(item.msrp || 0) > 0)))) return sendJson(res, 409, { error: "Add MSRP to every quote line before creating a savings proposal." });
+  const pdf = await buildQuotePdf(draft, variant);
+  const suffix = variant === "standard" ? "" : `-${variant}`;
+  res.writeHead(200, {
+    "Content-Type": "application/pdf",
+    "Content-Length": pdf.length,
+    "Content-Disposition": `inline; filename="${safeImportFileName(`${draft.draftNumber || "draft-quote"}${suffix}`, "draft-quote")}.pdf"`,
+    "Cache-Control": "private, no-store"
+  });
+  return res.end(pdf);
 }
 
 function buildOrderFromDraft(db, draft, user = "Luis") {
@@ -18355,6 +18419,9 @@ function buildOrderFromDraft(db, draft, user = "Luis") {
     refundAmount: 0,
     notes: draft.note || "",
     customerNote: draft.customerNote || "",
+    quoteExpiresAt: draft.expiresAt || "",
+    quoteTermIds: normalizeQuoteTermIds(draft.selectedTermIds),
+    quoteCustomTerms: draft.customTerms || "",
     items,
     marketplaceOrderNumber: draft.marketplaceOrderNumber || "",
     marketplaceOrderId: draft.marketplaceOrderNumber || "",
@@ -70232,6 +70299,9 @@ async function handleApi(req, res) {
       marketplaceOrderNumber: body.marketplaceOrderNumber,
       note: body.note,
       customerNote: body.customerNote,
+      expiresAt: body.expiresAt || defaultQuoteExpiration(30),
+      selectedTermIds: body.selectedTermIds,
+      customTerms: body.customTerms,
       shippingAddress: body.shippingAddress,
       billingAddress: body.billingAddress,
       items: body.items,
@@ -70256,6 +70326,7 @@ async function handleApi(req, res) {
       revisionNumber: nextDraftRevisionNumber(db, current.quoteGroupId || current.id),
       parentDraftId: current.id,
       marketplaceOrderNumber: "",
+      expiresAt: defaultQuoteExpiration(30),
       note: current.note ? `${current.note} / Duplicated from ${current.draftNumber}` : `Duplicated from ${current.draftNumber}`,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
@@ -70280,6 +70351,9 @@ async function handleApi(req, res) {
       marketplaceOrderNumber: body.marketplaceOrderNumber ?? current.marketplaceOrderNumber,
       note: body.note ?? current.note,
       customerNote: body.customerNote ?? current.customerNote,
+      expiresAt: body.expiresAt ?? current.expiresAt,
+      selectedTermIds: body.selectedTermIds ?? current.selectedTermIds,
+      customTerms: body.customTerms ?? current.customTerms,
       shippingAddress: body.shippingAddress ?? current.shippingAddress,
       billingAddress: body.billingAddress ?? current.billingAddress,
       items: body.items ?? current.items,
@@ -70324,6 +70398,7 @@ async function handleApi(req, res) {
         title: item.title,
         qty: Number(item.qty || 1),
         price: Number(item.price || 0),
+        msrp: Number(product?.listPrice ?? product?.msrp ?? 0),
         cost: Number(product?.cost || 0)
       };
     });
@@ -70336,6 +70411,7 @@ async function handleApi(req, res) {
       phone: order.phone || "",
       marketplaceOrderNumber: "",
       note: `Duplicated from ${order.orderNumber}`,
+      expiresAt: defaultQuoteExpiration(30),
       shippingAddress: order.address || {},
       billingAddress: order.address || {},
       items,
@@ -70548,50 +70624,7 @@ async function handleApi(req, res) {
     const db = await readOrderDraftWorkflowDb();
     const draft = (db.orderDrafts || []).find((row) => row.id === parts[2]);
     if (!draft) return notFound(res);
-    const format = parts[4] || "pdf";
-    const address = draft.shippingAddress || {};
-    const items = Array.isArray(draft.items) ? draft.items : [];
-    const subtotal = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
-    if (format === "csv") {
-      const shipTo = [address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(" "), address.country].filter(Boolean).join(" | ");
-      const rows = items.length ? items.map((item) => ({
-        quoteNumber: draft.draftNumber,
-        status: draft.status || "draft",
-        customer: draft.buyer || "",
-        email: draft.buyerEmail || "",
-        phone: draft.phone || "",
-        source: draft.source || "Manual",
-        sku: item.sku || "",
-        title: item.title || "",
-        qty: Number(item.qty || 0),
-        unitPrice: Number(item.price || 0),
-        lineTotal: Number(item.qty || 0) * Number(item.price || 0),
-        shipTo,
-        customerNote: draft.customerNote || ""
-      })) : [{
-        quoteNumber: draft.draftNumber,
-        status: draft.status || "draft",
-        customer: draft.buyer || "",
-        email: draft.buyerEmail || "",
-        phone: draft.phone || "",
-        source: draft.source || "Manual",
-        sku: "",
-        title: "",
-        qty: 0,
-        unitPrice: 0,
-        lineTotal: 0,
-        shipTo,
-        customerNote: draft.customerNote || ""
-      }];
-      return sendCsv(res, rowsToCsv(rows), `${draft.draftNumber || "draft-quote"}.csv`);
-    }
-    if (format !== "pdf") return sendJson(res, 400, { error: "Unsupported export format." });
-    const customerNoteSection = draft.customerNote ? `<dt>Message</dt><dd class="note">${escapeHtml(draft.customerNote)}</dd>` : "";
-    const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(draft.draftNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse;margin-top:16px}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}dl{display:grid;grid-template-columns:180px 1fr;gap:8px 16px;margin-top:20px}.note{white-space:pre-wrap}</style></head><body><h1>${escapeHtml(draft.draftNumber)}</h1><p class="muted">Manual draft / ${escapeHtml(draft.source || "Manual")}</p><p><strong>${escapeHtml(draft.buyer || "Unknown customer")}</strong><br>${escapeHtml(draft.buyerEmail || "")}<br>${escapeHtml(draft.phone || "")}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.price || 0).toFixed(2))}</td><td>${escapeHtml((Number(item.qty || 0) * Number(item.price || 0)).toFixed(2))}</td></tr>`).join("")}</tbody></table><dl><dt>Subtotal</dt><dd>${escapeHtml(subtotal.toFixed(2))}</dd><dt>External reference</dt><dd>${escapeHtml(draft.marketplaceOrderNumber || "N/A")}</dd><dt>Shipping</dt><dd>${escapeHtml([address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(", "), address.country].filter(Boolean).join(" / "))}</dd>${customerNoteSection}</dl></body></html>`;
-    res.writeHead(200, htmlResponseHeaders({
-      "Content-Disposition": `attachment; filename=${draft.draftNumber}.html`
-    }));
-    return res.end(htmlDoc);
+    return sendOrderDraftExport(res, draft, parts[4] || "pdf", String(url.searchParams.get("variant") || "standard").toLowerCase());
   }
 
   if (req.method === "POST" && url.pathname === "/api/inventory/bulk" && postgres.isPostgresEnabled()) {
@@ -73699,50 +73732,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts[3] === "export") {
     const draft = (db.orderDrafts || []).find((row) => row.id === parts[2]);
     if (!draft) return notFound(res);
-    const format = parts[4] || "pdf";
-    const address = draft.shippingAddress || {};
-    const items = Array.isArray(draft.items) ? draft.items : [];
-    const subtotal = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0);
-    if (format === "csv") {
-      const shipTo = [address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(" "), address.country].filter(Boolean).join(" | ");
-      const rows = items.length ? items.map((item) => ({
-        quoteNumber: draft.draftNumber,
-        status: draft.status || "draft",
-        customer: draft.buyer || "",
-        email: draft.buyerEmail || "",
-        phone: draft.phone || "",
-        source: draft.source || "Manual",
-        sku: item.sku || "",
-        title: item.title || "",
-        qty: Number(item.qty || 0),
-        unitPrice: Number(item.price || 0),
-        lineTotal: Number(item.qty || 0) * Number(item.price || 0),
-        shipTo,
-        customerNote: draft.customerNote || ""
-      })) : [{
-        quoteNumber: draft.draftNumber,
-        status: draft.status || "draft",
-        customer: draft.buyer || "",
-        email: draft.buyerEmail || "",
-        phone: draft.phone || "",
-        source: draft.source || "Manual",
-        sku: "",
-        title: "",
-        qty: 0,
-        unitPrice: 0,
-        lineTotal: 0,
-        shipTo,
-        customerNote: draft.customerNote || ""
-      }];
-      return sendCsv(res, rowsToCsv(rows), `${draft.draftNumber || "draft-quote"}.csv`);
-    }
-    if (format !== "pdf") return sendJson(res, 400, { error: "Unsupported export format." });
-    const customerNoteSection = draft.customerNote ? `<dt>Message</dt><dd class="note">${escapeHtml(draft.customerNote)}</dd>` : "";
-    const htmlDoc = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(draft.draftNumber)}</title><style>body{font-family:Arial,sans-serif;padding:32px;color:#111}table{width:100%;border-collapse:collapse;margin-top:16px}td,th{border:1px solid #ddd;padding:8px;text-align:left}.muted{color:#666}dl{display:grid;grid-template-columns:180px 1fr;gap:8px 16px;margin-top:20px}.note{white-space:pre-wrap}</style></head><body><h1>${escapeHtml(draft.draftNumber)}</h1><p class="muted">Manual draft / ${escapeHtml(draft.source || "Manual")}</p><p><strong>${escapeHtml(draft.buyer || "Unknown customer")}</strong><br>${escapeHtml(draft.buyerEmail || "")}<br>${escapeHtml(draft.phone || "")}</p><table><thead><tr><th>SKU</th><th>Title</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${items.map((item) => `<tr><td>${escapeHtml(item.sku || "")}</td><td>${escapeHtml(item.title || "")}</td><td>${escapeHtml(item.qty || 0)}</td><td>${escapeHtml(Number(item.price || 0).toFixed(2))}</td><td>${escapeHtml((Number(item.qty || 0) * Number(item.price || 0)).toFixed(2))}</td></tr>`).join("")}</tbody></table><dl><dt>Subtotal</dt><dd>${escapeHtml(subtotal.toFixed(2))}</dd><dt>External reference</dt><dd>${escapeHtml(draft.marketplaceOrderNumber || "N/A")}</dd><dt>Shipping</dt><dd>${escapeHtml([address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(", "), address.country].filter(Boolean).join(" / "))}</dd>${customerNoteSection}</dl></body></html>`;
-    res.writeHead(200, htmlResponseHeaders({
-      "Content-Disposition": `attachment; filename=${draft.draftNumber}.html`
-    }));
-    return res.end(htmlDoc);
+    return sendOrderDraftExport(res, draft, parts[4] || "pdf", String(url.searchParams.get("variant") || "standard").toLowerCase());
   }
 
   if (req.method === 'POST' && url.pathname === '/api/import/inventory') {
@@ -74416,6 +74406,9 @@ async function handleApi(req, res) {
       marketplaceOrderNumber: body.marketplaceOrderNumber,
       note: body.note,
       customerNote: body.customerNote,
+      expiresAt: body.expiresAt || defaultQuoteExpiration(30),
+      selectedTermIds: body.selectedTermIds,
+      customTerms: body.customTerms,
       shippingAddress: body.shippingAddress,
       billingAddress: body.billingAddress,
       items: body.items,
@@ -74438,6 +74431,7 @@ async function handleApi(req, res) {
       revisionNumber: nextDraftRevisionNumber(db, current.quoteGroupId || current.id),
       parentDraftId: current.id,
       marketplaceOrderNumber: "",
+      expiresAt: defaultQuoteExpiration(30),
       note: current.note ? `${current.note} / Duplicated from ${current.draftNumber}` : `Duplicated from ${current.draftNumber}`,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
@@ -74461,6 +74455,9 @@ async function handleApi(req, res) {
       marketplaceOrderNumber: body.marketplaceOrderNumber ?? current.marketplaceOrderNumber,
       note: body.note ?? current.note,
       customerNote: body.customerNote ?? current.customerNote,
+      expiresAt: body.expiresAt ?? current.expiresAt,
+      selectedTermIds: body.selectedTermIds ?? current.selectedTermIds,
+      customTerms: body.customTerms ?? current.customTerms,
       shippingAddress: body.shippingAddress ?? current.shippingAddress,
       billingAddress: body.billingAddress ?? current.billingAddress,
       items: body.items ?? current.items,
@@ -74497,6 +74494,7 @@ async function handleApi(req, res) {
           title: item.title,
           qty: Number(item.qty || 1),
           price: Number(item.price || 0),
+          msrp: Number(inventoryItem?.listPrice ?? inventoryItem?.msrp ?? 0),
           cost: Number(inventoryItem?.cost || 0)
         };
       })
@@ -74505,6 +74503,7 @@ async function handleApi(req, res) {
         title: order.title,
         qty: Number(order.qty || 1),
         price: Number(order.total || 0) / Math.max(1, Number(order.qty || 1)),
+        msrp: Number((db.inventory || []).find((row) => row.sku === order.sku)?.listPrice ?? (db.inventory || []).find((row) => row.sku === order.sku)?.msrp ?? 0),
         cost: Number((db.inventory || []).find((row) => row.sku === order.sku)?.cost || 0)
       }];
     const duplicate = normalizeOrderDraft(db, {
@@ -74514,6 +74513,7 @@ async function handleApi(req, res) {
       phone: order.phone || "",
       marketplaceOrderNumber: "",
       note: `Duplicated from ${order.orderNumber}`,
+      expiresAt: defaultQuoteExpiration(30),
       shippingAddress: order.address || {},
       billingAddress: order.address || {},
       items,

@@ -2,6 +2,7 @@ import { Alert,AlertDescription,AlertTitle } from "@/components/ui/alert"
 import { AlertDialog,AlertDialogAction,AlertDialogCancel,AlertDialogContent,AlertDialogDescription,AlertDialogFooter,AlertDialogHeader,AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Calendar } from "@/components/ui/calendar"
 import { Card,CardContent,CardDescription,CardFooter,CardHeader,CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Dialog,DialogContent,DialogDescription,DialogFooter,DialogHeader,DialogTitle } from "@/components/ui/dialog"
@@ -17,6 +18,7 @@ import { FieldDescription,FieldGroup,FieldLabel,FieldLegend,FieldSeparator,Field
 import { HoverCard,HoverCardContent,HoverCardTrigger } from "@/components/ui/hover-card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Popover,PopoverContent,PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   Select,
@@ -44,6 +46,7 @@ import {
   Archive,
   ArrowRight,
   Ban,
+  CalendarDays,
   CheckCircle2,
   ChevronDown,
   Clock3,
@@ -87,12 +90,51 @@ import { channelOrderNumberFor,channelOrderUrlFor,detectedTrackingUpdate,detectT
 import { CatalogImage } from "./product-workspaces"
 import { shipmentTrackingCarriers,trackingUrlForShipment } from "./shipment-links"
 
+const quoteTermOptions = [
+  { id: "availability", group: "Commercial", label: "Availability", description: "Product availability may change until the order is accepted." },
+  { id: "taxes", group: "Commercial", label: "Sales tax", description: "Add applicable tax unless a valid exemption certificate is on file." },
+  { id: "shipping", group: "Commercial", label: "Shipping and handling", description: "Shipping and handling are additional unless this quote includes them." },
+  { id: "lead_time", group: "Commercial", label: "Estimated lead time", description: "Supplier and carrier lead times are estimates." },
+  { id: "payment_due", group: "Payment", label: "Due upon acceptance", description: "Payment is due when the quote is accepted." },
+  { id: "net_15", group: "Payment", label: "Net 15", description: "Approved account payment is due within 15 days." },
+  { id: "net_30", group: "Payment", label: "Net 30", description: "Approved account payment is due within 30 days." },
+  { id: "po_required", group: "Fulfillment", label: "Purchase order required", description: "Require the customer's PO number before fulfillment." },
+  { id: "partial_shipments", group: "Fulfillment", label: "Partial shipments", description: "Allow available items to ship separately." },
+  { id: "returns_standard", group: "Returns", label: "Standard return policy", description: "Returns require authorization and follow the current return policy." },
+  { id: "special_order_final", group: "Returns", label: "Special-order items", description: "Special-order and custom items become final once ordered." },
+  { id: "manufacturer_warranty", group: "Returns", label: "Manufacturer warranty", description: "Product warranties are provided by the manufacturer unless stated otherwise." },
+] as const
+
+const quotePdfVersions = [
+  { id: "standard", title: "Standard quote", description: "SKU, description, quantity, unit price, and line total." },
+  { id: "savings", title: "Savings proposal", description: "Adds MSRP, customer price, and savings by line and in total." },
+  { id: "summary", title: "Compact summary", description: "A shorter customer view with item, quantity, and total only." },
+] as const
+
+const quotePaymentTermIds = new Set(["payment_due", "net_15", "net_30"])
+
+function quoteDateKey(date: Date) {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, "0")
+  const day = String(date.getDate()).padStart(2, "0")
+  return `${year}-${month}-${day}`
+}
+
+function quoteDateAfter(days: number) {
+  const date = new Date()
+  date.setDate(date.getDate() + days)
+  return quoteDateKey(date)
+}
+
 export function DraftQuoteFieldDetailPage() {
   const draftId = decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
   const [draft, setDraft] = useState<Record<string, unknown> | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [editorOpen, setEditorOpen] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
+  const [exportVariant, setExportVariant] = useState<"standard" | "savings" | "summary">("standard")
+  const [expirationCalendarOpen, setExpirationCalendarOpen] = useState(false)
   const [catalogQuery, setCatalogQuery] = useState("")
   const [catalogResults, setCatalogResults] = useState<ProductItem[]>([])
   const [catalogSearching, setCatalogSearching] = useState(false)
@@ -101,23 +143,214 @@ export function DraftQuoteFieldDetailPage() {
   const [similarLineIndex, setSimilarLineIndex] = useState(-1)
   const [similarResults, setSimilarResults] = useState<Array<Record<string, unknown>>>([])
   const autoEditOpenedRef = useRef(false)
-  const [form, setForm] = useState({ buyer: "", buyerEmail: "", phone: "", source: "Manual", status: "draft", note: "", customerNote: "", line1: "", line2: "", city: "", state: "", postalCode: "", country: "US", items: [] as Array<{ sku: string; title: string; qty: string; price: string }> })
-  const load = async () => { setLoading(true); try { const result = await api<{ draft?: Record<string, unknown> }>(`/api/order-drafts/${encodeURIComponent(draftId)}`); setDraft(result.draft || null) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to load quote.") } finally { setLoading(false) } }
+  const [form, setForm] = useState({
+    buyer: "", buyerEmail: "", phone: "", source: "Manual", status: "draft", note: "", customerNote: "",
+    expiresAt: quoteDateAfter(30), selectedTermIds: [] as string[], customTerms: "",
+    line1: "", line2: "", city: "", state: "", postalCode: "", country: "US",
+    items: [] as Array<{ sku: string; title: string; qty: string; msrp: string; price: string }>,
+  })
+
+  const load = async () => {
+    setLoading(true)
+    try {
+      const result = await api<{ draft?: Record<string, unknown> }>(`/api/order-drafts/${encodeURIComponent(draftId)}`)
+      setDraft(result.draft || null)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load quote.")
+    } finally {
+      setLoading(false)
+    }
+  }
+
   useEffect(() => { void load() }, [draftId])
-  useEffect(() => { const query = catalogQuery.trim(); if (!editorOpen || query.length < 2) { setCatalogResults([]); return } let cancelled = false; const timer = window.setTimeout(() => { setCatalogSearching(true); api<{ inventory?: ProductItem[] }>(`/api/inventory?q=${encodeURIComponent(query)}&limit=8&fastPage=1`).then((result) => { if (!cancelled) setCatalogResults(result.inventory || []) }).catch(() => { if (!cancelled) setCatalogResults([]) }).finally(() => { if (!cancelled) setCatalogSearching(false) }) }, 180); return () => { cancelled = true; window.clearTimeout(timer) } }, [catalogQuery, editorOpen])
-  const openEditor = () => { if (!draft) return; const address = (draft.shippingAddress || {}) as Record<string, unknown>; const items = Array.isArray(draft.items) ? draft.items as Array<Record<string, unknown>> : []; setForm({ buyer: String(draft.buyer || ""), buyerEmail: String(draft.buyerEmail || ""), phone: String(draft.phone || ""), source: String(draft.source || "Manual"), status: String(draft.status || "draft"), note: String(draft.note || ""), customerNote: String(draft.customerNote || ""), line1: String(address.line1 || address.address1 || ""), line2: String(address.line2 || address.address2 || ""), city: String(address.city || ""), state: String(address.state || address.province || ""), postalCode: String(address.postalCode || address.zip || ""), country: String(address.country || "US"), items: items.map((item) => ({ sku: String(item.sku || ""), title: String(item.title || ""), qty: String(item.qty || 1), price: String(item.price || 0) })) }); setCatalogQuery(""); setCatalogResults([]); setEditorOpen(true) }
-  useEffect(() => { if (loading || !draft || autoEditOpenedRef.current) return; if (new URLSearchParams(window.location.search).get("edit") !== "1") return; autoEditOpenedRef.current = true; openEditor(); window.history.replaceState({}, "", `/drafts/${encodeURIComponent(draftId)}`) }, [loading, draft, draftId])
-  const updateLine = (index: number, patch: Partial<{ sku: string; title: string; qty: string; price: string }>) => setForm((current) => ({ ...current, items: current.items.map((line, lineIndex) => lineIndex === index ? { ...line, ...patch } : line) }))
-  const addCatalogItem = (item: ProductItem) => { const sku = String(item.sku || "").trim(); if (!sku) return; setForm((current) => { const existing = current.items.findIndex((line) => line.sku.toLowerCase() === sku.toLowerCase()); if (existing >= 0) return { ...current, items: current.items.map((line, index) => index === existing ? { ...line, qty: String(Math.max(1, Number(line.qty || 0)) + 1) } : line) }; return { ...current, items: [...current.items, { sku, title: String(item.title || item.marketplaceTitle || sku), qty: "1", price: String(item.websitePrice ?? item.price ?? 0) }] } }); setCatalogQuery(""); setCatalogResults([]); toast.success(`${sku} added to the quote.`) }
-  const findSimilar = async (line: Record<string, unknown>, index: number) => { setSimilarOpen(true); setSimilarLineIndex(index); setSimilarResults([]); setSimilarLoading(true); try { const result = await api<{ alternatives?: Array<Record<string, unknown>>; message?: string }>(`/api/order-drafts/${encodeURIComponent(draftId)}/similar-skus?lineIndex=${index}&sku=${encodeURIComponent(String(line.sku || ""))}&title=${encodeURIComponent(String(line.title || ""))}`); setSimilarResults(result.alternatives || []); if (!result.alternatives?.length) toast.message(result.message || "No similar SKUs found.") } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to find similar SKUs.") } finally { setSimilarLoading(false) } }
-  const applySimilar = (item: Record<string, unknown>) => { const lines = Array.isArray(draft?.items) ? draft.items as Array<Record<string, unknown>> : []; if (!editorOpen) openEditor(); window.setTimeout(() => setForm((current) => ({ ...current, items: (current.items.length ? current.items : lines.map((line) => ({ sku: String(line.sku || ""), title: String(line.title || ""), qty: String(line.qty || 1), price: String(line.price || 0) }))).map((line, index) => index === similarLineIndex ? { ...line, sku: String(item.sku || ""), title: String(item.title || item.sku || ""), price: String(item.price || line.price || 0) } : line) })), 0); setSimilarOpen(false); toast.success(`${String(item.sku || "SKU")} applied to the quote draft. Save the quote to keep it.`) }
-  const save = async () => { const items = form.items.map((item) => ({ sku: item.sku.trim(), title: item.title.trim() || item.sku.trim(), qty: Number(item.qty || 0), price: Number(item.price || 0) })).filter((item) => item.sku && item.qty > 0); setBusy(true); try { await api(`/api/order-drafts/${encodeURIComponent(draftId)}`, { method: "PATCH", body: JSON.stringify({ buyer: form.buyer.trim(), buyerEmail: form.buyerEmail.trim(), phone: form.phone.trim(), source: form.source, status: form.status, note: form.note.trim(), customerNote: form.customerNote.trim(), shippingAddress: { name: form.buyer.trim(), line1: form.line1.trim(), line2: form.line2.trim(), city: form.city.trim(), state: form.state.trim(), postalCode: form.postalCode.trim(), country: form.country.trim() }, items }) }); setEditorOpen(false); await load(); toast.success("Quote updated.") } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update quote.") } finally { setBusy(false) } }
-  const updateStatus = async (status: string) => { setBusy(true); try { await api(`/api/order-drafts/${encodeURIComponent(draftId)}`, { method: "PATCH", body: JSON.stringify({ status }) }); await load(); toast.success(`Quote marked ${status.replace(/_/g, " ")}.`) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update quote status.") } finally { setBusy(false) } }
-  const duplicate = async () => { setBusy(true); try { const result = await api<{ draft?: Record<string, unknown> }>(`/api/order-drafts/${encodeURIComponent(draftId)}/duplicate`, { method: "POST" }); toast.success("Quote duplicated."); const nextId = String(result.draft?.id || ""); if (nextId) window.location.href = `/drafts/${encodeURIComponent(nextId)}` } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to duplicate quote.") } finally { setBusy(false) } }
-  const convert = async () => { setBusy(true); try { const result = await api<{ order?: Record<string, unknown> }>(`/api/order-drafts/${encodeURIComponent(draftId)}/convert`, { method: "POST", body: JSON.stringify({ user: "Luis" }) }); toast.success("Quote converted to an order."); if (result.order) window.location.href = orderHref(result.order) } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to convert quote.") } finally { setBusy(false) } }
+  useEffect(() => {
+    const query = catalogQuery.trim()
+    if (!editorOpen || query.length < 2) { setCatalogResults([]); return }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      setCatalogSearching(true)
+      api<{ inventory?: ProductItem[] }>(`/api/inventory?q=${encodeURIComponent(query)}&limit=8&fastPage=1`)
+        .then((result) => { if (!cancelled) setCatalogResults(result.inventory || []) })
+        .catch(() => { if (!cancelled) setCatalogResults([]) })
+        .finally(() => { if (!cancelled) setCatalogSearching(false) })
+    }, 180)
+    return () => { cancelled = true; window.clearTimeout(timer) }
+  }, [catalogQuery, editorOpen])
+
+  const openEditor = () => {
+    if (!draft) return
+    const address = (draft.shippingAddress || {}) as Record<string, unknown>
+    const items = Array.isArray(draft.items) ? draft.items as Array<Record<string, unknown>> : []
+    setForm({
+      buyer: String(draft.buyer || ""), buyerEmail: String(draft.buyerEmail || ""), phone: String(draft.phone || ""),
+      source: String(draft.source || "Manual"), status: String(draft.status || "draft"), note: String(draft.note || ""),
+      customerNote: String(draft.customerNote || ""), expiresAt: String(draft.expiresAt || quoteDateAfter(30)),
+      selectedTermIds: Array.isArray(draft.selectedTermIds) ? draft.selectedTermIds.map(String) : [], customTerms: String(draft.customTerms || ""),
+      line1: String(address.line1 || address.address1 || ""), line2: String(address.line2 || address.address2 || ""), city: String(address.city || ""),
+      state: String(address.state || address.province || ""), postalCode: String(address.postalCode || address.zip || ""), country: String(address.country || "US"),
+      items: items.map((item) => ({ sku: String(item.sku || ""), title: String(item.title || ""), qty: String(item.qty || 1), msrp: String(item.msrp || 0), price: String(item.price || 0) })),
+    })
+    setCatalogQuery("")
+    setCatalogResults([])
+    setEditorOpen(true)
+  }
+
+  useEffect(() => {
+    if (loading || !draft || autoEditOpenedRef.current) return
+    if (new URLSearchParams(window.location.search).get("edit") !== "1") return
+    autoEditOpenedRef.current = true
+    openEditor()
+    window.history.replaceState({}, "", `/drafts/${encodeURIComponent(draftId)}`)
+  }, [loading, draft, draftId])
+
+  const updateLine = (index: number, patch: Partial<{ sku: string; title: string; qty: string; msrp: string; price: string }>) => setForm((current) => ({ ...current, items: current.items.map((line, lineIndex) => lineIndex === index ? { ...line, ...patch } : line) }))
+  const addCatalogItem = (item: ProductItem) => {
+    const sku = String(item.sku || "").trim()
+    if (!sku) return
+    setForm((current) => {
+      const existing = current.items.findIndex((line) => line.sku.toLowerCase() === sku.toLowerCase())
+      if (existing >= 0) return { ...current, items: current.items.map((line, index) => index === existing ? { ...line, qty: String(Math.max(1, Number(line.qty || 0)) + 1) } : line) }
+      return { ...current, items: [...current.items, { sku, title: String(item.title || item.marketplaceTitle || sku), qty: "1", msrp: String(item.listPrice ?? item.msrp ?? 0), price: String(item.websitePrice ?? item.price ?? 0) }] }
+    })
+    setCatalogQuery("")
+    setCatalogResults([])
+    toast.success(`${sku} added to the quote.`)
+  }
+  const findSimilar = async (line: Record<string, unknown>, index: number) => {
+    setSimilarOpen(true); setSimilarLineIndex(index); setSimilarResults([]); setSimilarLoading(true)
+    try {
+      const result = await api<{ alternatives?: Array<Record<string, unknown>>; message?: string }>(`/api/order-drafts/${encodeURIComponent(draftId)}/similar-skus?lineIndex=${index}&sku=${encodeURIComponent(String(line.sku || ""))}&title=${encodeURIComponent(String(line.title || ""))}`)
+      setSimilarResults(result.alternatives || [])
+      if (!result.alternatives?.length) toast.message(result.message || "No similar SKUs found.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to find similar SKUs.")
+    } finally { setSimilarLoading(false) }
+  }
+  const applySimilar = (item: Record<string, unknown>) => {
+    const lines = Array.isArray(draft?.items) ? draft.items as Array<Record<string, unknown>> : []
+    if (!editorOpen) openEditor()
+    window.setTimeout(() => setForm((current) => ({
+      ...current,
+      items: (current.items.length ? current.items : lines.map((line) => ({ sku: String(line.sku || ""), title: String(line.title || ""), qty: String(line.qty || 1), msrp: String(line.msrp || 0), price: String(line.price || 0) }))).map((line, index) => index === similarLineIndex ? { ...line, sku: String(item.sku || ""), title: String(item.title || item.sku || ""), msrp: String(item.listPrice || item.msrp || line.msrp || 0), price: String(item.price || line.price || 0) } : line),
+    })), 0)
+    setSimilarOpen(false)
+    toast.success(`${String(item.sku || "SKU")} applied to the quote draft. Save the quote to keep it.`)
+  }
+  const toggleTerm = (termId: string, checked: boolean) => setForm((current) => {
+    let selected = current.selectedTermIds.filter((id) => id !== termId)
+    if (checked && quotePaymentTermIds.has(termId)) selected = selected.filter((id) => !quotePaymentTermIds.has(id))
+    if (checked) selected.push(termId)
+    return { ...current, selectedTermIds: selected }
+  })
+  const save = async () => {
+    const items = form.items.map((item) => ({ sku: item.sku.trim(), title: item.title.trim() || item.sku.trim(), qty: Number(item.qty || 0), msrp: Number(item.msrp || 0), price: Number(item.price || 0) })).filter((item) => item.sku && item.qty > 0)
+    setBusy(true)
+    try {
+      await api(`/api/order-drafts/${encodeURIComponent(draftId)}`, { method: "PATCH", body: JSON.stringify({
+        buyer: form.buyer.trim(), buyerEmail: form.buyerEmail.trim(), phone: form.phone.trim(), source: form.source, status: form.status,
+        note: form.note.trim(), customerNote: form.customerNote.trim(), expiresAt: form.expiresAt, selectedTermIds: form.selectedTermIds, customTerms: form.customTerms.trim(),
+        shippingAddress: { name: form.buyer.trim(), line1: form.line1.trim(), line2: form.line2.trim(), city: form.city.trim(), state: form.state.trim(), postalCode: form.postalCode.trim(), country: form.country.trim() }, items,
+      }) })
+      setEditorOpen(false)
+      await load()
+      toast.success("Quote updated.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to update quote.")
+    } finally { setBusy(false) }
+  }
+  const updateStatus = async (status: string) => {
+    setBusy(true)
+    try { await api(`/api/order-drafts/${encodeURIComponent(draftId)}`, { method: "PATCH", body: JSON.stringify({ status }) }); await load(); toast.success(`Quote marked ${status.replace(/_/g, " ")}.`) }
+    catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update quote status.") }
+    finally { setBusy(false) }
+  }
+  const duplicate = async () => {
+    setBusy(true)
+    try { const result = await api<{ draft?: Record<string, unknown> }>(`/api/order-drafts/${encodeURIComponent(draftId)}/duplicate`, { method: "POST" }); toast.success("Quote duplicated with a new 30-day validity period."); const nextId = String(result.draft?.id || ""); if (nextId) window.location.href = `/drafts/${encodeURIComponent(nextId)}` }
+    catch (error) { toast.error(error instanceof Error ? error.message : "Unable to duplicate quote.") }
+    finally { setBusy(false) }
+  }
+  const convert = async () => {
+    setBusy(true)
+    try { const result = await api<{ order?: Record<string, unknown> }>(`/api/order-drafts/${encodeURIComponent(draftId)}/convert`, { method: "POST", body: JSON.stringify({ user: "Luis" }) }); toast.success("Quote converted to an order."); if (result.order) window.location.href = orderHref(result.order) }
+    catch (error) { toast.error(error instanceof Error ? error.message : "Unable to convert quote.") }
+    finally { setBusy(false) }
+  }
+
   const lines = Array.isArray(draft?.items) ? draft.items as Array<Record<string, unknown>> : []
   const total = lines.reduce((sum, line) => sum + Number(line.price || 0) * Number(line.qty || 0), 0)
-  return <div className="grid gap-5"><PageHeader eyebrow="Operations / Draft quote" title={String(draft?.draftNumber || draftId || "Quote")} description="A customer proposal that remains editable until accepted and converted into an order." action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/drafts">Back to drafts</a></Button><Button size="sm" disabled={busy || !draft} onClick={openEditor}><Pencil className="size-4" /> Edit quote</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" disabled={busy || !draft}><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Quote status</DropdownMenuLabel>{["draft", "reviewing", "quoted", "sent", "accepted", "lost"].map((status) => <DropdownMenuItem key={status} onSelect={() => void updateStatus(status)}>{status.replace(/_/g, " ")}</DropdownMenuItem>)}<DropdownMenuSeparator /><DropdownMenuItem onSelect={() => void duplicate()}><Copy className="size-4" /> Duplicate quote</DropdownMenuItem><DropdownMenuItem onSelect={() => void convert()}><ArrowRight className="size-4" /> Convert to order</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem asChild><a href={`/api/order-drafts/${encodeURIComponent(draftId)}/export/pdf`} target="_blank" rel="noreferrer"><FileText className="size-4" /> Download PDF</a></DropdownMenuItem><DropdownMenuItem asChild><a href={`/api/order-drafts/${encodeURIComponent(draftId)}/export/csv`} target="_blank" rel="noreferrer"><FileDown className="size-4" /> Download CSV</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>} />{loading ? <div className="grid gap-3"><Skeleton className="h-36" /><Skeleton className="h-72" /></div> : !draft ? <Card><CardContent className="p-8 text-center text-muted-foreground">This draft quote was not found.</CardContent></Card> : <><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><Detail label="Customer" value={String(draft.buyer || "Not assigned")} /><Detail label="Status" value={String(draft.status || "draft")} /><Detail label="Quote total" value={moneyLabel(total)} /><Detail label="Source" value={String(draft.source || "Manual")} /></div><Card><CardHeader><CardTitle className="text-base">Quote items</CardTitle><CardDescription>Catalog lines, quantities, sell prices, and quote totals.</CardDescription></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Item</TableHead><TableHead>Qty</TableHead><TableHead>Unit price</TableHead><TableHead>Total</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => <TableRow key={`${String(line.sku)}-${index}`}><TableCell className="font-mono text-xs">{String(line.sku || "-")}</TableCell><TableCell>{String(line.title || line.sku || "-")}</TableCell><TableCell>{numberLabel(Number(line.qty || 0))}</TableCell><TableCell>{moneyLabel(Number(line.price || 0))}</TableCell><TableCell className="font-medium">{moneyLabel(Number(line.price || 0) * Number(line.qty || 0))}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" onClick={() => void findSimilar(line, index)}><Search className="size-4" /> Find similar</Button></TableCell></TableRow>)}</TableBody></Table></CardContent></Card><div className="grid gap-4 lg:grid-cols-2"><Card><CardHeader className="pb-3"><CardTitle className="text-sm">Internal notes</CardTitle><CardDescription>Visible only to DataPlus staff.</CardDescription></CardHeader><CardContent className="whitespace-pre-wrap text-sm text-muted-foreground">{String(draft.note || "No internal notes.")}</CardContent></Card><Card><CardHeader className="pb-3"><CardTitle className="text-sm">Customer message</CardTitle><CardDescription>Included on the customer quote and exports.</CardDescription></CardHeader><CardContent className="whitespace-pre-wrap text-sm text-muted-foreground">{String(draft.customerNote || "No customer message.")}</CardContent></Card></div></>}<Dialog open={similarOpen} onOpenChange={setSimilarOpen}><DialogContent className="max-h-[88vh] max-w-4xl overflow-y-auto"><DialogHeader><DialogTitle>Similar SKUs</DialogTitle><DialogDescription>Suggestions prioritize active catalog items, availability, category match, and lower sell price when possible.</DialogDescription></DialogHeader>{similarLoading ? <div className="grid min-h-32 place-items-center"><Loader2 className="size-6 animate-spin text-primary" /></div> : <div className="grid gap-2">{similarResults.map((item) => <div key={String(item.sku)} className="grid gap-3 rounded-md border p-3 sm:grid-cols-[minmax(120px,0.35fr)_minmax(0,1fr)_120px_120px_auto]"><div className="font-mono text-xs font-semibold">{String(item.sku || "")}</div><div className="min-w-0"><p className="truncate font-medium">{String(item.title || item.sku || "")}</p><p className="truncate text-xs text-muted-foreground">{String(item.reason || "Catalog alternative")}</p></div><div><p className="text-xs text-muted-foreground">Available</p><p className="font-medium">{numberLabel(Number(item.available || 0))}</p></div><div><p className="text-xs text-muted-foreground">Price</p><p className="font-medium">{moneyLabel(Number(item.price || 0))}</p></div><Button size="sm" onClick={() => applySimilar(item)}>Apply</Button></div>)}{!similarResults.length && <div className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">No similar SKUs found for this line.</div>}</div>}<DialogFooter><Button variant="outline" onClick={() => setSimilarOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog><Dialog open={editorOpen} onOpenChange={setEditorOpen}><DialogContent className="max-h-[92vh] w-[calc(100vw-2rem)] max-w-6xl overflow-y-auto p-0"><DialogHeader className="border-b px-8 py-6"><DialogTitle>Edit draft quote</DialogTitle><DialogDescription>Search the catalog, add quote lines, then complete the customer and delivery information.</DialogDescription></DialogHeader><div className="p-8"><FieldGroup className="gap-8"><FieldSet><FieldLegend>Quote items</FieldLegend><FieldDescription>Search your approved catalog to add a verified SKU with its current sell price.</FieldDescription><FieldGroup className="mt-4"><FormField><FieldLabel htmlFor="quote-catalog-search">Add catalog product</FieldLabel><div className="relative"><Search className="absolute left-3 top-3 size-4 text-muted-foreground" /><Input id="quote-catalog-search" autoFocus className="pl-9" value={catalogQuery} onChange={(event) => setCatalogQuery(event.target.value)} placeholder="Search SKU, UPC, title, or brand" /></div><FieldDescription>Choose a result to add it. Selecting an existing SKU increases its quantity.</FieldDescription></FormField>{catalogSearching && <p className="text-xs text-muted-foreground">Searching catalog...</p>}{catalogQuery.trim().length >= 2 && !catalogSearching && <div className="overflow-hidden rounded-md border">{catalogResults.map((item) => <button key={item.id || item.sku} type="button" onClick={() => addCatalogItem(item)} className="grid w-full grid-cols-[180px_minmax(0,1fr)_120px] gap-4 border-b px-4 py-3 text-left text-sm last:border-b-0 hover:bg-muted"><span className="font-mono text-xs font-medium">{item.sku}</span><span className="truncate">{item.title || item.marketplaceTitle || item.sku}</span><span className="text-right font-medium">{moneyLabel(Number(item.websitePrice ?? item.price ?? 0))}</span></button>)}{!catalogResults.length && <p className="p-4 text-sm text-muted-foreground">No catalog match. Add a manual line below if this product is not in the catalog.</p>}</div>}<div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Product</TableHead><TableHead className="w-28">Quantity</TableHead><TableHead className="w-36">Unit price</TableHead><TableHead className="w-14" /></TableRow></TableHeader><TableBody>{form.items.map((line, index) => <TableRow key={`${line.sku}-${index}`}><TableCell><Input value={line.sku} onChange={(event) => updateLine(index, { sku: event.target.value })} placeholder="SKU" /></TableCell><TableCell><Input value={line.title} onChange={(event) => updateLine(index, { title: event.target.value })} placeholder="Product title" /></TableCell><TableCell><Input type="number" min="1" value={line.qty} onChange={(event) => updateLine(index, { qty: event.target.value })} /></TableCell><TableCell><Input type="number" min="0" step="0.01" value={line.price} onChange={(event) => updateLine(index, { price: event.target.value })} /></TableCell><TableCell><Button size="icon" variant="ghost" title="Remove item" onClick={() => setForm((current) => ({ ...current, items: current.items.filter((_, lineIndex) => lineIndex !== index) }))}><Trash2 className="size-4" /></Button></TableCell></TableRow>)}{!form.items.length && <TableRow><TableCell colSpan={5} className="h-20 text-center text-muted-foreground">No lines yet.</TableCell></TableRow>}</TableBody></Table></div><Button type="button" size="sm" variant="outline" onClick={() => setForm((current) => ({ ...current, items: [...current.items, { sku: "", title: "", qty: "1", price: "" }] }))}>Add manual item</Button></FieldGroup></FieldSet><FieldSeparator /><div className="grid gap-8 lg:grid-cols-2"><FieldSet><FieldLegend>Customer</FieldLegend><FieldDescription>Contact information for the quote recipient.</FieldDescription><FieldGroup className="mt-4"><FormField><FieldLabel htmlFor="quote-buyer">Customer name</FieldLabel><Input id="quote-buyer" value={form.buyer} onChange={(event) => setForm({ ...form, buyer: event.target.value })} /></FormField><FormField><FieldLabel htmlFor="quote-email">Customer email</FieldLabel><Input id="quote-email" type="email" value={form.buyerEmail} onChange={(event) => setForm({ ...form, buyerEmail: event.target.value })} /></FormField><FormField><FieldLabel htmlFor="quote-phone">Phone</FieldLabel><Input id="quote-phone" value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} /></FormField><FormField><FieldLabel htmlFor="quote-source">Quote source</FieldLabel><Input id="quote-source" value={form.source} onChange={(event) => setForm({ ...form, source: event.target.value })} /></FormField></FieldGroup></FieldSet><FieldSet><FieldLegend>Shipping address</FieldLegend><FieldDescription>Where the completed order will be delivered.</FieldDescription><FieldGroup className="mt-4"><FormField><FieldLabel htmlFor="quote-line1">Address line 1</FieldLabel><Input id="quote-line1" value={form.line1} onChange={(event) => setForm({ ...form, line1: event.target.value })} /></FormField><FormField><FieldLabel htmlFor="quote-line2">Address line 2</FieldLabel><Input id="quote-line2" value={form.line2} onChange={(event) => setForm({ ...form, line2: event.target.value })} /></FormField><div className="grid gap-4 sm:grid-cols-2"><FormField><FieldLabel htmlFor="quote-city">City</FieldLabel><Input id="quote-city" value={form.city} onChange={(event) => setForm({ ...form, city: event.target.value })} /></FormField><FormField><FieldLabel htmlFor="quote-state">State / province</FieldLabel><Input id="quote-state" value={form.state} onChange={(event) => setForm({ ...form, state: event.target.value })} /></FormField><FormField><FieldLabel htmlFor="quote-postal">Postal code</FieldLabel><Input id="quote-postal" value={form.postalCode} onChange={(event) => setForm({ ...form, postalCode: event.target.value })} /></FormField><FormField><FieldLabel htmlFor="quote-country">Country</FieldLabel><Input id="quote-country" value={form.country} onChange={(event) => setForm({ ...form, country: event.target.value })} /></FormField></div></FieldGroup></FieldSet></div><FieldSeparator /><div className="grid gap-8 lg:grid-cols-2"><FieldSet><FieldLegend>Internal notes</FieldLegend><FieldDescription>Visible only to DataPlus staff. These notes never appear on customer documents.</FieldDescription><FormField className="mt-4"><FieldLabel htmlFor="quote-notes">Staff notes</FieldLabel><Textarea id="quote-notes" className="min-h-28" value={form.note} onChange={(event) => setForm({ ...form, note: event.target.value })} placeholder="Follow-up details, pricing context, or internal instructions" /></FormField></FieldSet><FieldSet><FieldLegend>Customer message</FieldLegend><FieldDescription>Shown to the customer on the quote PDF and CSV export.</FieldDescription><FormField className="mt-4"><FieldLabel htmlFor="quote-customer-note">Message</FieldLabel><Textarea id="quote-customer-note" className="min-h-28" value={form.customerNote} onChange={(event) => setForm({ ...form, customerNote: event.target.value })} placeholder="Quote terms, availability, delivery expectations, or a thank-you message" /></FormField></FieldSet></div></FieldGroup></div><DialogFooter className="border-t bg-muted/20 px-8 py-5"><Button variant="outline" onClick={() => setEditorOpen(false)}>Cancel</Button><Button disabled={busy} onClick={() => void save()}><Save className="size-4" /> Save quote</Button></DialogFooter></DialogContent></Dialog></div>
+  const savings = lines.reduce((sum, line) => sum + Math.max(0, Number(line.msrp || 0) - Number(line.price || 0)) * Number(line.qty || 0), 0)
+  const missingMsrpCount = lines.filter((line) => !(Number(line.msrp || 0) > 0)).length
+  const hasCompleteMsrp = lines.length > 0 && missingMsrpCount === 0
+  const expiresAt = String(draft?.expiresAt || "")
+  const expired = Boolean(expiresAt && expiresAt < quoteDateKey(new Date()))
+  const selectedTermIds = Array.isArray(draft?.selectedTermIds) ? draft.selectedTermIds.map(String) : []
+  const selectedTerms = quoteTermOptions.filter((term) => selectedTermIds.includes(term.id))
+  const expirationDate = form.expiresAt ? new Date(`${form.expiresAt}T12:00:00`) : undefined
+
+  return <div className="grid gap-5">
+    <PageHeader eyebrow="Operations / Draft quote" title={String(draft?.draftNumber || draftId || "Quote")} description="A customer proposal that remains editable until accepted and converted into an order." action={<div className="flex flex-wrap gap-2">
+      <Button size="sm" variant="outline" asChild><a href="/drafts">Back to drafts</a></Button>
+      <Button size="sm" disabled={busy || !draft} onClick={openEditor}><Pencil className="size-4" /> Edit quote</Button>
+      <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" disabled={busy || !draft}><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end">
+        <DropdownMenuLabel>Quote status</DropdownMenuLabel>
+        {["draft", "reviewing", "quoted", "sent", "accepted", "lost"].map((status) => <DropdownMenuItem key={status} onSelect={() => void updateStatus(status)}>{status.replace(/_/g, " ")}</DropdownMenuItem>)}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => void duplicate()}><Copy className="size-4" /> Duplicate quote</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => void convert()}><ArrowRight className="size-4" /> Convert to order</DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => { setExportVariant("standard"); setExportOpen(true) }}><Printer className="size-4" /> Print / save PDF</DropdownMenuItem>
+        <DropdownMenuItem asChild><a href={`/api/order-drafts/${encodeURIComponent(draftId)}/export/csv`} target="_blank" rel="noreferrer"><FileDown className="size-4" /> Download CSV</a></DropdownMenuItem>
+      </DropdownMenuContent></DropdownMenu>
+    </div>} />
+
+    {loading ? <div className="grid gap-3"><Skeleton className="h-36" /><Skeleton className="h-72" /></div> : !draft ? <Card><CardContent className="p-8 text-center text-muted-foreground">This draft quote was not found.</CardContent></Card> : <>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <Detail label="Customer" value={String(draft.buyer || "Not assigned")} />
+        <Detail label="Status" value={String(draft.status || "draft")} />
+        <Detail label="Quote total" value={moneyLabel(total)} />
+        <Detail label="Valid until" value={expiresAt ? `${dateLabel(`${expiresAt}T12:00:00`)}${expired ? " (expired)" : ""}` : "Not set"} />
+        <Detail label="Source" value={String(draft.source || "Manual")} />
+      </div>
+      {expired && !["accepted", "lost"].includes(String(draft.status || "")) ? <Alert variant="destructive"><Clock3 className="size-4" /><AlertTitle>Quote expired</AlertTitle><AlertDescription>Extend the validity date before sending or accepting this quote.</AlertDescription></Alert> : null}
+      <Card><CardHeader><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">Quote items</CardTitle><CardDescription>Catalog lines, MSRP, customer prices, and savings.</CardDescription></div>{hasCompleteMsrp ? <Badge variant="outline">{moneyLabel(savings)} customer savings</Badge> : <Badge variant="outline">{lines.length ? `MSRP missing on ${numberLabel(missingMsrpCount)} line${missingMsrpCount === 1 ? "" : "s"}` : "No quote lines"}</Badge>}</div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Item</TableHead><TableHead>Qty</TableHead><TableHead>MSRP</TableHead><TableHead>Unit price</TableHead><TableHead>Savings</TableHead><TableHead>Total</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
+        {lines.map((line, index) => { const lineSavings = Math.max(0, Number(line.msrp || 0) - Number(line.price || 0)) * Number(line.qty || 0); return <TableRow key={`${String(line.sku)}-${index}`}><TableCell className="font-mono text-xs">{String(line.sku || "-")}</TableCell><TableCell>{String(line.title || line.sku || "-")}</TableCell><TableCell>{numberLabel(Number(line.qty || 0))}</TableCell><TableCell>{Number(line.msrp || 0) > 0 ? moneyLabel(Number(line.msrp)) : "-"}</TableCell><TableCell>{moneyLabel(Number(line.price || 0))}</TableCell><TableCell className={lineSavings > 0 ? "font-medium text-emerald-600" : "text-muted-foreground"}>{lineSavings > 0 ? moneyLabel(lineSavings) : "-"}</TableCell><TableCell className="font-medium">{moneyLabel(Number(line.price || 0) * Number(line.qty || 0))}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" onClick={() => void findSimilar(line, index)}><Search className="size-4" /> Find similar</Button></TableCell></TableRow> })}
+      </TableBody></Table></div></CardContent></Card>
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Card><CardHeader className="pb-3"><CardTitle className="text-sm">Internal notes</CardTitle><CardDescription>Visible only to DataPlus staff.</CardDescription></CardHeader><CardContent className="whitespace-pre-wrap text-sm text-muted-foreground">{String(draft.note || "No internal notes.")}</CardContent></Card>
+        <Card><CardHeader className="pb-3"><CardTitle className="text-sm">Customer message</CardTitle><CardDescription>Included on every customer quote version.</CardDescription></CardHeader><CardContent className="whitespace-pre-wrap text-sm text-muted-foreground">{String(draft.customerNote || "No customer message.")}</CardContent></Card>
+        <Card><CardHeader className="pb-3"><CardTitle className="text-sm">Quote terms</CardTitle><CardDescription>Only checked terms appear on customer PDFs.</CardDescription></CardHeader><CardContent className="grid gap-2 text-sm text-muted-foreground">{selectedTerms.map((term) => <div key={term.id} className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-600" /><span>{term.label}</span></div>)}{draft.customTerms ? <div className="whitespace-pre-wrap border-t pt-2">{String(draft.customTerms)}</div> : null}{!selectedTerms.length && !draft.customTerms ? "No terms selected." : null}</CardContent></Card>
+      </div>
+    </>}
+
+    <Dialog open={exportOpen} onOpenChange={setExportOpen}><DialogContent className="w-[calc(100vw-2rem)] max-w-3xl"><DialogHeader><DialogTitle>Print or save quote PDF</DialogTitle><DialogDescription>Choose the customer-facing version for this conversation. Internal notes are excluded from every version.</DialogDescription></DialogHeader><div className="grid gap-2">
+      {quotePdfVersions.map((version) => { const disabled = version.id === "savings" && !hasCompleteMsrp; const selected = exportVariant === version.id; return <button key={version.id} type="button" disabled={disabled} onClick={() => setExportVariant(version.id)} className={cn("flex items-start gap-3 rounded-md border p-4 text-left transition-colors", selected && "border-primary bg-primary/5", disabled && "cursor-not-allowed opacity-50")}><span className={cn("mt-0.5 grid size-5 shrink-0 place-items-center rounded-full border", selected && "border-primary bg-primary text-primary-foreground")}>{selected ? <CheckCircle2 className="size-3.5" /> : null}</span><span className="min-w-0"><span className="block font-medium">{version.title}</span><span className="mt-1 block text-sm text-muted-foreground">{version.description}</span>{disabled ? <span className="mt-1 block text-xs font-medium text-amber-600">Add MSRP to every quote line to use this version.</span> : null}</span></button> })}
+    </div><DialogFooter><Button variant="outline" onClick={() => setExportOpen(false)}>Cancel</Button><Button onClick={() => window.open(`/api/order-drafts/${encodeURIComponent(draftId)}/export/pdf?variant=${exportVariant}`, "_blank", "noopener,noreferrer")}><Printer className="size-4" /> Open PDF</Button></DialogFooter></DialogContent></Dialog>
+
+    <Dialog open={similarOpen} onOpenChange={setSimilarOpen}><DialogContent className="max-h-[88vh] max-w-4xl overflow-y-auto"><DialogHeader><DialogTitle>Similar SKUs</DialogTitle><DialogDescription>Suggestions prioritize active catalog items, availability, category match, and lower sell price when possible.</DialogDescription></DialogHeader>{similarLoading ? <div className="grid min-h-32 place-items-center"><Loader2 className="size-6 animate-spin text-primary" /></div> : <div className="grid gap-2">{similarResults.map((item) => <div key={String(item.sku)} className="grid gap-3 rounded-md border p-3 sm:grid-cols-[minmax(120px,0.35fr)_minmax(0,1fr)_120px_120px_auto]"><div className="font-mono text-xs font-semibold">{String(item.sku || "")}</div><div className="min-w-0"><p className="truncate font-medium">{String(item.title || item.sku || "")}</p><p className="truncate text-xs text-muted-foreground">{String(item.reason || "Catalog alternative")}</p></div><div><p className="text-xs text-muted-foreground">Available</p><p className="font-medium">{numberLabel(Number(item.available || 0))}</p></div><div><p className="text-xs text-muted-foreground">Price</p><p className="font-medium">{moneyLabel(Number(item.price || 0))}</p></div><Button size="sm" onClick={() => applySimilar(item)}>Apply</Button></div>)}{!similarResults.length && <div className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">No similar SKUs found for this line.</div>}</div>}<DialogFooter><Button variant="outline" onClick={() => setSimilarOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
+
+    <Dialog open={editorOpen} onOpenChange={setEditorOpen}><DialogContent className="flex max-h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-6xl flex-col overflow-hidden p-0 sm:max-h-[92vh]"><DialogHeader className="border-b px-4 py-5 sm:px-8 sm:py-6"><DialogTitle>Edit draft quote</DialogTitle><DialogDescription>Build the proposal, choose its validity period, and include only the terms that apply.</DialogDescription></DialogHeader><div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-8"><FieldGroup className="gap-8">
+      <FieldSet><FieldLegend>Quote items</FieldLegend><FieldDescription>Search the approved catalog to pull the current customer price and available MSRP.</FieldDescription><FieldGroup className="mt-4"><FormField><FieldLabel htmlFor="quote-catalog-search">Add catalog product</FieldLabel><div className="relative"><Search className="absolute left-3 top-3 size-4 text-muted-foreground" /><Input id="quote-catalog-search" autoFocus className="pl-9" value={catalogQuery} onChange={(event) => setCatalogQuery(event.target.value)} placeholder="Search SKU, UPC, title, or brand" /></div><FieldDescription>Choosing an existing SKU increases its quantity.</FieldDescription></FormField>{catalogSearching && <p className="text-xs text-muted-foreground">Searching catalog...</p>}{catalogQuery.trim().length >= 2 && !catalogSearching && <div className="overflow-hidden rounded-md border">{catalogResults.map((item) => <button key={item.id || item.sku} type="button" onClick={() => addCatalogItem(item)} className="grid w-full grid-cols-[120px_minmax(0,1fr)_90px] gap-3 border-b px-3 py-3 text-left text-sm last:border-b-0 hover:bg-muted sm:grid-cols-[180px_minmax(0,1fr)_120px] sm:px-4"><span className="truncate font-mono text-xs font-medium">{item.sku}</span><span className="truncate">{item.title || item.marketplaceTitle || item.sku}</span><span className="text-right font-medium">{moneyLabel(Number(item.websitePrice ?? item.price ?? 0))}</span></button>)}{!catalogResults.length && <p className="p-4 text-sm text-muted-foreground">No catalog match. Add a manual line below.</p>}</div>}
+        <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Product</TableHead><TableHead className="w-28">Qty</TableHead><TableHead className="w-36">MSRP</TableHead><TableHead className="w-36">Quote price</TableHead><TableHead className="w-14" /></TableRow></TableHeader><TableBody>{form.items.map((line, index) => <TableRow key={`${line.sku}-${index}`}><TableCell><Input value={line.sku} onChange={(event) => updateLine(index, { sku: event.target.value })} placeholder="SKU" /></TableCell><TableCell><Input className="min-w-56" value={line.title} onChange={(event) => updateLine(index, { title: event.target.value })} placeholder="Product title" /></TableCell><TableCell><Input type="number" min="1" value={line.qty} onChange={(event) => updateLine(index, { qty: event.target.value })} /></TableCell><TableCell><Input type="number" min="0" step="0.01" value={line.msrp} onChange={(event) => updateLine(index, { msrp: event.target.value })} /></TableCell><TableCell><Input type="number" min="0" step="0.01" value={line.price} onChange={(event) => updateLine(index, { price: event.target.value })} /></TableCell><TableCell><Button type="button" size="icon" variant="ghost" title="Remove line" onClick={() => setForm((current) => ({ ...current, items: current.items.filter((_, lineIndex) => lineIndex !== index) }))}><Trash2 className="size-4" /></Button></TableCell></TableRow>)}</TableBody></Table></div>
+        <Button type="button" variant="outline" className="w-fit" onClick={() => setForm((current) => ({ ...current, items: [...current.items, { sku: "", title: "", qty: "1", msrp: "0", price: "0" }] }))}><Plus className="size-4" /> Add manual line</Button>
+      </FieldGroup></FieldSet>
+
+      <FieldSeparator />
+      <FieldSet><FieldLegend>Customer and quote status</FieldLegend><div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4"><Field label="Customer name"><Input value={form.buyer} onChange={(event) => setForm({ ...form, buyer: event.target.value })} /></Field><Field label="Customer email"><Input type="email" value={form.buyerEmail} onChange={(event) => setForm({ ...form, buyerEmail: event.target.value })} /></Field><Field label="Phone"><Input value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} /></Field><Field label="Status"><Select value={form.status} onValueChange={(status) => setForm({ ...form, status })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["draft", "reviewing", "quoted", "sent", "accepted", "lost"].map((status) => <SelectItem key={status} value={status}>{status.replace(/_/g, " ")}</SelectItem>)}</SelectContent></Select></Field><Field label="Source"><Select value={form.source} onValueChange={(source) => setForm({ ...form, source })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["Manual", "Phone", "Email", "Shopify"].map((source) => <SelectItem key={source} value={source}>{source}</SelectItem>)}</SelectContent></Select></Field></div></FieldSet>
+
+      <FieldSeparator />
+      <FieldSet><FieldLegend>Quote validity</FieldLegend><FieldDescription>Set a clear customer deadline. New and duplicated quotes default to 30 days.</FieldDescription><div className="mt-4 flex flex-wrap items-end gap-2"><Button type="button" variant={form.expiresAt === quoteDateAfter(7) ? "default" : "outline"} onClick={() => setForm({ ...form, expiresAt: quoteDateAfter(7) })}>7 days</Button><Button type="button" variant={form.expiresAt === quoteDateAfter(30) ? "default" : "outline"} onClick={() => setForm({ ...form, expiresAt: quoteDateAfter(30) })}>30 days</Button><Popover open={expirationCalendarOpen} onOpenChange={setExpirationCalendarOpen}><PopoverTrigger asChild><Button type="button" variant="outline"><CalendarDays className="size-4" /> Custom date</Button></PopoverTrigger><PopoverContent align="start" className="w-auto p-2"><Calendar mode="single" selected={expirationDate} disabled={{ before: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()) }} onSelect={(date) => { if (date) setForm((current) => ({ ...current, expiresAt: quoteDateKey(date) })); setExpirationCalendarOpen(false) }} /></PopoverContent></Popover><Field label="Valid until"><Input type="date" min={quoteDateKey(new Date())} value={form.expiresAt} onChange={(event) => setForm({ ...form, expiresAt: event.target.value })} /></Field></div></FieldSet>
+
+      <FieldSeparator />
+      <FieldSet><FieldLegend>Terms and conditions</FieldLegend><FieldDescription>Check only the approved terms that apply. Payment choices are mutually exclusive.</FieldDescription><div className="mt-4 grid gap-5 lg:grid-cols-2">{["Commercial", "Payment", "Fulfillment", "Returns"].map((group) => <section key={group} className="grid content-start gap-2"><p className="text-sm font-semibold">{group}</p>{quoteTermOptions.filter((term) => term.group === group).map((term) => { const checked = form.selectedTermIds.includes(term.id); return <label key={term.id} className={cn("flex cursor-pointer items-start gap-3 rounded-md border p-3 transition-colors", checked && "border-primary/50 bg-primary/5")}><Checkbox className="mt-0.5" checked={checked} onCheckedChange={(value) => toggleTerm(term.id, value === true)} /><span><span className="block text-sm font-medium">{term.label}</span><span className="mt-0.5 block text-xs text-muted-foreground">{term.description}</span></span></label> })}</section>)}</div><div className="mt-5"><Field label="Custom customer terms"><Textarea className="min-h-24" value={form.customTerms} onChange={(event) => setForm({ ...form, customTerms: event.target.value })} placeholder="Add only approved customer-facing terms that are specific to this quote." /></Field><p className="mt-2 text-xs text-muted-foreground">Custom terms can affect payment, cancellation, and return obligations. Use company-approved language and request review when needed.</p></div></FieldSet>
+
+      <FieldSeparator />
+      <FieldSet><FieldLegend>Notes</FieldLegend><div className="mt-4 grid gap-4 sm:grid-cols-2"><Field label="Internal notes"><Textarea className="min-h-28" value={form.note} onChange={(event) => setForm({ ...form, note: event.target.value })} placeholder="Only DataPlus staff can see these notes" /></Field><Field label="Customer message"><Textarea className="min-h-28" value={form.customerNote} onChange={(event) => setForm({ ...form, customerNote: event.target.value })} placeholder="Included on every customer quote version" /></Field></div></FieldSet>
+
+      <FieldSeparator />
+      <FieldSet><FieldLegend>Ship-to address</FieldLegend><div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3"><Field label="Address line 1"><Input value={form.line1} onChange={(event) => setForm({ ...form, line1: event.target.value })} /></Field><Field label="Address line 2"><Input value={form.line2} onChange={(event) => setForm({ ...form, line2: event.target.value })} /></Field><Field label="City"><Input value={form.city} onChange={(event) => setForm({ ...form, city: event.target.value })} /></Field><Field label="State / province"><Input value={form.state} onChange={(event) => setForm({ ...form, state: event.target.value })} /></Field><Field label="Postal code"><Input value={form.postalCode} onChange={(event) => setForm({ ...form, postalCode: event.target.value })} /></Field><Field label="Country"><Input value={form.country} onChange={(event) => setForm({ ...form, country: event.target.value })} /></Field></div></FieldSet>
+    </FieldGroup></div><DialogFooter className="border-t bg-background px-4 py-4 sm:px-8"><Button variant="outline" onClick={() => setEditorOpen(false)}>Cancel</Button><Button disabled={busy || !form.expiresAt} onClick={() => void save()}><Save className="size-4" /> Save quote</Button></DialogFooter></DialogContent></Dialog>
+  </div>
 }
 
 type PooledSupplierGroup = {
