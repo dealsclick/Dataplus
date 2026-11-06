@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { Pool } = require('pg');
-const { createCompanyStore, LEGACY_TENANT: tenantId, LEGACY_COMPANY, LEGACY_COMPANY_NUMBER, money } = require('../lib/company-workspaces');
+const { createCompanyStore, LEGACY_TENANT: tenantId, LEGACY_COMPANY, LEGACY_COMPANY_NUMBER, BUYSUPPLY_PUBLIC_PROFILE, money } = require('../lib/company-workspaces');
 const { createCompanyHandler } = require('../lib/company-http');
 const {parseFile,normalize}=require('../lib/manual-order-import');
 const { PDFDocument } = require('pdf-lib');
@@ -72,7 +72,7 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
   let state={orders:[],orderDrafts:[],returns:[],customers:[],connections:[],warehouses:[],inventory:[],purchaseOrders:[],suppliers:[],vendors:[],brands:[],sequence:{},orderViews:[]};
   let response=null,exported=null;
   const store={
-    authorize:async(_user,requested)=>{assert.deepEqual(requested,scope);return {id:'buysupply',name:'BuySupply'};},
+    authorize:async(_user,requested)=>{assert.deepEqual(requested,scope);return {id:'buysupply',name:'BuySupply',profile:BUYSUPPLY_PUBLIC_PROFILE};},
     operationalState:async()=>state,
     updateOperationalState:async(_user,_scope,_action,work)=>work(state),
     catalog:async()=>({rows:[
@@ -87,6 +87,8 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
   });
   const op=async(path,method='GET',body={})=>{response=null;const handled=await operations({method,body},{},new URL(path,'http://localhost'),{id:'owner',name:'Owner'});return {handled,response};};
   assert.equal((await op('/api/app/bootstrap')).response.data.systemSettings.organizationName,'BuySupply');
+  assert.equal((await op('/api/app/bootstrap')).response.data.systemSettings.organizationLegalName,'Buy Supply, Corp.');
+  assert.equal((await op('/api/app/bootstrap')).response.data.systemSettings.organizationAddress.postalCode,'10303');
   assert.equal((await op('/api/app/summary')).response.data.summary,null);
   assert.deepEqual((await op('/api/app/references?include=warehouses,systemSettings')).response.data.warehouses,[]);
   assert.equal((await op('/api/channels')).response.data.connections.length,0);
@@ -171,6 +173,13 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(initialDirectory.companies.length,2);
     assert.equal(initialDirectory.companies.find(company=>company.id===LEGACY_COMPANY).company_number,String(LEGACY_COMPANY_NUMBER));
     assert.equal(initialDirectory.companies.find(company=>company.id==='buysupply').company_number,'101');
+    const publicProfile=await store.companyProfile(owner,buy);
+    assert.equal(publicProfile.legalName,'Buy Supply, Corp.');
+    assert.equal(publicProfile.website,'https://www.buysupply.com');
+    assert.equal(publicProfile.email,'support@buysupply.com');
+    assert.equal(publicProfile.address.line1,'388 South Avenue');
+    assert.equal(publicProfile.address.postalCode,'10303');
+    assert.equal(publicProfile.returnAddress,undefined,'Conditional return facilities are not saved as the business address');
     assert.equal((await store.directory(staff)).companies.length,1);
     await assert.rejects(store.createCompany(staff,tenantId,{name:'Forbidden'}),/access/);
     await assert.rejects(store.createCompany(owner,tenantId,{name:'  '}),/company name/);
@@ -179,6 +188,7 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(newCompany.name,'New Company');
     assert.equal(newCompany.currency,'USD');
     assert.equal(newCompany.company_number,'102');
+    assert.deepEqual(await store.companyProfile(owner,newScope),{});
     assert.deepEqual(await store.operationalState(owner,newScope),{});
     assert.equal((await store.vendorAccounts(owner,newScope)).length,0);
     assert.equal((await store.catalog(owner,newScope)).rows[0].source_sku,'SKU1');
@@ -216,6 +226,12 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal((await pool.query('select cost from products')).rows[0].cost,'888');
     await store.saveMember(owner,tenantId,{userId:staff.id,companyIds:['buysupply']},[owner,staff]);
     await store.authorize(staff,buy);
+    assert.equal((await store.companyProfile(staff,buy)).displayName,'BuySupply');
+    await assert.rejects(store.saveCompanyProfile(staff,buy,publicProfile),/access/);
+    const savedProfile=await store.saveCompanyProfile(owner,buy,{...publicProfile,phone:'646-213-2345'});
+    assert.equal(savedProfile.phone,'646-213-2345');
+    assert.equal(savedProfile.source.contactUrl,'https://www.buysupply.com/contact');
+    assert.deepEqual(await store.companyProfile(owner,newScope),{});
     await assert.rejects(store.legacyAccess(staff,null),/access/);
     await assert.rejects(store.selectProduct(staff,buy,{productId:'p1',sku:'FORBIDDEN'}),/access/);
     await assert.rejects(store.saveMember(owner,tenantId,{userId:staff.id,companyIds:['other-tenant-company']},[staff]),/belong/);
@@ -238,6 +254,9 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal((await invoke('/api/organization/select','POST',owner,buy)).status,200);
     assert.deepEqual(selection,buy);
     assert.equal((await invoke(`/api/organization/tenants/${tenantId}/companies/buysupply/catalog`,'GET',outsider)).status,403);
+    assert.equal((await invoke(`/api/organization/tenants/${tenantId}/companies/buysupply/profile`,'GET',owner)).data.profile.legalName,'Buy Supply, Corp.');
+    assert.equal((await invoke(`/api/organization/tenants/${tenantId}/companies/buysupply/profile`,'PATCH',staff,publicProfile)).status,403);
+    assert.equal((await invoke(`/api/organization/tenants/${tenantId}/companies/buysupply/profile`,'PATCH',owner,{...publicProfile,website:'not-a-url'})).status,400);
     assert.equal((await invoke(`/api/organization/tenants/${tenantId}/companies/buysupply/costs`,'PUT',owner,{productId:'p1',vendorAccountId:'wrong',unitCost:'2',uom:'Each'})).status,400);
     assert.equal((await invoke('/api/organization/unknown','GET',owner)).status,404);
     const csv='so,order_date,sku,qty,ext_price,ext_cost,status\n0001,2026-09-01,ABC,2,20,12,SHIPPED\n0002,2026-09-02,DEF,1,10,,UNPROCESSED';
@@ -353,6 +372,8 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     const packingSlip=await op(`/api/orders/${converted[0].data.order.id}/packing-slip`);
     assert.equal(packingSlip.status,200);
     assert.match(packingSlip.html,/BuySupply Packing Slip/);
+    assert.match(packingSlip.html,/Buy Supply, Corp\./);
+    assert.match(packingSlip.html,/388 South Avenue/);
     assert.match(packingSlip.html,new RegExp(converted[0].data.order.orderNumber));
     assert.match(packingSlip.html,/>ABC</);
     const warehouse=(await op('/api/warehouses','POST',{name:'BuySupply Warehouse',code:'BS',isDefaultReceiving:true,isDefaultReturns:true})).data.warehouse;

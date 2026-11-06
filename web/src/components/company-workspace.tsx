@@ -4,16 +4,30 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu'
 
-type Company = { tenant_id: string; id: string; company_number: string; name: string; mode: string; currency: string }
+type CompanyProfile = {
+  displayName: string
+  legalName: string
+  website: string
+  email: string
+  phone: string
+  tagline: string
+  businessHours: string
+  address: { line1: string; line2: string; city: string; state: string; postalCode: string; country: string }
+  source?: { contactUrl?: string; termsUrl?: string; shippingReturnsUrl?: string; verifiedAt?: string }
+}
+type Company = { tenant_id: string; id: string; company_number: string; name: string; mode: string; currency: string; profile?: CompanyProfile }
 type Directory = { initialized: boolean; canInitialize: boolean; tenants: { id: string; name: string; role: string }[]; companies: Company[]; selection: { tenantId: string; companyId: string } | null }
 type Product = { product_id: string; source_sku: string; title: string; brand: string; barcode: string; uom: string; company_sku: string; company_status: 'draft' | 'active' | 'inactive' | null; sell_price: string | null; selected: boolean }
 type Account = { id: string; supplier_name: string; account_reference: string }
 type Cost = { vendor_account_id: string; supplier_name: string; unit_cost: string | null; uom: string }
+const emptyProfile = (): CompanyProfile => ({ displayName: '', legalName: '', website: '', email: '', phone: '', tagline: '', businessHours: '', address: { line1: '', line2: '', city: '', state: '', postalCode: '', country: '' } })
+const completeProfile = (profile?: Partial<CompanyProfile>): CompanyProfile => ({ ...emptyProfile(), ...profile, address: { ...emptyProfile().address, ...(profile?.address || {}) } })
 async function request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
   const response = await fetch(path, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
   const data = await response.json()
@@ -88,7 +102,8 @@ export function CompanyWorkspace() {
 
 function CompanyDetails({ company, owner }: { company: Company; owner?: boolean }) {
   const base = `/api/organization/tenants/${encodeURIComponent(company.tenant_id)}/companies/${encodeURIComponent(company.id)}`
-  const [tab, setTab] = useState('catalog')
+  const [tab, setTab] = useState('profile')
+  const [profile, setProfile] = useState<CompanyProfile>(() => completeProfile(company.profile))
   const [query, setQuery] = useState('')
   const [search, setSearch] = useState('')
   const [selectedOnly, setSelectedOnly] = useState(false)
@@ -113,10 +128,11 @@ function CompanyDetails({ company, owner }: { company: Company; owner?: boolean 
   useEffect(() => {
     let cancelled = false; setError(''); setBusy(true)
     Promise.all([
+      request<{ profile: CompanyProfile }>(`${base}/profile`),
       request<{ rows: Product[]; hasMore: boolean }>(`${base}/catalog?q=${encodeURIComponent(search)}&page=${page}&selected=${selectedOnly ? 1 : 0}`),
       request<{ rows: Account[] }>(`${base}/vendor-accounts`),
       request<{ rows: typeof activity }>(`${base}/activity`)
-    ]).then(([products, vendors, events]) => { if (!cancelled) { setCatalog(products); setAccounts(vendors.rows); setActivity(events.rows) } }).catch(e => { if (!cancelled) setError(e.message) }).finally(() => { if (!cancelled) setBusy(false) })
+    ]).then(([companyProfile, products, vendors, events]) => { if (!cancelled) { setProfile(completeProfile(companyProfile.profile)); setCatalog(products); setAccounts(vendors.rows); setActivity(events.rows) } }).catch(e => { if (!cancelled) setError(e.message) }).finally(() => { if (!cancelled) setBusy(false) })
     return () => { cancelled = true }
   }, [base, search, page, selectedOnly, revision])
   async function run(work: () => Promise<void>) {
@@ -135,7 +151,29 @@ function CompanyDetails({ company, owner }: { company: Company; owner?: boolean 
     {company.mode === 'legacy' && <p className="text-sm text-muted-foreground">This catalog view prepares company records. LINQ’s existing operational pricing remains in its current product workspace.</p>}
     {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
     <Button variant="outline" disabled={busy} onClick={() => void run(async () => { await activateCompany(company); window.location.assign("/orders/tools") })}>Open Order Tools for {company.name}</Button>
-    <Tabs value={tab} onValueChange={setTab}><TabsList className="flex h-auto flex-wrap justify-start"><TabsTrigger value="catalog">Catalog</TabsTrigger><TabsTrigger value="accounts">Vendor accounts</TabsTrigger><TabsTrigger value="activity">Activity</TabsTrigger></TabsList>
+    <Tabs value={tab} onValueChange={setTab}><TabsList className="flex h-auto flex-wrap justify-start"><TabsTrigger value="profile">Profile</TabsTrigger><TabsTrigger value="catalog">Catalog</TabsTrigger><TabsTrigger value="accounts">Vendor accounts</TabsTrigger><TabsTrigger value="activity">Activity</TabsTrigger></TabsList>
+      <TabsContent value="profile" className="space-y-5">
+        <form className="space-y-5" onSubmit={event => { event.preventDefault(); if (!owner) return; void run(async () => { const result = await request<{ profile: CompanyProfile }>(`${base}/profile`, 'PATCH', profile); setProfile(result.profile) }) }}>
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-2"><Label htmlFor="company-display-name">Display name</Label><Input id="company-display-name" maxLength={160} value={profile.displayName} disabled={!owner} onChange={event => setProfile(current => ({ ...current, displayName: event.target.value }))} /></div>
+            <div className="grid gap-2"><Label htmlFor="company-legal-name">Legal name</Label><Input id="company-legal-name" maxLength={200} value={profile.legalName} disabled={!owner} onChange={event => setProfile(current => ({ ...current, legalName: event.target.value }))} /></div>
+            <div className="grid gap-2"><Label htmlFor="company-website">Website</Label><Input id="company-website" type="url" maxLength={500} value={profile.website} disabled={!owner} onChange={event => setProfile(current => ({ ...current, website: event.target.value }))} /></div>
+            <div className="grid gap-2"><Label htmlFor="company-email">Email</Label><Input id="company-email" type="email" maxLength={240} value={profile.email} disabled={!owner} onChange={event => setProfile(current => ({ ...current, email: event.target.value }))} /></div>
+            <div className="grid gap-2"><Label htmlFor="company-phone">Phone</Label><Input id="company-phone" type="tel" maxLength={80} value={profile.phone} disabled={!owner} onChange={event => setProfile(current => ({ ...current, phone: event.target.value }))} /></div>
+            <div className="grid gap-2"><Label htmlFor="company-hours">Business hours</Label><Input id="company-hours" maxLength={500} value={profile.businessHours} disabled={!owner} onChange={event => setProfile(current => ({ ...current, businessHours: event.target.value }))} /></div>
+          </div>
+          <div className="grid gap-2"><Label htmlFor="company-tagline">Business description</Label><Textarea id="company-tagline" maxLength={500} value={profile.tagline} disabled={!owner} onChange={event => setProfile(current => ({ ...current, tagline: event.target.value }))} /></div>
+          <div className="space-y-3"><h3 className="font-medium">Business address</h3><div className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-2 md:col-span-2"><Label htmlFor="company-address-line-1">Address line 1</Label><Input id="company-address-line-1" maxLength={240} value={profile.address.line1} disabled={!owner} onChange={event => setProfile(current => ({ ...current, address: { ...current.address, line1: event.target.value } }))} /></div>
+            <div className="grid gap-2 md:col-span-2"><Label htmlFor="company-address-line-2">Address line 2</Label><Input id="company-address-line-2" maxLength={240} value={profile.address.line2} disabled={!owner} onChange={event => setProfile(current => ({ ...current, address: { ...current.address, line2: event.target.value } }))} /></div>
+            <div className="grid gap-2"><Label htmlFor="company-city">City</Label><Input id="company-city" maxLength={120} value={profile.address.city} disabled={!owner} onChange={event => setProfile(current => ({ ...current, address: { ...current.address, city: event.target.value } }))} /></div>
+            <div className="grid grid-cols-2 gap-3"><div className="grid gap-2"><Label htmlFor="company-state">State</Label><Input id="company-state" maxLength={120} value={profile.address.state} disabled={!owner} onChange={event => setProfile(current => ({ ...current, address: { ...current.address, state: event.target.value } }))} /></div><div className="grid gap-2"><Label htmlFor="company-postal-code">ZIP code</Label><Input id="company-postal-code" maxLength={40} value={profile.address.postalCode} disabled={!owner} onChange={event => setProfile(current => ({ ...current, address: { ...current.address, postalCode: event.target.value } }))} /></div></div>
+            <div className="grid gap-2"><Label htmlFor="company-country">Country</Label><Input id="company-country" maxLength={80} value={profile.address.country} disabled={!owner} onChange={event => setProfile(current => ({ ...current, address: { ...current.address, country: event.target.value } }))} /></div>
+          </div></div>
+          {profile.source && <div className="flex flex-wrap gap-x-4 gap-y-2 text-sm text-muted-foreground">{profile.source.contactUrl && <a className="underline" href={profile.source.contactUrl} target="_blank" rel="noreferrer">Public contact page</a>}{profile.source.termsUrl && <a className="underline" href={profile.source.termsUrl} target="_blank" rel="noreferrer">Terms</a>}{profile.source.shippingReturnsUrl && <a className="underline" href={profile.source.shippingReturnsUrl} target="_blank" rel="noreferrer">Shipping and returns</a>}{profile.source.verifiedAt && <span>Verified {new Date(`${profile.source.verifiedAt}T00:00:00`).toLocaleDateString()}</span>}</div>}
+          {owner && <Button type="submit" disabled={busy}>{busy ? 'Saving...' : 'Save profile'}</Button>}
+        </form>
+      </TabsContent>
       <TabsContent value="catalog" className="space-y-4">
         <p className="text-sm text-muted-foreground">Shared product identity and content. Company SKU, selling status, price, vendor accounts, and negotiated costs remain private to this company.</p>
         <form className="flex flex-wrap gap-2" onSubmit={e => { e.preventDefault(); setPage(1); setSearch(query) }}><Input className="min-w-0 flex-1" aria-label="Search shared catalog" placeholder="SKU, UPC, or title" value={query} onChange={e => setQuery(e.target.value)} /><Button disabled={busy}>Search</Button><Button type="button" variant="outline" onClick={() => { setSelectedOnly(v => !v); setPage(1) }}>{selectedOnly ? 'Show shared catalog' : 'Show selected products'}</Button></form>
