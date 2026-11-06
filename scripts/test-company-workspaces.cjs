@@ -77,7 +77,7 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
     updateOperationalState:async(_user,_scope,_action,work)=>work(state),
     catalog:async()=>({rows:[
       {product_id:'current',source_sku:'ABC',title:'Current item',cost:999,raw:{secret:true}},
-      {product_id:'alternate',source_sku:'ALT-1',title:'Alternative item',brand:'Brand',manufacturer:'Maker',mfr_part_number:'MPN-1',barcode:'0123',default_image:'/image.jpg',uom:'Each',cost:888,raw:{secret:true}},
+      {product_id:'alternate',source_sku:'ALT-1',title:'Alternative item',brand:'Brand',manufacturer:'Maker',mfr_part_number:'MPN-1',barcode:'0123',default_image:'/image.jpg',uom:'Each',sell_price:'25.50',cost:888,raw:{secret:true}},
     ]}),
   };
   const operations=createCompanyOperationsHandler({
@@ -101,6 +101,7 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
   assert.equal(created.items[0].cost,0,'Company quote input cannot persist a LINQ or caller-provided cost');
   const suggestion=(await op(`/api/order-drafts/${created.id}/similar-skus?lineIndex=0&sku=ABC`)).response.data.alternatives[0];
   assert.equal(suggestion.sku,'ALT-1');
+  assert.equal(suggestion.price,25.5);
   assert.equal(suggestion.cost,undefined);
   assert.equal(suggestion.raw,undefined);
   const exportResult=await op(`/api/order-drafts/${created.id}/export/pdf?variant=savings`);
@@ -179,6 +180,14 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     for(const forbidden of ['raw','cost','price','qty','supplier']) assert.ok(!(forbidden in initial));
     await store.selectProduct(owner,buy,{productId:'p1',sku:'BUY1'});
     assert.equal((await store.catalog(owner,linq,'',1,true)).rows.length,0);
+    await assert.rejects(store.selectProduct(owner,buy,{productId:'p1',sku:'BUY1',status:'active',sellPrice:'invalid'}),/Sell price/);
+    await store.selectProduct(owner,buy,{productId:'p1',sku:'BUY1',status:'active',sellPrice:'13.97'});
+    const buyProduct=(await store.catalog(owner,buy,'',1,true)).rows[0];
+    assert.equal(buyProduct.company_status,'active');
+    assert.equal(buyProduct.sell_price,'13.97');
+    await store.selectProduct(owner,newScope,{productId:'p1',sku:'NEW1',status:'inactive',sellPrice:'99.00'});
+    assert.equal((await store.catalog(owner,newScope,'',1,true)).rows[0].sell_price,'99.00');
+    assert.equal((await store.catalog(owner,buy,'',1,true)).rows[0].sell_price,'13.97');
     const vendor=await store.createVendorAccount(owner,buy,{supplierName:'Supplier',accountReference:'BUY-account'});
     await store.saveCost(owner,buy,{productId:'p1',vendorAccountId:vendor.id,unitCost:'0',uom:'Each'});
     assert.equal((await store.costs(owner,buy,'p1'))[0].unit_cost,'0');
@@ -307,6 +316,10 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     const op=async(path,method='GET',body={},user=owner)=>{await operations({method,body},{},new URL(path,'http://localhost'),user);return operationalResponse;};
     assert.deepEqual((await op('/api/state')).data.connections,[]);
     assert.equal((await op('/api/orders')).data.orders.length,0);
+    const companyInventory=(await op('/api/inventory?q=SKU1')).data.inventory[0];
+    assert.equal(companyInventory.price,13.97);
+    assert.equal(companyInventory.cost,null);
+    assert.equal(companyInventory.status,'active');
     const draft=(await op('/api/order-drafts','POST',{buyer:'Buyer',items:[{sku:'ABC',qty:2,price:10}],id:'injected',tenantId:'other'})).data.draft;
     assert.notEqual(draft.id,'injected');
     assert.equal(draft.tenantId,buy.tenantId);

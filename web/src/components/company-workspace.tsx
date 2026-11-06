@@ -11,7 +11,7 @@ import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuIte
 
 type Company = { tenant_id: string; id: string; company_number: string; name: string; mode: string; currency: string }
 type Directory = { initialized: boolean; canInitialize: boolean; tenants: { id: string; name: string; role: string }[]; companies: Company[]; selection: { tenantId: string; companyId: string } | null }
-type Product = { product_id: string; source_sku: string; title: string; brand: string; barcode: string; uom: string; company_sku: string; selected: boolean }
+type Product = { product_id: string; source_sku: string; title: string; brand: string; barcode: string; uom: string; company_sku: string; company_status: 'draft' | 'active' | 'inactive' | null; sell_price: string | null; selected: boolean }
 type Account = { id: string; supplier_name: string; account_reference: string }
 type Cost = { vendor_account_id: string; supplier_name: string; unit_cost: string | null; uom: string }
 async function request<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
@@ -101,6 +101,8 @@ function CompanyDetails({ company, owner }: { company: Company; owner?: boolean 
   const [revision, setRevision] = useState(0)
   const [edit, setEdit] = useState<Product | null>(null)
   const [sku, setSku] = useState('')
+  const [status, setStatus] = useState<'draft' | 'active' | 'inactive'>('draft')
+  const [sellPrice, setSellPrice] = useState('')
   const [costs, setCosts] = useState<Cost[]>([])
   const [accountId, setAccountId] = useState('')
   const [unitCost, setUnitCost] = useState('')
@@ -125,7 +127,7 @@ function CompanyDetails({ company, owner }: { company: Company; owner?: boolean 
     setBusy(true); setError('')
     try {
       const result = await request<{ rows: Cost[] }>(`${base}/costs?productId=${encodeURIComponent(product.product_id)}`)
-      setCosts(result.rows); setEdit(product); setSku(product.company_sku || product.source_sku); setAccountId(''); setUnitCost(''); setUom(product.uom || 'Each')
+      setCosts(result.rows); setEdit(product); setSku(product.company_sku || product.source_sku); setStatus(product.company_status || 'draft'); setSellPrice(product.sell_price ?? ''); setAccountId(''); setUnitCost(''); setUom(product.uom || 'Each')
     } catch (e) { setError(e instanceof Error ? e.message : 'Unable to load product.') } finally { setBusy(false) }
   }
   return <section className="min-w-0 space-y-4">
@@ -135,12 +137,12 @@ function CompanyDetails({ company, owner }: { company: Company; owner?: boolean 
     <Button variant="outline" disabled={busy} onClick={() => void run(async () => { await activateCompany(company); window.location.assign("/orders/tools") })}>Open Order Tools for {company.name}</Button>
     <Tabs value={tab} onValueChange={setTab}><TabsList className="flex h-auto flex-wrap justify-start"><TabsTrigger value="catalog">Catalog</TabsTrigger><TabsTrigger value="accounts">Vendor accounts</TabsTrigger><TabsTrigger value="activity">Activity</TabsTrigger></TabsList>
       <TabsContent value="catalog" className="space-y-4">
-        <p className="text-sm text-muted-foreground">Shared product identity and content. Select a product to add a company SKU and its negotiated supplier cost. Blank cost means unknown.</p>
+        <p className="text-sm text-muted-foreground">Shared product identity and content. Company SKU, selling status, price, vendor accounts, and negotiated costs remain private to this company.</p>
         <form className="flex flex-wrap gap-2" onSubmit={e => { e.preventDefault(); setPage(1); setSearch(query) }}><Input className="min-w-0 flex-1" aria-label="Search shared catalog" placeholder="SKU, UPC, or title" value={query} onChange={e => setQuery(e.target.value)} /><Button disabled={busy}>Search</Button><Button type="button" variant="outline" onClick={() => { setSelectedOnly(v => !v); setPage(1) }}>{selectedOnly ? 'Show shared catalog' : 'Show selected products'}</Button></form>
         {busy && <p role="status" className="text-sm">Loading…</p>}
         <div className="space-y-2">{catalog.rows.map(product => <div key={product.product_id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3">
           <div className="min-w-0 flex-1"><p className="break-words font-medium">{product.company_sku || product.source_sku}</p><p className="break-words text-sm">{product.title}</p><p className="break-words text-xs text-muted-foreground">{product.brand || 'No brand'} · UPC: {product.barcode || 'Not recorded'}</p></div>
-          <div className="flex shrink-0 items-center gap-2">{product.selected && <Badge variant="secondary">Selected</Badge>}<Button size="sm" variant="outline" disabled={busy} onClick={() => void openProduct(product)}>{owner ? 'Configure' : 'View'}</Button></div>
+          <div className="flex shrink-0 items-center gap-2">{product.selected && <Badge variant="secondary">{product.company_status || 'draft'}</Badge>}<Button size="sm" variant="outline" disabled={busy} onClick={() => void openProduct(product)}>{owner ? 'Configure' : 'View'}</Button></div>
         </div>)}</div>
         {!busy && !catalog.rows.length && <p>No products found.</p>}
         <div className="flex items-center gap-3"><Button variant="outline" disabled={busy || page === 1} onClick={() => setPage(p => p - 1)}>Previous</Button><span className="text-sm">Page {page}</span><Button variant="outline" disabled={busy || !catalog.hasMore} onClick={() => setPage(p => p + 1)}>Next</Button></div>
@@ -154,13 +156,14 @@ function CompanyDetails({ company, owner }: { company: Company; owner?: boolean 
     </Tabs>
     <Dialog open={Boolean(edit)} onOpenChange={open => { if (!open) setEdit(null) }}><DialogContent className="max-h-[90dvh] overflow-y-auto"><DialogHeader><DialogTitle>Company product</DialogTitle><DialogDescription className="break-words">{edit?.title}</DialogDescription></DialogHeader>
       <Label htmlFor="company-sku">Company SKU</Label><Input id="company-sku" value={sku} disabled={!owner} onChange={e => setSku(e.target.value)} />
+      <div className="grid gap-4 sm:grid-cols-2"><div className="grid gap-2"><Label htmlFor="company-product-status">Selling status</Label><select id="company-product-status" className="h-10 w-full rounded-md border bg-background px-3" value={status} disabled={!owner} onChange={e => setStatus(e.target.value as typeof status)}><option value="draft">Draft</option><option value="active">Active</option><option value="inactive">Inactive</option></select></div><div className="grid gap-2"><Label htmlFor="company-sell-price">Sell price ({company.currency})</Label><Input id="company-sell-price" inputMode="decimal" value={sellPrice} disabled={!owner} onChange={e => setSellPrice(e.target.value)} placeholder="Not set" /></div></div>
       <div className="space-y-2">{costs.map(cost => <p key={cost.vendor_account_id} className="break-words text-sm">{cost.supplier_name}: {cost.unit_cost === null ? 'Unknown cost' : `${company.currency} ${cost.unit_cost}`} / {cost.uom}</p>)}</div>
       {owner && <><Label htmlFor="cost-account">Vendor account (optional)</Label><select id="cost-account" className="h-10 w-full rounded-md border bg-background px-3" value={accountId} onChange={e => { setAccountId(e.target.value); const cost = costs.find(c => c.vendor_account_id === e.target.value); setUnitCost(cost?.unit_cost ?? ''); setUom(cost?.uom || edit?.uom || 'Each') }}><option value="">Save catalog selection only</option>{accounts.map(a => <option key={a.id} value={a.id}>{a.supplier_name} — {a.account_reference}</option>)}</select>
       {accountId && <><Label htmlFor="unit-cost">Negotiated cost ({company.currency})</Label><Input id="unit-cost" inputMode="decimal" value={unitCost} onChange={e => setUnitCost(e.target.value)} placeholder="Unknown" /><Label htmlFor="cost-uom">Cost unit / pack</Label><Input id="cost-uom" value={uom} onChange={e => setUom(e.target.value)} /></>}</>}
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       <DialogFooter className="pb-[env(safe-area-inset-bottom)]"><Button variant="outline" onClick={() => setEdit(null)}>Close</Button>{owner && <Button disabled={busy || !sku.trim() || Boolean(accountId && !uom.trim())} onClick={() => void run(async () => {
         if (!edit) return
-        await request(`${base}/catalog`, 'PUT', { productId: edit.product_id, sku, ...(accountId ? { cost: { vendorAccountId: accountId, unitCost: unitCost || null, uom } } : {}) })
+        await request(`${base}/catalog`, 'PUT', { productId: edit.product_id, sku, status, sellPrice: sellPrice || null, ...(accountId ? { cost: { vendorAccountId: accountId, unitCost: unitCost || null, uom } } : {}) })
         setEdit(null)
       })}>Save</Button>}</DialogFooter>
     </DialogContent></Dialog>
