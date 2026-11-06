@@ -65,9 +65,11 @@ type CarrierProviderStatus = {
 
 type CarrierProviders = Record<string, CarrierProviderStatus>
 type CarrierAccessCompany = { id: string; name: string; mode: string; enabled: boolean }
+type CompanyCarrierPreference = { companyId: string; selectionMode: "lowest_cost" | "preferred_carrier"; preferredProviderId: string; rateTtlMinutes: number }
 type SharedCarrierAccess = {
   companies: Array<{ id: string; name: string; mode: string }>
   providers: Array<{ id: string; name: string; companyRates: boolean; companies: CarrierAccessCompany[] }>
+  preferences: CompanyCarrierPreference[]
 }
 
 const plannedProviderOrder = ["fedex", "dhl", "ontrac", "amazon_shipping"]
@@ -87,6 +89,7 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
   const [carrierAccess, setCarrierAccess] = useState<SharedCarrierAccess | null>(null)
   const [carrierAccessTenantId, setCarrierAccessTenantId] = useState("")
   const [sharingSaving, setSharingSaving] = useState("")
+  const [preferenceSaving, setPreferenceSaving] = useState("")
   const [loading, setLoading] = useState(true)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [uspsDialogOpen, setUspsDialogOpen] = useState(false)
@@ -144,6 +147,29 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
       toast.error(error instanceof Error ? error.message : "Unable to update carrier company access.")
     } finally {
       setSharingSaving("")
+    }
+  }
+
+  const saveCompanyPreference = async (companyId: string, patch: Partial<CompanyCarrierPreference>) => {
+    if (!carrierAccess || !carrierAccessTenantId) return
+    const current = carrierAccess.preferences.find((row) => row.companyId === companyId) || { companyId, selectionMode: "lowest_cost" as const, preferredProviderId: "", rateTtlMinutes: 30 }
+    const next = { ...current, ...patch }
+    if (next.selectionMode === "preferred_carrier" && !next.preferredProviderId) {
+      next.preferredProviderId = carrierAccess.providers.find((provider) => provider.companyRates && provider.companies.some((company) => company.id === companyId && company.enabled))?.id || ""
+    }
+    if (next.selectionMode === "preferred_carrier" && !next.preferredProviderId) { toast.error("Enable a rate-capable carrier for this company first."); return }
+    setPreferenceSaving(companyId)
+    try {
+      const result = await api<{ preference: CompanyCarrierPreference }>(`/api/organization/tenants/${encodeURIComponent(carrierAccessTenantId)}/companies/${encodeURIComponent(companyId)}/carrier-preferences`, {
+        method: "PATCH",
+        body: JSON.stringify(next),
+      })
+      setCarrierAccess((value) => value ? { ...value, preferences: value.preferences.map((row) => row.companyId === companyId ? result.preference : row) } : value)
+      toast.success("Company carrier policy updated.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to update the company carrier policy.")
+    } finally {
+      setPreferenceSaving("")
     }
   }
 
@@ -353,6 +379,24 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
               </label> })}
             </div>
           </div>)}
+        </div>
+        <div className="border-t bg-muted/15 p-4">
+          <div className="mb-3"><p className="text-sm font-semibold">Company rate policy</p><p className="text-xs text-muted-foreground">Choose whether quote rate lists lead with the lowest price or an enabled preferred carrier. Saved rates expire and must be refreshed before quote acceptance.</p></div>
+          <div className="grid gap-3 lg:grid-cols-2">
+            {carrierAccess.companies.map((company) => {
+              const preference = carrierAccess.preferences.find((row) => row.companyId === company.id) || { companyId: company.id, selectionMode: "lowest_cost" as const, preferredProviderId: "", rateTtlMinutes: 30 }
+              const enabledProviders = carrierAccess.providers.filter((provider) => provider.companyRates && provider.companies.some((entry) => entry.id === company.id && entry.enabled))
+              const saving = preferenceSaving === company.id
+              return <div key={company.id} className="grid gap-3 rounded-md border bg-background p-3">
+                <div className="flex items-center justify-between gap-2"><p className="truncate text-sm font-medium">{company.name}</p>{saving ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : null}</div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <CredentialField label="Rate selection"><Select value={preference.selectionMode} disabled={saving} onValueChange={(value) => void saveCompanyPreference(company.id, { selectionMode: value as CompanyCarrierPreference["selectionMode"] })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="lowest_cost">Lowest cost first</SelectItem><SelectItem value="preferred_carrier">Preferred carrier first</SelectItem></SelectContent></Select></CredentialField>
+                  <CredentialField label="Preferred carrier"><Select value={preference.preferredProviderId || "none"} disabled={saving || preference.selectionMode !== "preferred_carrier" || !enabledProviders.length} onValueChange={(value) => void saveCompanyPreference(company.id, { preferredProviderId: value === "none" ? "" : value })}><SelectTrigger><SelectValue placeholder="Select carrier" /></SelectTrigger><SelectContent><SelectItem value="none" disabled>Select carrier</SelectItem>{enabledProviders.map((provider) => <SelectItem key={provider.id} value={provider.id}>{provider.name}</SelectItem>)}</SelectContent></Select></CredentialField>
+                  <CredentialField label="Rate freshness"><Select value={String(preference.rateTtlMinutes)} disabled={saving} onValueChange={(value) => void saveCompanyPreference(company.id, { rateTtlMinutes: Number(value) })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="15">15 minutes</SelectItem><SelectItem value="30">30 minutes</SelectItem><SelectItem value="60">60 minutes</SelectItem><SelectItem value="120">2 hours</SelectItem></SelectContent></Select></CredentialField>
+                </div>
+              </div>
+            })}
+          </div>
         </div>
       </CardContent>
     </Card> : null}

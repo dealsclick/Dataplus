@@ -90,7 +90,10 @@ const companyOperationsHandler = createCompanyOperationsHandler({
   store: companyStore, selection: companySelection, sendJson, sendHtml, parseBody,
   normalizeDraft: normalizeOrderDraft, buildOrder: buildOrderFromDraft,
   exportDraft: sendOrderDraftExport,
-  quoteUps: (input) => upsRating.shopRates(input, process.env, carrierCredentials.getUps())
+  quoteUps: (input) => upsRating.shopRates(input, process.env, carrierCredentials.getUps()),
+  quoteUsps: (input) => uspsApi.shopRates(input, process.env, carrierCredentials.getUsps()),
+  quoteVeeqo: quoteCompanyVeeqo,
+  validateAddress: validateCompanyQuoteAddress
 });
 const { importProgress } = require("./lib/import-progress");
 const { reviewOrder, reviewReturn } = require("./lib/order-data-review");
@@ -18291,9 +18294,15 @@ function normalizeDraftShippingEstimate(value) {
   const packageSource = value.package && typeof value.package === "object" && !Array.isArray(value.package) ? value.package : {};
   const packageInfo = Object.fromEntries(["weight", "length", "width", "height"].map((key) => [key, Number(packageSource[key] || 0)]));
   if (!Number.isFinite(amount) || amount < 0 || Object.values(packageInfo).some((number) => !Number.isFinite(number) || number <= 0)) return null;
+  const providerId = String(value.providerId || "ups").trim().toLowerCase();
+  const carrier = String(value.carrier || (providerId === "usps" ? "USPS" : providerId === "veeqo" ? "Veeqo" : "UPS")).trim();
+  const quotedAt = String(value.quotedAt || "").trim();
+  const quotedAtMs = Date.parse(quotedAt);
+  const expiresAt = String(value.expiresAt || (Number.isFinite(quotedAtMs) ? new Date(quotedAtMs + 30 * 60_000).toISOString() : "1970-01-01T00:00:00.000Z")).trim();
+  if (!new Set(["ups", "usps", "veeqo"]).has(providerId) || !carrier || !Number.isFinite(Date.parse(expiresAt))) return null;
   return {
-    providerId: "ups",
-    carrier: "UPS",
+    providerId,
+    carrier,
     service: String(value.service || "").trim(),
     serviceCode: String(value.serviceCode || "").trim(),
     amount,
@@ -18301,7 +18310,8 @@ function normalizeDraftShippingEstimate(value) {
     deliveryDays: Number.isFinite(Number(value.deliveryDays)) ? Number(value.deliveryDays) : null,
     deliveryEstimate: String(value.deliveryEstimate || "").trim(),
     warehouseId: String(value.warehouseId || "").trim(),
-    quotedAt: String(value.quotedAt || new Date().toISOString()).trim(),
+    quotedAt: quotedAt || "1970-01-01T00:00:00.000Z",
+    expiresAt,
     package: packageInfo
   };
 }
@@ -31100,6 +31110,80 @@ function normalizeVeeqoRate(rate = {}, index = 0) {
       : Array.isArray(rate.shippingServiceOptions) ? rate.shippingServiceOptions : [],
     raw: rate
   };
+}
+
+async function validateCompanyQuoteAddress(input = {}) {
+  const address = input.address && typeof input.address === "object" ? input.address : {};
+  const providerIds = new Set(Array.isArray(input.providerIds) ? input.providerIds.map((value) => String(value || "").toLowerCase()) : []);
+  const country = String(address.country || "US").trim().toUpperCase();
+  if (!["US", "USA", "PR", "VI", "GU", "AS", "MP"].includes(country)) {
+    return { status: "not_applicable", providerId: "", address, message: "Domestic carrier address validation does not apply to this destination." };
+  }
+  const errors = [];
+  if (providerIds.has("usps")) {
+    try {
+      const result = await uspsApi.standardizeAddress(address, process.env, carrierCredentials.getUsps());
+      const normalized = { ...address, ...(result.address || {}), country: country === "USA" ? "US" : country };
+      const originalKey = [address.line1,address.line2,address.city,address.state,address.postalCode].map((value) => String(value || "").trim().toUpperCase()).join("|");
+      const normalizedKey = [normalized.line1,normalized.line2,normalized.city,normalized.state,normalized.postalCode].map((value) => String(value || "").trim().toUpperCase()).join("|");
+      return {
+        status: originalKey === normalizedKey ? "verified" : "corrected",
+        providerId: "usps",address: normalized,
+        message: originalKey === normalizedKey ? "USPS verified the destination address." : "USPS standardized the destination address for rating.",
+        corrections: Array.isArray(result.corrections) ? result.corrections.slice(0,10) : []
+      };
+    } catch (error) { errors.push(`USPS: ${error.message || "address verification failed"}`); }
+  }
+  if (providerIds.has("ups")) {
+    try {
+      const result = await upsRating.suggestPostalCodes(address, process.env, carrierCredentials.getUps(), { selectionKey: input.reference || "company-quote" });
+      const currentPostal = String(address.postalCode || "").match(/^\d{5}/)?.[0] || "";
+      const match = (result.candidates || []).find((candidate) => String(candidate.postalCode) === currentPostal);
+      if (!match) throw new Error("UPS did not match the city and state to the entered ZIP Code.");
+      return { status: "verified", providerId: "ups", address: { ...address, city: match.city || address.city, state: match.state || address.state, postalCode: address.postalCode, country: match.country || country }, message: "UPS verified the destination city, state, and ZIP Code." };
+    } catch (error) { errors.push(`UPS: ${error.message || "address verification failed"}`); }
+  }
+  if (errors.length) throw new Error(errors.join(" "));
+  return { status: "not_available", providerId: "", address, message: "No enabled carrier address validator was available." };
+}
+
+async function quoteCompanyVeeqo(input = {}) {
+  const settings = dbCache.data?.systemSettings || {};
+  const config = veeqoConfig(settings);
+  const address = (source = {}, fallback = "") => ({
+    name: String(source.name || fallback || "").trim(),company: String(source.company || "").trim(),
+    phone: String(source.phone || "").trim(),email: String(source.email || "").trim(),
+    line1: String(source.line1 || "").trim(),line2: String(source.line2 || "").trim(),
+    town: String(source.city || source.town || "").trim(),county: String(source.state || source.county || "").trim(),
+    postcode: String(source.postalCode || source.postcode || "").trim(),country_code: normalizeVeeqoAddressCountry(source.country || "US")
+  });
+  const parcel = input.package || {};
+  const channelItems = (Array.isArray(input.items) ? input.items : []).slice(0,500).map((item,index) => ({
+    remote_id: String(item.sku || `quote-line-${index+1}`),title: String(item.title || item.sku || "Item").slice(0,500),
+    sku: String(item.sku || "").slice(0,200),quantity: Math.max(1,Number(item.qty || 1) || 1),
+    value: Number(item.price || 0).toFixed(2),currency_code: String(input.currency || "USD")
+  }));
+  const shippingConfigurationIds = await veeqoShippingConfigurationIds(settings);
+  const response = await veeqoRequest("/shipping/api/v1/rates", {
+    method: "POST",
+    body: {
+      to_address: address(input.to,"Customer"),from_address: address(input.from,input.sellerDisplayName || config.sellerDisplayName),
+      parcels: [{ package_type: "box",weight: Number(parcel.weight),weight_unit: "lb",length: Number(parcel.length),width: Number(parcel.width),height: Number(parcel.height),dimension_unit: "in" }],
+      customer_reference: String(input.reference || "Company quote"),estimated_value: Number(input.itemValue || 0).toFixed(2),
+      currency_code: String(input.currency || "USD"),seller_display_name: String(input.sellerDisplayName || config.sellerDisplayName),
+      preferred_shipment_date: new Date().toISOString(),include_unavailable_quotes: true,
+      ...(shippingConfigurationIds.length ? { shipping_configuration_ids: shippingConfigurationIds } : {}),channel_items: channelItems
+    },
+    signal: AbortSignal.timeout(15_000),lowMemoryTransport: true,maxResponseBytes: 2 * 1024 * 1024
+  }, settings);
+  const available = Array.isArray(response.quotes) ? response.quotes : Array.isArray(response.available) ? response.available : firstArrayFrom(response.rates || response.shipments || response);
+  const responseExpiresAt = String(response.expires_at || response.expiresAt || "").trim();
+  const quotedAt = new Date().toISOString();
+  const rates = available.slice(0,100).map((rate,index) => normalizeVeeqoRate({ ...rate,expires_at:rate.expires_at || rate.expiresAt || responseExpiresAt,quoted_at:quotedAt },index)).map((rate) => ({
+    id:rate.id,carrier:rate.carrier,service:rate.service,serviceType:rate.serviceType,amount:rate.amount,currency:rate.currency,
+    deliveryDays:rate.deliveryDays,deliveryEstimate:rate.deliveryEstimate,warning:rate.warning,quotedAt:rate.quotedAt,expiresAt:rate.expiresAt
+  })).filter((rate) => rate.amount > 0 && !/media mail|bound printed matter/i.test(`${rate.carrier} ${rate.service}`));
+  return { rates, status:{ ok:rates.length>0,rateCount:rates.length } };
 }
 
 function normalizeUnavailableVeeqoRate(rate = {}, index = 0) {

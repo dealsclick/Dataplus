@@ -83,7 +83,12 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
       {product_id:'current',source_sku:'ABC',title:'Current item',cost:999,raw:{secret:true}},
       {product_id:'alternate',source_sku:'ALT-1',title:'Alternative item',brand:'Brand',manufacturer:'Maker',mfr_part_number:'MPN-1',barcode:'0123',default_image:'/image.jpg',uom:'Each',sell_price:'25.50',cost:888,raw:{secret:true}},
     ]}),
-    companyCarrierAccess:async()=>[{id:'ups',name:'UPS',enabled:true,companyRates:true}],
+    companyCarrierAccess:async()=>[
+      {id:'ups',name:'UPS',enabled:true,companyRates:true},
+      {id:'usps',name:'USPS',enabled:true,companyRates:true},
+      {id:'veeqo',name:'Veeqo',enabled:true,companyRates:true},
+    ],
+    companyCarrierPreference:async()=>({selectionMode:'preferred_carrier',preferredProviderId:'usps',rateTtlMinutes:30}),
   };
   const operations=createCompanyOperationsHandler({
     store,selection:()=>scope,sendJson:(_res,status,data)=>{response={status,data};},parseBody:async req=>req.body,
@@ -94,6 +99,9 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
       assert.equal(input.to.postalCode,'10001');
       return {status:{ok:true},rates:[{id:'ups-ground',carrier:'UPS',service:'Ground',amount:8.5,currency:'USD',quotedAt:'2026-11-06T12:00:00.000Z'}]};
     },
+    quoteUsps:async()=>({status:{ok:true},rates:[{id:'usps-ground',carrier:'USPS',service:'Ground Advantage',amount:9,currency:'USD'}]}),
+    quoteVeeqo:async()=>{throw new Error('Veeqo test account unavailable');},
+    validateAddress:async({address})=>({status:'verified',providerId:'usps',address,message:'USPS verified the destination address.'}),
   });
   const op=async(path,method='GET',body={})=>{response=null;const handled=await operations({method,body},{},new URL(path,'http://localhost'),{id:'owner',name:'Owner'});return {handled,response};};
   assert.equal((await op('/api/app/bootstrap')).response.data.systemSettings.organizationName,'BuySupply');
@@ -114,11 +122,20 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
   assert.equal(created.items[0].msrp,15);
   assert.equal(created.items[0].cost,0,'Company quote input cannot persist a LINQ or caller-provided cost');
   const rateResult=(await op(`/api/order-drafts/${created.id}/shipping-rates`,'POST',{package:{weight:5,length:10,width:8,height:6}})).response.data;
-  assert.equal(rateResult.rates[0].amount,8.5);
+  assert.equal(rateResult.rates[0].providerId,'usps','Preferred carrier rates lead even when another carrier costs less');
+  assert.equal(rateResult.rates[1].amount,8.5);
+  assert.equal(rateResult.addressValidation.status,'verified');
+  assert.match(rateResult.providerErrors[0].message,/Veeqo test account/);
   const withShipping=(await op(`/api/order-drafts/${created.id}`,'PATCH',{shippingEstimate:{...rateResult.rates[0],warehouseId:'',package:rateResult.package}})).response.data.draft;
-  assert.equal(withShipping.total,28.5);
-  assert.equal(withShipping.shippingEstimate.carrier,'UPS');
-  assert.equal((await op(`/api/order-drafts/${created.id}`,'PATCH',{note:'Internal note updated'})).response.data.draft.shippingEstimate.amount,8.5);
+  assert.equal(withShipping.total,29);
+  assert.equal(withShipping.shippingEstimate.carrier,'USPS');
+  assert.ok(Date.parse(withShipping.shippingEstimate.expiresAt)>Date.now());
+  assert.equal((await op(`/api/order-drafts/${created.id}`,'PATCH',{note:'Internal note updated'})).response.data.draft.shippingEstimate.amount,9);
+  state.orderDrafts.find((draft)=>draft.id===created.id).shippingEstimate.expiresAt='2020-01-01T00:00:00.000Z';
+  const expiredAcceptance=(await op(`/api/order-drafts/${created.id}`,'PATCH',{status:'accepted'})).response;
+  assert.equal(expiredAcceptance.status,409);
+  assert.match(expiredAcceptance.data.error,/expired/);
+  await op(`/api/order-drafts/${created.id}`,'PATCH',{shippingEstimate:{...rateResult.rates[0],warehouseId:'',package:rateResult.package}});
   assert.equal((await op(`/api/order-drafts/${created.id}`,'PATCH',{shippingAddress:{line1:'2 Main St',city:'New York',state:'NY',postalCode:'10001',country:'US'}})).response.data.draft.shippingEstimate,null);
   assert.equal((await op('/api/orders/references')).response.data.connections.length,0);
   const prospectList=(await op('/api/customers')).response.data;
@@ -202,7 +219,12 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     const initialCarrierAccess=await store.carrierAccess(owner,tenantId);
     assert.equal(initialCarrierAccess.providers.find(provider=>provider.id==='ups').companies.find(company=>company.id==='buysupply').enabled,true);
     assert.equal(initialCarrierAccess.providers.find(provider=>provider.id==='veeqo').companies.find(company=>company.id==='buysupply').enabled,false);
+    assert.equal(initialCarrierAccess.providers.find(provider=>provider.id==='usps').companyRates,true);
+    assert.equal(initialCarrierAccess.preferences.find(preference=>preference.companyId==='buysupply').selectionMode,'lowest_cost');
     assert.equal((await store.companyCarrierAccess(owner,buy)).find(provider=>provider.id==='ups').enabled,true);
+    assert.equal((await store.companyCarrierPreference(owner,buy)).rateTtlMinutes,30);
+    assert.equal((await store.saveCompanyCarrierPreference(owner,buy,{selectionMode:'preferred_carrier',preferredProviderId:'ups',rateTtlMinutes:60})).preferredProviderId,'ups');
+    await assert.rejects(store.saveCompanyCarrierPreference(staff,buy,{selectionMode:'lowest_cost',rateTtlMinutes:30}),/access/);
     await assert.rejects(store.carrierAccess(staff,tenantId),/access/);
     assert.equal((await store.directory(staff)).companies.length,1);
     await assert.rejects(store.createCompany(staff,tenantId,{name:'Forbidden'}),/access/);
@@ -217,6 +239,7 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     await store.saveCarrierAccess(owner,tenantId,'ups',{companyIds:[LEGACY_COMPANY,newCompany.id]});
     assert.equal((await store.companyCarrierAccess(owner,newScope)).find(provider=>provider.id==='ups').enabled,true);
     assert.equal((await store.companyCarrierAccess(owner,buy)).find(provider=>provider.id==='ups').enabled,false);
+    assert.equal((await store.companyCarrierPreference(owner,buy)).selectionMode,'lowest_cost','Disabling the preferred carrier resets the company to lowest cost');
     await store.saveCarrierAccess(owner,tenantId,'ups',{companyIds:[LEGACY_COMPANY,'buysupply',newCompany.id]});
     assert.equal((await store.companyCarrierAccess(owner,buy)).find(provider=>provider.id==='ups').enabled,true);
     await assert.rejects(store.saveCarrierAccess(staff,tenantId,'ups',{companyIds:['buysupply']}),/access/);
@@ -288,6 +311,8 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.deepEqual(selection,buy);
     assert.equal((await invoke(`/api/organization/tenants/${tenantId}/companies/buysupply/catalog`,'GET',outsider)).status,403);
     assert.equal((await invoke(`/api/organization/tenants/${tenantId}/companies/buysupply/profile`,'GET',owner)).data.profile.legalName,'Buy Supply, Corp.');
+    assert.equal((await invoke(`/api/organization/tenants/${tenantId}/companies/buysupply/carrier-preferences`,'GET',owner)).data.preference.selectionMode,'lowest_cost');
+    assert.equal((await invoke(`/api/organization/tenants/${tenantId}/companies/buysupply/carrier-preferences`,'PATCH',staff,{selectionMode:'lowest_cost',rateTtlMinutes:30})).status,403);
     assert.equal((await invoke(`/api/organization/tenants/${tenantId}/companies/buysupply/profile`,'PATCH',staff,publicProfile)).status,403);
     assert.equal((await invoke(`/api/organization/tenants/${tenantId}/companies/buysupply/profile`,'PATCH',owner,{...publicProfile,website:'not-a-url'})).status,400);
     assert.equal((await invoke(`/api/organization/tenants/${tenantId}/companies/buysupply/costs`,'PUT',owner,{productId:'p1',vendorAccountId:'wrong',unitCost:'2',uom:'Each'})).status,400);
