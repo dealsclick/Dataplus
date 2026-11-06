@@ -187,6 +187,7 @@ function ChannelDetail({
   const isWalmart = channel.name?.toLowerCase() === "walmart"
   const isTemu = channel.name?.toLowerCase() === "temu"
   const isWhatnot = channel.name?.toLowerCase() === "whatnot"
+  const companySetupOnly = (channel as unknown as Record<string, unknown>).companyOwned === true && (channel as unknown as Record<string, unknown>).operationsEnabled === false
   const settings = { ...(channel.settings || {}), ...draft }
   const channelEnabled = settings.channelEnabled !== false
   const shippingProfiles = Array.isArray(channel.settings?.shopifyShippingProfiles) ? channel.settings.shopifyShippingProfiles : []
@@ -1105,13 +1106,19 @@ function ChannelDetail({
         </CardHeader>
       </Card>
 
+      {companySetupOnly && <Alert>
+        <ShieldCheck className="size-4" />
+        <AlertTitle>Company-owned setup is isolated</AlertTitle>
+        <AlertDescription>Save channel settings and API credentials now. Connecting accounts, verification, webhooks, imports, and automatic syncs remain off until the marketplace workers are isolated for this company.</AlertDescription>
+      </Alert>}
+
       <Tabs value={activeTab} onValueChange={tab => { if (tab === "companies") window.location.assign("/settings?tab=companies"); else setActiveTab(tab) }}>
         <TabsList className="flex flex-wrap">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           {isTemu && <TabsTrigger value="connection">Connection</TabsTrigger>}
-          {isEbay && <TabsTrigger value="operations">Operations</TabsTrigger>}
+          {isEbay && <TabsTrigger value="operations" disabled={companySetupOnly}>Operations</TabsTrigger>}
           <TabsTrigger value="setup">Setup</TabsTrigger>
-          <TabsTrigger value="actions">Run</TabsTrigger>
+          <TabsTrigger value="actions" disabled={companySetupOnly}>Run</TabsTrigger>
           <TabsTrigger value="rules">Rules</TabsTrigger>
           <TabsTrigger value="mappings">Mappings</TabsTrigger>
           <TabsTrigger value="attributes">Attributes</TabsTrigger>
@@ -1130,7 +1137,7 @@ function ChannelDetail({
                   </CardTitle>
                   <CardDescription>{auth?.message || "Run a connection check before major Shopify jobs."}</CardDescription>
                 </div>
-                <Button onClick={onCheckShopify} disabled={checking}>
+                <Button onClick={onCheckShopify} disabled={checking || companySetupOnly}>
                   {checking ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
                   Check connection
                 </Button>
@@ -1155,8 +1162,8 @@ function ChannelDetail({
                   <CardDescription>{ebayCredentials?.hasSellerAuthorization ? "Seller authorization is ready for eBay syncs." : "Add credentials, then authorize the eBay seller account."}</CardDescription>
                 </div>
                 <div className="flex flex-wrap justify-end gap-2">
-                  <Button onClick={() => void runEbayAction("authorize")} disabled={!ebayCredentials?.configured}>{ebayCredentials?.hasSellerAuthorization ? "Reconnect eBay account" : "Sign in with eBay"}</Button>
-                  <Button variant="outline" onClick={() => void verifyEbayConnection()} disabled={!ebayCredentials?.hasSellerAuthorization || ebayVerifying}>
+                  <Button onClick={() => void runEbayAction("authorize")} disabled={companySetupOnly || !ebayCredentials?.configured}>{ebayCredentials?.hasSellerAuthorization ? "Reconnect eBay account" : "Sign in with eBay"}</Button>
+                  <Button variant="outline" onClick={() => void verifyEbayConnection()} disabled={companySetupOnly || !ebayCredentials?.hasSellerAuthorization || ebayVerifying}>
                     {ebayVerifying ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
                     Verify connection
                   </Button>

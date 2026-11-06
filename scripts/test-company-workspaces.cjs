@@ -89,6 +89,7 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
   assert.equal((await op('/api/app/bootstrap')).response.data.systemSettings.organizationName,'BuySupply');
   assert.equal((await op('/api/app/summary')).response.data.summary,null);
   assert.deepEqual((await op('/api/app/references?include=warehouses,systemSettings')).response.data.warehouses,[]);
+  assert.equal((await op('/api/channels')).response.data.connections.length,5);
   const created=(await op('/api/order-drafts','POST',{
     buyer:'Buyer',customerNote:'Customer-facing note',note:'Internal note',expiresAt:'2026-12-20',
     selectedTermIds:['taxes','net_30','unknown'],customTerms:'Approved custom term.',
@@ -99,7 +100,7 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
   assert.deepEqual(Array.from(created.selectedTermIds),['taxes','net_30']);
   assert.equal(created.items[0].msrp,15);
   assert.equal(created.items[0].cost,0,'Company quote input cannot persist a LINQ or caller-provided cost');
-  assert.deepEqual((await op('/api/orders/references')).response.data.connections,[]);
+  assert.equal((await op('/api/orders/references')).response.data.connections.length,5);
   const prospectList=(await op('/api/customers')).response.data;
   assert.equal(prospectList.customers.length,1);
   assert.equal(prospectList.customers[0].name,'Buyer');
@@ -157,7 +158,8 @@ test('company isolation, catalog projection, access changes, persistence and HTT
   const pool=new Pool({connectionString,options:`-c search_path=${schema}`});
   const owner={id:'owner',status:'active',isMasterAdmin:true}, staff={id:'staff',status:'active'}, outsider={id:'outsider',status:'active',isMasterAdmin:true};
   const buy={tenantId,companyId:'buysupply'}, linq={tenantId,companyId:LEGACY_COMPANY};
-  const store=createCompanyStore(()=>pool);
+  const credentialEnv={DATAPLUS_CREDENTIALS_ENCRYPTION_KEY:'11'.repeat(32)};
+  const store=createCompanyStore(()=>pool,{credentialEnv});
   try {
     await pool.query(`create table products(product_id text primary key,sku text,title text,brand text,manufacturer text,mfr_part_number text,barcode text,main_category text,default_image text,uom text,cost numeric,raw jsonb);
       insert into products values('p1','SKU1','Test product','Brand','Manufacturer','MPN','012345','Category',null,'Each',888,'{"secret":"LINQ-private","price":999}');`);
@@ -327,7 +329,7 @@ test('company isolation, catalog projection, access changes, persistence and HTT
       normalizeDraft:draftFunctions.normalizeOrderDraft,
       buildOrder:draftFunctions.buildOrderFromDraft});
     const op=async(path,method='GET',body={},user=owner)=>{await operations({method,body},{},new URL(path,'http://localhost'),user);return operationalResponse;};
-    assert.deepEqual((await op('/api/state')).data.connections,[]);
+    assert.equal((await op('/api/state')).data.connections.length,5);
     assert.equal((await op('/api/orders')).data.orders.length,0);
     const companyInventory=(await op('/api/inventory?q=SKU1')).data.inventory[0];
     assert.equal(companyInventory.price,13.97);
@@ -337,7 +339,8 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.notEqual(draft.id,'injected');
     assert.equal(draft.tenantId,buy.tenantId);
     assert.equal(draft.companyId,buy.companyId);
-    assert.deepEqual((await op('/api/orders/references')).data,{connections:[],warehouses:[],companyId:'buysupply'});
+    assert.equal((await op('/api/orders/references')).data.connections.length,5);
+    assert.deepEqual((await op('/api/orders/references')).data.warehouses,[]);
     const prospectCustomer=(await op('/api/customers')).data.customers[0];
     assert.equal(prospectCustomer.segment,'prospect');
     assert.equal(prospectCustomer.totalOrders,0);
@@ -347,6 +350,31 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(converted[0].data.order.id,converted[1].data.order.id);
     assert.equal((await op('/api/orders')).data.orders.length,1);
     assert.equal((await op('/api/orders')).data.orders[0].productCost,null);
+    const warehouse=(await op('/api/warehouses','POST',{name:'BuySupply Warehouse',code:'BS',isDefaultReceiving:true,isDefaultReturns:true})).data.warehouse;
+    assert.equal(warehouse.code,'BS');
+    assert.equal((await op('/api/app/references?include=warehouses')).data.warehouses[0].id,warehouse.id);
+    const bin=(await op(`/api/warehouses/${warehouse.id}/bins`,'POST',{code:'A-01',name:'Primary receiving',isDefault:true})).data.bin;
+    assert.equal(bin.code,'A-01');
+    assert.equal((await op(`/api/warehouses/${warehouse.id}/detail`)).data.summary.activeBins,1);
+    const fulfillment=(await op('/api/fulfillment/console?view=ready')).data;
+    assert.equal(fulfillment.scope,'company');
+    assert.equal(fulfillment.work.length,1);
+    assert.equal(fulfillment.work[0].warehouseId,warehouse.id);
+    assert.equal(fulfillment.capabilities.labelPurchase,false);
+    const route=fulfillment.work[0];
+    const packageResult=(await op(`/api/orders/${route.orderId}/fulfillment-package`,'PATCH',{routeId:route.id,warehouseId:warehouse.id,warehouseName:warehouse.name,packageWeight:5,packageLength:10,packageWidth:8,packageHeight:6})).data;
+    assert.equal(packageResult.route.labelReadiness.weight,5);
+    assert.equal((await op('/api/fulfillment/console?view=ready')).data.work[0].package.packageLength,10);
+    assert.equal((await op(`/api/orders/${route.orderId}/workflow-routes/${encodeURIComponent(route.id)}/status`,'POST',{status:'picked'})).data.route.warehouseStage,'picked');
+    const shopifyCredentials=(await op('/api/shopify/credentials','PUT',{storeDomain:'buysupply.myshopify.com',apiVersion:'2026-04',clientId:'shop-client',clientSecret:'shop-secret'})).data;
+    assert.equal(shopifyCredentials.credentials.hasClientCredentials,true);
+    assert.equal(shopifyCredentials.credentials.connected,false);
+    const ebayCredentials=(await op('/api/ebay/credentials','PUT',{environment:'production',ruName:'BuySupply-RuName',clientId:'ebay-client',clientSecret:'ebay-secret'})).data;
+    assert.equal(ebayCredentials.credentials.configured,true);
+    assert.equal(ebayCredentials.credentials.hasSellerAuthorization,false);
+    const encryptedCredentials=(await pool.query('select sealed_payload::text as value from workspace_channel_credentials where tenant_id=$1 and company_id=$2',[buy.tenantId,buy.companyId])).rows.map(row=>row.value).join(' ');
+    assert.doesNotMatch(encryptedCredentials,/shop-secret|ebay-secret|shop-client|ebay-client/);
+    assert.equal((await op('/api/shopify/credentials','PUT',{clientId:'forbidden'},staff)).status,403);
     const convertedCustomer=(await op('/api/customers')).data.customers[0];
     assert.equal(convertedCustomer.id,prospectCustomer.id);
     assert.equal(convertedCustomer.totalOrders,1);
@@ -377,6 +405,8 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.notEqual(duplicateDraft.draftNumber,draft.draftNumber);
     assert.equal((await op('/api/shopify/orders/import','POST')).status,409);
     activeScope=newScope;
+    assert.equal((await op('/api/shopify/credentials')).data.credentials.hasClientCredentials,false);
+    assert.deepEqual((await op('/api/warehouses')).data.warehouses,[]);
     const otherCompanyCustomer=(await op('/api/customers','GET',{},owner)).data.customers[0];
     assert.equal(otherCompanyCustomer.name,'Other company buyer');
     assert.notEqual(otherCompanyCustomer.id,convertedCustomer.id);
