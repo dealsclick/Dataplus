@@ -49,6 +49,13 @@ jobs:
         run: |
           createdb --host=127.0.0.1 --username=postgres dataplus_fulfillment_test
           node scripts/test-fulfillment-storage-postgres.cjs
+      - name: Run company isolation and shared catalog tests
+        env:
+          PGPASSWORD: postgres
+          COMPANY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dataplus_company_test
+        run: |
+          createdb --host=127.0.0.1 --username=postgres dataplus_company_test
+          node scripts/test-company-workspaces.cjs
 
   deploy:
     name: Deploy to DigitalOcean Droplet
