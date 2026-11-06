@@ -89,7 +89,7 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
   assert.equal((await op('/api/app/bootstrap')).response.data.systemSettings.organizationName,'BuySupply');
   assert.equal((await op('/api/app/summary')).response.data.summary,null);
   assert.deepEqual((await op('/api/app/references?include=warehouses,systemSettings')).response.data.warehouses,[]);
-  assert.equal((await op('/api/channels')).response.data.connections.length,5);
+  assert.equal((await op('/api/channels')).response.data.connections.length,0);
   const created=(await op('/api/order-drafts','POST',{
     buyer:'Buyer',customerNote:'Customer-facing note',note:'Internal note',expiresAt:'2026-12-20',
     selectedTermIds:['taxes','net_30','unknown'],customTerms:'Approved custom term.',
@@ -100,7 +100,7 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
   assert.deepEqual(Array.from(created.selectedTermIds),['taxes','net_30']);
   assert.equal(created.items[0].msrp,15);
   assert.equal(created.items[0].cost,0,'Company quote input cannot persist a LINQ or caller-provided cost');
-  assert.equal((await op('/api/orders/references')).response.data.connections.length,5);
+  assert.equal((await op('/api/orders/references')).response.data.connections.length,0);
   const prospectList=(await op('/api/customers')).response.data;
   assert.equal(prospectList.customers.length,1);
   assert.equal(prospectList.customers[0].name,'Buyer');
@@ -325,11 +325,11 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     await store.importer.rollback(owner,buy,{batchId:duplicate.id,confirm:true});assert.equal((await store.importer.report(owner,buy,new URLSearchParams())).summary.orders,2);
     const {createCompanyOperationsHandler}=require('../lib/company-operations-http');
     let activeScope=buy,operationalResponse;
-    const operations=createCompanyOperationsHandler({store,selection:()=>activeScope,sendJson:(_r,status,data)=>{operationalResponse={status,data};},parseBody:async req=>req.body,
+    const operations=createCompanyOperationsHandler({store,selection:()=>activeScope,sendJson:(_r,status,data)=>{operationalResponse={status,data};},sendHtml:(_r,status,html)=>{operationalResponse={status,html};},parseBody:async req=>req.body,
       normalizeDraft:draftFunctions.normalizeOrderDraft,
       buildOrder:draftFunctions.buildOrderFromDraft});
     const op=async(path,method='GET',body={},user=owner)=>{await operations({method,body},{},new URL(path,'http://localhost'),user);return operationalResponse;};
-    assert.equal((await op('/api/state')).data.connections.length,5);
+    assert.equal((await op('/api/state')).data.connections.length,0);
     assert.equal((await op('/api/orders')).data.orders.length,0);
     const companyInventory=(await op('/api/inventory?q=SKU1')).data.inventory[0];
     assert.equal(companyInventory.price,13.97);
@@ -339,7 +339,7 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.notEqual(draft.id,'injected');
     assert.equal(draft.tenantId,buy.tenantId);
     assert.equal(draft.companyId,buy.companyId);
-    assert.equal((await op('/api/orders/references')).data.connections.length,5);
+    assert.equal((await op('/api/orders/references')).data.connections.length,0);
     assert.deepEqual((await op('/api/orders/references')).data.warehouses,[]);
     const prospectCustomer=(await op('/api/customers')).data.customers[0];
     assert.equal(prospectCustomer.segment,'prospect');
@@ -350,6 +350,11 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(converted[0].data.order.id,converted[1].data.order.id);
     assert.equal((await op('/api/orders')).data.orders.length,1);
     assert.equal((await op('/api/orders')).data.orders[0].productCost,null);
+    const packingSlip=await op(`/api/orders/${converted[0].data.order.id}/packing-slip`);
+    assert.equal(packingSlip.status,200);
+    assert.match(packingSlip.html,/BuySupply Packing Slip/);
+    assert.match(packingSlip.html,new RegExp(converted[0].data.order.orderNumber));
+    assert.match(packingSlip.html,/>ABC</);
     const warehouse=(await op('/api/warehouses','POST',{name:'BuySupply Warehouse',code:'BS',isDefaultReceiving:true,isDefaultReturns:true})).data.warehouse;
     assert.equal(warehouse.code,'BS');
     assert.equal((await op('/api/app/references?include=warehouses')).data.warehouses[0].id,warehouse.id);

@@ -87,7 +87,7 @@ const companyHandler = createCompanyHandler({
 });
 const { createCompanyOperationsHandler } = require("./lib/company-operations-http");
 const companyOperationsHandler = createCompanyOperationsHandler({
-  store: companyStore, selection: companySelection, sendJson, parseBody,
+  store: companyStore, selection: companySelection, sendJson, sendHtml, parseBody,
   normalizeDraft: normalizeOrderDraft, buildOrder: buildOrderFromDraft,
   exportDraft: sendOrderDraftExport
 });
