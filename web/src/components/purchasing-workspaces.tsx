@@ -126,6 +126,20 @@ function quoteDateAfter(days: number) {
   return quoteDateKey(date)
 }
 
+type QuoteCarrierRate = {
+  id: string
+  carrier: string
+  service: string
+  amount: number
+  currency: string
+  deliveryDays?: number
+  deliveryEstimate?: string
+  quotedAt?: string
+  warning?: string
+}
+
+type QuoteCarrierAccess = { id: string; name: string; enabled: boolean; companyRates: boolean }
+
 export function DraftQuoteFieldDetailPage() {
   const draftId = decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
   const [draft, setDraft] = useState<Record<string, unknown> | null>(null)
@@ -142,6 +156,14 @@ export function DraftQuoteFieldDetailPage() {
   const [similarLoading, setSimilarLoading] = useState(false)
   const [similarLineIndex, setSimilarLineIndex] = useState(-1)
   const [similarResults, setSimilarResults] = useState<Array<Record<string, unknown>>>([])
+  const [warehouses, setWarehouses] = useState<Array<Record<string, unknown>>>([])
+  const [quoteCarriers, setQuoteCarriers] = useState<QuoteCarrierAccess[]>([])
+  const [shippingOpen, setShippingOpen] = useState(false)
+  const [shippingBusy, setShippingBusy] = useState(false)
+  const [shippingRates, setShippingRates] = useState<QuoteCarrierRate[]>([])
+  const [selectedShippingRateId, setSelectedShippingRateId] = useState("")
+  const [shippingWarehouseId, setShippingWarehouseId] = useState("")
+  const [shippingPackage, setShippingPackage] = useState({ weight: "", length: "", width: "", height: "" })
   const autoEditOpenedRef = useRef(false)
   const [form, setForm] = useState({
     buyer: "", buyerEmail: "", phone: "", source: "Manual", status: "draft", note: "", customerNote: "",
@@ -153,8 +175,10 @@ export function DraftQuoteFieldDetailPage() {
   const load = async () => {
     setLoading(true)
     try {
-      const result = await api<{ draft?: Record<string, unknown> }>(`/api/order-drafts/${encodeURIComponent(draftId)}`)
+      const result = await api<{ draft?: Record<string, unknown>; warehouses?: Array<Record<string, unknown>>; carriers?: QuoteCarrierAccess[] }>(`/api/order-drafts/${encodeURIComponent(draftId)}`)
       setDraft(result.draft || null)
+      setWarehouses(result.warehouses || [])
+      setQuoteCarriers(result.carriers || [])
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load quote.")
     } finally {
@@ -277,8 +301,55 @@ export function DraftQuoteFieldDetailPage() {
     finally { setBusy(false) }
   }
 
+  const openShippingRates = () => {
+    const estimate = draft?.shippingEstimate as Record<string, unknown> | undefined
+    const packageInfo = estimate?.package as Record<string, unknown> | undefined
+    setShippingPackage({
+      weight: packageInfo?.weight ? String(packageInfo.weight) : "",
+      length: packageInfo?.length ? String(packageInfo.length) : "",
+      width: packageInfo?.width ? String(packageInfo.width) : "",
+      height: packageInfo?.height ? String(packageInfo.height) : "",
+    })
+    setShippingWarehouseId(String(estimate?.warehouseId || warehouses.find((row) => row.isDefaultReceiving)?.id || warehouses[0]?.id || ""))
+    setShippingRates([])
+    setSelectedShippingRateId("")
+    setShippingOpen(true)
+  }
+  const requestShippingRates = async () => {
+    const parcel = Object.fromEntries(Object.entries(shippingPackage).map(([key, value]) => [key, Number(value)]))
+    if (Object.values(parcel).some((value) => !Number.isFinite(value) || value <= 0)) { toast.error("Enter weight and all package dimensions."); return }
+    setShippingBusy(true)
+    try {
+      const result = await api<{ rates?: QuoteCarrierRate[] }>(`/api/order-drafts/${encodeURIComponent(draftId)}/shipping-rates`, { method: "POST", body: JSON.stringify({ warehouseId: shippingWarehouseId, package: parcel }) })
+      const rates = [...(result.rates || [])].sort((left, right) => Number(left.amount || 0) - Number(right.amount || 0))
+      setShippingRates(rates)
+      setSelectedShippingRateId(rates[0]?.id || "")
+      if (!rates.length) toast.error("UPS did not return an eligible rate for this package.")
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to request UPS rates.") }
+    finally { setShippingBusy(false) }
+  }
+  const saveShippingRate = async () => {
+    const rate = shippingRates.find((row) => row.id === selectedShippingRateId)
+    if (!rate) return
+    setShippingBusy(true)
+    try {
+      await api(`/api/order-drafts/${encodeURIComponent(draftId)}`, { method: "PATCH", body: JSON.stringify({ shippingEstimate: {
+        providerId: "ups", carrier: "UPS", service: rate.service, amount: rate.amount, currency: rate.currency || "USD",
+        deliveryDays: rate.deliveryDays || null, deliveryEstimate: rate.deliveryEstimate || "", quotedAt: rate.quotedAt || new Date().toISOString(),
+        warehouseId: shippingWarehouseId, package: Object.fromEntries(Object.entries(shippingPackage).map(([key, value]) => [key, Number(value)])),
+      } }) })
+      setShippingOpen(false)
+      await load()
+      toast.success("UPS shipping estimate added to the quote.")
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save the shipping estimate.") }
+    finally { setShippingBusy(false) }
+  }
+
   const lines = Array.isArray(draft?.items) ? draft.items as Array<Record<string, unknown>> : []
-  const total = lines.reduce((sum, line) => sum + Number(line.price || 0) * Number(line.qty || 0), 0)
+  const subtotal = lines.reduce((sum, line) => sum + Number(line.price || 0) * Number(line.qty || 0), 0)
+  const savedShippingEstimate = draft?.shippingEstimate && typeof draft.shippingEstimate === "object" ? draft.shippingEstimate as Record<string, unknown> : null
+  const shippingAmount = Number(savedShippingEstimate?.amount || 0)
+  const total = subtotal + shippingAmount
   const savings = lines.reduce((sum, line) => sum + Math.max(0, Number(line.msrp || 0) - Number(line.price || 0)) * Number(line.qty || 0), 0)
   const missingMsrpCount = lines.filter((line) => !(Number(line.msrp || 0) > 0)).length
   const hasCompleteMsrp = lines.length > 0 && missingMsrpCount === 0
@@ -316,12 +387,20 @@ export function DraftQuoteFieldDetailPage() {
       <Card><CardHeader><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">Quote items</CardTitle><CardDescription>Catalog lines, MSRP, customer prices, and savings.</CardDescription></div>{hasCompleteMsrp ? <Badge variant="outline">{moneyLabel(savings)} customer savings</Badge> : <Badge variant="outline">{lines.length ? `MSRP missing on ${numberLabel(missingMsrpCount)} line${missingMsrpCount === 1 ? "" : "s"}` : "No quote lines"}</Badge>}</div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Item</TableHead><TableHead>Qty</TableHead><TableHead>MSRP</TableHead><TableHead>Unit price</TableHead><TableHead>Savings</TableHead><TableHead>Total</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
         {lines.map((line, index) => { const lineSavings = Math.max(0, Number(line.msrp || 0) - Number(line.price || 0)) * Number(line.qty || 0); return <TableRow key={`${String(line.sku)}-${index}`}><TableCell className="font-mono text-xs">{String(line.sku || "-")}</TableCell><TableCell>{String(line.title || line.sku || "-")}</TableCell><TableCell>{numberLabel(Number(line.qty || 0))}</TableCell><TableCell>{Number(line.msrp || 0) > 0 ? moneyLabel(Number(line.msrp)) : "-"}</TableCell><TableCell>{moneyLabel(Number(line.price || 0))}</TableCell><TableCell className={lineSavings > 0 ? "font-medium text-emerald-600" : "text-muted-foreground"}>{lineSavings > 0 ? moneyLabel(lineSavings) : "-"}</TableCell><TableCell className="font-medium">{moneyLabel(Number(line.price || 0) * Number(line.qty || 0))}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" onClick={() => void findSimilar(line, index)}><Search className="size-4" /> Find similar</Button></TableCell></TableRow> })}
       </TableBody></Table></div></CardContent></Card>
+      {quoteCarriers.some((provider) => provider.id === "ups" && provider.enabled && provider.companyRates) ? <Card><CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Shipping estimate</CardTitle><CardDescription>Use the organization UPS account for an accurate customer quote.</CardDescription></div><Button size="sm" variant={savedShippingEstimate ? "outline" : "default"} onClick={openShippingRates}><Truck className="size-4" /> {savedShippingEstimate ? "Refresh UPS rate" : "Get UPS rate"}</Button></div></CardHeader><CardContent>{savedShippingEstimate ? <div className="grid gap-3 text-sm sm:grid-cols-4"><Detail label="Service" value={String(savedShippingEstimate.service || "UPS")} /><Detail label="Shipping" value={moneyLabel(shippingAmount)} /><Detail label="Package" value={`${String((savedShippingEstimate.package as Record<string, unknown>)?.weight || "-")} lb / ${String((savedShippingEstimate.package as Record<string, unknown>)?.length || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.width || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.height || "-")} in`} /><Detail label="Estimated quote total" value={moneyLabel(total)} /></div> : <p className="text-sm text-muted-foreground">No shipping rate has been added. Product subtotal is {moneyLabel(subtotal)}.</p>}</CardContent></Card> : null}
       <div className="grid gap-4 lg:grid-cols-3">
         <Card><CardHeader className="pb-3"><CardTitle className="text-sm">Internal notes</CardTitle><CardDescription>Visible only to DataPlus staff.</CardDescription></CardHeader><CardContent className="whitespace-pre-wrap text-sm text-muted-foreground">{String(draft.note || "No internal notes.")}</CardContent></Card>
         <Card><CardHeader className="pb-3"><CardTitle className="text-sm">Customer message</CardTitle><CardDescription>Included on every customer quote version.</CardDescription></CardHeader><CardContent className="whitespace-pre-wrap text-sm text-muted-foreground">{String(draft.customerNote || "No customer message.")}</CardContent></Card>
         <Card><CardHeader className="pb-3"><CardTitle className="text-sm">Quote terms</CardTitle><CardDescription>Only checked terms appear on customer PDFs.</CardDescription></CardHeader><CardContent className="grid gap-2 text-sm text-muted-foreground">{selectedTerms.map((term) => <div key={term.id} className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-600" /><span>{term.label}</span></div>)}{draft.customTerms ? <div className="whitespace-pre-wrap border-t pt-2">{String(draft.customTerms)}</div> : null}{!selectedTerms.length && !draft.customTerms ? "No terms selected." : null}</CardContent></Card>
       </div>
     </>}
+
+    <Dialog open={shippingOpen} onOpenChange={(open) => { if (!shippingBusy) setShippingOpen(open) }}><DialogContent className="flex max-h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-3xl flex-col overflow-hidden p-0 sm:max-h-[90vh]"><DialogHeader className="border-b px-4 py-5 sm:px-6"><DialogTitle>Get UPS quote rate</DialogTitle><DialogDescription>Rates use the organization UPS account, this company ship-from address, and the quote customer address.</DialogDescription></DialogHeader><div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-6">
+      {warehouses.length ? <Field label="Ship from warehouse"><Select value={shippingWarehouseId} onValueChange={setShippingWarehouseId}><SelectTrigger><SelectValue placeholder="Use company address" /></SelectTrigger><SelectContent>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || "Warehouse")}</SelectItem>)}</SelectContent></Select></Field> : <Alert><Info className="size-4" /><AlertTitle>Using company address</AlertTitle><AlertDescription>No company warehouse is configured, so UPS will use the saved company profile address.</AlertDescription></Alert>}
+      <div className="grid gap-3 sm:grid-cols-4"><Field label="Weight (lb)"><Input type="number" min="0.01" step="0.01" inputMode="decimal" value={shippingPackage.weight} onChange={(event) => setShippingPackage((current) => ({ ...current, weight: event.target.value }))} /></Field><Field label="Length (in)"><Input type="number" min="0.01" step="0.01" inputMode="decimal" value={shippingPackage.length} onChange={(event) => setShippingPackage((current) => ({ ...current, length: event.target.value }))} /></Field><Field label="Width (in)"><Input type="number" min="0.01" step="0.01" inputMode="decimal" value={shippingPackage.width} onChange={(event) => setShippingPackage((current) => ({ ...current, width: event.target.value }))} /></Field><Field label="Height (in)"><Input type="number" min="0.01" step="0.01" inputMode="decimal" value={shippingPackage.height} onChange={(event) => setShippingPackage((current) => ({ ...current, height: event.target.value }))} /></Field></div>
+      <Button type="button" variant="outline" disabled={shippingBusy} onClick={() => void requestShippingRates()}>{shippingBusy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Request UPS rates</Button>
+      {shippingRates.length ? <div className="grid gap-2"><p className="text-sm font-semibold">Available services</p>{shippingRates.map((rate) => { const selected = selectedShippingRateId === rate.id; return <button key={rate.id} type="button" onClick={() => setSelectedShippingRateId(rate.id)} className={cn("grid gap-1 rounded-md border p-3 text-left transition-colors sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center", selected && "border-primary bg-primary/5")}><span><span className="block font-medium">{rate.carrier} {rate.service}</span><span className="block text-xs text-muted-foreground">{rate.deliveryDays ? `${rate.deliveryDays} business day${rate.deliveryDays === 1 ? "" : "s"}` : "UPS delivery estimate"}{rate.warning ? ` · ${rate.warning}` : ""}</span></span><span className="text-lg font-semibold">{moneyLabel(rate.amount)}</span></button> })}</div> : null}
+    </div><DialogFooter className="border-t bg-background px-4 py-4 sm:px-6"><Button variant="outline" disabled={shippingBusy} onClick={() => setShippingOpen(false)}>Cancel</Button><Button disabled={shippingBusy || !selectedShippingRateId} onClick={() => void saveShippingRate()}>{shippingBusy ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Add rate to quote</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={exportOpen} onOpenChange={setExportOpen}><DialogContent className="w-[calc(100vw-2rem)] max-w-3xl"><DialogHeader><DialogTitle>Print or save quote PDF</DialogTitle><DialogDescription>Choose the customer-facing version for this conversation. Internal notes are excluded from every version.</DialogDescription></DialogHeader><div className="grid gap-2">
       {quotePdfVersions.map((version) => { const disabled = version.id === "savings" && !hasCompleteMsrp; const selected = exportVariant === version.id; return <button key={version.id} type="button" disabled={disabled} onClick={() => setExportVariant(version.id)} className={cn("flex items-start gap-3 rounded-md border p-4 text-left transition-colors", selected && "border-primary bg-primary/5", disabled && "cursor-not-allowed opacity-50")}><span className={cn("mt-0.5 grid size-5 shrink-0 place-items-center rounded-full border", selected && "border-primary bg-primary text-primary-foreground")}>{selected ? <CheckCircle2 className="size-3.5" /> : null}</span><span className="min-w-0"><span className="block font-medium">{version.title}</span><span className="mt-1 block text-sm text-muted-foreground">{version.description}</span>{disabled ? <span className="mt-1 block text-xs font-medium text-amber-600">Add MSRP to every quote line to use this version.</span> : null}</span></button> })}

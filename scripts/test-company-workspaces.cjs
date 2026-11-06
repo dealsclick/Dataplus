@@ -9,7 +9,7 @@ const quoteDocuments=require('../lib/quote-documents');
 const serverSource=require('node:fs').readFileSync(require.resolve('../server'),'utf8');
 const draftFunctions={crypto:require('node:crypto'),normalizeAddress:value=>value,...quoteDocuments};
 require('node:vm').createContext(draftFunctions);
-for(const name of ['nextDraftNumber','nextOrderNumber','normalizeDraftLine','orderDraftTotals','normalizeOrderDraft','buildOrderFromDraft']) {
+for(const name of ['nextDraftNumber','nextOrderNumber','normalizeDraftLine','orderDraftTotals','normalizeDraftShippingEstimate','normalizeOrderDraft','buildOrderFromDraft']) {
   const start=serverSource.indexOf(`function ${name}(`);
   require('node:vm').runInContext(serverSource.slice(start,serverSource.indexOf('\nfunction ',start+1)),draftFunctions);
 }
@@ -21,6 +21,10 @@ test('quote totals follow edited lines, including removal of all lines',()=>{
   const edited=draftFunctions.normalizeOrderDraft(db,{...original,items:[{sku:'A',qty:3,price:12.5}]});
   assert.equal(edited.total,37.5);
   assert.equal(draftFunctions.normalizeOrderDraft(db,{...edited,items:[]}).total,0);
+  const shipped=draftFunctions.normalizeOrderDraft(db,{...edited,shippingEstimate:{amount:8.5,service:'UPS Ground',package:{weight:5,length:10,width:8,height:6}}});
+  assert.equal(shipped.subtotal,37.5);
+  assert.equal(shipped.total,46);
+  assert.equal(shipped.shippingEstimate.service,'UPS Ground');
 });
 
 test('quote customer messages remain separate from internal notes',()=>{
@@ -79,11 +83,17 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
       {product_id:'current',source_sku:'ABC',title:'Current item',cost:999,raw:{secret:true}},
       {product_id:'alternate',source_sku:'ALT-1',title:'Alternative item',brand:'Brand',manufacturer:'Maker',mfr_part_number:'MPN-1',barcode:'0123',default_image:'/image.jpg',uom:'Each',sell_price:'25.50',cost:888,raw:{secret:true}},
     ]}),
+    companyCarrierAccess:async()=>[{id:'ups',name:'UPS',enabled:true,companyRates:true}],
   };
   const operations=createCompanyOperationsHandler({
     store,selection:()=>scope,sendJson:(_res,status,data)=>{response={status,data};},parseBody:async req=>req.body,
     normalizeDraft:draftFunctions.normalizeOrderDraft,buildOrder:draftFunctions.buildOrderFromDraft,
     exportDraft:async(_res,draft,format,variant)=>{exported={draft,format,variant};},
+    quoteUps:async input=>{
+      assert.equal(input.from.line1,'388 South Avenue');
+      assert.equal(input.to.postalCode,'10001');
+      return {status:{ok:true},rates:[{id:'ups-ground',carrier:'UPS',service:'Ground',amount:8.5,currency:'USD',quotedAt:'2026-11-06T12:00:00.000Z'}]};
+    },
   });
   const op=async(path,method='GET',body={})=>{response=null;const handled=await operations({method,body},{},new URL(path,'http://localhost'),{id:'owner',name:'Owner'});return {handled,response};};
   assert.equal((await op('/api/app/bootstrap')).response.data.systemSettings.organizationName,'BuySupply');
@@ -95,6 +105,7 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
   const created=(await op('/api/order-drafts','POST',{
     buyer:'Buyer',customerNote:'Customer-facing note',note:'Internal note',expiresAt:'2026-12-20',
     selectedTermIds:['taxes','net_30','unknown'],customTerms:'Approved custom term.',
+    shippingAddress:{line1:'1 Main St',city:'New York',state:'NY',postalCode:'10001',country:'US'},
     items:[{sku:'ABC',title:'Current item',qty:2,price:10,msrp:15,cost:777}],
   })).response.data.draft;
   assert.equal(created.customerNote,'Customer-facing note');
@@ -102,6 +113,13 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
   assert.deepEqual(Array.from(created.selectedTermIds),['taxes','net_30']);
   assert.equal(created.items[0].msrp,15);
   assert.equal(created.items[0].cost,0,'Company quote input cannot persist a LINQ or caller-provided cost');
+  const rateResult=(await op(`/api/order-drafts/${created.id}/shipping-rates`,'POST',{package:{weight:5,length:10,width:8,height:6}})).response.data;
+  assert.equal(rateResult.rates[0].amount,8.5);
+  const withShipping=(await op(`/api/order-drafts/${created.id}`,'PATCH',{shippingEstimate:{...rateResult.rates[0],warehouseId:'',package:rateResult.package}})).response.data.draft;
+  assert.equal(withShipping.total,28.5);
+  assert.equal(withShipping.shippingEstimate.carrier,'UPS');
+  assert.equal((await op(`/api/order-drafts/${created.id}`,'PATCH',{note:'Internal note updated'})).response.data.draft.shippingEstimate.amount,8.5);
+  assert.equal((await op(`/api/order-drafts/${created.id}`,'PATCH',{shippingAddress:{line1:'2 Main St',city:'New York',state:'NY',postalCode:'10001',country:'US'}})).response.data.draft.shippingEstimate,null);
   assert.equal((await op('/api/orders/references')).response.data.connections.length,0);
   const prospectList=(await op('/api/customers')).response.data;
   assert.equal(prospectList.customers.length,1);
@@ -121,6 +139,7 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
   const exportResult=await op(`/api/order-drafts/${created.id}/export/pdf?variant=savings`);
   assert.equal(exportResult.handled,true);
   assert.equal(exported.draft.id,created.id);
+  assert.equal(exported.draft.companyProfile.organizationName,'BuySupply');
   assert.equal(exported.format,'pdf');
   assert.equal(exported.variant,'savings');
   const unsupported=(await op('/api/shopify/orders/import','POST')).response;
@@ -180,6 +199,11 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(publicProfile.address.line1,'388 South Avenue');
     assert.equal(publicProfile.address.postalCode,'10303');
     assert.equal(publicProfile.returnAddress,undefined,'Conditional return facilities are not saved as the business address');
+    const initialCarrierAccess=await store.carrierAccess(owner,tenantId);
+    assert.equal(initialCarrierAccess.providers.find(provider=>provider.id==='ups').companies.find(company=>company.id==='buysupply').enabled,true);
+    assert.equal(initialCarrierAccess.providers.find(provider=>provider.id==='veeqo').companies.find(company=>company.id==='buysupply').enabled,false);
+    assert.equal((await store.companyCarrierAccess(owner,buy)).find(provider=>provider.id==='ups').enabled,true);
+    await assert.rejects(store.carrierAccess(staff,tenantId),/access/);
     assert.equal((await store.directory(staff)).companies.length,1);
     await assert.rejects(store.createCompany(staff,tenantId,{name:'Forbidden'}),/access/);
     await assert.rejects(store.createCompany(owner,tenantId,{name:'  '}),/company name/);
@@ -189,6 +213,13 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(newCompany.currency,'USD');
     assert.equal(newCompany.company_number,'102');
     assert.deepEqual(await store.companyProfile(owner,newScope),{});
+    assert.equal((await store.companyCarrierAccess(owner,newScope)).find(provider=>provider.id==='ups').enabled,false);
+    await store.saveCarrierAccess(owner,tenantId,'ups',{companyIds:[LEGACY_COMPANY,newCompany.id]});
+    assert.equal((await store.companyCarrierAccess(owner,newScope)).find(provider=>provider.id==='ups').enabled,true);
+    assert.equal((await store.companyCarrierAccess(owner,buy)).find(provider=>provider.id==='ups').enabled,false);
+    await store.saveCarrierAccess(owner,tenantId,'ups',{companyIds:[LEGACY_COMPANY,'buysupply',newCompany.id]});
+    assert.equal((await store.companyCarrierAccess(owner,buy)).find(provider=>provider.id==='ups').enabled,true);
+    await assert.rejects(store.saveCarrierAccess(staff,tenantId,'ups',{companyIds:['buysupply']}),/access/);
     assert.deepEqual(await store.operationalState(owner,newScope),{});
     assert.equal((await store.vendorAccounts(owner,newScope)).length,0);
     assert.equal((await store.catalog(owner,newScope)).rows[0].source_sku,'SKU1');
@@ -238,6 +269,8 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     await pool.query("insert into workspace_tenants(id,name) values('other','Other tenant'); insert into workspace_companies(tenant_id,id,company_number,name,mode) values('other','buysupply',999,'Unrelated company','reporting'); insert into workspace_memberships values('other','outsider','owner','[]');");
     const other={tenantId:'other',companyId:'buysupply'};
     await assert.rejects(store.authorize(owner,other),/access/);
+    await assert.rejects(store.carrierAccess(outsider,'other'),/not available/);
+    await assert.rejects(store.saveCarrierAccess(outsider,'other','ups',{companyIds:['buysupply']}),/not available/);
     await assert.rejects(store.catalog(outsider,other),/no shared catalog/);
     assert.equal((await store.vendorAccounts(outsider,other)).length,0);
     assert.equal((await store.costs(outsider,other,'p1')).length,0);

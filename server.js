@@ -89,7 +89,8 @@ const { createCompanyOperationsHandler } = require("./lib/company-operations-htt
 const companyOperationsHandler = createCompanyOperationsHandler({
   store: companyStore, selection: companySelection, sendJson, sendHtml, parseBody,
   normalizeDraft: normalizeOrderDraft, buildOrder: buildOrderFromDraft,
-  exportDraft: sendOrderDraftExport
+  exportDraft: sendOrderDraftExport,
+  quoteUps: (input) => upsRating.shopRates(input, process.env, carrierCredentials.getUps())
 });
 const { importProgress } = require("./lib/import-progress");
 const { reviewOrder, reviewReturn } = require("./lib/order-data-review");
@@ -18284,6 +18285,27 @@ function orderDraftTotals(items = []) {
   return items.reduce((sum, item) => sum + Number(item.qty || 0) * Number(item.price || 0), 0);
 }
 
+function normalizeDraftShippingEstimate(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const amount = Number(value.amount);
+  const packageSource = value.package && typeof value.package === "object" && !Array.isArray(value.package) ? value.package : {};
+  const packageInfo = Object.fromEntries(["weight", "length", "width", "height"].map((key) => [key, Number(packageSource[key] || 0)]));
+  if (!Number.isFinite(amount) || amount < 0 || Object.values(packageInfo).some((number) => !Number.isFinite(number) || number <= 0)) return null;
+  return {
+    providerId: "ups",
+    carrier: "UPS",
+    service: String(value.service || "").trim(),
+    serviceCode: String(value.serviceCode || "").trim(),
+    amount,
+    currency: String(value.currency || "USD").trim() || "USD",
+    deliveryDays: Number.isFinite(Number(value.deliveryDays)) ? Number(value.deliveryDays) : null,
+    deliveryEstimate: String(value.deliveryEstimate || "").trim(),
+    warehouseId: String(value.warehouseId || "").trim(),
+    quotedAt: String(value.quotedAt || new Date().toISOString()).trim(),
+    package: packageInfo
+  };
+}
+
 function normalizeOrderDraft(db, draft = {}) {
   const createdAt = draft.createdAt || new Date().toISOString();
   const items = (Array.isArray(draft.items) ? draft.items : [])
@@ -18291,6 +18313,8 @@ function normalizeOrderDraft(db, draft = {}) {
     .filter((item) => item.sku || item.title);
   const quoteGroupId = String(draft.quoteGroupId || draft.id || crypto.randomUUID()).trim();
   const revisionNumber = Math.max(1, Number(draft.revisionNumber || 1));
+  const shippingEstimate = normalizeDraftShippingEstimate(draft.shippingEstimate);
+  const subtotal = orderDraftTotals(items);
   return {
     id: draft.id || crypto.randomUUID(),
     draftNumber: String(draft.draftNumber || nextDraftNumber(db)).trim(),
@@ -18313,7 +18337,9 @@ function normalizeOrderDraft(db, draft = {}) {
     shippingAddress: normalizeAddress(draft.shippingAddress || draft.address || {}, "shipping"),
     billingAddress: normalizeAddress(draft.billingAddress || draft.shippingAddress || draft.address || {}, "billing"),
     items,
-    total: orderDraftTotals(items),
+    shippingEstimate,
+    subtotal,
+    total: subtotal + Number(shippingEstimate?.amount || 0),
     createdAt,
     updatedAt: draft.updatedAt || createdAt
   };
@@ -18326,6 +18352,7 @@ async function sendOrderDraftExport(res, draft, format = "pdf", variant = "stand
     const shipTo = [address.name, address.line1, address.line2, [address.city, address.state, address.postalCode].filter(Boolean).join(" "), address.country].filter(Boolean).join(" | ");
     const terms = quoteTerms(draft).join(" | ");
     const rows = items.length ? items.map((item) => ({
+      company: draft.companyProfile?.organizationName || "DealsClick",
       quoteNumber: draft.draftNumber,
       status: draft.status || "draft",
       expiresAt: draft.expiresAt || "",
@@ -18340,10 +18367,14 @@ async function sendOrderDraftExport(res, draft, format = "pdf", variant = "stand
       unitPrice: Number(item.price || 0),
       lineSavings: Math.max(0, Number(item.msrp || 0) - Number(item.price || 0)) * Number(item.qty || 0),
       lineTotal: Number(item.qty || 0) * Number(item.price || 0),
+      shippingService: draft.shippingEstimate?.service || "",
+      shippingAmount: Number(draft.shippingEstimate?.amount || 0),
+      quoteTotal: Number(draft.total || orderDraftTotals(items) + Number(draft.shippingEstimate?.amount || 0)),
       shipTo,
       customerNote: draft.customerNote || "",
       terms
     })) : [{
+      company: draft.companyProfile?.organizationName || "DealsClick",
       quoteNumber: draft.draftNumber,
       status: draft.status || "draft",
       expiresAt: draft.expiresAt || "",
@@ -18358,6 +18389,9 @@ async function sendOrderDraftExport(res, draft, format = "pdf", variant = "stand
       unitPrice: 0,
       lineSavings: 0,
       lineTotal: 0,
+      shippingService: draft.shippingEstimate?.service || "",
+      shippingAmount: Number(draft.shippingEstimate?.amount || 0),
+      quoteTotal: Number(draft.total || Number(draft.shippingEstimate?.amount || 0)),
       shipTo,
       customerNote: draft.customerNote || "",
       terms
@@ -18388,7 +18422,8 @@ function buildOrderFromDraft(db, draft, user = "Luis") {
     price: Number(item.price || 0)
   }));
   const first = items[0] || {};
-  const total = orderDraftTotals(items);
+  const shippingCost = Number(draft.shippingEstimate?.amount || 0);
+  const total = orderDraftTotals(items) + shippingCost;
   const productCost = (draft.items || []).reduce((sum, item) => sum + Number(item.qty || 0) * Number(item.cost || 0), 0);
   return {
     id: crypto.randomUUID(),
@@ -18408,15 +18443,16 @@ function buildOrderFromDraft(db, draft, user = "Luis") {
     buyerEmail: draft.buyerEmail || "",
     phone: draft.phone || "",
     address: normalizeAddress(draft.shippingAddress || {}, "shipping"),
-    shippingService: "Not selected",
+    shippingService: draft.shippingEstimate?.service || "Not selected",
     trackingNumber: "",
-    shippingCarrier: "",
-    carrierName: "",
+    shippingCarrier: draft.shippingEstimate?.carrier || "",
+    carrierName: draft.shippingEstimate?.carrier || "",
     trackingUrl: "",
     shipDate: "",
     productCost,
     marketplaceFees: 0,
-    shippingCost: 0,
+    shippingCost,
+    quotedShipping: draft.shippingEstimate || null,
     refundAmount: 0,
     notes: draft.note || "",
     customerNote: draft.customerNote || "",

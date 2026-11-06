@@ -5,6 +5,7 @@ import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -63,6 +64,11 @@ type CarrierProviderStatus = {
 }
 
 type CarrierProviders = Record<string, CarrierProviderStatus>
+type CarrierAccessCompany = { id: string; name: string; mode: string; enabled: boolean }
+type SharedCarrierAccess = {
+  companies: Array<{ id: string; name: string; mode: string }>
+  providers: Array<{ id: string; name: string; companyRates: boolean; companies: CarrierAccessCompany[] }>
+}
 
 const plannedProviderOrder = ["fedex", "dhl", "ontrac", "amazon_shipping"]
 
@@ -78,6 +84,9 @@ function CredentialField({ label, children, hint }: { label: string; children: R
 
 export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
   const [providers, setProviders] = useState<CarrierProviders>({})
+  const [carrierAccess, setCarrierAccess] = useState<SharedCarrierAccess | null>(null)
+  const [carrierAccessTenantId, setCarrierAccessTenantId] = useState("")
+  const [sharingSaving, setSharingSaving] = useState("")
   const [loading, setLoading] = useState(true)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [uspsDialogOpen, setUspsDialogOpen] = useState(false)
@@ -102,7 +111,41 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
     }
   }
 
-  useEffect(() => { void load() }, [])
+  const loadCarrierAccess = async () => {
+    if (!canManage) return
+    try {
+      const organization = await api<{ selection?: { tenantId?: string }; tenants?: Array<{ id: string }> }>("/api/organization")
+      const tenantId = String(organization.selection?.tenantId || organization.tenants?.[0]?.id || "")
+      if (!tenantId) return
+      const access = await api<SharedCarrierAccess>(`/api/organization/tenants/${encodeURIComponent(tenantId)}/carrier-access`)
+      setCarrierAccessTenantId(tenantId)
+      setCarrierAccess(access)
+    } catch {
+      setCarrierAccess(null)
+    }
+  }
+
+  useEffect(() => { void load(); void loadCarrierAccess() }, [])
+
+  const setCompanyAccess = async (providerId: string, companyId: string, enabled: boolean) => {
+    if (!carrierAccess || !carrierAccessTenantId) return
+    const provider = carrierAccess.providers.find((row) => row.id === providerId)
+    if (!provider) return
+    const companyIds = provider.companies.filter((company) => company.id === companyId ? enabled : company.enabled).map((company) => company.id)
+    setSharingSaving(`${providerId}:${companyId}`)
+    try {
+      const result = await api<SharedCarrierAccess>(`/api/organization/tenants/${encodeURIComponent(carrierAccessTenantId)}/carrier-access/${encodeURIComponent(providerId)}`, {
+        method: "PUT",
+        body: JSON.stringify({ companyIds }),
+      })
+      setCarrierAccess(result)
+      toast.success(`${provider.name} company access updated.`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to update carrier company access.")
+    } finally {
+      setSharingSaving("")
+    }
+  }
 
   const ups = providers.ups
   const usps = providers.usps
@@ -289,6 +332,30 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
         </div>}
       </CardContent>
     </Card>
+
+    {carrierAccess ? <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base"><LockKeyhole className="size-4" /> Share across companies</CardTitle>
+        <CardDescription>Grant a company permission to use an organization carrier account. Credentials remain in restricted server storage and are never copied into company records.</CardDescription>
+      </CardHeader>
+      <CardContent className="p-0">
+        <div className="divide-y border-t">
+          {carrierAccess.providers.map((provider) => <div key={provider.id} className="grid gap-3 p-4 lg:grid-cols-[minmax(160px,0.35fr)_minmax(0,1fr)] lg:items-start">
+            <div>
+              <div className="flex flex-wrap items-center gap-2"><p className="font-semibold">{provider.name}</p>{provider.companyRates ? <Badge variant="outline" className="border-emerald-500/50 text-emerald-700 dark:text-emerald-300">Quote rates ready</Badge> : <Badge variant="secondary">Shared access</Badge>}</div>
+              <p className="mt-1 text-xs text-muted-foreground">{provider.companyRates ? "Enabled companies can request negotiated rates from their company-owned quotes." : "The access grant is managed here; company quote rating is not enabled for this provider yet."}</p>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {provider.companies.map((company) => { const saving = sharingSaving === `${provider.id}:${company.id}`; return <label key={company.id} className="flex min-w-0 cursor-pointer items-center gap-3 rounded-md border p-3">
+                <Checkbox checked={company.enabled} disabled={Boolean(sharingSaving)} onCheckedChange={(value) => void setCompanyAccess(provider.id, company.id, value === true)} />
+                <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{company.name}</span><span className="block text-xs text-muted-foreground">{company.enabled ? "Account enabled" : "Account disabled"}</span></span>
+                {saving ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : null}
+              </label> })}
+            </div>
+          </div>)}
+        </div>
+      </CardContent>
+    </Card> : null}
 
     <Dialog open={dialogOpen} onOpenChange={(open) => { if (!saving && !testing) setDialogOpen(open) }}>
       <DialogContent className="max-h-[calc(100dvh-2rem)] max-w-lg overflow-y-auto">

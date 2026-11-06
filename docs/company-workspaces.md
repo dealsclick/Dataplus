@@ -14,6 +14,8 @@ Company selection is stored in the authenticated session and is therefore shared
 
 Shared product facts are queried in bounded pages, with an allowlist excluding raw data, prices, costs, inventory, and listing metadata. Each company can select products with its own SKU and register vendor accounts. Negotiated costs are per company, product, vendor account, and explicit cost UOM. Blank cost means unknown; zero is preserved. Cost changes include before/after audit evidence. Company setup data is durable in PostgreSQL and does not use the JSON fallback.
 
+Organization carrier accounts use explicit per-company grants. A grant references the existing server-side carrier credential record; it never copies or returns credentials to company storage. UPS is enabled for LINQ and BuySupply in the original organization, while Veeqo and USPS remain LINQ-only by default. Organization owners manage the company checkboxes in carrier settings. BuySupply quote drafts can request UPS negotiated rates only after the grant is checked on every request; the selected service, package, and amount are saved with the company quote and included in its total and PDF. This does not enable company label purchase or carrier tracking. Unrelated tenants cannot receive grants to the original organization's accounts.
+
 The current catalog source is a migration bridge to existing LINQ product identities. It is restricted to the original organization. It is not a platform-wide shared catalog, nor a physical extraction of all product facts into a new master table.
 
 ## Deliberately not enabled yet
