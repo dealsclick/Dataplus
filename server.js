@@ -88,7 +88,8 @@ const companyHandler = createCompanyHandler({
 const { createCompanyOperationsHandler } = require("./lib/company-operations-http");
 const companyOperationsHandler = createCompanyOperationsHandler({
   store: companyStore, selection: companySelection, sendJson, parseBody,
-  normalizeDraft: normalizeOrderDraft, buildOrder: buildOrderFromDraft
+  normalizeDraft: normalizeOrderDraft, buildOrder: buildOrderFromDraft,
+  exportDraft: sendOrderDraftExport
 });
 const { importProgress } = require("./lib/import-progress");
 const { reviewOrder, reviewReturn } = require("./lib/order-data-review");
@@ -52695,7 +52696,7 @@ async function handleApi(req, res) {
   }
 
   const isNotificationRequest = url.pathname === "/api/notifications" || url.pathname.startsWith("/api/notifications/");
-  const isCollaborationRequest = isNotificationRequest || url.pathname === "/api/mentions" || url.pathname.startsWith("/api/mentions/");
+  const isCollaborationRequest = isNotificationRequest || url.pathname === "/api/mentions" || url.pathname.startsWith("/api/mentions/") || (req.method === "POST" && url.pathname === "/api/activity");
   if (!changingOwnPassword && !isCollaborationRequest && await companyOperationsHandler(req,res,url,authUser)) return;
   if (!changingOwnPassword && (postgres.isPostgresEnabled() || companySelection(req))) {
     try {

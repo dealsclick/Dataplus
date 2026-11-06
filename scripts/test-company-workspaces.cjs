@@ -66,6 +66,51 @@ test('all customer quote versions generate real multi-page-capable PDFs',async()
   }
 });
 
+test('company draft quotes use scoped storage for fields, exports, and catalog suggestions',async()=>{
+  const {createCompanyOperationsHandler}=require('../lib/company-operations-http');
+  const scope={tenantId,companyId:'buysupply'};
+  let state={orders:[],orderDrafts:[],returns:[],customers:[],connections:[],warehouses:[],inventory:[],purchaseOrders:[],suppliers:[],vendors:[],brands:[],sequence:{},orderViews:[]};
+  let response=null,exported=null;
+  const store={
+    authorize:async(_user,requested)=>{assert.deepEqual(requested,scope);return {id:'buysupply',name:'BuySupply'};},
+    operationalState:async()=>state,
+    updateOperationalState:async(_user,_scope,_action,work)=>work(state),
+    catalog:async()=>({rows:[
+      {product_id:'current',source_sku:'ABC',title:'Current item',cost:999,raw:{secret:true}},
+      {product_id:'alternate',source_sku:'ALT-1',title:'Alternative item',brand:'Brand',manufacturer:'Maker',mfr_part_number:'MPN-1',barcode:'0123',default_image:'/image.jpg',uom:'Each',cost:888,raw:{secret:true}},
+    ]}),
+  };
+  const operations=createCompanyOperationsHandler({
+    store,selection:()=>scope,sendJson:(_res,status,data)=>{response={status,data};},parseBody:async req=>req.body,
+    normalizeDraft:draftFunctions.normalizeOrderDraft,buildOrder:draftFunctions.buildOrderFromDraft,
+    exportDraft:async(_res,draft,format,variant)=>{exported={draft,format,variant};},
+  });
+  const op=async(path,method='GET',body={})=>{response=null;const handled=await operations({method,body},{},new URL(path,'http://localhost'),{id:'owner',name:'Owner'});return {handled,response};};
+  assert.equal((await op('/api/app/bootstrap')).response.data.systemSettings.organizationName,'BuySupply');
+  assert.equal((await op('/api/app/summary')).response.data.summary,null);
+  assert.deepEqual((await op('/api/app/references?include=warehouses,systemSettings')).response.data.warehouses,[]);
+  const created=(await op('/api/order-drafts','POST',{
+    buyer:'Buyer',customerNote:'Customer-facing note',note:'Internal note',expiresAt:'2026-12-20',
+    selectedTermIds:['taxes','net_30','unknown'],customTerms:'Approved custom term.',
+    items:[{sku:'ABC',title:'Current item',qty:2,price:10,msrp:15,cost:777}],
+  })).response.data.draft;
+  assert.equal(created.customerNote,'Customer-facing note');
+  assert.equal(created.expiresAt,'2026-12-20');
+  assert.deepEqual(Array.from(created.selectedTermIds),['taxes','net_30']);
+  assert.equal(created.items[0].msrp,15);
+  assert.equal(created.items[0].cost,0,'Company quote input cannot persist a LINQ or caller-provided cost');
+  const suggestion=(await op(`/api/order-drafts/${created.id}/similar-skus?lineIndex=0&sku=ABC`)).response.data.alternatives[0];
+  assert.equal(suggestion.sku,'ALT-1');
+  assert.equal(suggestion.cost,undefined);
+  assert.equal(suggestion.raw,undefined);
+  const exportResult=await op(`/api/order-drafts/${created.id}/export/pdf?variant=savings`);
+  assert.equal(exportResult.handled,true);
+  assert.equal(exported.draft.id,created.id);
+  assert.equal(exported.format,'pdf');
+  assert.equal(exported.variant,'savings');
+  assert.equal((await op('/api/shopify/orders/import','POST')).response.status,409);
+});
+
 test('company membership routes require user permission management before reading or writing', async () => {
   let response;
   const handler=createCompanyHandler({store:{},parseBody:async()=>{throw new Error('Unauthorized body must not be processed');},sendJson:(_res,status,data)=>{response={status,data};},canManageMembers:()=>false});
