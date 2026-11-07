@@ -93,7 +93,9 @@ const companyOperationsHandler = createCompanyOperationsHandler({
   quoteUps: (input) => upsRating.shopRates(input, process.env, carrierCredentials.getUps()),
   quoteUsps: (input) => uspsApi.shopRates(input, process.env, carrierCredentials.getUsps()),
   quoteVeeqo: quoteCompanyVeeqo,
-  validateAddress: validateCompanyQuoteAddress
+  purchaseUps: (input) => upsRating.createShipment(input, process.env, carrierCredentials.getUps()),
+  validateAddress: validateCompanyQuoteAddress,
+  attachmentRoot: () => path.join(DATA_DIR, "company-order-attachments")
 });
 const { importProgress } = require("./lib/import-progress");
 const { reviewOrder, reviewReturn } = require("./lib/order-data-review");

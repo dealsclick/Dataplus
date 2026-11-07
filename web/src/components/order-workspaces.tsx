@@ -495,7 +495,7 @@ export function UniversalShippingLabelDialog({ open, onOpenChange, orderId, orde
   const [rateLoadCompleted, setRateLoadCompleted] = useState(false)
   const [adminPinRequired, setAdminPinRequired] = useState(false)
   const [adminPin, setAdminPin] = useState("")
-  const [printPreview, setPrintPreview] = useState<{ shipmentId: string; orderNumber: string } | null>(null)
+  const [printPreview, setPrintPreview] = useState<{ shipmentId: string; orderNumber: string; fileExtension: string } | null>(null)
   const [printDocumentMode, setPrintDocumentMode] = useState("label")
   const [printStations, setPrintStations] = useState<Array<Record<string, any>>>([])
   const [printDestination, setPrintDestination] = useState("browser")
@@ -578,7 +578,10 @@ export function UniversalShippingLabelDialog({ open, onOpenChange, orderId, orde
       toast.success(result.message || "Label purchase is processing. It will appear under Purchased labels when the document is ready.")
       return
     }
-    const nextPreview = { shipmentId, orderNumber: String(order.orderNumber || orderId) }
+    const printDocument = (result.document || shipmentDocuments[0] || {}) as Record<string, unknown>
+    const printFormat = String(printDocument.mimeType || printDocument.format || printDocument.name || "pdf").toLowerCase()
+    const fileExtension = printFormat.includes("gif") ? "gif" : printFormat.includes("png") ? "png" : "pdf"
+    const nextPreview = { shipmentId, orderNumber: String(order.orderNumber || orderId), fileExtension }
     window.setTimeout(() => {
       setPrintDocumentMode(draft.printPackingSlip ? "packing-4x6" : "label")
       setPrintPreview(nextPreview)
@@ -670,7 +673,7 @@ export function UniversalShippingLabelDialog({ open, onOpenChange, orderId, orde
     if (selectedIsReference) return toast.error("This shipping option is reference-only. Choose Veeqo, Temu, or another label provider to print a label.")
     setLoading(true)
     try {
-      const result = await api<{ document?: Record<string, unknown>; shipment?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/labels`, { method: "POST", body: JSON.stringify({ provider: selected.provider, rate: selected, ...draft, labelFormat: draft.labelFormat, lines: selectedLines, purchaseOrderId, adminPin }) })
+      const result = await api<{ document?: Record<string, unknown>; shipment?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/labels`, { method: "POST", body: JSON.stringify({ provider: selected.provider, rate: selected, ...draft, labelFormat: draft.labelFormat, lines: selectedLines, routeIds, purchaseOrderId, adminPin }) })
       await onUpdated()
       onOpenChange(false)
       showPurchasedLabel(result)
@@ -684,7 +687,7 @@ export function UniversalShippingLabelDialog({ open, onOpenChange, orderId, orde
       }
       if (error instanceof Error && error.message.includes("exceeds the configured max") && window.confirm(`${error.message}\n\nBuy this label anyway?`)) {
         try {
-          const result = await api<{ document?: Record<string, unknown>; shipment?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/labels`, { method: "POST", body: JSON.stringify({ provider: selected.provider, rate: selected, ...draft, confirmAboveMaxCost: true, lines: selectedLines, purchaseOrderId, adminPin }) })
+          const result = await api<{ document?: Record<string, unknown>; shipment?: Record<string, unknown>; message?: string }>(`/api/orders/${encodeURIComponent(orderId)}/shipping/labels`, { method: "POST", body: JSON.stringify({ provider: selected.provider, rate: selected, ...draft, confirmAboveMaxCost: true, lines: selectedLines, routeIds, purchaseOrderId, adminPin }) })
           await onUpdated(); onOpenChange(false); showPurchasedLabel(result)
         } catch (confirmError) { toast.error(confirmError instanceof Error ? confirmError.message : "Unable to print shipping label.") }
       } else {
@@ -873,7 +876,7 @@ export function UniversalShippingLabelDialog({ open, onOpenChange, orderId, orde
         <DialogHeader className="border-b p-4 pr-12"><DialogTitle>Print label {printPreview?.orderNumber}</DialogTitle><DialogDescription>The label is already purchased. Choose the packet format, preview it, then print or download it without buying again.</DialogDescription></DialogHeader>
         <div className="grid gap-3 border-b bg-muted/20 p-3 sm:p-4"><RadioGroup value={printDocumentMode} onValueChange={setPrintDocumentMode} className="grid gap-2 sm:grid-cols-3"><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="label" className="mt-0.5" /><span><span className="block text-sm font-medium">Shipping label</span><span className="block text-xs text-muted-foreground">Carrier label only</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-4x6" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">4 x 6 thermal pages</span></span></Label><Label className="flex cursor-pointer items-start gap-2 rounded-md border bg-background p-3"><RadioGroupItem value="packing-letter" className="mt-0.5" /><span><span className="block text-sm font-medium">Label + packing slip</span><span className="block text-xs text-muted-foreground">Packing slip on Letter</span></span></Label></RadioGroup><div className="grid gap-3 sm:grid-cols-2"><Field label="Print destination"><Select value={printDestination} onValueChange={choosePrintDestination}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="browser">This browser</SelectItem>{printStations.map((station) => <SelectItem key={String(station.id)} value={String(station.id)}>{String(station.name || "Print station")}{station.online ? " - online" : ""}</SelectItem>)}</SelectContent></Select><p className="text-xs text-muted-foreground">Saved as your default print destination.</p></Field>{selectedPrintStation ? <Field label="Printer"><Select value={printStationPrinter} onValueChange={(printerName) => { setPrintStationPrinter(printerName); void savePrintPreference(printDestination, printerName) }}><SelectTrigger><SelectValue placeholder="Choose printer" /></SelectTrigger><SelectContent>{(selectedPrintStation.printers || []).map((printer: string) => <SelectItem key={printer} value={printer}>{printer}</SelectItem>)}</SelectContent></Select></Field> : null}</div></div>
         <div className="min-h-0 flex-1 bg-muted/30 p-2 sm:p-4">{printPacketUrl ? <iframe key={printPacketUrl} ref={printFrameRef} src={printPacketUrl} title={`Purchased label ${printPreview?.orderNumber || ""}`} className="h-full min-h-[420px] w-full rounded-md border bg-white" /> : null}</div>
-        <DialogFooter className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setPrintPreview(null)}>Close</Button>{printPacketUrl ? <Button variant="outline" asChild><a href={printPacketUrl} download={`Label-${printPreview?.orderNumber || orderId}.pdf`}><FileDown className="size-4" /> Download PDF</a></Button> : null}<Button disabled={!printPacketUrl || loading || (printDestination !== "browser" && !printStationPrinter)} onClick={() => void (printDestination === "browser" ? printPurchasedLabel() : sendPurchasedLabelToStation())}>{loading ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} {printDestination === "browser" ? "Print in browser" : "Send to printer"}</Button></DialogFooter>
+        <DialogFooter className="border-t p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" onClick={() => setPrintPreview(null)}>Close</Button>{printPacketUrl ? <Button variant="outline" asChild><a href={printPacketUrl} download={`Label-${printPreview?.orderNumber || orderId}.${printPreview?.fileExtension || "pdf"}`}><FileDown className="size-4" /> Download label</a></Button> : null}<Button disabled={!printPacketUrl || loading || (printDestination !== "browser" && !printStationPrinter)} onClick={() => void (printDestination === "browser" ? printPurchasedLabel() : sendPurchasedLabelToStation())}>{loading ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} {printDestination === "browser" ? "Print in browser" : "Send to printer"}</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   </>

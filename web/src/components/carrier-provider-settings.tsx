@@ -68,7 +68,7 @@ type CarrierAccessCompany = { id: string; name: string; mode: string; enabled: b
 type CompanyCarrierPreference = { companyId: string; selectionMode: "lowest_cost" | "preferred_carrier"; preferredProviderId: string; rateTtlMinutes: number }
 type SharedCarrierAccess = {
   companies: Array<{ id: string; name: string; mode: string }>
-  providers: Array<{ id: string; name: string; companyRates: boolean; companies: CarrierAccessCompany[] }>
+  providers: Array<{ id: string; name: string; companyRates: boolean; companyLabels?: boolean; companies: CarrierAccessCompany[] }>
   preferences: CompanyCarrierPreference[]
 }
 
@@ -368,8 +368,8 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
         <div className="divide-y border-t">
           {carrierAccess.providers.map((provider) => <div key={provider.id} className="grid gap-3 p-4 lg:grid-cols-[minmax(160px,0.35fr)_minmax(0,1fr)] lg:items-start">
             <div>
-              <div className="flex flex-wrap items-center gap-2"><p className="font-semibold">{provider.name}</p>{provider.companyRates ? <Badge variant="outline" className="border-emerald-500/50 text-emerald-700 dark:text-emerald-300">Quote rates ready</Badge> : <Badge variant="secondary">Shared access</Badge>}</div>
-              <p className="mt-1 text-xs text-muted-foreground">{provider.companyRates ? "Enabled companies can request negotiated rates from their company-owned quotes." : "The access grant is managed here; company quote rating is not enabled for this provider yet."}</p>
+              <div className="flex flex-wrap items-center gap-2"><p className="font-semibold">{provider.name}</p>{provider.companyRates ? <Badge variant="outline" className="border-emerald-500/50 text-emerald-700 dark:text-emerald-300">Quote rates ready</Badge> : <Badge variant="secondary">Shared access</Badge>}{provider.companyLabels ? <Badge variant="outline" className="border-blue-500/50 text-blue-700 dark:text-blue-300">Shipping labels ready</Badge> : null}</div>
+              <p className="mt-1 text-xs text-muted-foreground">{provider.companyLabels ? "Enabled companies can request negotiated rates and buy labels on the shared account without accessing another company's orders." : provider.companyRates ? "Enabled companies can request negotiated rates from their company-owned quotes." : "The access grant is managed here; company quote rating is not enabled for this provider yet."}</p>
             </div>
             <div className="grid gap-2 sm:grid-cols-2">
               {provider.companies.map((company) => { const saving = sharingSaving === `${provider.id}:${company.id}`; return <label key={company.id} className="flex min-w-0 cursor-pointer items-center gap-3 rounded-md border p-3">

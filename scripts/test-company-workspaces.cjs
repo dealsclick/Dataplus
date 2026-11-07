@@ -70,9 +70,11 @@ test('all customer quote versions generate real multi-page-capable PDFs',async()
   }
 });
 
-test('company draft quotes use scoped storage for fields, exports, and catalog suggestions',async()=>{
+test('company draft quotes use scoped storage for fields, exports, catalog suggestions, and UPS labels',async(t)=>{
   const {createCompanyOperationsHandler}=require('../lib/company-operations-http');
   const scope={tenantId,companyId:'buysupply'};
+  const attachmentRoot=require('node:fs').mkdtempSync(require('node:path').join(require('node:os').tmpdir(),'dataplus-company-labels-'));
+  t.after(()=>require('node:fs').rmSync(attachmentRoot,{recursive:true,force:true}));
   let state={orders:[],orderDrafts:[],returns:[],customers:[],connections:[],warehouses:[],inventory:[],purchaseOrders:[],suppliers:[],vendors:[],brands:[],sequence:{},orderViews:[]};
   let response=null,exported=null;
   const store={
@@ -84,9 +86,9 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
       {product_id:'alternate',source_sku:'ALT-1',title:'Alternative item',brand:'Brand',manufacturer:'Maker',mfr_part_number:'MPN-1',barcode:'0123',default_image:'/image.jpg',uom:'Each',sell_price:'25.50',cost:888,raw:{secret:true}},
     ]}),
     companyCarrierAccess:async()=>[
-      {id:'ups',name:'UPS',enabled:true,companyRates:true},
-      {id:'usps',name:'USPS',enabled:true,companyRates:true},
-      {id:'veeqo',name:'Veeqo',enabled:true,companyRates:true},
+      {id:'ups',name:'UPS',enabled:true,companyRates:true,companyLabels:true},
+      {id:'usps',name:'USPS',enabled:true,companyRates:true,companyLabels:false},
+      {id:'veeqo',name:'Veeqo',enabled:true,companyRates:true,companyLabels:false},
     ],
     companyCarrierPreference:async()=>({selectionMode:'preferred_carrier',preferredProviderId:'usps',rateTtlMinutes:30}),
   };
@@ -97,11 +99,16 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
     quoteUps:async input=>{
       assert.equal(input.from.line1,'388 South Avenue');
       assert.equal(input.to.postalCode,'10001');
-      return {status:{ok:true},rates:[{id:'ups-ground',carrier:'UPS',service:'Ground',amount:8.5,currency:'USD',quotedAt:'2026-11-06T12:00:00.000Z'}]};
+      return {status:{ok:true},rates:[{id:'ups-ground',carrier:'UPS',service:'Ground',serviceCode:'03',amount:8.5,currency:'USD',quotedAt:'2026-11-06T12:00:00.000Z'}]};
     },
     quoteUsps:async()=>({status:{ok:true},rates:[{id:'usps-ground',carrier:'USPS',service:'Ground Advantage',amount:9,currency:'USD'}]}),
     quoteVeeqo:async()=>{throw new Error('Veeqo test account unavailable');},
+    purchaseUps:async input=>{
+      assert.equal(input.serviceCode,'03');assert.equal(input.package.weight,5);assert.equal(input.to.postalCode,'10001');
+      return {content:Buffer.from('GIF89a'),mimeType:'image/gif',format:'GIF',trackingNumber:'1Z999AA10123456784',shipmentIdentificationNumber:'1Z999AA10123456784',service:'UPS Ground',serviceCode:'03',amount:8.5,currency:'USD',transactionId:'test-transaction'};
+    },
     validateAddress:async({address})=>({status:'verified',providerId:'usps',address,message:'USPS verified the destination address.'}),
+    attachmentRoot,
   });
   const op=async(path,method='GET',body={})=>{response=null;const handled=await operations({method,body},{},new URL(path,'http://localhost'),{id:'owner',name:'Owner'});return {handled,response};};
   assert.equal((await op('/api/app/bootstrap')).response.data.systemSettings.organizationName,'BuySupply');
@@ -159,6 +166,27 @@ test('company draft quotes use scoped storage for fields, exports, and catalog s
   assert.equal(exported.draft.companyProfile.organizationName,'BuySupply');
   assert.equal(exported.format,'pdf');
   assert.equal(exported.variant,'savings');
+  const warehouse=(await op('/api/warehouses','POST',{name:'BuySupply Warehouse',code:'BS',isDefaultReceiving:true,addressLine1:'388 South Avenue',city:'Staten Island',state:'NY',postalCode:'10303',country:'US',phone:'7185550100'})).response.data.warehouse;
+  await op(`/api/order-drafts/${created.id}`,'PATCH',{shippingAddress:{line1:'1 Main St',city:'New York',state:'NY',postalCode:'10001',country:'US',phone:'2125550100'}});
+  const freshQuote=(await op(`/api/order-drafts/${created.id}/shipping-rates`,'POST',{warehouseId:warehouse.id,package:{weight:5,length:10,width:8,height:6}})).response.data;
+  const upsQuote=freshQuote.rates.find(rate=>rate.provider==='ups');
+  await op(`/api/order-drafts/${created.id}`,'PATCH',{shippingEstimate:{...upsQuote,warehouseId:warehouse.id,package:freshQuote.package}});
+  const converted=(await op(`/api/order-drafts/${created.id}/convert`,'POST')).response.data.order;
+  const routeId=`company-route:${converted.id}:0`;
+  const orderRates=(await op(`/api/orders/${converted.id}/shipping/rates`,'POST',{warehouseId:warehouse.id,packageWeight:5,packageLength:10,packageWidth:8,packageHeight:6,routeIds:[routeId]})).response.data;
+  assert.equal(orderRates.rateReview.package.weight,5,'Order label dialog package field names are accepted');
+  assert.equal(state.orders.find(row=>row.id===converted.id).package.packageWeight,5,'Saved order dimensions reopen in the label dialog');
+  const selectedUps=orderRates.rates.find(rate=>rate.provider==='ups');
+  await op(`/api/fulfillment/rates/${encodeURIComponent(routeId)}`,'PATCH',{selectedRateId:selectedUps.id,routeIds:[routeId]});
+  assert.equal((await op(`/api/orders/${converted.id}/shipping/labels`,'POST',{provider:'ups',rate:selectedUps,warehouseId:warehouse.id,packageWeight:5,packageLength:10,packageWidth:8,packageHeight:6,routeIds:['company-route:another-order:0']})).response.status,404);
+  const purchase=(await op(`/api/orders/${converted.id}/shipping/labels`,'POST',{provider:'ups',rate:selectedUps,warehouseId:warehouse.id,packageWeight:5,packageLength:10,packageWidth:8,packageHeight:6,routeIds:[routeId]})).response.data;
+  assert.equal(purchase.shipment.trackingNumber,'1Z999AA10123456784');
+  assert.equal(purchase.document.storage,'company_local');
+  assert.ok(require('node:fs').existsSync(require('node:path').join(attachmentRoot,require('node:fs').readdirSync(attachmentRoot)[0],purchase.document.storageKey)));
+  const duplicatePurchase=(await op(`/api/orders/${converted.id}/shipping/labels`,'POST',{provider:'ups',rate:selectedUps,warehouseId:warehouse.id,packageWeight:5,packageLength:10,packageWidth:8,packageHeight:6,routeIds:[routeId]})).response.data;
+  assert.equal(duplicatePurchase.shipment.id,purchase.shipment.id,'Repeated clicks do not buy a duplicate UPS label');
+  const printed=(await op(`/api/orders/${converted.id}/shipments/${purchase.shipment.id}/printed`,'POST')).response.data;
+  assert.equal(printed.order.operationalStatus,'shipped');
   const unsupported=(await op('/api/shopify/orders/import','POST')).response;
   assert.equal(unsupported.status,409);
   assert.match(unsupported.data.error,/BuySupply has not enabled POST \/api\/shopify\/orders\/import yet/);
@@ -404,7 +432,8 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     let activeScope=buy,operationalResponse;
     const operations=createCompanyOperationsHandler({store,selection:()=>activeScope,sendJson:(_r,status,data)=>{operationalResponse={status,data};},sendHtml:(_r,status,html)=>{operationalResponse={status,html};},parseBody:async req=>req.body,
       normalizeDraft:draftFunctions.normalizeOrderDraft,
-      buildOrder:draftFunctions.buildOrderFromDraft});
+      buildOrder:draftFunctions.buildOrderFromDraft,
+      purchaseUps:async()=>({content:Buffer.from('GIF89a'),trackingNumber:'1Z999AA10123456784',service:'UPS Ground',amount:8.25,currency:'USD'})});
     const op=async(path,method='GET',body={},user=owner)=>{await operations({method,body},{},new URL(path,'http://localhost'),user);return operationalResponse;};
     assert.equal((await op('/api/state')).data.connections.length,0);
     assert.equal((await op('/api/orders')).data.orders.length,0);
@@ -445,6 +474,7 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(fulfillment.work.length,1);
     assert.equal(fulfillment.work[0].warehouseId,warehouse.id);
     assert.equal(fulfillment.capabilities.labelPurchase,false);
+    assert.equal(fulfillment.capabilities.orderLabelPurchase,true);
     const route=fulfillment.work[0];
     const packageResult=(await op(`/api/orders/${route.orderId}/fulfillment-package`,'PATCH',{routeId:route.id,warehouseId:warehouse.id,warehouseName:warehouse.name,packageWeight:5,packageLength:10,packageWidth:8,packageHeight:6})).data;
     assert.equal(packageResult.route.labelReadiness.weight,5);
