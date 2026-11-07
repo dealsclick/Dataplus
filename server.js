@@ -18273,6 +18273,8 @@ function normalizeCustomerLists(customer) {
 function normalizeDraftLine(db, line = {}, index = 0) {
   const sku = String(line.sku || "").trim();
   const inventoryItem = (db.inventory || []).find((item) => String(item.sku || "").toLowerCase() === sku.toLowerCase());
+  const rawCost = line.cost !== undefined ? line.cost : inventoryItem?.cost;
+  const cost = quoteSupplierCost(rawCost);
   return {
     id: line.id || crypto.randomUUID(),
     sku,
@@ -18280,7 +18282,14 @@ function normalizeDraftLine(db, line = {}, index = 0) {
     qty: Math.max(1, Number(line.qty || 1)),
     price: Number(line.price ?? inventoryItem?.price ?? 0),
     msrp: Math.max(0, Number(line.msrp ?? inventoryItem?.listPrice ?? inventoryItem?.msrp ?? 0)),
-    cost: Number(line.cost ?? inventoryItem?.cost ?? 0),
+    cost,
+    selectedSupplierKey: String(line.selectedSupplierKey || "").trim(),
+    selectedSupplierId: String(line.selectedSupplierId || "").trim(),
+    selectedSupplierName: String(line.selectedSupplierName || "").trim(),
+    selectedSupplierCode: String(line.selectedSupplierCode || "").trim(),
+    selectedSupplierSku: String(line.selectedSupplierSku || "").trim(),
+    selectedSupplierProductId: String(line.selectedSupplierProductId || "").trim(),
+    selectedSupplierUom: String(line.selectedSupplierUom || "").trim(),
     note: String(line.note || "").trim(),
     sortOrder: Number(line.sortOrder ?? index)
   };
@@ -18431,12 +18440,22 @@ function buildOrderFromDraft(db, draft, user = "Luis") {
     sku: item.sku,
     title: item.title,
     qty: Number(item.qty || 1),
-    price: Number(item.price || 0)
+    price: Number(item.price || 0),
+    cost: quoteSupplierCost(item.cost),
+    selectedSupplierKey: String(item.selectedSupplierKey || ""),
+    selectedSupplierId: String(item.selectedSupplierId || ""),
+    selectedSupplierName: String(item.selectedSupplierName || ""),
+    selectedSupplierCode: String(item.selectedSupplierCode || ""),
+    selectedSupplierSku: String(item.selectedSupplierSku || ""),
+    selectedSupplierProductId: String(item.selectedSupplierProductId || ""),
+    selectedSupplierUom: String(item.selectedSupplierUom || "")
   }));
   const first = items[0] || {};
   const shippingCost = Number(draft.shippingEstimate?.amount || 0);
   const total = orderDraftTotals(items) + shippingCost;
-  const productCost = (draft.items || []).reduce((sum, item) => sum + Number(item.qty || 0) * Number(item.cost || 0), 0);
+  const productCost = items.every((item) => item.cost !== null)
+    ? items.reduce((sum, item) => sum + Number(item.qty || 0) * Number(item.cost), 0)
+    : null;
   return {
     id: crypto.randomUUID(),
     internalOrderNumber,
@@ -47117,7 +47136,7 @@ async function auditSupplierOptionsForLine(line = {}) {
   if (!product) return { product: null, options: [], pendingReviewCount: 0 };
   const cacheVersion = String(product.supplierCoverageUpdatedAt || "unindexed").trim();
   const cacheIdentity = encodeURIComponent(`${String(product.id || product.sku || line.productId || line.sku || "").trim().toLowerCase()}:${cacheVersion}`);
-  const cacheKey = cacheIdentity ? `dataplus:audit-supplier-options:v2:${cacheIdentity}` : "";
+  const cacheKey = cacheIdentity ? `dataplus:audit-supplier-options:v3:${cacheIdentity}` : "";
   if (cacheKey) {
     const cached = await redisCache.getJson(cacheKey);
     if (cached && Array.isArray(cached.options)) {
@@ -47165,8 +47184,8 @@ async function auditSupplierOptionsForLine(line = {}) {
       vendorSku: String(match.vendorSku || match.sourceSku || match.sku || "").trim(),
       manufacturerSku: String(match.mfrPartNumber || product.mfrPartNumber || product.manufacturerPartNumber || product.mpn || "").trim(),
       barcode: String(match.barcode || match.upc || match.gtin || product.barcode || product.upc || product.gtin || "").trim(),
-      cost: Number(match.cost || 0),
-      qty: Number(match.qty || 0),
+      cost: match.cost === null || match.cost === undefined || match.cost === "" ? null : Number(match.cost),
+      qty: match.qty === null || match.qty === undefined || match.qty === "" ? null : Number(match.qty),
       matchType: String(match.matchType || coverage.matchType || "").trim(),
       matchStatus: String(match.matchStatus || "confirmed").trim().toLowerCase(),
       requiresReview: Boolean(match.requiresReview || String(match.matchStatus || "").trim().toLowerCase() === "pending"),
@@ -47176,9 +47195,11 @@ async function auditSupplierOptionsForLine(line = {}) {
     const current = bySupplier.get(key);
     const optionConfirmed = !option.requiresReview;
     const currentConfirmed = current && !current.requiresReview;
+    const optionHasCost = option.cost !== null && Number.isFinite(option.cost);
+    const currentHasCost = current?.cost !== null && current?.cost !== undefined && Number.isFinite(current.cost);
     if (!current
       || (optionConfirmed && !currentConfirmed)
-      || (optionConfirmed === currentConfirmed && option.cost > 0 && (Number(current.cost || 0) <= 0 || option.cost < Number(current.cost || 0)))) {
+      || (optionConfirmed === currentConfirmed && optionHasCost && (!currentHasCost || option.cost < current.cost))) {
       bySupplier.set(key, option);
     }
   }
@@ -47195,6 +47216,68 @@ async function auditSupplierOptionsForLine(line = {}) {
     }, result.options.length ? 3600 : 300);
   }
   return result;
+}
+
+function quoteSupplierCost(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+async function quoteSupplierOptionsForSku(sku = "") {
+  const product = await postgres.readProductByKey(sku);
+  if (!product) return { product: null, options: [] };
+  const [coverage, similarity] = await Promise.all([
+    auditSupplierOptionsForLine({ productId: product.id, sku: product.sku }),
+    postgres.readProductSimilarityGroup({ productId: product.id, sku: product.sku }).catch(() => ({ members: [] }))
+  ]);
+  const options = [];
+  const seen = new Set();
+  const add = (source = {}, related = false) => {
+    const supplierName = String(source.supplierName || source.supplier || "").trim();
+    const supplierCode = String(source.supplierCode || "").trim();
+    const supplierSku = String(source.sourceSku || source.vendorSku || source.sku || "").trim();
+    if (!supplierName && !supplierCode) return;
+    const productId = String(source.productId || product.id || "").trim();
+    const identity = `${productId.toLowerCase()}::${String(source.vendorId || supplierCode || supplierName).trim().toLowerCase()}::${supplierSku.toLowerCase()}`;
+    if (seen.has(identity)) return;
+    seen.add(identity);
+    const requiresReview = Boolean(source.requiresReview || String(source.matchStatus || "").toLowerCase() === "pending");
+    options.push({
+      key: related ? `product:${productId}` : `supplier:${String(source.key || source.vendorId || supplierCode || supplierName).trim().toLowerCase()}`,
+      productId,
+      vendorId: String(source.vendorId || "").trim(),
+      supplierName: supplierName || supplierCode,
+      supplierCode,
+      supplierSku,
+      sourceSku: String(source.sourceSku || supplierSku).trim(),
+      vendorSku: String(source.vendorSku || supplierSku).trim(),
+      managedSku: String(source.sku || product.sku || "").trim(),
+      cost: quoteSupplierCost(source.cost),
+      qty: source.supplierQty ?? source.qty ?? source.stockQty ?? null,
+      uom: String(source.uom || "").trim(),
+      matchType: String(source.matchType || (related ? "related-product" : "primary")).trim(),
+      requiresReview,
+      selectable: !requiresReview,
+      related,
+      isPrimary: !related && String(source.matchType || "").toLowerCase() === "primary"
+    });
+  };
+  for (const option of coverage.options || []) add(option, false);
+  for (const member of similarity.members || []) {
+    if (String(member.productId || "") === String(product.id || "")) continue;
+    add(member, true);
+  }
+  options.sort((left, right) => {
+    if (left.requiresReview !== right.requiresReview) return left.requiresReview ? 1 : -1;
+    const leftKnown = left.cost !== null;
+    const rightKnown = right.cost !== null;
+    if (leftKnown !== rightKnown) return leftKnown ? -1 : 1;
+    if (leftKnown && rightKnown && left.cost !== right.cost) return left.cost - right.cost;
+    return left.supplierName.localeCompare(right.supplierName);
+  });
+  const knownCosts = options.filter((option) => option.selectable && option.cost !== null).map((option) => option.cost);
+  return { product, options, lowestCost: knownCosts.length ? Math.min(...knownCosts) : null };
 }
 
 function normalizeAuditDemandSku(value) {
@@ -70328,6 +70411,30 @@ async function handleApi(req, res) {
     if (!skus.length) return draftLike;
     const products = await postgres.readProductsByKeys(skus);
     db.inventory = products || [];
+    const selectedItems = items.filter((item) => String(item.selectedSupplierKey || "").trim());
+    if (selectedItems.length) {
+      const bySku = new Map();
+      await Promise.all([...new Set(selectedItems.map((item) => String(item.sku || "").trim()).filter(Boolean))].map(async (sku) => {
+        bySku.set(sku.toLowerCase(), await quoteSupplierOptionsForSku(sku));
+      }));
+      for (const item of selectedItems) {
+        const result = bySku.get(String(item.sku || "").trim().toLowerCase());
+        const selection = result?.options?.find((option) => option.key === String(item.selectedSupplierKey || "").trim());
+        if (!selection || !selection.selectable) {
+          throw Object.assign(new Error(`The selected supplier for ${item.sku || "this quote line"} is no longer available.`), { statusCode: 409 });
+        }
+        Object.assign(item, {
+          cost: selection.cost,
+          selectedSupplierKey: selection.key,
+          selectedSupplierId: selection.vendorId || "",
+          selectedSupplierName: selection.supplierName,
+          selectedSupplierCode: selection.supplierCode || "",
+          selectedSupplierSku: selection.supplierSku || selection.sourceSku || selection.vendorSku || "",
+          selectedSupplierProductId: selection.productId || "",
+          selectedSupplierUom: selection.uom || ""
+        });
+      }
+    }
     return draftLike;
   }
 
@@ -70352,6 +70459,21 @@ async function handleApi(req, res) {
     const db = { inventory: inventory || [], warehouses: warehouses || [], sequence: {} };
     const draft = normalizeOrderDraft(db, rawDraft);
     return sendJson(res, 200, { draft, warehouses: db.warehouses });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] && parts[3] === "supplier-options" && parts.length === 4 && postgres.isPostgresEnabled()) {
+    const drafts = await postgres.readStateField("orderDrafts").catch(() => []);
+    const rawDraft = (drafts || []).find((row) => String(row.id || "") === String(parts[2]) || String(row.draftNumber || "").toLowerCase() === String(parts[2]).toLowerCase());
+    if (!rawDraft) return notFound(res);
+    const sku = String(url.searchParams.get("sku") || "").trim();
+    if (!sku) return sendJson(res, 400, { error: "Choose a quote line SKU." });
+    const result = await quoteSupplierOptionsForSku(sku);
+    return sendJson(res, 200, {
+      sku,
+      options: result.options,
+      lowestCost: result.lowestCost,
+      costScope: "operational_catalog"
+    });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] && parts[3] === "similar-skus" && postgres.isPostgresEnabled()) {

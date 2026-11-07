@@ -9,7 +9,7 @@ const quoteDocuments=require('../lib/quote-documents');
 const serverSource=require('node:fs').readFileSync(require.resolve('../server'),'utf8');
 const draftFunctions={crypto:require('node:crypto'),normalizeAddress:value=>value,...quoteDocuments};
 require('node:vm').createContext(draftFunctions);
-for(const name of ['nextDraftNumber','nextOrderNumber','normalizeDraftLine','orderDraftTotals','normalizeDraftShippingEstimate','normalizeOrderDraft','buildOrderFromDraft']) {
+for(const name of ['quoteSupplierCost','nextDraftNumber','nextOrderNumber','normalizeDraftLine','orderDraftTotals','normalizeDraftShippingEstimate','normalizeOrderDraft','buildOrderFromDraft']) {
   const start=serverSource.indexOf(`function ${name}(`);
   require('node:vm').runInContext(serverSource.slice(start,serverSource.indexOf('\nfunction ',start+1)),draftFunctions);
 }
@@ -40,6 +40,22 @@ test('quote customer messages remain separate from internal notes',()=>{
   const order=draftFunctions.buildOrderFromDraft(db,draft,'Sales user');
   assert.equal(order.notes,'Staff follow-up only');
   assert.equal(order.customerNote,'Pricing is valid for 14 days.');
+});
+
+test('quote supplier selections preserve zero cost and make unknown total cost explicit',()=>{
+  const db={inventory:[],orders:[],orderDrafts:[],sequence:{order:1000,draft:1000}};
+  const selected=draftFunctions.normalizeOrderDraft(db,{items:[{
+    sku:'A',qty:2,price:15,cost:0,selectedSupplierKey:'vendor:one',selectedSupplierId:'one',
+    selectedSupplierName:'Supplier One',selectedSupplierSku:'SUP-A',selectedSupplierUom:'Each'
+  }]});
+  assert.equal(selected.items[0].cost,0);
+  assert.equal(selected.items[0].selectedSupplierName,'Supplier One');
+  const order=draftFunctions.buildOrderFromDraft(db,selected,'Sales user');
+  assert.equal(order.productCost,0);
+  assert.equal(order.items[0].selectedSupplierSku,'SUP-A');
+  const unknown=draftFunctions.normalizeOrderDraft(db,{items:[{sku:'B',qty:1,price:20,cost:null}]});
+  assert.equal(unknown.items[0].cost,null);
+  assert.equal(draftFunctions.buildOrderFromDraft(db,unknown,'Sales user').productCost,null);
 });
 
 test('quote expiration, terms, MSRP, and savings remain structured',()=>{
@@ -85,6 +101,10 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
       {product_id:'current',source_sku:'ABC',title:'Current item',cost:999,raw:{secret:true}},
       {product_id:'alternate',source_sku:'ALT-1',title:'Alternative item',brand:'Brand',manufacturer:'Maker',mfr_part_number:'MPN-1',barcode:'0123',default_image:'/image.jpg',uom:'Each',sell_price:'25.50',cost:888,raw:{secret:true}},
     ]}),
+    costs:async(_user,_scope,productId)=>productId==='current' ? [
+      {vendor_account_id:'vendor-standard',unit_cost:'6.00',uom:'Each',supplier_name:'Standard Supply'},
+      {vendor_account_id:'vendor-low',unit_cost:'4.00',uom:'Each',supplier_name:'Lowest Cost Supply'},
+    ] : [],
     companyCarrierAccess:async()=>[
       {id:'ups',name:'UPS',enabled:true,companyRates:true,companyLabels:true},
       {id:'usps',name:'USPS',enabled:true,companyRates:true,companyLabels:false},
@@ -127,7 +147,16 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   assert.equal(created.expiresAt,'2026-12-20');
   assert.deepEqual(Array.from(created.selectedTermIds),['taxes','net_30']);
   assert.equal(created.items[0].msrp,15);
-  assert.equal(created.items[0].cost,0,'Company quote input cannot persist a LINQ or caller-provided cost');
+  assert.equal(created.items[0].cost,null,'Company quote input cannot persist a LINQ or caller-provided cost');
+  const supplierOptions=(await op(`/api/order-drafts/${created.id}/supplier-options?sku=ABC`)).response.data.options;
+  assert.equal(supplierOptions.length,2);
+  assert.equal(supplierOptions[0].supplierName,'Lowest Cost Supply');
+  assert.equal(supplierOptions[0].cost,4);
+  const withSupplier=(await op(`/api/order-drafts/${created.id}`,'PATCH',{items:[{
+    sku:'ABC',title:'Current item',qty:2,price:10,msrp:15,selectedSupplierKey:'vendor:vendor-low'
+  }]})).response.data.draft;
+  assert.equal(withSupplier.items[0].cost,4);
+  assert.equal(withSupplier.items[0].selectedSupplierName,'Lowest Cost Supply');
   const rateResult=(await op(`/api/order-drafts/${created.id}/shipping-rates`,'POST',{package:{weight:5,length:10,width:8,height:6}})).response.data;
   assert.equal(rateResult.rates[0].providerId,'usps','Preferred carrier rates lead even when another carrier costs less');
   assert.equal(rateResult.rates[1].amount,8.5);
@@ -172,6 +201,8 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   const upsQuote=freshQuote.rates.find(rate=>rate.provider==='ups');
   await op(`/api/order-drafts/${created.id}`,'PATCH',{shippingEstimate:{...upsQuote,warehouseId:warehouse.id,package:freshQuote.package}});
   const converted=(await op(`/api/order-drafts/${created.id}/convert`,'POST')).response.data.order;
+  assert.equal(converted.productCost,8);
+  assert.equal(converted.items[0].selectedSupplierName,'Lowest Cost Supply');
   const routeId=`company-route:${converted.id}:0`;
   const orderRates=(await op(`/api/orders/${converted.id}/shipping/rates`,'POST',{warehouseId:warehouse.id,packageWeight:5,packageLength:10,packageWidth:8,packageHeight:6,routeIds:[routeId]})).response.data;
   assert.equal(orderRates.rateReview.package.weight,5,'Order label dialog package field names are accepted');

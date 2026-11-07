@@ -151,6 +151,96 @@ type QuoteCarrierRate = {
 type QuoteCarrierAccess = { id: string; name: string; enabled: boolean; companyRates: boolean }
 type QuoteCarrierPreference = { selectionMode: "lowest_cost" | "preferred_carrier"; preferredProviderId: string; rateTtlMinutes: number }
 type QuoteAddressValidation = { status: string; providerId?: string; message?: string; address?: Record<string, unknown> }
+type QuoteSupplierOption = {
+  key: string
+  productId?: string
+  vendorId?: string
+  supplierName: string
+  supplierCode?: string
+  supplierSku?: string
+  sourceSku?: string
+  vendorSku?: string
+  managedSku?: string
+  cost: number | null
+  qty?: number | null
+  uom?: string
+  matchType?: string
+  requiresReview?: boolean
+  selectable?: boolean
+  related?: boolean
+  isPrimary?: boolean
+}
+type QuoteLineForm = {
+  sku: string
+  title: string
+  qty: string
+  msrp: string
+  price: string
+  cost: string
+  selectedSupplierKey: string
+  selectedSupplierId: string
+  selectedSupplierName: string
+  selectedSupplierCode: string
+  selectedSupplierSku: string
+  selectedSupplierProductId: string
+  selectedSupplierUom: string
+}
+
+function quoteLineCost(line: Pick<QuoteLineForm, "cost"> | Record<string, unknown>) {
+  if (line.cost === null || line.cost === undefined || line.cost === "") return null
+  const value = Number(line.cost)
+  return Number.isFinite(value) && value >= 0 ? value : null
+}
+
+function quoteMarginPercent(revenue: number, cost: number) {
+  return revenue > 0 ? ((revenue - cost) / revenue) * 100 : null
+}
+
+function QuoteSupplierPicker({ line, options, loading, onSelect }: { line: QuoteLineForm; options: QuoteSupplierOption[]; loading: boolean; onSelect: (option: QuoteSupplierOption) => void }) {
+  const [open, setOpen] = useState(false)
+  const selected = options.find((option) => option.key === line.selectedSupplierKey)
+  const selectedCost = quoteLineCost(line)
+  const knownOptions = options.filter((option) => option.selectable !== false && !option.requiresReview && option.cost !== null)
+  const lowest = knownOptions.reduce<QuoteSupplierOption | null>((best, option) => !best || Number(option.cost) < Number(best.cost) ? option : best, null)
+  const cheaper = selectedCost !== null && lowest && lowest.cost !== null && Number(lowest.cost) < selectedCost ? lowest : null
+  const supplierName = selected?.supplierName || line.selectedSupplierName
+  return <div className="grid min-w-52 gap-1.5">
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button type="button" variant="outline" className="h-auto min-h-10 w-full justify-between px-3 py-2 text-left" disabled={loading && !options.length}>
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-medium">{loading ? "Loading suppliers..." : supplierName || (options.length ? "Choose supplier" : "No supplier costs")}</span>
+            <span className="block truncate text-xs text-muted-foreground">{options.length ? `${options.length} supplier option${options.length === 1 ? "" : "s"}` : "Cost is unknown"}{selectedCost !== null ? ` · ${moneyLabel(selectedCost)}` : ""}</span>
+          </span>
+          {loading ? <Loader2 className="size-4 shrink-0 animate-spin" /> : <Users className="size-4 shrink-0 text-muted-foreground" />}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-[min(94vw,430px)] p-0">
+        <Command>
+          <CommandInput placeholder="Search supplier or supplier SKU..." />
+          <CommandList>
+            <CommandEmpty>No supplier cost records found.</CommandEmpty>
+            <CommandGroup heading="Supplier options">
+              {options.map((option) => {
+                const isLowest = option.cost !== null && lowest?.key === option.key
+                const disabled = option.selectable === false || option.requiresReview
+                return <CommandItem key={option.key} disabled={disabled} value={`${option.supplierName} ${option.supplierCode || ""} ${option.supplierSku || ""}`} onSelect={() => { if (!disabled) { onSelect(option); setOpen(false) } }} className="items-start py-3">
+                  <CheckCircle2 className={cn("mt-0.5 size-4 shrink-0", option.key === line.selectedSupplierKey ? "text-emerald-600" : "text-transparent")} />
+                  <span className="min-w-0 flex-1">
+                    <span className="flex flex-wrap items-center gap-1.5"><span className="font-medium">{option.supplierName}</span>{isLowest ? <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">Lowest cost</Badge> : null}{option.related ? <Badge variant="outline">Related SKU</Badge> : null}{disabled ? <Badge variant="outline" className="border-amber-500/40 text-amber-700 dark:text-amber-300">Review required</Badge> : null}</span>
+                    <span className="mt-0.5 block truncate text-xs text-muted-foreground">Supplier SKU {option.supplierSku || option.sourceSku || option.vendorSku || "-"}{option.uom ? ` · ${option.uom}` : ""}{option.qty !== null && option.qty !== undefined ? ` · ${numberLabel(option.qty)} available` : ""}</span>
+                  </span>
+                  <span className="shrink-0 font-semibold tabular-nums">{option.cost === null ? "Unknown" : moneyLabel(option.cost)}</span>
+                </CommandItem>
+              })}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+    {cheaper ? <p className="text-xs font-medium text-emerald-600">Save {moneyLabel(Number(selectedCost) - Number(cheaper.cost))}/unit with {cheaper.supplierName}</p> : selected && lowest?.key === selected.key ? <p className="text-xs font-medium text-emerald-600">Lowest known supplier cost selected</p> : null}
+  </div>
+}
 
 export function DraftQuoteFieldDetailPage() {
   const draftId = decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
@@ -180,13 +270,16 @@ export function DraftQuoteFieldDetailPage() {
   const [selectedShippingRateId, setSelectedShippingRateId] = useState("")
   const [shippingWarehouseId, setShippingWarehouseId] = useState("")
   const [shippingPackage, setShippingPackage] = useState({ weight: "", length: "", width: "", height: "" })
+  const [supplierOptionsBySku, setSupplierOptionsBySku] = useState<Record<string, QuoteSupplierOption[]>>({})
+  const [supplierOptionsLoading, setSupplierOptionsLoading] = useState<Set<string>>(new Set())
   const autoEditOpenedRef = useRef(false)
   const [form, setForm] = useState({
     buyer: "", buyerEmail: "", phone: "", source: "Manual", status: "draft", note: "", customerNote: "",
     expiresAt: quoteDateAfter(30), selectedTermIds: [] as string[], customTerms: "",
     line1: "", line2: "", city: "", state: "", postalCode: "", country: "US",
-    items: [] as Array<{ sku: string; title: string; qty: string; msrp: string; price: string }>,
+    items: [] as QuoteLineForm[],
   })
+  const supplierLookupKey = [...new Set(form.items.map((line) => line.sku.trim().toLowerCase()).filter((sku) => sku.length >= 2))].sort().join("|")
 
   const load = async () => {
     setLoading(true)
@@ -218,6 +311,49 @@ export function DraftQuoteFieldDetailPage() {
     return () => { cancelled = true; window.clearTimeout(timer) }
   }, [catalogQuery, editorOpen])
 
+  useEffect(() => {
+    if (!editorOpen || !supplierLookupKey) return
+    const skus = supplierLookupKey.split("|")
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      setSupplierOptionsLoading(new Set(skus))
+      Promise.all(skus.map(async (sku) => {
+        try {
+          const result = await api<{ options?: QuoteSupplierOption[] }>(`/api/order-drafts/${encodeURIComponent(draftId)}/supplier-options?sku=${encodeURIComponent(sku)}`, { signal: controller.signal })
+          return [sku, result.options || []] as const
+        } catch (error) {
+          if (!(error instanceof DOMException && error.name === "AbortError")) toast.error(error instanceof Error ? error.message : `Unable to load suppliers for ${sku}.`)
+          return [sku, []] as const
+        }
+      })).then((entries) => {
+        if (controller.signal.aborted) return
+        const loaded: Record<string, QuoteSupplierOption[]> = Object.fromEntries(entries)
+        setSupplierOptionsBySku((current) => ({ ...current, ...loaded }))
+        setForm((current) => ({
+          ...current,
+          items: current.items.map((line) => {
+            const options = loaded[line.sku.trim().toLowerCase()] || []
+            if (!options.length || line.selectedSupplierKey) return line
+            const matchingName = options.find((option) => option.selectable !== false && option.supplierName.toLowerCase() === line.selectedSupplierName.toLowerCase())
+            const preferred = matchingName || options.find((option) => option.selectable !== false && option.isPrimary) || options.find((option) => option.selectable !== false && !option.requiresReview && option.cost !== null)
+            return preferred ? {
+              ...line,
+              cost: preferred.cost === null ? "" : String(preferred.cost),
+              selectedSupplierKey: preferred.key,
+              selectedSupplierId: preferred.vendorId || "",
+              selectedSupplierName: preferred.supplierName,
+              selectedSupplierCode: preferred.supplierCode || "",
+              selectedSupplierSku: preferred.supplierSku || preferred.sourceSku || preferred.vendorSku || "",
+              selectedSupplierProductId: preferred.productId || "",
+              selectedSupplierUom: preferred.uom || "",
+            } : line
+          }),
+        }))
+      }).finally(() => { if (!controller.signal.aborted) setSupplierOptionsLoading(new Set()) })
+    }, 250)
+    return () => { window.clearTimeout(timer); controller.abort() }
+  }, [draftId, editorOpen, supplierLookupKey])
+
   const openEditor = () => {
     if (!draft) return
     const address = (draft.shippingAddress || {}) as Record<string, unknown>
@@ -229,10 +365,19 @@ export function DraftQuoteFieldDetailPage() {
       selectedTermIds: Array.isArray(draft.selectedTermIds) ? draft.selectedTermIds.map(String) : [], customTerms: String(draft.customTerms || ""),
       line1: String(address.line1 || address.address1 || ""), line2: String(address.line2 || address.address2 || ""), city: String(address.city || ""),
       state: String(address.state || address.province || ""), postalCode: String(address.postalCode || address.zip || ""), country: String(address.country || "US"),
-      items: items.map((item) => ({ sku: String(item.sku || ""), title: String(item.title || ""), qty: String(item.qty || 1), msrp: String(item.msrp || 0), price: String(item.price || 0) })),
+      items: items.map((item) => ({
+        sku: String(item.sku || ""), title: String(item.title || ""), qty: String(item.qty || 1), msrp: String(item.msrp || 0), price: String(item.price || 0),
+        cost: item.cost === null || item.cost === undefined ? "" : String(item.cost),
+        selectedSupplierKey: String(item.selectedSupplierKey || ""), selectedSupplierId: String(item.selectedSupplierId || ""),
+        selectedSupplierName: String(item.selectedSupplierName || ""), selectedSupplierCode: String(item.selectedSupplierCode || ""),
+        selectedSupplierSku: String(item.selectedSupplierSku || ""), selectedSupplierProductId: String(item.selectedSupplierProductId || ""),
+        selectedSupplierUom: String(item.selectedSupplierUom || ""),
+      })),
     })
     setCatalogQuery("")
     setCatalogResults([])
+    setSupplierOptionsBySku({})
+    setSupplierOptionsLoading(new Set())
     setEditorSection("items")
     setEditorOpen(true)
   }
@@ -245,14 +390,19 @@ export function DraftQuoteFieldDetailPage() {
     window.history.replaceState({}, "", `/drafts/${encodeURIComponent(draftId)}`)
   }, [loading, draft, draftId])
 
-  const updateLine = (index: number, patch: Partial<{ sku: string; title: string; qty: string; msrp: string; price: string }>) => setForm((current) => ({ ...current, items: current.items.map((line, lineIndex) => lineIndex === index ? { ...line, ...patch } : line) }))
+  const updateLine = (index: number, patch: Partial<QuoteLineForm>) => setForm((current) => ({ ...current, items: current.items.map((line, lineIndex) => lineIndex === index ? { ...line, ...patch } : line) }))
   const addCatalogItem = (item: ProductItem) => {
     const sku = String(item.sku || "").trim()
     if (!sku) return
     setForm((current) => {
       const existing = current.items.findIndex((line) => line.sku.toLowerCase() === sku.toLowerCase())
       if (existing >= 0) return { ...current, items: current.items.map((line, index) => index === existing ? { ...line, qty: String(Math.max(1, Number(line.qty || 0)) + 1) } : line) }
-      return { ...current, items: [...current.items, { sku, title: String(item.title || item.marketplaceTitle || sku), qty: "1", msrp: String(item.listPrice ?? item.msrp ?? 0), price: String(item.websitePrice ?? item.price ?? 0) }] }
+      return { ...current, items: [...current.items, {
+        sku, title: String(item.title || item.marketplaceTitle || sku), qty: "1", msrp: String(item.listPrice ?? item.msrp ?? 0), price: String(item.websitePrice ?? item.price ?? 0),
+        cost: item.sellUnitCost === null || item.sellUnitCost === undefined ? item.sourceCost === null || item.sourceCost === undefined ? item.cost === null || item.cost === undefined ? "" : String(item.cost) : String(item.sourceCost) : String(item.sellUnitCost),
+        selectedSupplierKey: "", selectedSupplierId: "", selectedSupplierName: String(item.supplier || item.vendor || ""), selectedSupplierCode: String(item.supplierCode || ""),
+        selectedSupplierSku: String(item.vendorSku || item.sourceSku || ""), selectedSupplierProductId: String(item.id || item.productCatalogId || ""), selectedSupplierUom: String(item.uom || ""),
+      }] }
     })
     setCatalogQuery("")
     setCatalogResults([])
@@ -273,7 +423,15 @@ export function DraftQuoteFieldDetailPage() {
     if (!editorOpen) openEditor()
     window.setTimeout(() => setForm((current) => ({
       ...current,
-      items: (current.items.length ? current.items : lines.map((line) => ({ sku: String(line.sku || ""), title: String(line.title || ""), qty: String(line.qty || 1), msrp: String(line.msrp || 0), price: String(line.price || 0) }))).map((line, index) => index === similarLineIndex ? { ...line, sku: String(item.sku || ""), title: String(item.title || item.sku || ""), msrp: String(item.listPrice || item.msrp || line.msrp || 0), price: String(item.price || line.price || 0) } : line),
+      items: (current.items.length ? current.items : lines.map((line) => ({
+        sku: String(line.sku || ""), title: String(line.title || ""), qty: String(line.qty || 1), msrp: String(line.msrp || 0), price: String(line.price || 0),
+        cost: line.cost === null || line.cost === undefined ? "" : String(line.cost), selectedSupplierKey: String(line.selectedSupplierKey || ""),
+        selectedSupplierId: String(line.selectedSupplierId || ""), selectedSupplierName: String(line.selectedSupplierName || ""), selectedSupplierCode: String(line.selectedSupplierCode || ""),
+        selectedSupplierSku: String(line.selectedSupplierSku || ""), selectedSupplierProductId: String(line.selectedSupplierProductId || ""), selectedSupplierUom: String(line.selectedSupplierUom || ""),
+      }))).map((line, index) => index === similarLineIndex ? {
+        ...line, sku: String(item.sku || ""), title: String(item.title || item.sku || ""), msrp: String(item.listPrice || item.msrp || line.msrp || 0), price: String(item.price || line.price || 0),
+        cost: item.cost === null || item.cost === undefined ? "" : String(item.cost), selectedSupplierKey: "", selectedSupplierId: "", selectedSupplierName: "", selectedSupplierCode: "", selectedSupplierSku: "", selectedSupplierProductId: "", selectedSupplierUom: "",
+      } : line),
     })), 0)
     setSimilarOpen(false)
     toast.success(`${String(item.sku || "SKU")} applied to the quote draft. Save the quote to keep it.`)
@@ -285,7 +443,12 @@ export function DraftQuoteFieldDetailPage() {
     return { ...current, selectedTermIds: selected }
   })
   const save = async () => {
-    const items = form.items.map((item) => ({ sku: item.sku.trim(), title: item.title.trim() || item.sku.trim(), qty: Number(item.qty || 0), msrp: Number(item.msrp || 0), price: Number(item.price || 0) })).filter((item) => item.sku && item.qty > 0)
+    const items = form.items.map((item) => ({
+      sku: item.sku.trim(), title: item.title.trim() || item.sku.trim(), qty: Number(item.qty || 0), msrp: Number(item.msrp || 0), price: Number(item.price || 0),
+      cost: quoteLineCost(item), selectedSupplierKey: item.selectedSupplierKey, selectedSupplierId: item.selectedSupplierId,
+      selectedSupplierName: item.selectedSupplierName, selectedSupplierCode: item.selectedSupplierCode, selectedSupplierSku: item.selectedSupplierSku,
+      selectedSupplierProductId: item.selectedSupplierProductId, selectedSupplierUom: item.selectedSupplierUom,
+    })).filter((item) => item.sku && item.qty > 0)
     setBusy(true)
     try {
       await api(`/api/order-drafts/${encodeURIComponent(draftId)}`, { method: "PATCH", body: JSON.stringify({
@@ -376,6 +539,11 @@ export function DraftQuoteFieldDetailPage() {
   const enabledQuoteCarrierLabel = enabledQuoteCarriers.map((provider) => provider.name).join(", ")
   const shippingAmount = Number(savedShippingEstimate?.amount || 0)
   const total = subtotal + shippingAmount
+  const costedLines = lines.filter((line) => quoteLineCost(line) !== null)
+  const productCost = costedLines.reduce((sum, line) => sum + Number(line.qty || 0) * Number(quoteLineCost(line)), 0)
+  const costsComplete = lines.length > 0 && costedLines.length === lines.length
+  const grossProfit = costsComplete ? subtotal - productCost : null
+  const grossMargin = grossProfit === null ? null : quoteMarginPercent(subtotal, productCost)
   const savings = lines.reduce((sum, line) => sum + Math.max(0, Number(line.msrp || 0) - Number(line.price || 0)) * Number(line.qty || 0), 0)
   const missingMsrpCount = lines.filter((line) => !(Number(line.msrp || 0) > 0)).length
   const hasCompleteMsrp = lines.length > 0 && missingMsrpCount === 0
@@ -387,6 +555,11 @@ export function DraftQuoteFieldDetailPage() {
   const formSubtotal = form.items.reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0)) * Math.max(0, Number(line.price || 0)), 0)
   const formSavings = form.items.reduce((sum, line) => sum + Math.max(0, Number(line.msrp || 0) - Number(line.price || 0)) * Math.max(0, Number(line.qty || 0)), 0)
   const formUnitCount = form.items.reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0)), 0)
+  const formCostedLines = form.items.filter((line) => quoteLineCost(line) !== null)
+  const formProductCost = formCostedLines.reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0)) * Number(quoteLineCost(line)), 0)
+  const formCostsComplete = form.items.length > 0 && formCostedLines.length === form.items.length
+  const formGrossProfit = formCostsComplete ? formSubtotal - formProductCost : null
+  const formGrossMargin = formGrossProfit === null ? null : quoteMarginPercent(formSubtotal, formProductCost)
   const formEstimatedTotal = formSubtotal + shippingAmount
   const editorSections = ["items", "customer", "delivery", "terms", "notes"] as const
   const editorSectionIndex = editorSections.indexOf(editorSection)
@@ -422,16 +595,24 @@ export function DraftQuoteFieldDetailPage() {
     </div>} />
 
     {loading ? <div className="grid gap-3"><Skeleton className="h-36" /><Skeleton className="h-72" /></div> : !draft ? <Card><CardContent className="p-8 text-center text-muted-foreground">This draft quote was not found.</CardContent></Card> : <>
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
         <Detail label="Customer" value={String(draft.buyer || "Not assigned")} />
         <Detail label="Status" value={String(draft.status || "draft")} />
         <Detail label="Quote total" value={moneyLabel(total)} />
+        <Detail label="Gross margin" value={grossMargin === null ? `${numberLabel(lines.length - costedLines.length)} line cost${lines.length - costedLines.length === 1 ? "" : "s"} needed` : `${grossMargin.toFixed(1)}% · ${moneyLabel(grossProfit)}`} />
         <Detail label="Valid until" value={expiresAt ? `${dateLabel(`${expiresAt}T12:00:00`)}${expired ? " (expired)" : ""}` : "Not set"} />
         <Detail label="Source" value={String(draft.source || "Manual")} />
       </div>
       {expired && !["accepted", "lost"].includes(String(draft.status || "")) ? <Alert variant="destructive"><Clock3 className="size-4" /><AlertTitle>Quote expired</AlertTitle><AlertDescription>Extend the validity date before sending or accepting this quote.</AlertDescription></Alert> : null}
-      <Card><CardHeader><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">Quote items</CardTitle><CardDescription>Catalog lines, MSRP, customer prices, and savings.</CardDescription></div>{hasCompleteMsrp ? <Badge variant="outline">{moneyLabel(savings)} customer savings</Badge> : <Badge variant="outline">{lines.length ? `MSRP missing on ${numberLabel(missingMsrpCount)} line${missingMsrpCount === 1 ? "" : "s"}` : "No quote lines"}</Badge>}</div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Item</TableHead><TableHead>Qty</TableHead><TableHead>MSRP</TableHead><TableHead>Unit price</TableHead><TableHead>Savings</TableHead><TableHead>Total</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
-        {lines.map((line, index) => { const lineSavings = Math.max(0, Number(line.msrp || 0) - Number(line.price || 0)) * Number(line.qty || 0); return <TableRow key={`${String(line.sku)}-${index}`}><TableCell className="font-mono text-xs">{String(line.sku || "-")}</TableCell><TableCell>{String(line.title || line.sku || "-")}</TableCell><TableCell>{numberLabel(Number(line.qty || 0))}</TableCell><TableCell>{Number(line.msrp || 0) > 0 ? moneyLabel(Number(line.msrp)) : "-"}</TableCell><TableCell>{moneyLabel(Number(line.price || 0))}</TableCell><TableCell className={lineSavings > 0 ? "font-medium text-emerald-600" : "text-muted-foreground"}>{lineSavings > 0 ? moneyLabel(lineSavings) : "-"}</TableCell><TableCell className="font-medium">{moneyLabel(Number(line.price || 0) * Number(line.qty || 0))}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" onClick={() => void findSimilar(line, index)}><Search className="size-4" /> Find similar</Button></TableCell></TableRow> })}
+      <Card><CardHeader><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">Quote items</CardTitle><CardDescription>Supplier cost, customer price, savings, and gross margin by line.</CardDescription></div><div className="flex flex-wrap gap-2">{hasCompleteMsrp ? <Badge variant="outline">{moneyLabel(savings)} customer savings</Badge> : <Badge variant="outline">{lines.length ? `MSRP missing on ${numberLabel(missingMsrpCount)} line${missingMsrpCount === 1 ? "" : "s"}` : "No quote lines"}</Badge>}{costsComplete ? <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">{grossMargin?.toFixed(1)}% total margin</Badge> : <Badge variant="outline" className="border-amber-500/40 text-amber-700 dark:text-amber-300">Cost needed on {numberLabel(lines.length - costedLines.length)} line{lines.length - costedLines.length === 1 ? "" : "s"}</Badge>}</div></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Item</TableHead><TableHead>Supplier</TableHead><TableHead>Qty</TableHead><TableHead>MSRP</TableHead><TableHead>Unit price</TableHead><TableHead>Savings</TableHead><TableHead>Margin</TableHead><TableHead>Total</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
+        {lines.map((line, index) => {
+          const lineSavings = Math.max(0, Number(line.msrp || 0) - Number(line.price || 0)) * Number(line.qty || 0)
+          const lineCost = quoteLineCost(line)
+          const lineRevenue = Number(line.price || 0) * Number(line.qty || 0)
+          const lineProfit = lineCost === null ? null : lineRevenue - lineCost * Number(line.qty || 0)
+          const lineMargin = lineCost === null ? null : quoteMarginPercent(Number(line.price || 0), lineCost)
+          return <TableRow key={`${String(line.sku)}-${index}`}><TableCell className="font-mono text-xs">{String(line.sku || "-")}</TableCell><TableCell>{String(line.title || line.sku || "-")}</TableCell><TableCell><p className="font-medium">{String(line.selectedSupplierName || "Cost not selected")}</p><p className="font-mono text-xs text-muted-foreground">{String(line.selectedSupplierSku || "-")}{lineCost === null ? "" : ` · ${moneyLabel(lineCost)}`}</p></TableCell><TableCell>{numberLabel(Number(line.qty || 0))}</TableCell><TableCell>{Number(line.msrp || 0) > 0 ? moneyLabel(Number(line.msrp)) : "-"}</TableCell><TableCell>{moneyLabel(Number(line.price || 0))}</TableCell><TableCell className={lineSavings > 0 ? "font-medium text-emerald-600" : "text-muted-foreground"}>{lineSavings > 0 ? moneyLabel(lineSavings) : "-"}</TableCell><TableCell className={cn("font-medium", lineProfit !== null && lineProfit < 0 ? "text-destructive" : lineProfit !== null ? "text-emerald-600" : "text-muted-foreground")}>{lineMargin === null ? "Cost needed" : `${lineMargin.toFixed(1)}% · ${moneyLabel(lineProfit)}`}</TableCell><TableCell className="font-medium">{moneyLabel(lineRevenue)}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" onClick={() => void findSimilar(line, index)}><Search className="size-4" /> Find similar</Button></TableCell></TableRow>
+        })}
       </TableBody></Table></div></CardContent></Card>
       {enabledQuoteCarriers.length ? <Card><CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Shipping estimate</CardTitle><CardDescription>Compare the shared {enabledQuoteCarrierLabel} accounts for an accurate customer quote.</CardDescription></div><Button size="sm" variant={savedShippingEstimate ? "outline" : "default"} onClick={openShippingRates}><Truck className="size-4" /> {savedShippingEstimate ? "Refresh carrier rates" : "Get carrier rates"}</Button></div></CardHeader><CardContent className="grid gap-3">{savedShippingEstimate ? <><div className="grid gap-3 text-sm sm:grid-cols-5"><Detail label="Carrier / service" value={`${String(savedShippingEstimate.carrier || "Carrier")} ${String(savedShippingEstimate.service || "")}`} /><Detail label="Shipping" value={moneyLabel(shippingAmount)} /><Detail label="Package" value={`${String((savedShippingEstimate.package as Record<string, unknown>)?.weight || "-")} lb / ${String((savedShippingEstimate.package as Record<string, unknown>)?.length || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.width || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.height || "-")} in`} /><Detail label="Rate valid until" value={savedRateExpired ? "Expired - refresh required" : dateLabel(String(savedShippingEstimate.expiresAt || ""))} /><Detail label="Estimated quote total" value={moneyLabel(total)} /></div>{savedRateExpired ? <Alert variant="destructive"><Clock3 className="size-4" /><AlertTitle>Shipping rate expired</AlertTitle><AlertDescription>Refresh carrier rates before accepting or converting this quote.</AlertDescription></Alert> : null}</> : <p className="text-sm text-muted-foreground">No shipping rate has been added. Product subtotal is {moneyLabel(subtotal)}.</p>}</CardContent></Card> : null}
       <div className="grid gap-4 lg:grid-cols-3">
@@ -467,6 +648,7 @@ export function DraftQuoteFieldDetailPage() {
             <div className="flex flex-wrap items-center gap-2 pr-1">
               <Badge variant="outline">{form.items.length} line{form.items.length === 1 ? "" : "s"}</Badge>
               <Badge variant="outline">{numberLabel(formUnitCount)} unit{formUnitCount === 1 ? "" : "s"}</Badge>
+              <Badge variant="outline" className={formGrossMargin === null ? "border-amber-500/40 text-amber-700 dark:text-amber-300" : "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"}>{formGrossMargin === null ? `${form.items.length - formCostedLines.length} cost${form.items.length - formCostedLines.length === 1 ? "" : "s"} needed` : `${formGrossMargin.toFixed(1)}% margin`}</Badge>
               <Badge variant="secondary">{moneyLabel(formEstimatedTotal)}</Badge>
             </div>
           </div>
@@ -517,21 +699,36 @@ export function DraftQuoteFieldDetailPage() {
                     <p className="font-medium">Proposal lines</p>
                     <p className="text-xs text-muted-foreground">Prices are per selling unit.</p>
                   </div>
-                  <Button type="button" size="sm" variant="outline" onClick={() => setForm((current) => ({ ...current, items: [...current.items, { sku: "", title: "", qty: "1", msrp: "0", price: "0" }] }))}><Plus className="size-4" /> Add manual line</Button>
+                  <Button type="button" size="sm" variant="outline" onClick={() => setForm((current) => ({ ...current, items: [...current.items, {
+                    sku: "", title: "", qty: "1", msrp: "0", price: "0", cost: "", selectedSupplierKey: "", selectedSupplierId: "", selectedSupplierName: "", selectedSupplierCode: "", selectedSupplierSku: "", selectedSupplierProductId: "", selectedSupplierUom: "",
+                  }] }))}><Plus className="size-4" /> Add manual line</Button>
                 </div>
 
                 {form.items.length ? <div className="overflow-x-auto rounded-md border">
-                  <Table className="min-w-[820px]">
-                    <TableHeader><TableRow><TableHead className="w-40">SKU</TableHead><TableHead>Product</TableHead><TableHead className="w-24">Qty</TableHead><TableHead className="w-36">MSRP</TableHead><TableHead className="w-36">Quote price</TableHead><TableHead className="w-28 text-right">Total</TableHead><TableHead className="w-12" /></TableRow></TableHeader>
-                    <TableBody>{form.items.map((line, index) => <TableRow key={`${line.sku}-${index}`}>
-                      <TableCell><Input value={line.sku} onChange={(event) => updateLine(index, { sku: event.target.value })} placeholder="SKU" /></TableCell>
-                      <TableCell><Input className="min-w-56" value={line.title} onChange={(event) => updateLine(index, { title: event.target.value })} placeholder="Product title" /></TableCell>
-                      <TableCell><Input type="number" min="1" inputMode="numeric" value={line.qty} onChange={(event) => updateLine(index, { qty: event.target.value })} /></TableCell>
-                      <TableCell><InputGroup><InputGroupAddon>$</InputGroupAddon><InputGroupInput type="number" min="0" step="0.01" inputMode="decimal" value={line.msrp} onChange={(event) => updateLine(index, { msrp: event.target.value })} /></InputGroup></TableCell>
-                      <TableCell><InputGroup><InputGroupAddon>$</InputGroupAddon><InputGroupInput type="number" min="0" step="0.01" inputMode="decimal" value={line.price} onChange={(event) => updateLine(index, { price: event.target.value })} /></InputGroup></TableCell>
-                      <TableCell className="text-right font-semibold tabular-nums">{moneyLabel(Math.max(0, Number(line.qty || 0)) * Math.max(0, Number(line.price || 0)))}</TableCell>
-                      <TableCell><Button type="button" size="icon" variant="ghost" title="Remove line" onClick={() => setForm((current) => ({ ...current, items: current.items.filter((_, lineIndex) => lineIndex !== index) }))}><Trash2 className="size-4" /></Button></TableCell>
-                    </TableRow>)}</TableBody>
+                  <Table className="min-w-[1260px]">
+                    <TableHeader><TableRow><TableHead className="w-40">SKU</TableHead><TableHead>Product</TableHead><TableHead className="w-60">Supplier / cost</TableHead><TableHead className="w-20">Qty</TableHead><TableHead className="w-32">MSRP</TableHead><TableHead className="w-32">Quote price</TableHead><TableHead className="w-36">Profit margin</TableHead><TableHead className="w-28 text-right">Total</TableHead><TableHead className="w-12" /></TableRow></TableHeader>
+                    <TableBody>{form.items.map((line, index) => {
+                      const lineCost = quoteLineCost(line)
+                      const linePrice = Math.max(0, Number(line.price || 0))
+                      const lineQty = Math.max(0, Number(line.qty || 0))
+                      const lineProfit = lineCost === null ? null : (linePrice - lineCost) * lineQty
+                      const lineMargin = lineCost === null ? null : quoteMarginPercent(linePrice, lineCost)
+                      const skuKey = line.sku.trim().toLowerCase()
+                      return <TableRow key={`${line.sku}-${index}`}>
+                        <TableCell><Input value={line.sku} onChange={(event) => updateLine(index, { sku: event.target.value, cost: "", selectedSupplierKey: "", selectedSupplierId: "", selectedSupplierName: "", selectedSupplierCode: "", selectedSupplierSku: "", selectedSupplierProductId: "", selectedSupplierUom: "" })} placeholder="SKU" /></TableCell>
+                        <TableCell><Input className="min-w-56" value={line.title} onChange={(event) => updateLine(index, { title: event.target.value })} placeholder="Product title" /></TableCell>
+                        <TableCell><QuoteSupplierPicker line={line} options={supplierOptionsBySku[skuKey] || []} loading={supplierOptionsLoading.has(skuKey)} onSelect={(option) => updateLine(index, {
+                          cost: option.cost === null ? "" : String(option.cost), selectedSupplierKey: option.key, selectedSupplierId: option.vendorId || "", selectedSupplierName: option.supplierName,
+                          selectedSupplierCode: option.supplierCode || "", selectedSupplierSku: option.supplierSku || option.sourceSku || option.vendorSku || "", selectedSupplierProductId: option.productId || "", selectedSupplierUom: option.uom || "",
+                        })} /></TableCell>
+                        <TableCell><Input type="number" min="1" inputMode="numeric" value={line.qty} onChange={(event) => updateLine(index, { qty: event.target.value })} /></TableCell>
+                        <TableCell><InputGroup><InputGroupAddon>$</InputGroupAddon><InputGroupInput type="number" min="0" step="0.01" inputMode="decimal" value={line.msrp} onChange={(event) => updateLine(index, { msrp: event.target.value })} /></InputGroup></TableCell>
+                        <TableCell><InputGroup><InputGroupAddon>$</InputGroupAddon><InputGroupInput type="number" min="0" step="0.01" inputMode="decimal" value={line.price} onChange={(event) => updateLine(index, { price: event.target.value })} /></InputGroup></TableCell>
+                        <TableCell><p className={cn("font-semibold", lineProfit !== null && lineProfit < 0 ? "text-destructive" : lineProfit !== null ? "text-emerald-600" : "text-muted-foreground")}>{lineMargin === null ? "Cost needed" : `${lineMargin.toFixed(1)}%`}</p><p className="text-xs text-muted-foreground">{lineProfit === null ? "Select a supplier" : `${moneyLabel(lineProfit)} profit`}</p></TableCell>
+                        <TableCell className="text-right font-semibold tabular-nums">{moneyLabel(lineQty * linePrice)}</TableCell>
+                        <TableCell><Button type="button" size="icon" variant="ghost" title="Remove line" onClick={() => setForm((current) => ({ ...current, items: current.items.filter((_, lineIndex) => lineIndex !== index) }))}><Trash2 className="size-4" /></Button></TableCell>
+                      </TableRow>
+                    })}</TableBody>
                   </Table>
                 </div> : <Empty className="border">
                   <EmptyHeader><EmptyMedia variant="icon"><PackageCheck /></EmptyMedia><EmptyTitle>No quote items yet</EmptyTitle><EmptyDescription>Search the catalog above or add a manual line to start the proposal.</EmptyDescription></EmptyHeader>
@@ -598,7 +795,10 @@ export function DraftQuoteFieldDetailPage() {
                   <div className="mt-4 grid gap-2 text-sm">
                     <div className="flex justify-between gap-3 text-muted-foreground"><span>{form.items.length} product line{form.items.length === 1 ? "" : "s"}</span><span>{numberLabel(formUnitCount)} units</span></div>
                     <div className="flex justify-between gap-3"><span>Products</span><span className="font-medium tabular-nums">{moneyLabel(formSubtotal)}</span></div>
+                    <div className="flex justify-between gap-3"><span>Supplier cost</span><span className="font-medium tabular-nums">{formCostsComplete ? moneyLabel(formProductCost) : "Incomplete"}</span></div>
                     {formSavings > 0 ? <div className="flex justify-between gap-3 text-emerald-600"><span>Customer savings</span><span className="font-medium tabular-nums">{moneyLabel(formSavings)}</span></div> : null}
+                    <div className={cn("flex justify-between gap-3", formGrossProfit !== null && formGrossProfit < 0 ? "text-destructive" : formGrossProfit !== null ? "text-emerald-600" : "text-amber-600")}><span>Gross profit</span><span className="font-medium tabular-nums">{formGrossProfit === null ? "Cost needed" : moneyLabel(formGrossProfit)}</span></div>
+                    <div className={cn("flex justify-between gap-3", formGrossMargin !== null && formGrossMargin < 0 ? "text-destructive" : formGrossMargin !== null ? "text-emerald-600" : "text-amber-600")}><span>Gross margin</span><span className="font-medium tabular-nums">{formGrossMargin === null ? "-" : `${formGrossMargin.toFixed(1)}%`}</span></div>
                     <div className="flex justify-between gap-3"><span>Saved shipping</span><span className="font-medium tabular-nums">{savedShippingEstimate ? moneyLabel(shippingAmount) : "Not quoted"}</span></div>
                     <div className="mt-2 flex justify-between gap-3 border-t pt-3 text-base font-semibold"><span>Estimated total</span><span className="tabular-nums">{moneyLabel(formEstimatedTotal)}</span></div>
                   </div>
@@ -607,7 +807,7 @@ export function DraftQuoteFieldDetailPage() {
                 <section className="border-t pt-5">
                   <p className="font-semibold">Readiness</p>
                   <div className="mt-3 grid gap-2.5 text-sm">
-                    {[{ label: "Quote items", ready: editorCompletion.items }, { label: "Customer", ready: editorCompletion.customer }, { label: "Delivery address", ready: editorCompletion.delivery }, { label: "Expiration date", ready: editorCompletion.terms }].map((check) => <div key={check.label} className="flex items-center gap-2"><CheckCircle2 className={cn("size-4", check.ready ? "text-emerald-500" : "text-muted-foreground/35")} /><span className={check.ready ? "" : "text-muted-foreground"}>{check.label}</span></div>)}
+                    {[{ label: "Quote items", ready: editorCompletion.items }, { label: "Supplier costs", ready: formCostsComplete }, { label: "Customer", ready: editorCompletion.customer }, { label: "Delivery address", ready: editorCompletion.delivery }, { label: "Expiration date", ready: editorCompletion.terms }].map((check) => <div key={check.label} className="flex items-center gap-2"><CheckCircle2 className={cn("size-4", check.ready ? "text-emerald-500" : "text-muted-foreground/35")} /><span className={check.ready ? "" : "text-muted-foreground"}>{check.label}</span></div>)}
                   </div>
                 </section>
 
