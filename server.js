@@ -28,7 +28,7 @@ const { operationJobChannel, operationJobTrigger } = require('./lib/job-classifi
 const { evaluateFulfillmentIntervention } = require("./lib/fulfillment-intervention");
 const { splitFulfillmentRoutes } = require("./lib/fulfillment-package-split");
 const { fulfillmentRowVisibleInAllShipments, orderVisibleInAllShipments } = require("./lib/fulfillment-shipment-visibility");
-const { QUOTE_EXPORT_VARIANTS, buildQuotePdf, defaultQuoteExpiration, normalizeQuoteExpiration, normalizeQuoteTermIds, quoteTerms } = require("./lib/quote-documents");
+const { QUOTE_EXPORT_VARIANTS, QUOTE_TERM_OPTIONS, buildQuotePdf, defaultQuoteExpiration, defaultQuoteTermIds, normalizeQuoteExpiration, normalizeQuoteTermIds, normalizeQuoteTermLibrary, normalizeQuoteTermSnapshot, quoteTermSnapshot, quoteTerms } = require("./lib/quote-documents");
 const { createCompanyHandler } = require("./lib/company-http");
 const { resolveMentionedUsers } = require("./lib/order-mentions");
 const companyStore = createCompanyStore(() => postgres.getPool(), {
@@ -1567,6 +1567,7 @@ const AUTH_PERMISSION_AREAS = [
   { id: "ai", label: "David AI", path: "/ai", actions: ["view", "chat", "approve", "configure"] },
   { id: "settings", label: "System Settings", path: "/settings", actions: ["view", "edit", "credentials", "backup", "maintenance"], sections: [
     { id: "settings.operations", label: "Operations settings", path: "/settings", actions: ["view", "edit", "maintenance"] },
+    { id: "settings.sales", label: "Sales settings", path: "/settings?tab=sales", actions: ["view", "edit"] },
     { id: "settings.security", label: "Security settings", path: "/settings?tab=security", actions: ["view", "edit", "credentials"] },
     { id: "settings.integrations", label: "Integrations", path: "/settings?tab=data-sources", actions: ["view", "edit", "credentials"] },
     { id: "settings.backups", label: "Backups and maintenance", path: "/settings?tab=backups", actions: ["view", "backup", "maintenance"] },
@@ -6058,6 +6059,7 @@ function normalizeSystemSettings(settings = {}) {
     }))
     .filter((template) => template.id && template.name)
     .slice(0, 100);
+  normalized.quoteTerms = normalizeQuoteTermLibrary(normalized.quoteTerms);
   normalized.returnTemplateAssignments = normalized.returnTemplateAssignments && typeof normalized.returnTemplateAssignments === "object"
     ? { ...DEFAULT_SYSTEM_SETTINGS.returnTemplateAssignments, ...normalized.returnTemplateAssignments }
     : { ...DEFAULT_SYSTEM_SETTINGS.returnTemplateAssignments };
@@ -6668,6 +6670,7 @@ function currentAuthUser(req, settings = readSystemSettingsStore(dbCache.data?.s
 }
 
 function authAreaForPath(pathname = "") {
+  if (pathname === "/api/quote-terms") return "settings";
   if (/^\/api\/shipping-providers(?:\/|$)/.test(pathname)) return "settings";
   if (pathname.startsWith("/api/auth")) return "";
   if (pathname.startsWith("/api/notifications")) return "";
@@ -6709,6 +6712,7 @@ function authRequirementForRequest(req, url, parts = []) {
     return { area: "users", action: "view" };
   }
   if (area === "settings") {
+    if (pathname === "/api/quote-terms") return { area: "settings.sales", action: method === "GET" ? "view" : "edit" };
     if (/^\/api\/shipping-providers(?:\/|$)/.test(pathname)) return { area: method === "GET" ? "settings" : "settings.security", action: method === "GET" ? "view" : "credentials" };
     if (/\/wiki\b/.test(pathname)) return { area: "settings.integrations", action: method === "GET" ? "view" : "edit" };
     if (/credential|ai-test|smtp-test|api-key|auth/i.test(pathname)) return { area: "settings.security", action: "credentials" };
@@ -18334,6 +18338,43 @@ function normalizeDraftShippingEstimate(value) {
   };
 }
 
+function validatedQuoteTermLibrary(value) {
+  if (!Array.isArray(value)) throw Object.assign(new Error("Enter a valid quote term list."), { statusCode: 400 });
+  if (value.length > 100) throw Object.assign(new Error("Use at most 100 quote terms."), { statusCode: 400 });
+  const ids = new Set();
+  const defaultExclusiveGroups = new Set();
+  for (const [index, term] of value.entries()) {
+    if (!term || typeof term !== "object" || Array.isArray(term)) throw Object.assign(new Error(`Quote term ${index + 1} is invalid.`), { statusCode: 400 });
+    const id = String(term.id || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 100);
+    if (!id || !String(term.group || "").trim() || !String(term.label || "").trim() || !String(term.text || "").trim()) {
+      throw Object.assign(new Error(`Quote term ${index + 1} requires an ID, group, label, and customer wording.`), { statusCode: 400 });
+    }
+    if (ids.has(id)) throw Object.assign(new Error(`Quote term ID ${id} is duplicated.`), { statusCode: 400 });
+    ids.add(id);
+    const exclusiveGroup = String(term.exclusiveGroup || "").trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
+    if (term.active !== false && term.defaultSelected === true && exclusiveGroup) {
+      if (defaultExclusiveGroups.has(exclusiveGroup)) throw Object.assign(new Error(`Only one ${exclusiveGroup.replace(/[-_]+/g, " ")} term can be selected by default.`), { statusCode: 400 });
+      defaultExclusiveGroups.add(exclusiveGroup);
+    }
+  }
+  const now = new Date().toISOString();
+  return normalizeQuoteTermLibrary(value).map((term, index) => ({
+    ...term,
+    sortOrder: index,
+    createdAt: term.createdAt || now,
+    updatedAt: now
+  }));
+}
+
+function quoteTermSelection(library, requestedIds, previousSnapshot = [], useDefaults = false) {
+  const terms = normalizeQuoteTermLibrary(library);
+  const ids = normalizeQuoteTermIds(useDefaults ? defaultQuoteTermIds(terms) : requestedIds, terms);
+  return {
+    selectedTermIds: ids,
+    selectedTermsSnapshot: quoteTermSnapshot(terms, ids, previousSnapshot)
+  };
+}
+
 function normalizeOrderDraft(db, draft = {}) {
   const createdAt = draft.createdAt || new Date().toISOString();
   const items = (Array.isArray(draft.items) ? draft.items : [])
@@ -18343,6 +18384,12 @@ function normalizeOrderDraft(db, draft = {}) {
   const revisionNumber = Math.max(1, Number(draft.revisionNumber || 1));
   const shippingEstimate = normalizeDraftShippingEstimate(draft.shippingEstimate);
   const subtotal = orderDraftTotals(items);
+  const storedTermsSnapshot = normalizeQuoteTermSnapshot(draft.selectedTermsSnapshot);
+  const selectedTermIds = normalizeQuoteTermIds(
+    Array.isArray(draft.selectedTermIds) ? draft.selectedTermIds : storedTermsSnapshot.map((term) => term.id),
+    storedTermsSnapshot.length ? storedTermsSnapshot : undefined
+  );
+  const selectedTermsSnapshot = storedTermsSnapshot.length ? storedTermsSnapshot : quoteTermSnapshot(QUOTE_TERM_OPTIONS, selectedTermIds);
   return {
     id: draft.id || crypto.randomUUID(),
     draftNumber: String(draft.draftNumber || nextDraftNumber(db)).trim(),
@@ -18360,7 +18407,8 @@ function normalizeOrderDraft(db, draft = {}) {
     note: String(draft.note || "").trim(),
     customerNote: String(draft.customerNote || "").trim(),
     expiresAt: normalizeQuoteExpiration(draft.expiresAt),
-    selectedTermIds: normalizeQuoteTermIds(draft.selectedTermIds),
+    selectedTermIds,
+    selectedTermsSnapshot,
     customTerms: String(draft.customTerms || "").trim(),
     shippingAddress: normalizeAddress(draft.shippingAddress || draft.address || {}, "shipping"),
     billingAddress: normalizeAddress(draft.billingAddress || draft.shippingAddress || draft.address || {}, "billing"),
@@ -70409,6 +70457,24 @@ async function handleApi(req, res) {
     return sendJson(res, 400, { error: "Unsupported template action." });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/quote-terms") {
+    const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
+    return sendJson(res, 200, { quoteTerms: normalizeQuoteTermLibrary(settings.quoteTerms), companyOwned: false });
+  }
+
+  if (req.method === "PUT" && url.pathname === "/api/quote-terms") {
+    try {
+      const body = await parseBody(req);
+      const quoteTerms = validatedQuoteTermLibrary(body.quoteTerms);
+      const current = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
+      const next = writeSystemSettingsStore({ ...current, quoteTerms });
+      if (dbCache.data) dbCache.data.systemSettings = next;
+      return sendJson(res, 200, { quoteTerms, companyOwned: false, message: "Quote terms saved." });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to save quote terms." });
+    }
+  }
+
   async function readOrderDraftWorkflowDb() {
     const [baseDb, drafts] = await Promise.all([
       readDbFast({ skipInventory: true }),
@@ -70465,9 +70531,10 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
-    const [drafts, warehouses] = await Promise.all([
+    const [drafts, warehouses, systemSettings] = await Promise.all([
       postgres.readStateField("orderDrafts").catch(() => []),
-      postgres.readStateField("warehouses").catch(() => [])
+      postgres.readStateField("warehouses").catch(() => []),
+      readRuntimeSystemSettings(dbCache.data?.systemSettings || {})
     ]);
     const rawDraft = (drafts || []).find((row) => String(row.id || "") === String(parts[2]) || String(row.draftNumber || "").toLowerCase() === String(parts[2]).toLowerCase());
     if (!rawDraft) return notFound(res);
@@ -70476,9 +70543,9 @@ async function handleApi(req, res) {
     // variant IDs. This stays index-backed even when a manually entered SKU has
     // no catalog match, unlike the broad product-key resolver.
     const inventory = skus.length ? await postgres.readProductsForOrderSkus(skus) : [];
-    const db = { inventory: inventory || [], warehouses: warehouses || [], sequence: {} };
+    const db = { inventory: inventory || [], warehouses: warehouses || [], systemSettings, sequence: {} };
     const draft = normalizeOrderDraft(db, rawDraft);
-    return sendJson(res, 200, { draft, warehouses: db.warehouses });
+    return sendJson(res, 200, { draft, warehouses: db.warehouses, quoteTerms: normalizeQuoteTermLibrary(systemSettings.quoteTerms) });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] && parts[3] === "supplier-options" && parts.length === 4 && postgres.isPostgresEnabled()) {
@@ -70558,6 +70625,7 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const db = await readOrderDraftWorkflowDb();
     await hydrateDraftLineCosts(db, body);
+    const termSelection = quoteTermSelection(db.systemSettings?.quoteTerms, body.selectedTermIds, [], body.selectedTermIds === undefined);
     const draft = normalizeOrderDraft(db, {
       source: body.source,
       buyer: body.buyer,
@@ -70567,7 +70635,7 @@ async function handleApi(req, res) {
       note: body.note,
       customerNote: body.customerNote,
       expiresAt: body.expiresAt || defaultQuoteExpiration(30),
-      selectedTermIds: body.selectedTermIds,
+      ...termSelection,
       customTerms: body.customTerms,
       shippingAddress: body.shippingAddress,
       billingAddress: body.billingAddress,
@@ -70609,6 +70677,9 @@ async function handleApi(req, res) {
     const current = (db.orderDrafts || []).find((row) => row.id === parts[2]);
     if (!current) return notFound(res);
     await hydrateDraftLineCosts(db, body.items ? body : current);
+    const termSelection = body.selectedTermIds === undefined
+      ? { selectedTermIds: current.selectedTermIds, selectedTermsSnapshot: current.selectedTermsSnapshot }
+      : quoteTermSelection(db.systemSettings?.quoteTerms, body.selectedTermIds, current.selectedTermsSnapshot);
     const updated = normalizeOrderDraft(db, {
       ...current,
       source: body.source ?? current.source,
@@ -70619,7 +70690,7 @@ async function handleApi(req, res) {
       note: body.note ?? current.note,
       customerNote: body.customerNote ?? current.customerNote,
       expiresAt: body.expiresAt ?? current.expiresAt,
-      selectedTermIds: body.selectedTermIds ?? current.selectedTermIds,
+      ...termSelection,
       customTerms: body.customTerms ?? current.customTerms,
       shippingAddress: body.shippingAddress ?? current.shippingAddress,
       billingAddress: body.billingAddress ?? current.billingAddress,
@@ -70671,6 +70742,7 @@ async function handleApi(req, res) {
     });
     const db = await readOrderDraftWorkflowDb();
     db.inventory = products || [];
+    const termSelection = quoteTermSelection(db.systemSettings?.quoteTerms, undefined, [], true);
     const duplicate = normalizeOrderDraft(db, {
       buyer: order.buyer,
       source: order.source || "Manual",
@@ -70679,6 +70751,7 @@ async function handleApi(req, res) {
       marketplaceOrderNumber: "",
       note: `Duplicated from ${order.orderNumber}`,
       expiresAt: defaultQuoteExpiration(30),
+      ...termSelection,
       shippingAddress: order.address || {},
       billingAddress: order.address || {},
       items,
@@ -74665,6 +74738,7 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts.length === 2) {
     const body = await parseBody(req);
+    const termSelection = quoteTermSelection(db.systemSettings?.quoteTerms, body.selectedTermIds, [], body.selectedTermIds === undefined);
     const draft = normalizeOrderDraft(db, {
       source: body.source,
       buyer: body.buyer,
@@ -74674,7 +74748,7 @@ async function handleApi(req, res) {
       note: body.note,
       customerNote: body.customerNote,
       expiresAt: body.expiresAt || defaultQuoteExpiration(30),
-      selectedTermIds: body.selectedTermIds,
+      ...termSelection,
       customTerms: body.customTerms,
       shippingAddress: body.shippingAddress,
       billingAddress: body.billingAddress,
@@ -74713,6 +74787,9 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const current = (db.orderDrafts || []).find((row) => row.id === parts[2]);
     if (!current) return notFound(res);
+    const termSelection = body.selectedTermIds === undefined
+      ? { selectedTermIds: current.selectedTermIds, selectedTermsSnapshot: current.selectedTermsSnapshot }
+      : quoteTermSelection(db.systemSettings?.quoteTerms, body.selectedTermIds, current.selectedTermsSnapshot);
     const updated = normalizeOrderDraft(db, {
       ...current,
       source: body.source ?? current.source,
@@ -74723,7 +74800,7 @@ async function handleApi(req, res) {
       note: body.note ?? current.note,
       customerNote: body.customerNote ?? current.customerNote,
       expiresAt: body.expiresAt ?? current.expiresAt,
-      selectedTermIds: body.selectedTermIds ?? current.selectedTermIds,
+      ...termSelection,
       customTerms: body.customTerms ?? current.customTerms,
       shippingAddress: body.shippingAddress ?? current.shippingAddress,
       billingAddress: body.billingAddress ?? current.billingAddress,
@@ -74773,6 +74850,7 @@ async function handleApi(req, res) {
         msrp: Number((db.inventory || []).find((row) => row.sku === order.sku)?.listPrice ?? (db.inventory || []).find((row) => row.sku === order.sku)?.msrp ?? 0),
         cost: Number((db.inventory || []).find((row) => row.sku === order.sku)?.cost || 0)
       }];
+    const termSelection = quoteTermSelection(db.systemSettings?.quoteTerms, undefined, [], true);
     const duplicate = normalizeOrderDraft(db, {
       buyer: order.buyer,
       source: order.source || "Manual",
@@ -74781,6 +74859,7 @@ async function handleApi(req, res) {
       marketplaceOrderNumber: "",
       note: `Duplicated from ${order.orderNumber}`,
       expiresAt: defaultQuoteExpiration(30),
+      ...termSelection,
       shippingAddress: order.address || {},
       billingAddress: order.address || {},
       items,

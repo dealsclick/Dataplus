@@ -24,6 +24,7 @@ import { settingsTabItems } from "./settings-navigation"
 import { UserCompanyAccess } from "./user-company-access"
 import { SuperuserActivity } from "./superuser-activity"
 import { CarrierProviderSettings } from "./carrier-provider-settings"
+import { QuoteTermsSettings } from "./quote-terms-settings"
 import { api, dateLabel, numberLabel } from "../lib/client-api"
 import { loadAppReferences } from "../lib/app-state"
 import { Detail, Field, PageHeader, ToggleField } from "./app-ui"
@@ -878,7 +879,7 @@ function SettingsPage({
         eyebrow="Admin"
         title="System Settings"
         description="Operations, workers, catalog controls, integrations, and deployment history in compact tabs."
-        action={["releases", "superuser", "performance"].includes(activeTab) ? undefined : editing ? (
+        action={["releases", "superuser", "performance", "sales"].includes(activeTab) ? undefined : editing ? (
           <div className="flex gap-2">
             <Button variant="outline" onClick={() => { setEditing(false); setDraft({}) }}>Cancel</Button>
             <Button onClick={save}>Save changes</Button>
@@ -967,6 +968,7 @@ function SettingsPage({
           </Card>
         </TabsContent>
         <TabsContent value="templates" className="grid gap-4"><ReturnTemplateSettings settings={{ ...settings, ...draft }} editing={editing} onChange={update} /></TabsContent>
+        <TabsContent value="sales" className="grid gap-4"><QuoteTermsSettings canEdit={userCan(authUser, "settings.sales", "edit")} /></TabsContent>
         <TabsContent value="organization" className="grid gap-4">
           <Card>
             <CardHeader><CardTitle className="text-base">System branding</CardTitle><CardDescription>Upload the logo shown in DataPlus navigation and mobile warehouse screens.</CardDescription></CardHeader>

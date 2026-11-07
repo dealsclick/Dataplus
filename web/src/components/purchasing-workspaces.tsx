@@ -95,29 +95,13 @@ import { Detail,Field,PageHeader } from "./app-ui"
 import { channelOrderNumberFor,channelOrderUrlFor,detectedTrackingUpdate,detectTrackingCarrier,enabledCarrierNames,enabledCarrierServices,UniversalShippingLabelDialog,useFulfillmentCarriers } from "./order-workspaces"
 import { CatalogImage } from "./product-workspaces"
 import { shipmentTrackingCarriers,trackingUrlForShipment } from "./shipment-links"
-
-const quoteTermOptions = [
-  { id: "availability", group: "Commercial", label: "Availability", description: "Product availability may change until the order is accepted." },
-  { id: "taxes", group: "Commercial", label: "Sales tax", description: "Add applicable tax unless a valid exemption certificate is on file." },
-  { id: "shipping", group: "Commercial", label: "Shipping and handling", description: "Shipping and handling are additional unless this quote includes them." },
-  { id: "lead_time", group: "Commercial", label: "Estimated lead time", description: "Supplier and carrier lead times are estimates." },
-  { id: "payment_due", group: "Payment", label: "Due upon acceptance", description: "Payment is due when the quote is accepted." },
-  { id: "net_15", group: "Payment", label: "Net 15", description: "Approved account payment is due within 15 days." },
-  { id: "net_30", group: "Payment", label: "Net 30", description: "Approved account payment is due within 30 days." },
-  { id: "po_required", group: "Fulfillment", label: "Purchase order required", description: "Require the customer's PO number before fulfillment." },
-  { id: "partial_shipments", group: "Fulfillment", label: "Partial shipments", description: "Allow available items to ship separately." },
-  { id: "returns_standard", group: "Returns", label: "Standard return policy", description: "Returns require authorization and follow the current return policy." },
-  { id: "special_order_final", group: "Returns", label: "Special-order items", description: "Special-order and custom items become final once ordered." },
-  { id: "manufacturer_warranty", group: "Returns", label: "Manufacturer warranty", description: "Product warranties are provided by the manufacturer unless stated otherwise." },
-] as const
+import type { QuoteTermDefinition } from "./quote-terms-settings"
 
 const quotePdfVersions = [
   { id: "standard", title: "Standard quote", description: "SKU, description, quantity, unit price, and line total." },
   { id: "savings", title: "Savings proposal", description: "Adds MSRP, customer price, and savings by line and in total." },
   { id: "summary", title: "Compact summary", description: "A shorter customer view with item, quantity, and total only." },
 ] as const
-
-const quotePaymentTermIds = new Set(["payment_due", "net_15", "net_30"])
 
 function quoteDateKey(date: Date) {
   const year = date.getFullYear()
@@ -269,6 +253,7 @@ export function DraftQuoteFieldDetailPage() {
   const [similarLineIndex, setSimilarLineIndex] = useState(-1)
   const [similarResults, setSimilarResults] = useState<Array<Record<string, unknown>>>([])
   const [warehouses, setWarehouses] = useState<Array<Record<string, unknown>>>([])
+  const [quoteTermOptions, setQuoteTermOptions] = useState<QuoteTermDefinition[]>([])
   const [quoteCarriers, setQuoteCarriers] = useState<QuoteCarrierAccess[]>([])
   const [carrierPreference, setCarrierPreference] = useState<QuoteCarrierPreference>({ selectionMode: "lowest_cost", preferredProviderId: "", rateTtlMinutes: 30 })
   const [shippingOpen, setShippingOpen] = useState(false)
@@ -293,8 +278,9 @@ export function DraftQuoteFieldDetailPage() {
   const load = async () => {
     setLoading(true)
     try {
-      const result = await api<{ draft?: Record<string, unknown>; warehouses?: Array<Record<string, unknown>>; carriers?: QuoteCarrierAccess[]; carrierPreference?: QuoteCarrierPreference }>(`/api/order-drafts/${encodeURIComponent(draftId)}`)
+      const result = await api<{ draft?: Record<string, unknown>; warehouses?: Array<Record<string, unknown>>; quoteTerms?: QuoteTermDefinition[]; carriers?: QuoteCarrierAccess[]; carrierPreference?: QuoteCarrierPreference }>(`/api/order-drafts/${encodeURIComponent(draftId)}`)
       setDraft(result.draft || null)
+      setQuoteTermOptions(result.quoteTerms || [])
       setWarehouses(result.warehouses || [])
       setQuoteCarriers(result.carriers || [])
       setCarrierPreference(result.carrierPreference || { selectionMode: "lowest_cost", preferredProviderId: "", rateTtlMinutes: 30 })
@@ -471,7 +457,8 @@ export function DraftQuoteFieldDetailPage() {
   }
   const toggleTerm = (termId: string, checked: boolean) => setForm((current) => {
     let selected = current.selectedTermIds.filter((id) => id !== termId)
-    if (checked && quotePaymentTermIds.has(termId)) selected = selected.filter((id) => !quotePaymentTermIds.has(id))
+    const term = quoteTermOptions.find((option) => option.id === termId)
+    if (checked && term?.exclusiveGroup) selected = selected.filter((id) => quoteTermOptions.find((option) => option.id === id)?.exclusiveGroup !== term.exclusiveGroup)
     if (checked) selected.push(termId)
     return { ...current, selectedTermIds: selected }
   })
@@ -583,7 +570,10 @@ export function DraftQuoteFieldDetailPage() {
   const expiresAt = String(draft?.expiresAt || "")
   const expired = Boolean(expiresAt && expiresAt < quoteDateKey(new Date()))
   const selectedTermIds = Array.isArray(draft?.selectedTermIds) ? draft.selectedTermIds.map(String) : []
-  const selectedTerms = quoteTermOptions.filter((term) => selectedTermIds.includes(term.id))
+  const selectedTermSnapshot = Array.isArray(draft?.selectedTermsSnapshot) ? draft.selectedTermsSnapshot as QuoteTermDefinition[] : []
+  const selectedTerms = selectedTermIds.map((id) => selectedTermSnapshot.find((term) => term.id === id) || quoteTermOptions.find((term) => term.id === id)).filter((term): term is QuoteTermDefinition => Boolean(term))
+  const editableQuoteTerms = quoteTermOptions.filter((term) => term.active || form.selectedTermIds.includes(term.id))
+  const quoteTermGroups = [...new Set(editableQuoteTerms.map((term) => term.group))]
   const expirationDate = form.expiresAt ? new Date(`${form.expiresAt}T12:00:00`) : undefined
   const formSubtotal = form.items.reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0)) * Math.max(0, Number(line.price || 0)), 0)
   const formSavings = form.items.reduce((sum, line) => sum + Math.max(0, Number(line.msrp || 0) - Number(line.price || 0)) * Math.max(0, Number(line.qty || 0)), 0)
@@ -813,8 +803,8 @@ export function DraftQuoteFieldDetailPage() {
                 </section>
 
                 <section className="grid gap-4 border-t pt-6">
-                  <div><h3 className="text-base font-semibold">Terms and conditions</h3><p className="mt-1 text-sm text-muted-foreground">Check only the approved terms that apply. Payment choices are mutually exclusive.</p></div>
-                  <div className="grid gap-5 xl:grid-cols-2">{["Commercial", "Payment", "Fulfillment", "Returns"].map((group) => <section key={group} className="grid content-start gap-2"><p className="text-sm font-semibold">{group}</p>{quoteTermOptions.filter((term) => term.group === group).map((term) => { const checked = form.selectedTermIds.includes(term.id); return <label key={term.id} className={cn("flex cursor-pointer items-start gap-3 rounded-md border p-3 transition-colors", checked && "border-primary/50 bg-primary/5")}><Checkbox className="mt-0.5" checked={checked} onCheckedChange={(value) => toggleTerm(term.id, value === true)} /><span><span className="block text-sm font-medium">{term.label}</span><span className="mt-0.5 block text-xs text-muted-foreground">{term.description}</span></span></label> })}</section>)}</div>
+                  <div><h3 className="text-base font-semibold">Terms and conditions</h3><p className="mt-1 text-sm text-muted-foreground">Check only the approved terms that apply. Terms in the same exclusive group cannot be selected together.</p></div>
+                  {quoteTermGroups.length ? <div className="grid gap-5 xl:grid-cols-2">{quoteTermGroups.map((group) => <section key={group} className="grid content-start gap-2"><p className="text-sm font-semibold">{group}</p>{editableQuoteTerms.filter((term) => term.group === group).map((term) => { const checked = form.selectedTermIds.includes(term.id); return <label key={term.id} className={cn("flex cursor-pointer items-start gap-3 rounded-md border p-3 transition-colors", checked && "border-primary/50 bg-primary/5", !term.active && "opacity-60")}><Checkbox className="mt-0.5" checked={checked} onCheckedChange={(value) => toggleTerm(term.id, value === true)} /><span><span className="flex flex-wrap items-center gap-2 text-sm font-medium">{term.label}{!term.active ? <Badge variant="outline">Inactive</Badge> : null}</span><span className="mt-0.5 block text-xs text-muted-foreground">{term.text}</span></span></label> })}</section>)}</div> : <Alert><Info className="size-4" /><AlertTitle>No quote terms configured</AlertTitle><AlertDescription>An administrator can add customer terms under Settings &gt; Sales.</AlertDescription></Alert>}
                   <Field label="Custom customer terms"><Textarea className="min-h-24" value={form.customTerms} onChange={(event) => setForm({ ...form, customTerms: event.target.value })} placeholder="Add only approved customer-facing terms that are specific to this quote." /></Field>
                 </section>
               </TabsContent>

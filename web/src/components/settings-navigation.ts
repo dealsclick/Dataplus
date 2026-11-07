@@ -1,5 +1,6 @@
 export const settingsTabItems = [
     { id: "operations", label: "Operations" },
+    { id: "sales", label: "Sales" },
     { id: "organization", label: "Organization" },
     { id: "companies", label: "Companies" },
     { id: "orders", label: "Orders" },

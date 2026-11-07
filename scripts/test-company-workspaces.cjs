@@ -144,6 +144,11 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   assert.equal((await op('/api/app/summary')).response.data.summary,null);
   assert.deepEqual((await op('/api/app/references?include=warehouses,systemSettings')).response.data.warehouses,[]);
   assert.equal((await op('/api/channels')).response.data.connections.length,0);
+  const companyTerms=(await op('/api/quote-terms')).response.data;
+  assert.equal(companyTerms.companyOwned,true);
+  assert.ok(companyTerms.quoteTerms.length>0);
+  const editedTerms=companyTerms.quoteTerms.map(term=>term.id==='taxes'?{...term,text:'Company-specific tax wording.'}:term);
+  assert.equal((await op('/api/quote-terms','PUT',{quoteTerms:editedTerms})).response.data.quoteTerms.find(term=>term.id==='taxes').text,'Company-specific tax wording.');
   const created=(await op('/api/order-drafts','POST',{
     buyer:'Buyer',customerNote:'Customer-facing note',note:'Internal note',expiresAt:'2026-12-20',
     selectedTermIds:['taxes','net_30','unknown'],customTerms:'Approved custom term.',
@@ -153,6 +158,7 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   assert.equal(created.customerNote,'Customer-facing note');
   assert.equal(created.expiresAt,'2026-12-20');
   assert.deepEqual(Array.from(created.selectedTermIds),['taxes','net_30']);
+  assert.equal(created.selectedTermsSnapshot.find(term=>term.id==='taxes').text,'Company-specific tax wording.');
   assert.equal(created.items[0].msrp,15);
   assert.equal(created.items[0].cost,null,'Company quote input cannot persist a LINQ or caller-provided cost');
   const supplierOptions=(await op(`/api/order-drafts/${created.id}/supplier-options?sku=ABC`)).response.data.options;
