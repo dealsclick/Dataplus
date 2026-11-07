@@ -2,9 +2,11 @@ import { Alert,AlertDescription,AlertTitle } from "@/components/ui/alert"
 import { AlertDialog,AlertDialogAction,AlertDialogCancel,AlertDialogContent,AlertDialogDescription,AlertDialogFooter,AlertDialogHeader,AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { ButtonGroup } from "@/components/ui/button-group"
 import { Calendar } from "@/components/ui/calendar"
 import { Card,CardContent,CardDescription,CardFooter,CardHeader,CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Command,CommandEmpty,CommandGroup,CommandInput,CommandItem,CommandList } from "@/components/ui/command"
 import { Dialog,DialogContent,DialogDescription,DialogFooter,DialogHeader,DialogTitle } from "@/components/ui/dialog"
 import {
   DropdownMenu,
@@ -14,9 +16,11 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from "@/components/ui/dropdown-menu"
-import { FieldDescription,FieldGroup,FieldLabel,FieldLegend,FieldSeparator,FieldSet,Field as FormField } from "@/components/ui/field"
+import { FieldLabel,Field as FormField } from "@/components/ui/field"
 import { HoverCard,HoverCardContent,HoverCardTrigger } from "@/components/ui/hover-card"
+import { Empty,EmptyDescription,EmptyHeader,EmptyMedia,EmptyTitle } from "@/components/ui/empty"
 import { Input } from "@/components/ui/input"
+import { InputGroup,InputGroupAddon,InputGroupInput } from "@/components/ui/input-group"
 import { Label } from "@/components/ui/label"
 import { Popover,PopoverContent,PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -48,6 +52,8 @@ import {
   Ban,
   CalendarDays,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   ChevronDown,
   Clock3,
   Copy,
@@ -152,6 +158,7 @@ export function DraftQuoteFieldDetailPage() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [editorOpen, setEditorOpen] = useState(false)
+  const [editorSection, setEditorSection] = useState<"items" | "customer" | "delivery" | "terms" | "notes">("items")
   const [exportOpen, setExportOpen] = useState(false)
   const [exportVariant, setExportVariant] = useState<"standard" | "savings" | "summary">("standard")
   const [expirationCalendarOpen, setExpirationCalendarOpen] = useState(false)
@@ -226,6 +233,7 @@ export function DraftQuoteFieldDetailPage() {
     })
     setCatalogQuery("")
     setCatalogResults([])
+    setEditorSection("items")
     setEditorOpen(true)
   }
 
@@ -376,6 +384,26 @@ export function DraftQuoteFieldDetailPage() {
   const selectedTermIds = Array.isArray(draft?.selectedTermIds) ? draft.selectedTermIds.map(String) : []
   const selectedTerms = quoteTermOptions.filter((term) => selectedTermIds.includes(term.id))
   const expirationDate = form.expiresAt ? new Date(`${form.expiresAt}T12:00:00`) : undefined
+  const formSubtotal = form.items.reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0)) * Math.max(0, Number(line.price || 0)), 0)
+  const formSavings = form.items.reduce((sum, line) => sum + Math.max(0, Number(line.msrp || 0) - Number(line.price || 0)) * Math.max(0, Number(line.qty || 0)), 0)
+  const formUnitCount = form.items.reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0)), 0)
+  const formEstimatedTotal = formSubtotal + shippingAmount
+  const editorSections = ["items", "customer", "delivery", "terms", "notes"] as const
+  const editorSectionIndex = editorSections.indexOf(editorSection)
+  const editorCompletion = {
+    items: form.items.some((line) => line.sku.trim() && Number(line.qty || 0) > 0),
+    customer: Boolean(form.buyer.trim()),
+    delivery: Boolean(form.line1.trim() && form.city.trim() && form.state.trim() && form.postalCode.trim()),
+    terms: Boolean(form.expiresAt),
+    notes: Boolean(form.note.trim() || form.customerNote.trim()),
+  }
+  const editorSectionMeta = [
+    { id: "items" as const, label: "Items", icon: PackageCheck },
+    { id: "customer" as const, label: "Customer", icon: Users },
+    { id: "delivery" as const, label: "Delivery", icon: Truck },
+    { id: "terms" as const, label: "Validity & terms", icon: FileText },
+    { id: "notes" as const, label: "Notes", icon: MessageSquare },
+  ]
 
   return <div className="grid gap-5">
     <PageHeader eyebrow="Operations / Draft quote" title={String(draft?.draftNumber || draftId || "Quote")} description="A customer proposal that remains editable until accepted and converted into an order." action={<div className="flex flex-wrap gap-2">
@@ -428,27 +456,182 @@ export function DraftQuoteFieldDetailPage() {
 
     <Dialog open={similarOpen} onOpenChange={setSimilarOpen}><DialogContent className="max-h-[88vh] max-w-4xl overflow-y-auto"><DialogHeader><DialogTitle>Similar SKUs</DialogTitle><DialogDescription>Suggestions prioritize active catalog items, availability, category match, and lower sell price when possible.</DialogDescription></DialogHeader>{similarLoading ? <div className="grid min-h-32 place-items-center"><Loader2 className="size-6 animate-spin text-primary" /></div> : <div className="grid gap-2">{similarResults.map((item) => <div key={String(item.sku)} className="grid gap-3 rounded-md border p-3 sm:grid-cols-[minmax(120px,0.35fr)_minmax(0,1fr)_120px_120px_auto]"><div className="font-mono text-xs font-semibold">{String(item.sku || "")}</div><div className="min-w-0"><p className="truncate font-medium">{String(item.title || item.sku || "")}</p><p className="truncate text-xs text-muted-foreground">{String(item.reason || "Catalog alternative")}</p></div><div><p className="text-xs text-muted-foreground">Available</p><p className="font-medium">{numberLabel(Number(item.available || 0))}</p></div><div><p className="text-xs text-muted-foreground">Price</p><p className="font-medium">{moneyLabel(Number(item.price || 0))}</p></div><Button size="sm" onClick={() => applySimilar(item)}>Apply</Button></div>)}{!similarResults.length && <div className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">No similar SKUs found for this line.</div>}</div>}<DialogFooter><Button variant="outline" onClick={() => setSimilarOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
 
-    <Dialog open={editorOpen} onOpenChange={setEditorOpen}><DialogContent className="flex max-h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-6xl flex-col overflow-hidden p-0 sm:max-h-[92vh]"><DialogHeader className="border-b px-4 py-5 sm:px-8 sm:py-6"><DialogTitle>Edit draft quote</DialogTitle><DialogDescription>Build the proposal, choose its validity period, and include only the terms that apply.</DialogDescription></DialogHeader><div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-8"><FieldGroup className="gap-8">
-      <FieldSet><FieldLegend>Quote items</FieldLegend><FieldDescription>Search the approved catalog to pull the current customer price and available MSRP.</FieldDescription><FieldGroup className="mt-4"><FormField><FieldLabel htmlFor="quote-catalog-search">Add catalog product</FieldLabel><div className="relative"><Search className="absolute left-3 top-3 size-4 text-muted-foreground" /><Input id="quote-catalog-search" autoFocus className="pl-9" value={catalogQuery} onChange={(event) => setCatalogQuery(event.target.value)} placeholder="Search SKU, UPC, title, or brand" /></div><FieldDescription>Choosing an existing SKU increases its quantity.</FieldDescription></FormField>{catalogSearching && <p className="text-xs text-muted-foreground">Searching catalog...</p>}{catalogQuery.trim().length >= 2 && !catalogSearching && <div className="overflow-hidden rounded-md border">{catalogResults.map((item) => <button key={item.id || item.sku} type="button" onClick={() => addCatalogItem(item)} className="grid w-full grid-cols-[120px_minmax(0,1fr)_90px] gap-3 border-b px-3 py-3 text-left text-sm last:border-b-0 hover:bg-muted sm:grid-cols-[180px_minmax(0,1fr)_120px] sm:px-4"><span className="truncate font-mono text-xs font-medium">{item.sku}</span><span className="truncate">{item.title || item.marketplaceTitle || item.sku}</span><span className="text-right font-medium">{moneyLabel(Number(item.websitePrice ?? item.price ?? 0))}</span></button>)}{!catalogResults.length && <p className="p-4 text-sm text-muted-foreground">No catalog match. Add a manual line below.</p>}</div>}
-        <div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Product</TableHead><TableHead className="w-28">Qty</TableHead><TableHead className="w-36">MSRP</TableHead><TableHead className="w-36">Quote price</TableHead><TableHead className="w-14" /></TableRow></TableHeader><TableBody>{form.items.map((line, index) => <TableRow key={`${line.sku}-${index}`}><TableCell><Input value={line.sku} onChange={(event) => updateLine(index, { sku: event.target.value })} placeholder="SKU" /></TableCell><TableCell><Input className="min-w-56" value={line.title} onChange={(event) => updateLine(index, { title: event.target.value })} placeholder="Product title" /></TableCell><TableCell><Input type="number" min="1" value={line.qty} onChange={(event) => updateLine(index, { qty: event.target.value })} /></TableCell><TableCell><Input type="number" min="0" step="0.01" value={line.msrp} onChange={(event) => updateLine(index, { msrp: event.target.value })} /></TableCell><TableCell><Input type="number" min="0" step="0.01" value={line.price} onChange={(event) => updateLine(index, { price: event.target.value })} /></TableCell><TableCell><Button type="button" size="icon" variant="ghost" title="Remove line" onClick={() => setForm((current) => ({ ...current, items: current.items.filter((_, lineIndex) => lineIndex !== index) }))}><Trash2 className="size-4" /></Button></TableCell></TableRow>)}</TableBody></Table></div>
-        <Button type="button" variant="outline" className="w-fit" onClick={() => setForm((current) => ({ ...current, items: [...current.items, { sku: "", title: "", qty: "1", msrp: "0", price: "0" }] }))}><Plus className="size-4" /> Add manual line</Button>
-      </FieldGroup></FieldSet>
+    <Dialog open={editorOpen} onOpenChange={(open) => { if (!busy) setEditorOpen(open) }}>
+      <DialogContent className="flex h-[100dvh] max-h-[100dvh] w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none p-0 sm:h-[92dvh] sm:w-[calc(100vw-2rem)] sm:!max-w-[1480px] sm:rounded-lg">
+        <DialogHeader className="shrink-0 border-b px-4 py-4 pr-12 sm:px-6">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <DialogTitle>Edit draft quote</DialogTitle>
+              <DialogDescription className="mt-1">Build the proposal in focused sections while totals and readiness stay visible.</DialogDescription>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 pr-1">
+              <Badge variant="outline">{form.items.length} line{form.items.length === 1 ? "" : "s"}</Badge>
+              <Badge variant="outline">{numberLabel(formUnitCount)} unit{formUnitCount === 1 ? "" : "s"}</Badge>
+              <Badge variant="secondary">{moneyLabel(formEstimatedTotal)}</Badge>
+            </div>
+          </div>
+        </DialogHeader>
 
-      <FieldSeparator />
-      <FieldSet><FieldLegend>Customer and quote status</FieldLegend><div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4"><Field label="Customer name"><Input value={form.buyer} onChange={(event) => setForm({ ...form, buyer: event.target.value })} /></Field><Field label="Customer email"><Input type="email" value={form.buyerEmail} onChange={(event) => setForm({ ...form, buyerEmail: event.target.value })} /></Field><Field label="Phone"><Input value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} /></Field><Field label="Status"><Select value={form.status} onValueChange={(status) => setForm({ ...form, status })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["draft", "reviewing", "quoted", "sent", "accepted", "lost"].map((status) => <SelectItem key={status} value={status}>{status.replace(/_/g, " ")}</SelectItem>)}</SelectContent></Select></Field><Field label="Source"><Select value={form.source} onValueChange={(source) => setForm({ ...form, source })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["Manual", "Phone", "Email", "Shopify"].map((source) => <SelectItem key={source} value={source}>{source}</SelectItem>)}</SelectContent></Select></Field></div></FieldSet>
+        <Tabs value={editorSection} onValueChange={(value) => setEditorSection(value as typeof editorSection)} className="min-h-0 flex-1 gap-0 lg:grid lg:grid-cols-[210px_minmax(0,1fr)_290px]">
+          <div className="shrink-0 border-b bg-muted/20 lg:border-r lg:border-b-0">
+            <TabsList variant="line" className="h-auto w-full justify-start overflow-x-auto rounded-none border-0 bg-transparent p-2 lg:flex-col lg:items-stretch lg:gap-1 lg:overflow-visible lg:p-3">
+              {editorSectionMeta.map((section) => {
+                const Icon = section.icon
+                return <TabsTrigger key={section.id} value={section.id} className="h-10 shrink-0 justify-start lg:w-full">
+                  <Icon className="size-4" />
+                  {section.label}
+                  {editorCompletion[section.id] ? <CheckCircle2 className="ml-auto size-3.5 text-emerald-500" /> : null}
+                </TabsTrigger>
+              })}
+            </TabsList>
+          </div>
 
-      <FieldSeparator />
-      <FieldSet><FieldLegend>Quote validity</FieldLegend><FieldDescription>Set a clear customer deadline. New and duplicated quotes default to 30 days.</FieldDescription><div className="mt-4 flex flex-wrap items-end gap-2"><Button type="button" variant={form.expiresAt === quoteDateAfter(7) ? "default" : "outline"} onClick={() => setForm({ ...form, expiresAt: quoteDateAfter(7) })}>7 days</Button><Button type="button" variant={form.expiresAt === quoteDateAfter(30) ? "default" : "outline"} onClick={() => setForm({ ...form, expiresAt: quoteDateAfter(30) })}>30 days</Button><Popover open={expirationCalendarOpen} onOpenChange={setExpirationCalendarOpen}><PopoverTrigger asChild><Button type="button" variant="outline"><CalendarDays className="size-4" /> Custom date</Button></PopoverTrigger><PopoverContent align="start" className="w-auto p-2"><Calendar mode="single" selected={expirationDate} disabled={{ before: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()) }} onSelect={(date) => { if (date) setForm((current) => ({ ...current, expiresAt: quoteDateKey(date) })); setExpirationCalendarOpen(false) }} /></PopoverContent></Popover><Field label="Valid until"><Input type="date" min={quoteDateKey(new Date())} value={form.expiresAt} onChange={(event) => setForm({ ...form, expiresAt: event.target.value })} /></Field></div></FieldSet>
+          <ScrollArea className="h-full min-h-0 flex-1">
+            <div className="p-4 sm:p-6 lg:p-8">
+              <TabsContent value="items" className="m-0 grid gap-6">
+                <div>
+                  <h3 className="text-base font-semibold">Quote items</h3>
+                  <p className="mt-1 text-sm text-muted-foreground">Search the approved catalog or add a manual line. Choosing an existing SKU increases its quantity.</p>
+                </div>
 
-      <FieldSeparator />
-      <FieldSet><FieldLegend>Terms and conditions</FieldLegend><FieldDescription>Check only the approved terms that apply. Payment choices are mutually exclusive.</FieldDescription><div className="mt-4 grid gap-5 lg:grid-cols-2">{["Commercial", "Payment", "Fulfillment", "Returns"].map((group) => <section key={group} className="grid content-start gap-2"><p className="text-sm font-semibold">{group}</p>{quoteTermOptions.filter((term) => term.group === group).map((term) => { const checked = form.selectedTermIds.includes(term.id); return <label key={term.id} className={cn("flex cursor-pointer items-start gap-3 rounded-md border p-3 transition-colors", checked && "border-primary/50 bg-primary/5")}><Checkbox className="mt-0.5" checked={checked} onCheckedChange={(value) => toggleTerm(term.id, value === true)} /><span><span className="block text-sm font-medium">{term.label}</span><span className="mt-0.5 block text-xs text-muted-foreground">{term.description}</span></span></label> })}</section>)}</div><div className="mt-5"><Field label="Custom customer terms"><Textarea className="min-h-24" value={form.customTerms} onChange={(event) => setForm({ ...form, customTerms: event.target.value })} placeholder="Add only approved customer-facing terms that are specific to this quote." /></Field><p className="mt-2 text-xs text-muted-foreground">Custom terms can affect payment, cancellation, and return obligations. Use company-approved language and request review when needed.</p></div></FieldSet>
+                <FormField>
+                  <FieldLabel htmlFor="quote-catalog-search">Add catalog product</FieldLabel>
+                  <Command shouldFilter={false} className="rounded-md border shadow-xs">
+                    <CommandInput id="quote-catalog-search" autoFocus value={catalogQuery} onValueChange={setCatalogQuery} placeholder="Search SKU, UPC, title, or brand" />
+                    {catalogQuery.trim().length >= 2 ? <CommandList className="border-t">
+                      {catalogSearching ? <div className="flex items-center gap-2 p-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Searching catalog...</div> : null}
+                      {!catalogSearching && catalogResults.length ? <CommandGroup heading="Catalog results">
+                        {catalogResults.map((item) => <CommandItem key={item.id || item.sku} value={String(item.sku || item.id)} onSelect={() => addCatalogItem(item)} className="grid grid-cols-[minmax(90px,0.3fr)_minmax(0,1fr)_auto] gap-3 py-3">
+                          <span className="truncate font-mono text-xs font-medium">{item.sku}</span>
+                          <span className="truncate">{item.title || item.marketplaceTitle || item.sku}</span>
+                          <span className="font-semibold">{moneyLabel(Number(item.websitePrice ?? item.price ?? 0))}</span>
+                        </CommandItem>)}
+                      </CommandGroup> : null}
+                      {!catalogSearching && !catalogResults.length ? <CommandEmpty>No catalog match. Add a manual line below.</CommandEmpty> : null}
+                    </CommandList> : null}
+                  </Command>
+                </FormField>
 
-      <FieldSeparator />
-      <FieldSet><FieldLegend>Notes</FieldLegend><div className="mt-4 grid gap-4 sm:grid-cols-2"><Field label="Internal notes"><Textarea className="min-h-28" value={form.note} onChange={(event) => setForm({ ...form, note: event.target.value })} placeholder="Only DataPlus staff can see these notes" /></Field><Field label="Customer message"><Textarea className="min-h-28" value={form.customerNote} onChange={(event) => setForm({ ...form, customerNote: event.target.value })} placeholder="Included on every customer quote version" /></Field></div></FieldSet>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="font-medium">Proposal lines</p>
+                    <p className="text-xs text-muted-foreground">Prices are per selling unit.</p>
+                  </div>
+                  <Button type="button" size="sm" variant="outline" onClick={() => setForm((current) => ({ ...current, items: [...current.items, { sku: "", title: "", qty: "1", msrp: "0", price: "0" }] }))}><Plus className="size-4" /> Add manual line</Button>
+                </div>
 
-      <FieldSeparator />
-      <FieldSet><FieldLegend>Ship-to address</FieldLegend><div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3"><Field label="Address line 1"><Input value={form.line1} onChange={(event) => setForm({ ...form, line1: event.target.value })} /></Field><Field label="Address line 2"><Input value={form.line2} onChange={(event) => setForm({ ...form, line2: event.target.value })} /></Field><Field label="City"><Input value={form.city} onChange={(event) => setForm({ ...form, city: event.target.value })} /></Field><Field label="State / province"><Input value={form.state} onChange={(event) => setForm({ ...form, state: event.target.value })} /></Field><Field label="Postal code"><Input value={form.postalCode} onChange={(event) => setForm({ ...form, postalCode: event.target.value })} /></Field><Field label="Country"><Input value={form.country} onChange={(event) => setForm({ ...form, country: event.target.value })} /></Field></div></FieldSet>
-    </FieldGroup></div><DialogFooter className="border-t bg-background px-4 py-4 sm:px-8"><Button variant="outline" onClick={() => setEditorOpen(false)}>Cancel</Button><Button disabled={busy || !form.expiresAt} onClick={() => void save()}><Save className="size-4" /> Save quote</Button></DialogFooter></DialogContent></Dialog>
+                {form.items.length ? <div className="overflow-x-auto rounded-md border">
+                  <Table className="min-w-[820px]">
+                    <TableHeader><TableRow><TableHead className="w-40">SKU</TableHead><TableHead>Product</TableHead><TableHead className="w-24">Qty</TableHead><TableHead className="w-36">MSRP</TableHead><TableHead className="w-36">Quote price</TableHead><TableHead className="w-28 text-right">Total</TableHead><TableHead className="w-12" /></TableRow></TableHeader>
+                    <TableBody>{form.items.map((line, index) => <TableRow key={`${line.sku}-${index}`}>
+                      <TableCell><Input value={line.sku} onChange={(event) => updateLine(index, { sku: event.target.value })} placeholder="SKU" /></TableCell>
+                      <TableCell><Input className="min-w-56" value={line.title} onChange={(event) => updateLine(index, { title: event.target.value })} placeholder="Product title" /></TableCell>
+                      <TableCell><Input type="number" min="1" inputMode="numeric" value={line.qty} onChange={(event) => updateLine(index, { qty: event.target.value })} /></TableCell>
+                      <TableCell><InputGroup><InputGroupAddon>$</InputGroupAddon><InputGroupInput type="number" min="0" step="0.01" inputMode="decimal" value={line.msrp} onChange={(event) => updateLine(index, { msrp: event.target.value })} /></InputGroup></TableCell>
+                      <TableCell><InputGroup><InputGroupAddon>$</InputGroupAddon><InputGroupInput type="number" min="0" step="0.01" inputMode="decimal" value={line.price} onChange={(event) => updateLine(index, { price: event.target.value })} /></InputGroup></TableCell>
+                      <TableCell className="text-right font-semibold tabular-nums">{moneyLabel(Math.max(0, Number(line.qty || 0)) * Math.max(0, Number(line.price || 0)))}</TableCell>
+                      <TableCell><Button type="button" size="icon" variant="ghost" title="Remove line" onClick={() => setForm((current) => ({ ...current, items: current.items.filter((_, lineIndex) => lineIndex !== index) }))}><Trash2 className="size-4" /></Button></TableCell>
+                    </TableRow>)}</TableBody>
+                  </Table>
+                </div> : <Empty className="border">
+                  <EmptyHeader><EmptyMedia variant="icon"><PackageCheck /></EmptyMedia><EmptyTitle>No quote items yet</EmptyTitle><EmptyDescription>Search the catalog above or add a manual line to start the proposal.</EmptyDescription></EmptyHeader>
+                </Empty>}
+              </TabsContent>
+
+              <TabsContent value="customer" className="m-0 grid gap-6">
+                <div><h3 className="text-base font-semibold">Customer and quote status</h3><p className="mt-1 text-sm text-muted-foreground">Keep the buyer details and sales stage together.</p></div>
+                <div className="grid gap-5 sm:grid-cols-2">
+                  <Field label="Customer name"><Input autoFocus value={form.buyer} onChange={(event) => setForm({ ...form, buyer: event.target.value })} /></Field>
+                  <Field label="Customer email"><Input type="email" value={form.buyerEmail} onChange={(event) => setForm({ ...form, buyerEmail: event.target.value })} /></Field>
+                  <Field label="Phone"><Input type="tel" value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} /></Field>
+                  <Field label="Status"><Select value={form.status} onValueChange={(status) => setForm({ ...form, status })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["draft", "reviewing", "quoted", "sent", "accepted", "lost"].map((status) => <SelectItem key={status} value={status}>{status.replace(/_/g, " ")}</SelectItem>)}</SelectContent></Select></Field>
+                  <Field label="Source"><Select value={form.source} onValueChange={(source) => setForm({ ...form, source })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["Manual", "Phone", "Email", "Shopify"].map((source) => <SelectItem key={source} value={source}>{source}</SelectItem>)}</SelectContent></Select></Field>
+                </div>
+              </TabsContent>
+
+              <TabsContent value="delivery" className="m-0 grid gap-6">
+                <div><h3 className="text-base font-semibold">Ship-to address</h3><p className="mt-1 text-sm text-muted-foreground">A complete destination is required before comparing carrier rates.</p></div>
+                <div className="grid gap-5 sm:grid-cols-2">
+                  <Field label="Address line 1"><Input autoFocus value={form.line1} onChange={(event) => setForm({ ...form, line1: event.target.value })} /></Field>
+                  <Field label="Address line 2"><Input value={form.line2} onChange={(event) => setForm({ ...form, line2: event.target.value })} /></Field>
+                  <Field label="City"><Input value={form.city} onChange={(event) => setForm({ ...form, city: event.target.value })} /></Field>
+                  <Field label="State / province"><Input value={form.state} onChange={(event) => setForm({ ...form, state: event.target.value })} /></Field>
+                  <Field label="Postal code"><Input value={form.postalCode} onChange={(event) => setForm({ ...form, postalCode: event.target.value })} /></Field>
+                  <Field label="Country"><Input value={form.country} onChange={(event) => setForm({ ...form, country: event.target.value })} /></Field>
+                </div>
+                {!editorCompletion.delivery ? <Alert><Info className="size-4" /><AlertTitle>Destination is incomplete</AlertTitle><AlertDescription>You can save the draft now, but carrier rates need address line 1, city, state, and postal code.</AlertDescription></Alert> : null}
+              </TabsContent>
+
+              <TabsContent value="terms" className="m-0 grid gap-8">
+                <section className="grid gap-4">
+                  <div><h3 className="text-base font-semibold">Quote validity</h3><p className="mt-1 text-sm text-muted-foreground">Set a clear customer deadline. New and duplicated quotes default to 30 days.</p></div>
+                  <div className="flex flex-wrap items-end gap-3">
+                    <ButtonGroup>
+                      <Button type="button" variant={form.expiresAt === quoteDateAfter(7) ? "default" : "outline"} onClick={() => setForm({ ...form, expiresAt: quoteDateAfter(7) })}>7 days</Button>
+                      <Button type="button" variant={form.expiresAt === quoteDateAfter(30) ? "default" : "outline"} onClick={() => setForm({ ...form, expiresAt: quoteDateAfter(30) })}>30 days</Button>
+                    </ButtonGroup>
+                    <Popover open={expirationCalendarOpen} onOpenChange={setExpirationCalendarOpen}><PopoverTrigger asChild><Button type="button" variant="outline"><CalendarDays className="size-4" /> Custom date</Button></PopoverTrigger><PopoverContent align="start" className="w-auto p-2"><Calendar mode="single" selected={expirationDate} disabled={{ before: new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()) }} onSelect={(date) => { if (date) setForm((current) => ({ ...current, expiresAt: quoteDateKey(date) })); setExpirationCalendarOpen(false) }} /></PopoverContent></Popover>
+                    <Field label="Valid until"><Input type="date" min={quoteDateKey(new Date())} value={form.expiresAt} onChange={(event) => setForm({ ...form, expiresAt: event.target.value })} /></Field>
+                  </div>
+                </section>
+
+                <section className="grid gap-4 border-t pt-6">
+                  <div><h3 className="text-base font-semibold">Terms and conditions</h3><p className="mt-1 text-sm text-muted-foreground">Check only the approved terms that apply. Payment choices are mutually exclusive.</p></div>
+                  <div className="grid gap-5 xl:grid-cols-2">{["Commercial", "Payment", "Fulfillment", "Returns"].map((group) => <section key={group} className="grid content-start gap-2"><p className="text-sm font-semibold">{group}</p>{quoteTermOptions.filter((term) => term.group === group).map((term) => { const checked = form.selectedTermIds.includes(term.id); return <label key={term.id} className={cn("flex cursor-pointer items-start gap-3 rounded-md border p-3 transition-colors", checked && "border-primary/50 bg-primary/5")}><Checkbox className="mt-0.5" checked={checked} onCheckedChange={(value) => toggleTerm(term.id, value === true)} /><span><span className="block text-sm font-medium">{term.label}</span><span className="mt-0.5 block text-xs text-muted-foreground">{term.description}</span></span></label> })}</section>)}</div>
+                  <Field label="Custom customer terms"><Textarea className="min-h-24" value={form.customTerms} onChange={(event) => setForm({ ...form, customTerms: event.target.value })} placeholder="Add only approved customer-facing terms that are specific to this quote." /></Field>
+                </section>
+              </TabsContent>
+
+              <TabsContent value="notes" className="m-0 grid gap-7">
+                <div><h3 className="text-base font-semibold">Sales notes</h3><p className="mt-1 text-sm text-muted-foreground">Keep internal context separate from the message that appears on customer PDFs.</p></div>
+                <Field label="Internal notes"><Textarea autoFocus className="min-h-40" value={form.note} onChange={(event) => setForm({ ...form, note: event.target.value })} placeholder="Only DataPlus staff can see these notes" /></Field>
+                <Field label="Customer message"><Textarea className="min-h-40" value={form.customerNote} onChange={(event) => setForm({ ...form, customerNote: event.target.value })} placeholder="Included on every customer quote version" /></Field>
+              </TabsContent>
+            </div>
+          </ScrollArea>
+
+          <aside className="hidden min-h-0 border-l bg-muted/20 lg:block">
+            <ScrollArea className="h-full">
+              <div className="grid gap-6 p-5">
+                <section>
+                  <div className="flex items-center justify-between gap-2"><p className="font-semibold">Quote summary</p><Badge variant="outline" className="capitalize">{form.status.replace(/_/g, " ")}</Badge></div>
+                  <div className="mt-4 grid gap-2 text-sm">
+                    <div className="flex justify-between gap-3 text-muted-foreground"><span>{form.items.length} product line{form.items.length === 1 ? "" : "s"}</span><span>{numberLabel(formUnitCount)} units</span></div>
+                    <div className="flex justify-between gap-3"><span>Products</span><span className="font-medium tabular-nums">{moneyLabel(formSubtotal)}</span></div>
+                    {formSavings > 0 ? <div className="flex justify-between gap-3 text-emerald-600"><span>Customer savings</span><span className="font-medium tabular-nums">{moneyLabel(formSavings)}</span></div> : null}
+                    <div className="flex justify-between gap-3"><span>Saved shipping</span><span className="font-medium tabular-nums">{savedShippingEstimate ? moneyLabel(shippingAmount) : "Not quoted"}</span></div>
+                    <div className="mt-2 flex justify-between gap-3 border-t pt-3 text-base font-semibold"><span>Estimated total</span><span className="tabular-nums">{moneyLabel(formEstimatedTotal)}</span></div>
+                  </div>
+                </section>
+
+                <section className="border-t pt-5">
+                  <p className="font-semibold">Readiness</p>
+                  <div className="mt-3 grid gap-2.5 text-sm">
+                    {[{ label: "Quote items", ready: editorCompletion.items }, { label: "Customer", ready: editorCompletion.customer }, { label: "Delivery address", ready: editorCompletion.delivery }, { label: "Expiration date", ready: editorCompletion.terms }].map((check) => <div key={check.label} className="flex items-center gap-2"><CheckCircle2 className={cn("size-4", check.ready ? "text-emerald-500" : "text-muted-foreground/35")} /><span className={check.ready ? "" : "text-muted-foreground"}>{check.label}</span></div>)}
+                  </div>
+                </section>
+
+                <section className="border-t pt-5">
+                  <p className="font-semibold">Customer terms</p>
+                  <p className="mt-2 text-sm text-muted-foreground">{form.selectedTermIds.length} selected</p>
+                  <p className="mt-1 text-sm text-muted-foreground">Valid until {form.expiresAt ? dateLabel(form.expiresAt) : "not set"}</p>
+                </section>
+              </div>
+            </ScrollArea>
+          </aside>
+        </Tabs>
+
+        <DialogFooter className="!m-0 !flex-row shrink-0 flex-wrap items-center justify-between rounded-none border-t bg-background px-4 py-3 sm:px-6 sm:!justify-between">
+          <span className="hidden text-xs text-muted-foreground sm:block">Section {editorSectionIndex + 1} of {editorSections.length}</span>
+          <div className="ml-auto flex flex-wrap justify-end gap-2">
+            <Button variant="outline" disabled={busy} onClick={() => setEditorOpen(false)}>Cancel</Button>
+            {editorSectionIndex > 0 ? <Button variant="outline" disabled={busy} onClick={() => setEditorSection(editorSections[editorSectionIndex - 1])}><ChevronLeft className="size-4" /> Previous</Button> : null}
+            {editorSectionIndex < editorSections.length - 1 ? <Button variant="outline" disabled={busy} onClick={() => setEditorSection(editorSections[editorSectionIndex + 1])}>Next <ChevronRight className="size-4" /></Button> : null}
+            <Button disabled={busy || !form.expiresAt} onClick={() => void save()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save quote</Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 }
 
