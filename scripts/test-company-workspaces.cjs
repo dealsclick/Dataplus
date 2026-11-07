@@ -45,18 +45,20 @@ test('quote customer messages remain separate from internal notes',()=>{
 test('quote supplier selections preserve zero cost and make unknown total cost explicit',()=>{
   const db={inventory:[],orders:[],orderDrafts:[],sequence:{order:1000,draft:1000}};
   const selected=draftFunctions.normalizeOrderDraft(db,{items:[{
-    sku:'A',qty:2,price:15,cost:0,mapPrice:12,listPrice:20,selectedSupplierKey:'vendor:one',selectedSupplierId:'one',
+    sku:'A',qty:2,price:15,priceOverridden:true,cost:0,mapPrice:12,listPrice:20,selectedSupplierKey:'vendor:one',selectedSupplierId:'one',
     selectedSupplierName:'Supplier One',selectedSupplierSku:'SUP-A',selectedSupplierUom:'Each'
   }]});
   assert.equal(selected.items[0].cost,0);
   assert.equal(selected.items[0].mapPrice,12);
   assert.equal(selected.items[0].listPrice,20);
   assert.equal(selected.items[0].msrp,20);
+  assert.equal(selected.items[0].priceOverridden,true);
   assert.equal(selected.items[0].selectedSupplierName,'Supplier One');
   const order=draftFunctions.buildOrderFromDraft(db,selected,'Sales user');
   assert.equal(order.productCost,0);
   assert.equal(order.items[0].mapPrice,12);
   assert.equal(order.items[0].listPrice,20);
+  assert.equal(order.items[0].priceOverridden,true);
   assert.equal(order.items[0].selectedSupplierSku,'SUP-A');
   const unknown=draftFunctions.normalizeOrderDraft(db,{items:[{sku:'B',qty:1,price:20,cost:null}]});
   assert.equal(unknown.items[0].cost,null);
@@ -158,12 +160,13 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   assert.equal(supplierOptions[0].supplierName,'Lowest Cost Supply');
   assert.equal(supplierOptions[0].cost,4);
   const withSupplier=(await op(`/api/order-drafts/${created.id}`,'PATCH',{items:[{
-    sku:'ABC',title:'Current item',qty:2,price:10,listPrice:15,mapPrice:8,selectedSupplierKey:'vendor:vendor-low'
+    sku:'ABC',title:'Current item',qty:2,price:10,priceOverridden:true,listPrice:15,mapPrice:8,selectedSupplierKey:'vendor:vendor-low'
   }]})).response.data.draft;
   assert.equal(withSupplier.items[0].cost,4);
   assert.equal(withSupplier.items[0].selectedSupplierName,'Lowest Cost Supply');
   assert.equal(withSupplier.items[0].listPrice,15);
   assert.equal(withSupplier.items[0].mapPrice,8);
+  assert.equal(withSupplier.items[0].priceOverridden,true);
   const rateResult=(await op(`/api/order-drafts/${created.id}/shipping-rates`,'POST',{package:{weight:5,length:10,width:8,height:6}})).response.data;
   assert.equal(rateResult.rates[0].providerId,'usps','Preferred carrier rates lead even when another carrier costs less');
   assert.equal(rateResult.rates[1].amount,8.5);
@@ -212,6 +215,7 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   assert.equal(converted.items[0].selectedSupplierName,'Lowest Cost Supply');
   assert.equal(converted.items[0].listPrice,15);
   assert.equal(converted.items[0].mapPrice,8);
+  assert.equal(converted.items[0].priceOverridden,true);
   const routeId=`company-route:${converted.id}:0`;
   const orderRates=(await op(`/api/orders/${converted.id}/shipping/rates`,'POST',{warehouseId:warehouse.id,packageWeight:5,packageLength:10,packageWidth:8,packageHeight:6,routeIds:[routeId]})).response.data;
   assert.equal(orderRates.rateReview.package.weight,5,'Order label dialog package field names are accepted');
