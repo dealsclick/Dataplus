@@ -979,6 +979,7 @@ export type ProductItem = CatalogItem & {
   sellUnitCost?: number
   listPrice?: number
   msrp?: number
+  mapPrice?: number
   itemLength?: number
   itemWidth?: number
   itemHeight?: number

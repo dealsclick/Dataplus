@@ -18275,13 +18275,19 @@ function normalizeDraftLine(db, line = {}, index = 0) {
   const inventoryItem = (db.inventory || []).find((item) => String(item.sku || "").toLowerCase() === sku.toLowerCase());
   const rawCost = line.cost !== undefined ? line.cost : inventoryItem?.cost;
   const cost = quoteSupplierCost(rawCost);
+  const rawListPrice = Number(line.listPrice ?? line.msrp ?? inventoryItem?.listPrice ?? inventoryItem?.msrp ?? 0);
+  const rawMapPrice = Number(line.mapPrice ?? sourcePriceFloors(inventoryItem || {}).mapPrice ?? 0);
+  const listPrice = Number.isFinite(rawListPrice) ? Math.max(0, rawListPrice) : 0;
+  const mapPrice = Number.isFinite(rawMapPrice) ? Math.max(0, rawMapPrice) : 0;
   return {
     id: line.id || crypto.randomUUID(),
     sku,
     title: String(line.title || inventoryItem?.title || "").trim(),
     qty: Math.max(1, Number(line.qty || 1)),
     price: Number(line.price ?? inventoryItem?.price ?? 0),
-    msrp: Math.max(0, Number(line.msrp ?? inventoryItem?.listPrice ?? inventoryItem?.msrp ?? 0)),
+    msrp: listPrice,
+    listPrice,
+    mapPrice,
     cost,
     selectedSupplierKey: String(line.selectedSupplierKey || "").trim(),
     selectedSupplierId: String(line.selectedSupplierId || "").trim(),
@@ -18442,6 +18448,9 @@ function buildOrderFromDraft(db, draft, user = "Luis") {
     qty: Number(item.qty || 1),
     price: Number(item.price || 0),
     cost: quoteSupplierCost(item.cost),
+    msrp: Math.max(0, Number(item.listPrice ?? item.msrp ?? 0)),
+    listPrice: Math.max(0, Number(item.listPrice ?? item.msrp ?? 0)),
+    mapPrice: Math.max(0, Number(item.mapPrice || 0)),
     selectedSupplierKey: String(item.selectedSupplierKey || ""),
     selectedSupplierId: String(item.selectedSupplierId || ""),
     selectedSupplierName: String(item.selectedSupplierName || ""),
@@ -47227,6 +47236,9 @@ function quoteSupplierCost(value) {
 async function quoteSupplierOptionsForSku(sku = "") {
   const product = await postgres.readProductByKey(sku);
   if (!product) return { product: null, options: [] };
+  const floors = sourcePriceFloors(product);
+  const rawListPrice = quoteSupplierCost(product.listPrice ?? product.msrp);
+  const listPrice = rawListPrice !== null && rawListPrice > 0 ? rawListPrice : null;
   const [coverage, similarity] = await Promise.all([
     auditSupplierOptionsForLine({ productId: product.id, sku: product.sku }),
     postgres.readProductSimilarityGroup({ productId: product.id, sku: product.sku }).catch(() => ({ members: [] }))
@@ -47277,7 +47289,13 @@ async function quoteSupplierOptionsForSku(sku = "") {
     return left.supplierName.localeCompare(right.supplierName);
   });
   const knownCosts = options.filter((option) => option.selectable && option.cost !== null).map((option) => option.cost);
-  return { product, options, lowestCost: knownCosts.length ? Math.min(...knownCosts) : null };
+  return {
+    product,
+    options,
+    lowestCost: knownCosts.length ? Math.min(...knownCosts) : null,
+    mapPrice: Number(floors.mapPrice || 0) > 0 ? Number(floors.mapPrice) : null,
+    listPrice
+  };
 }
 
 function normalizeAuditDemandSku(value) {
@@ -70472,6 +70490,8 @@ async function handleApi(req, res) {
       sku,
       options: result.options,
       lowestCost: result.lowestCost,
+      mapPrice: result.mapPrice,
+      listPrice: result.listPrice,
       costScope: "operational_catalog"
     });
   }

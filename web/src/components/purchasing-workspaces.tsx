@@ -170,13 +170,16 @@ type QuoteSupplierOption = {
   related?: boolean
   isPrimary?: boolean
 }
+type QuoteCatalogPricing = { mapPrice: number | null; listPrice: number | null }
 type QuoteLineForm = {
   sku: string
   title: string
   qty: string
   msrp: string
+  mapPrice: string
   price: string
   cost: string
+  autoPrice: boolean
   selectedSupplierKey: string
   selectedSupplierId: string
   selectedSupplierName: string
@@ -194,6 +197,12 @@ function quoteLineCost(line: Pick<QuoteLineForm, "cost"> | Record<string, unknow
 
 function quoteMarginPercent(revenue: number, cost: number) {
   return revenue > 0 ? ((revenue - cost) / revenue) * 100 : null
+}
+
+function quoteRecommendedPrice(cost: number | null, mapPrice: string | number | null | undefined) {
+  const costMarkup = cost === null ? 0 : Math.round((cost * 1.3 + Number.EPSILON) * 100) / 100
+  const map = Math.max(0, Number(mapPrice || 0))
+  return Math.max(costMarkup, map)
 }
 
 function QuoteSupplierPicker({ line, options, loading, onSelect }: { line: QuoteLineForm; options: QuoteSupplierOption[]; loading: boolean; onSelect: (option: QuoteSupplierOption) => void }) {
@@ -319,26 +328,35 @@ export function DraftQuoteFieldDetailPage() {
       setSupplierOptionsLoading(new Set(skus))
       Promise.all(skus.map(async (sku) => {
         try {
-          const result = await api<{ options?: QuoteSupplierOption[] }>(`/api/order-drafts/${encodeURIComponent(draftId)}/supplier-options?sku=${encodeURIComponent(sku)}`, { signal: controller.signal })
-          return [sku, result.options || []] as const
+          const result = await api<{ options?: QuoteSupplierOption[]; mapPrice?: number | null; listPrice?: number | null }>(`/api/order-drafts/${encodeURIComponent(draftId)}/supplier-options?sku=${encodeURIComponent(sku)}`, { signal: controller.signal })
+          return [sku, { options: result.options || [], mapPrice: result.mapPrice ?? null, listPrice: result.listPrice ?? null }] as const
         } catch (error) {
           if (!(error instanceof DOMException && error.name === "AbortError")) toast.error(error instanceof Error ? error.message : `Unable to load suppliers for ${sku}.`)
-          return [sku, []] as const
+          return [sku, { options: [] as QuoteSupplierOption[], mapPrice: null, listPrice: null }] as const
         }
       })).then((entries) => {
         if (controller.signal.aborted) return
-        const loaded: Record<string, QuoteSupplierOption[]> = Object.fromEntries(entries)
+        const loaded: Record<string, QuoteSupplierOption[]> = Object.fromEntries(entries.map(([sku, result]) => [sku, result.options]))
+        const pricing: Record<string, QuoteCatalogPricing> = Object.fromEntries(entries.map(([sku, result]) => [sku, { mapPrice: result.mapPrice, listPrice: result.listPrice }]))
         setSupplierOptionsBySku((current) => ({ ...current, ...loaded }))
         setForm((current) => ({
           ...current,
           items: current.items.map((line) => {
-            const options = loaded[line.sku.trim().toLowerCase()] || []
-            if (!options.length || line.selectedSupplierKey) return line
+            const key = line.sku.trim().toLowerCase()
+            const options = loaded[key] || []
+            const productPricing = pricing[key]
+            const mapPrice = Number(line.mapPrice || 0) > 0 ? line.mapPrice : productPricing?.mapPrice ? String(productPricing.mapPrice) : line.mapPrice
+            const msrp = Number(line.msrp || 0) > 0 ? line.msrp : productPricing?.listPrice ? String(productPricing.listPrice) : line.msrp
+            const pricedLine = { ...line, mapPrice, msrp, price: line.autoPrice ? String(quoteRecommendedPrice(quoteLineCost(line), mapPrice)) : line.price }
+            if (!options.length || line.selectedSupplierKey) return pricedLine
             const matchingName = options.find((option) => option.selectable !== false && option.supplierName.toLowerCase() === line.selectedSupplierName.toLowerCase())
             const preferred = matchingName || options.find((option) => option.selectable !== false && option.isPrimary) || options.find((option) => option.selectable !== false && !option.requiresReview && option.cost !== null)
             return preferred ? {
-              ...line,
+              ...pricedLine,
+              mapPrice,
+              msrp,
               cost: preferred.cost === null ? "" : String(preferred.cost),
+              price: line.autoPrice ? String(quoteRecommendedPrice(preferred.cost, mapPrice)) : line.price,
               selectedSupplierKey: preferred.key,
               selectedSupplierId: preferred.vendorId || "",
               selectedSupplierName: preferred.supplierName,
@@ -346,7 +364,7 @@ export function DraftQuoteFieldDetailPage() {
               selectedSupplierSku: preferred.supplierSku || preferred.sourceSku || preferred.vendorSku || "",
               selectedSupplierProductId: preferred.productId || "",
               selectedSupplierUom: preferred.uom || "",
-            } : line
+            } : pricedLine
           }),
         }))
       }).finally(() => { if (!controller.signal.aborted) setSupplierOptionsLoading(new Set()) })
@@ -367,6 +385,7 @@ export function DraftQuoteFieldDetailPage() {
       state: String(address.state || address.province || ""), postalCode: String(address.postalCode || address.zip || ""), country: String(address.country || "US"),
       items: items.map((item) => ({
         sku: String(item.sku || ""), title: String(item.title || ""), qty: String(item.qty || 1), msrp: String(item.msrp || 0), price: String(item.price || 0),
+        mapPrice: String(item.mapPrice || 0), autoPrice: false,
         cost: item.cost === null || item.cost === undefined ? "" : String(item.cost),
         selectedSupplierKey: String(item.selectedSupplierKey || ""), selectedSupplierId: String(item.selectedSupplierId || ""),
         selectedSupplierName: String(item.selectedSupplierName || ""), selectedSupplierCode: String(item.selectedSupplierCode || ""),
@@ -394,12 +413,15 @@ export function DraftQuoteFieldDetailPage() {
   const addCatalogItem = (item: ProductItem) => {
     const sku = String(item.sku || "").trim()
     if (!sku) return
+    const rawCost = item.sellUnitCost ?? item.sourceCost ?? item.cost
+    const initialCost = rawCost === null || rawCost === undefined || !Number.isFinite(Number(rawCost)) || Number(rawCost) < 0 ? null : Number(rawCost)
+    const initialMap = Math.max(0, Number(item.mapPrice || 0))
     setForm((current) => {
       const existing = current.items.findIndex((line) => line.sku.toLowerCase() === sku.toLowerCase())
       if (existing >= 0) return { ...current, items: current.items.map((line, index) => index === existing ? { ...line, qty: String(Math.max(1, Number(line.qty || 0)) + 1) } : line) }
       return { ...current, items: [...current.items, {
-        sku, title: String(item.title || item.marketplaceTitle || sku), qty: "1", msrp: String(item.listPrice ?? item.msrp ?? 0), price: String(item.websitePrice ?? item.price ?? 0),
-        cost: item.sellUnitCost === null || item.sellUnitCost === undefined ? item.sourceCost === null || item.sourceCost === undefined ? item.cost === null || item.cost === undefined ? "" : String(item.cost) : String(item.sourceCost) : String(item.sellUnitCost),
+        sku, title: String(item.title || item.marketplaceTitle || sku), qty: "1", msrp: String(item.listPrice ?? item.msrp ?? 0), mapPrice: String(initialMap),
+        price: String(quoteRecommendedPrice(initialCost, initialMap)), cost: initialCost === null ? "" : String(initialCost), autoPrice: true,
         selectedSupplierKey: "", selectedSupplierId: "", selectedSupplierName: String(item.supplier || item.vendor || ""), selectedSupplierCode: String(item.supplierCode || ""),
         selectedSupplierSku: String(item.vendorSku || item.sourceSku || ""), selectedSupplierProductId: String(item.id || item.productCatalogId || ""), selectedSupplierUom: String(item.uom || ""),
       }] }
@@ -425,11 +447,13 @@ export function DraftQuoteFieldDetailPage() {
       ...current,
       items: (current.items.length ? current.items : lines.map((line) => ({
         sku: String(line.sku || ""), title: String(line.title || ""), qty: String(line.qty || 1), msrp: String(line.msrp || 0), price: String(line.price || 0),
+        mapPrice: String(line.mapPrice || 0), autoPrice: false,
         cost: line.cost === null || line.cost === undefined ? "" : String(line.cost), selectedSupplierKey: String(line.selectedSupplierKey || ""),
         selectedSupplierId: String(line.selectedSupplierId || ""), selectedSupplierName: String(line.selectedSupplierName || ""), selectedSupplierCode: String(line.selectedSupplierCode || ""),
         selectedSupplierSku: String(line.selectedSupplierSku || ""), selectedSupplierProductId: String(line.selectedSupplierProductId || ""), selectedSupplierUom: String(line.selectedSupplierUom || ""),
       }))).map((line, index) => index === similarLineIndex ? {
-        ...line, sku: String(item.sku || ""), title: String(item.title || item.sku || ""), msrp: String(item.listPrice || item.msrp || line.msrp || 0), price: String(item.price || line.price || 0),
+        ...line, sku: String(item.sku || ""), title: String(item.title || item.sku || ""), msrp: String(item.listPrice || item.msrp || line.msrp || 0), mapPrice: String(item.mapPrice || 0),
+        price: String(quoteRecommendedPrice(item.cost === null || item.cost === undefined ? null : Number(item.cost), Number(item.mapPrice || 0))), autoPrice: true,
         cost: item.cost === null || item.cost === undefined ? "" : String(item.cost), selectedSupplierKey: "", selectedSupplierId: "", selectedSupplierName: "", selectedSupplierCode: "", selectedSupplierSku: "", selectedSupplierProductId: "", selectedSupplierUom: "",
       } : line),
     })), 0)
@@ -444,7 +468,7 @@ export function DraftQuoteFieldDetailPage() {
   })
   const save = async () => {
     const items = form.items.map((item) => ({
-      sku: item.sku.trim(), title: item.title.trim() || item.sku.trim(), qty: Number(item.qty || 0), msrp: Number(item.msrp || 0), price: Number(item.price || 0),
+      sku: item.sku.trim(), title: item.title.trim() || item.sku.trim(), qty: Number(item.qty || 0), msrp: Number(item.msrp || 0), listPrice: Number(item.msrp || 0), mapPrice: Number(item.mapPrice || 0), price: Number(item.price || 0),
       cost: quoteLineCost(item), selectedSupplierKey: item.selectedSupplierKey, selectedSupplierId: item.selectedSupplierId,
       selectedSupplierName: item.selectedSupplierName, selectedSupplierCode: item.selectedSupplierCode, selectedSupplierSku: item.selectedSupplierSku,
       selectedSupplierProductId: item.selectedSupplierProductId, selectedSupplierUom: item.selectedSupplierUom,
@@ -604,14 +628,15 @@ export function DraftQuoteFieldDetailPage() {
         <Detail label="Source" value={String(draft.source || "Manual")} />
       </div>
       {expired && !["accepted", "lost"].includes(String(draft.status || "")) ? <Alert variant="destructive"><Clock3 className="size-4" /><AlertTitle>Quote expired</AlertTitle><AlertDescription>Extend the validity date before sending or accepting this quote.</AlertDescription></Alert> : null}
-      <Card><CardHeader><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">Quote items</CardTitle><CardDescription>Supplier cost, customer price, savings, and gross margin by line.</CardDescription></div><div className="flex flex-wrap gap-2">{hasCompleteMsrp ? <Badge variant="outline">{moneyLabel(savings)} customer savings</Badge> : <Badge variant="outline">{lines.length ? `MSRP missing on ${numberLabel(missingMsrpCount)} line${missingMsrpCount === 1 ? "" : "s"}` : "No quote lines"}</Badge>}{costsComplete ? <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">{grossMargin?.toFixed(1)}% total margin</Badge> : <Badge variant="outline" className="border-amber-500/40 text-amber-700 dark:text-amber-300">Cost needed on {numberLabel(lines.length - costedLines.length)} line{lines.length - costedLines.length === 1 ? "" : "s"}</Badge>}</div></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Item</TableHead><TableHead>Supplier</TableHead><TableHead>Qty</TableHead><TableHead>MSRP</TableHead><TableHead>Unit price</TableHead><TableHead>Savings</TableHead><TableHead>Margin</TableHead><TableHead>Total</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
+      <Card><CardHeader><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">Quote items</CardTitle><CardDescription>Supplier cost, MAP, list price, customer price, and gross margin by line.</CardDescription></div><div className="flex flex-wrap gap-2">{hasCompleteMsrp ? <Badge variant="outline">{moneyLabel(savings)} customer savings</Badge> : <Badge variant="outline">{lines.length ? `List price missing on ${numberLabel(missingMsrpCount)} line${missingMsrpCount === 1 ? "" : "s"}` : "No quote lines"}</Badge>}{costsComplete ? <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">{grossMargin?.toFixed(1)}% total margin</Badge> : <Badge variant="outline" className="border-amber-500/40 text-amber-700 dark:text-amber-300">Cost needed on {numberLabel(lines.length - costedLines.length)} line{lines.length - costedLines.length === 1 ? "" : "s"}</Badge>}</div></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table className="min-w-[1380px]"><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Item</TableHead><TableHead>Supplier</TableHead><TableHead>Item cost</TableHead><TableHead>Qty</TableHead><TableHead>MAP</TableHead><TableHead>List price</TableHead><TableHead>Quote price</TableHead><TableHead>Savings</TableHead><TableHead>Margin</TableHead><TableHead>Total</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
         {lines.map((line, index) => {
           const lineSavings = Math.max(0, Number(line.msrp || 0) - Number(line.price || 0)) * Number(line.qty || 0)
           const lineCost = quoteLineCost(line)
+          const lineMap = Math.max(0, Number(line.mapPrice || 0))
           const lineRevenue = Number(line.price || 0) * Number(line.qty || 0)
           const lineProfit = lineCost === null ? null : lineRevenue - lineCost * Number(line.qty || 0)
           const lineMargin = lineCost === null ? null : quoteMarginPercent(Number(line.price || 0), lineCost)
-          return <TableRow key={`${String(line.sku)}-${index}`}><TableCell className="font-mono text-xs">{String(line.sku || "-")}</TableCell><TableCell>{String(line.title || line.sku || "-")}</TableCell><TableCell><p className="font-medium">{String(line.selectedSupplierName || "Cost not selected")}</p><p className="font-mono text-xs text-muted-foreground">{String(line.selectedSupplierSku || "-")}{lineCost === null ? "" : ` · ${moneyLabel(lineCost)}`}</p></TableCell><TableCell>{numberLabel(Number(line.qty || 0))}</TableCell><TableCell>{Number(line.msrp || 0) > 0 ? moneyLabel(Number(line.msrp)) : "-"}</TableCell><TableCell>{moneyLabel(Number(line.price || 0))}</TableCell><TableCell className={lineSavings > 0 ? "font-medium text-emerald-600" : "text-muted-foreground"}>{lineSavings > 0 ? moneyLabel(lineSavings) : "-"}</TableCell><TableCell className={cn("font-medium", lineProfit !== null && lineProfit < 0 ? "text-destructive" : lineProfit !== null ? "text-emerald-600" : "text-muted-foreground")}>{lineMargin === null ? "Cost needed" : `${lineMargin.toFixed(1)}% · ${moneyLabel(lineProfit)}`}</TableCell><TableCell className="font-medium">{moneyLabel(lineRevenue)}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" onClick={() => void findSimilar(line, index)}><Search className="size-4" /> Find similar</Button></TableCell></TableRow>
+          return <TableRow key={`${String(line.sku)}-${index}`}><TableCell className="font-mono text-xs">{String(line.sku || "-")}</TableCell><TableCell>{String(line.title || line.sku || "-")}</TableCell><TableCell><p className="font-medium">{String(line.selectedSupplierName || "Cost not selected")}</p><p className="font-mono text-xs text-muted-foreground">{String(line.selectedSupplierSku || "-")}</p></TableCell><TableCell className="font-semibold tabular-nums">{lineCost === null ? "Not set" : moneyLabel(lineCost)}</TableCell><TableCell>{numberLabel(Number(line.qty || 0))}</TableCell><TableCell>{lineMap > 0 ? moneyLabel(lineMap) : "Not set"}</TableCell><TableCell>{Number(line.msrp || 0) > 0 ? moneyLabel(Number(line.msrp)) : "Not set"}</TableCell><TableCell><p className={cn("font-medium", lineMap > 0 && Number(line.price || 0) < lineMap ? "text-destructive" : "")}>{moneyLabel(Number(line.price || 0))}</p>{lineMap > 0 && Number(line.price || 0) < lineMap ? <p className="text-xs text-destructive">Below MAP</p> : null}</TableCell><TableCell className={lineSavings > 0 ? "font-medium text-emerald-600" : "text-muted-foreground"}>{lineSavings > 0 ? moneyLabel(lineSavings) : "-"}</TableCell><TableCell className={cn("font-medium", lineProfit !== null && lineProfit < 0 ? "text-destructive" : lineProfit !== null ? "text-emerald-600" : "text-muted-foreground")}>{lineMargin === null ? "Cost needed" : `${lineMargin.toFixed(1)}% · ${moneyLabel(lineProfit)}`}</TableCell><TableCell className="font-medium">{moneyLabel(lineRevenue)}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" onClick={() => void findSimilar(line, index)}><Search className="size-4" /> Find similar</Button></TableCell></TableRow>
         })}
       </TableBody></Table></div></CardContent></Card>
       {enabledQuoteCarriers.length ? <Card><CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Shipping estimate</CardTitle><CardDescription>Compare the shared {enabledQuoteCarrierLabel} accounts for an accurate customer quote.</CardDescription></div><Button size="sm" variant={savedShippingEstimate ? "outline" : "default"} onClick={openShippingRates}><Truck className="size-4" /> {savedShippingEstimate ? "Refresh carrier rates" : "Get carrier rates"}</Button></div></CardHeader><CardContent className="grid gap-3">{savedShippingEstimate ? <><div className="grid gap-3 text-sm sm:grid-cols-5"><Detail label="Carrier / service" value={`${String(savedShippingEstimate.carrier || "Carrier")} ${String(savedShippingEstimate.service || "")}`} /><Detail label="Shipping" value={moneyLabel(shippingAmount)} /><Detail label="Package" value={`${String((savedShippingEstimate.package as Record<string, unknown>)?.weight || "-")} lb / ${String((savedShippingEstimate.package as Record<string, unknown>)?.length || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.width || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.height || "-")} in`} /><Detail label="Rate valid until" value={savedRateExpired ? "Expired - refresh required" : dateLabel(String(savedShippingEstimate.expiresAt || ""))} /><Detail label="Estimated quote total" value={moneyLabel(total)} /></div>{savedRateExpired ? <Alert variant="destructive"><Clock3 className="size-4" /><AlertTitle>Shipping rate expired</AlertTitle><AlertDescription>Refresh carrier rates before accepting or converting this quote.</AlertDescription></Alert> : null}</> : <p className="text-sm text-muted-foreground">No shipping rate has been added. Product subtotal is {moneyLabel(subtotal)}.</p>}</CardContent></Card> : null}
@@ -700,30 +725,37 @@ export function DraftQuoteFieldDetailPage() {
                     <p className="text-xs text-muted-foreground">Prices are per selling unit.</p>
                   </div>
                   <Button type="button" size="sm" variant="outline" onClick={() => setForm((current) => ({ ...current, items: [...current.items, {
-                    sku: "", title: "", qty: "1", msrp: "0", price: "0", cost: "", selectedSupplierKey: "", selectedSupplierId: "", selectedSupplierName: "", selectedSupplierCode: "", selectedSupplierSku: "", selectedSupplierProductId: "", selectedSupplierUom: "",
+                    sku: "", title: "", qty: "1", msrp: "0", mapPrice: "0", price: "0", cost: "", autoPrice: true, selectedSupplierKey: "", selectedSupplierId: "", selectedSupplierName: "", selectedSupplierCode: "", selectedSupplierSku: "", selectedSupplierProductId: "", selectedSupplierUom: "",
                   }] }))}><Plus className="size-4" /> Add manual line</Button>
                 </div>
 
                 {form.items.length ? <div className="overflow-x-auto rounded-md border">
-                  <Table className="min-w-[1260px]">
-                    <TableHeader><TableRow><TableHead className="w-40">SKU</TableHead><TableHead>Product</TableHead><TableHead className="w-60">Supplier / cost</TableHead><TableHead className="w-20">Qty</TableHead><TableHead className="w-32">MSRP</TableHead><TableHead className="w-32">Quote price</TableHead><TableHead className="w-36">Profit margin</TableHead><TableHead className="w-28 text-right">Total</TableHead><TableHead className="w-12" /></TableRow></TableHeader>
+                  <Table className="min-w-[1580px]">
+                    <TableHeader><TableRow><TableHead className="w-36">SKU</TableHead><TableHead>Product</TableHead><TableHead className="w-60">Supplier</TableHead><TableHead className="w-24">Item cost</TableHead><TableHead className="w-20">Qty</TableHead><TableHead className="w-28">MAP</TableHead><TableHead className="w-28">List price</TableHead><TableHead className="w-36">Quote price</TableHead><TableHead className="w-36">Profit margin</TableHead><TableHead className="w-28 text-right">Total</TableHead><TableHead className="w-12" /></TableRow></TableHeader>
                     <TableBody>{form.items.map((line, index) => {
                       const lineCost = quoteLineCost(line)
                       const linePrice = Math.max(0, Number(line.price || 0))
                       const lineQty = Math.max(0, Number(line.qty || 0))
+                      const lineMap = Math.max(0, Number(line.mapPrice || 0))
                       const lineProfit = lineCost === null ? null : (linePrice - lineCost) * lineQty
                       const lineMargin = lineCost === null ? null : quoteMarginPercent(linePrice, lineCost)
+                      const costMarkupPrice = quoteRecommendedPrice(lineCost, 0)
+                      const recommendedPrice = quoteRecommendedPrice(lineCost, lineMap)
+                      const recommendationLabel = lineMap > costMarkupPrice ? "MAP floor" : "Cost +30%"
                       const skuKey = line.sku.trim().toLowerCase()
                       return <TableRow key={`${line.sku}-${index}`}>
-                        <TableCell><Input value={line.sku} onChange={(event) => updateLine(index, { sku: event.target.value, cost: "", selectedSupplierKey: "", selectedSupplierId: "", selectedSupplierName: "", selectedSupplierCode: "", selectedSupplierSku: "", selectedSupplierProductId: "", selectedSupplierUom: "" })} placeholder="SKU" /></TableCell>
+                        <TableCell><Input value={line.sku} onChange={(event) => updateLine(index, { sku: event.target.value, cost: "", msrp: "0", mapPrice: "0", price: "0", autoPrice: true, selectedSupplierKey: "", selectedSupplierId: "", selectedSupplierName: "", selectedSupplierCode: "", selectedSupplierSku: "", selectedSupplierProductId: "", selectedSupplierUom: "" })} placeholder="SKU" /></TableCell>
                         <TableCell><Input className="min-w-56" value={line.title} onChange={(event) => updateLine(index, { title: event.target.value })} placeholder="Product title" /></TableCell>
                         <TableCell><QuoteSupplierPicker line={line} options={supplierOptionsBySku[skuKey] || []} loading={supplierOptionsLoading.has(skuKey)} onSelect={(option) => updateLine(index, {
                           cost: option.cost === null ? "" : String(option.cost), selectedSupplierKey: option.key, selectedSupplierId: option.vendorId || "", selectedSupplierName: option.supplierName,
                           selectedSupplierCode: option.supplierCode || "", selectedSupplierSku: option.supplierSku || option.sourceSku || option.vendorSku || "", selectedSupplierProductId: option.productId || "", selectedSupplierUom: option.uom || "",
+                          price: line.autoPrice ? String(quoteRecommendedPrice(option.cost, line.mapPrice)) : line.price,
                         })} /></TableCell>
+                        <TableCell className="font-semibold tabular-nums">{lineCost === null ? <span className="text-muted-foreground">Not set</span> : moneyLabel(lineCost)}</TableCell>
                         <TableCell><Input type="number" min="1" inputMode="numeric" value={line.qty} onChange={(event) => updateLine(index, { qty: event.target.value })} /></TableCell>
+                        <TableCell><InputGroup><InputGroupAddon>$</InputGroupAddon><InputGroupInput type="number" min="0" step="0.01" inputMode="decimal" value={line.mapPrice} onChange={(event) => { const mapPrice = event.target.value; updateLine(index, { mapPrice, price: line.autoPrice ? String(quoteRecommendedPrice(lineCost, mapPrice)) : line.price }) }} /></InputGroup></TableCell>
                         <TableCell><InputGroup><InputGroupAddon>$</InputGroupAddon><InputGroupInput type="number" min="0" step="0.01" inputMode="decimal" value={line.msrp} onChange={(event) => updateLine(index, { msrp: event.target.value })} /></InputGroup></TableCell>
-                        <TableCell><InputGroup><InputGroupAddon>$</InputGroupAddon><InputGroupInput type="number" min="0" step="0.01" inputMode="decimal" value={line.price} onChange={(event) => updateLine(index, { price: event.target.value })} /></InputGroup></TableCell>
+                        <TableCell><div className="grid gap-1"><InputGroup><InputGroupAddon>$</InputGroupAddon><InputGroupInput type="number" min="0" step="0.01" inputMode="decimal" value={line.price} onChange={(event) => updateLine(index, { price: event.target.value, autoPrice: false })} /></InputGroup>{linePrice < lineMap ? <span className="text-xs font-medium text-destructive">Below MAP</span> : line.autoPrice ? <span className="text-xs text-muted-foreground">{recommendationLabel}</span> : <Button type="button" variant="ghost" size="sm" className="h-6 justify-start px-1 text-xs" onClick={() => updateLine(index, { price: String(recommendedPrice), autoPrice: true })}><RotateCcw className="size-3" /> Use recommended</Button>}</div></TableCell>
                         <TableCell><p className={cn("font-semibold", lineProfit !== null && lineProfit < 0 ? "text-destructive" : lineProfit !== null ? "text-emerald-600" : "text-muted-foreground")}>{lineMargin === null ? "Cost needed" : `${lineMargin.toFixed(1)}%`}</p><p className="text-xs text-muted-foreground">{lineProfit === null ? "Select a supplier" : `${moneyLabel(lineProfit)} profit`}</p></TableCell>
                         <TableCell className="text-right font-semibold tabular-nums">{moneyLabel(lineQty * linePrice)}</TableCell>
                         <TableCell><Button type="button" size="icon" variant="ghost" title="Remove line" onClick={() => setForm((current) => ({ ...current, items: current.items.filter((_, lineIndex) => lineIndex !== index) }))}><Trash2 className="size-4" /></Button></TableCell>
