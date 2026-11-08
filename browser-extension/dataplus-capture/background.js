@@ -86,6 +86,26 @@ async function connectionStatus() {
   }
 }
 
+async function rfqStatus(reference) {
+  const normalizedReference = String(reference || '').trim();
+  const current = await settings();
+  if (!normalizedReference) throw new Error('The RFQ reference could not be detected.');
+  if (!current.extensionToken) return { connected: false, baseUrl: current.baseUrl, exists: false, draft: null, quoteUrl: '' };
+  const status = await connectionStatus();
+  if (!status.connected) return { connected: false, baseUrl: current.baseUrl, exists: false, draft: null, quoteUrl: '' };
+  const query = new URLSearchParams({ source: 'BuySupply DW RFQ', reference: normalizedReference });
+  const payload = await apiRequest(`/api/order-drafts/import-match?${query.toString()}`);
+  const draft = payload?.draft || null;
+  const quoteUrl = draft?.id ? `${current.baseUrl}/drafts/${encodeURIComponent(String(draft.id))}` : '';
+  return {
+    connected: true,
+    baseUrl: current.baseUrl,
+    exists: Boolean(draft),
+    draft: draft ? { id: draft.id, draftNumber: draft.draftNumber || '', status: draft.status || 'draft' } : null,
+    quoteUrl
+  };
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 });
@@ -94,7 +114,7 @@ chrome.runtime.onStartup.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const run = async () => {
     if (message?.type === 'dataplus:settings') {
       if (message.baseUrl !== undefined) {
@@ -106,6 +126,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === 'dataplus:connect') return connect();
     if (message?.type === 'dataplus:disconnect') return disconnect();
     if (message?.type === 'dataplus:connection-status') return connectionStatus();
+    if (message?.type === 'dataplus:rfq-status') return rfqStatus(message.reference);
+    if (message?.type === 'dataplus:open-sidepanel') {
+      if (!sender.tab?.id) throw new Error('Open DataPlus Capture from a website tab.');
+      await chrome.sidePanel.open({ tabId: sender.tab.id });
+      return { opened: true };
+    }
     if (message?.type === 'dataplus:api') return apiRequest(String(message.path || ''), message.options || {});
     if (message?.type === 'dataplus:open-tab') {
       const current = await settings();

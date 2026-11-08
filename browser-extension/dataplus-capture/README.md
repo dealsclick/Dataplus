@@ -14,7 +14,7 @@ Sign in to DataPlus in the same Chrome profile before choosing **Connect after s
 
 ## Supported workflows
 
-- `dw.buysupply.com/baskets/view/*`: preview the customer, optional phone, shipping address, initial RFQ lines, and processed DataPlus SKU matches. Before import, DataPlus checks the complete company quote history for the source RFQ number and opens an existing quote instead of creating a duplicate.
+- `dw.buysupply.com/baskets/view/*`: automatically preview the customer, optional phone, shipping address, initial RFQ lines, and processed DataPlus SKU matches. The BuySupply page displays a DataPlus status card and inline badge even when the side panel is closed. Existing RFQs include a direct DataPlus quote URL; new RFQs can open Capture for import. Before import, DataPlus checks the complete company quote history for the source RFQ number and opens an existing quote instead of creating a duplicate.
 - Product pages: read JSON-LD and Open Graph product facts, search the DataPlus catalog, and add the selected match to the currently open quote.
 - Unmatched products: create a provisional DataPlus draft SKU from facts read in the browser, preserve the competitor URL and observed price, and add it to the quote.
 - Difficult websites: save per-host CSS selectors under **Settings > Site extraction template**. Templates contain selectors only; they never contain executable JavaScript.

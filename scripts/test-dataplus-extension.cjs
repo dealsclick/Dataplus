@@ -11,6 +11,8 @@ const companyOperations = fs.readFileSync(path.join(root, 'lib', 'company-operat
 const sidepanel = fs.readFileSync(path.join(extensionRoot, 'sidepanel.js'), 'utf8');
 const sidepanelHtml = fs.readFileSync(path.join(extensionRoot, 'sidepanel.html'), 'utf8');
 const sidepanelCss = fs.readFileSync(path.join(extensionRoot, 'sidepanel.css'), 'utf8');
+const background = fs.readFileSync(path.join(extensionRoot, 'background.js'), 'utf8');
+const content = fs.readFileSync(path.join(extensionRoot, 'content.js'), 'utf8');
 
 assert.equal(manifest.manifest_version, 3);
 assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
@@ -49,7 +51,15 @@ assert.match(companyOperations, /importSource==='buysupply dw rfq'/);
 assert.match(companyOperations, /parts\[2\]==='import-match'/);
 assert.match(sidepanel, /findExistingRfqQuote/);
 assert.match(sidepanel, /requireConnectedSession/);
+assert.match(sidepanel, /autoScanRfqPage/);
+assert.match(sidepanel, /chrome\.tabs\.onActivated/);
+assert.match(sidepanel, /quote-url-link/);
+assert.match(background, /dataplus:rfq-status/);
+assert.match(background, /dataplus:open-sidepanel/);
+assert.match(content, /dataplus-rfq-status-card/);
+assert.match(content, /Open quote in DataPlus/);
 assert.match(sidepanelHtml, /Sign in to DataPlus first/);
+assert.match(sidepanelHtml, /BuySupply RFQs are checked automatically/);
 assert.match(sidepanelCss, /\[hidden\]\s*\{\s*display:\s*none\s*!important;/);
 
 for (const file of ['background.js', 'content.js', 'sidepanel.js']) {

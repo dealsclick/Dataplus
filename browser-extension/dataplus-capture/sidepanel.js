@@ -106,6 +106,11 @@ function quoteLabel(quote) {
   return `${quote.draftNumber || 'Draft'} · ${quote.buyer || 'Customer'} · ${money(quoteTotal(quote))}`;
 }
 
+function quoteUrl(id) {
+  if (!id) return '';
+  return `${String(state.baseUrl || 'https://dataplusapp.duckdns.org').replace(/\/$/, '')}/drafts/${encodeURIComponent(String(id))}`;
+}
+
 function renderContext() {
   const companySelect = byId('company-select');
   companySelect.replaceChildren();
@@ -264,6 +269,13 @@ function renderRfq(rfq) {
       'inline-message success',
       `${existing.draftNumber || 'This quote'} already exists in DataPlus with status ${String(existing.status || 'draft').replaceAll('_', ' ')}. A duplicate will not be created.`
     ));
+    const url = quoteUrl(existing.id);
+    const link = element('a', 'quote-url-link', url);
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.title = 'Open quote in DataPlus';
+    actions.append(link);
   }
   const button = element('button', existing ? 'secondary-button' : 'primary-button', existing ? `Open ${existing.draftNumber || 'existing draft'}` : 'Import as draft quote');
   button.type = 'button';
@@ -334,16 +346,17 @@ function renderCapture() {
   root.replaceChildren();
   if (!state.capture) {
     root.className = 'capture-result empty-state';
-    root.textContent = 'Scan the current page to preview its RFQ or product information.';
+    root.textContent = 'BuySupply RFQs are checked automatically. Use Rescan for product pages or to refresh the current result.';
     return;
   }
   if (state.capture.kind === 'rfq') renderRfq(state.capture);
   else renderProduct(state.capture);
 }
 
-async function scanPage() {
+async function scanPage({ automatic = false } = {}) {
+  if (automatic && (!state.connected || state.busy)) return;
   setBusy(true);
-  setNotice('Scanning the current page...');
+  setNotice(automatic ? 'Checking this RFQ in DataPlus...' : 'Scanning the current page...');
   try {
     const capture = await extractCurrentPage();
     state.capture = capture;
@@ -376,6 +389,7 @@ async function importRfq(rfq) {
       state.existingRfqQuote = existing;
       renderCapture();
       setNotice(`${existing.draftNumber || 'This quote'} already exists. Open it instead of importing another copy.`, 'success');
+      await refreshActivePageBadge();
       return;
     }
     const payload = await api('/api/order-drafts', {
@@ -407,6 +421,7 @@ async function importRfq(rfq) {
     renderContext();
     renderQuotes();
     renderCapture();
+    await refreshActivePageBadge();
     setNotice(payload.duplicate
       ? `${payload.draft?.draftNumber || 'Draft quote'} already exists and was opened without creating a duplicate.`
       : `${payload.draft?.draftNumber || 'Draft quote'} was imported and opened.`, 'success');
@@ -486,6 +501,18 @@ async function openQuote(id = state.selectedQuoteId) {
   await runtimeMessage({ type: 'dataplus:open-tab', path: `/drafts/${encodeURIComponent(id)}` });
 }
 
+async function refreshActivePageBadge() {
+  try {
+    const tab = await activeTab();
+    await new Promise((resolve) => {
+      chrome.tabs.sendMessage(tab.id, { type: 'dataplus:refresh-rfq-status' }, () => {
+        void chrome.runtime.lastError;
+        resolve();
+      });
+    });
+  } catch { /* RFQ page status will refresh the next time the page becomes active. */ }
+}
+
 async function loadTemplateFields() {
   const templates = await savedTemplates();
   const template = templates[state.activeHost] || {};
@@ -514,6 +541,29 @@ async function updateActiveHost() {
     byId('template-host').textContent = state.activeHost || 'Scan a product page first.';
     await loadTemplateFields();
   } catch { /* The page label remains unchanged. */ }
+}
+
+let autoScanTimer = null;
+let lastAutoScanKey = '';
+
+function scheduleAutoScan(delay = 180, force = false) {
+  if (autoScanTimer) clearTimeout(autoScanTimer);
+  autoScanTimer = setTimeout(() => {
+    autoScanTimer = null;
+    autoScanRfqPage(force).catch(() => {});
+  }, delay);
+}
+
+async function autoScanRfqPage(force = false) {
+  if (!state.connected || state.busy) return;
+  const tab = await activeTab();
+  const url = new URL(tab.url || 'https://invalid.local');
+  const isRfq = /dw\.buysupply\.com$/i.test(url.hostname) && /\/baskets\/view\//i.test(url.pathname);
+  if (!isRfq) return;
+  const key = `${tab.id}:${url.href}`;
+  if (!force && key === lastAutoScanKey) return;
+  lastAutoScanKey = key;
+  await scanPage({ automatic: true });
 }
 
 async function connect() {
@@ -561,12 +611,13 @@ async function initialize() {
     state.existingRfqQuote = null;
   }
   await updateActiveHost();
+  if (state.connected) scheduleAutoScan();
 }
 
 byId('connect-button').addEventListener('click', connect);
 byId('open-login-button').addEventListener('click', () => runtimeMessage({ type: 'dataplus:open-tab', path: '/' }));
 byId('refresh-button').addEventListener('click', async () => { setNotice('Refreshing...'); try { await initialize(); setNotice('Extension data refreshed.', 'success'); } catch (error) { setNotice(error.message, 'error'); } });
-byId('scan-button').addEventListener('click', scanPage);
+byId('scan-button').addEventListener('click', () => scanPage());
 byId('open-quote-button').addEventListener('click', () => openQuote());
 byId('quote-select').addEventListener('change', async (event) => {
   state.selectedQuoteId = event.target.value;
@@ -597,5 +648,10 @@ byId('disconnect-button').addEventListener('click', async () => {
 });
 byId('save-template-button').addEventListener('click', saveTemplate);
 for (const button of document.querySelectorAll('.tab-button')) button.addEventListener('click', () => showTab(button.dataset.tab));
+
+chrome.tabs.onActivated.addListener(() => scheduleAutoScan(180, true));
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
+  if (tab.active && changeInfo.status === 'complete') scheduleAutoScan(240, true);
+});
 
 initialize().catch((error) => setNotice(error.message || 'The extension could not start.', 'error'));

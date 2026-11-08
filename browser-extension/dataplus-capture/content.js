@@ -3,12 +3,183 @@
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (root) root.DataPlusPageExtractor = api;
   if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
+    const documentRef = root?.document;
+    const locationRef = root?.location;
+    let statusRequestPending = false;
+
+    const isRfqPage = () => Boolean(
+      documentRef
+      && /dw\.buysupply\.com$/i.test(String(locationRef?.hostname || ''))
+      && /\/baskets\/view\//i.test(String(locationRef?.pathname || ''))
+    );
+
+    function runtimeMessage(message) {
+      return new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage(message, (response) => {
+          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+          if (!response?.ok) return reject(new Error(response?.error || 'DataPlus could not check this RFQ.'));
+          resolve(response.result);
+        });
+      });
+    }
+
+    function statusStyles() {
+      return `
+        :host { color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+        * { box-sizing: border-box; letter-spacing: 0; }
+        .card { width: min(340px, calc(100vw - 24px)); padding: 12px; border: 1px solid #35506e; border-radius: 7px; background: #111820; color: #edf4fb; box-shadow: 0 12px 32px rgba(0,0,0,.28); font-size: 12px; line-height: 1.4; }
+        .card.success { border-color: #24704d; background: #10261c; }
+        .card.warning { border-color: #80651f; background: #2b240f; }
+        .card.error { border-color: #8a3e45; background: #32181b; }
+        .title { display: flex; align-items: center; gap: 8px; font-weight: 750; font-size: 13px; }
+        .dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: #56a7f6; }
+        .success .dot { background: #39c985; } .warning .dot { background: #e3b940; } .error .dot { background: #ef6d76; }
+        .detail { margin-top: 5px; color: #b4c0cc; }
+        .url { display: block; margin-top: 7px; overflow: hidden; color: #8bc5ff; text-overflow: ellipsis; white-space: nowrap; }
+        .action { display: inline-flex; align-items: center; justify-content: center; min-height: 30px; margin-top: 9px; padding: 5px 10px; border: 1px solid #4899e8; border-radius: 5px; background: #2186eb; color: white; font: inherit; font-weight: 700; text-decoration: none; cursor: pointer; }
+        .pill { display: inline-flex; align-items: center; gap: 6px; min-height: 25px; padding: 3px 8px; border: 1px solid #35506e; border-radius: 999px; background: #edf6ff; color: #174f82; font: 650 11px/1.2 Inter, ui-sans-serif, system-ui, sans-serif; text-decoration: none; vertical-align: middle; cursor: pointer; }
+        .pill.success { border-color: #23865b; background: #e7f8ef; color: #11623f; }
+        .pill.warning { border-color: #9b7622; background: #fff7da; color: #73530c; }
+        .pill.error { border-color: #a74e55; background: #fff0f1; color: #842f36; }
+        @media (prefers-color-scheme: dark) { .pill { background: #142638; color: #b9dcff; } .pill.success { background: #112c20; color: #8ee7b7; } .pill.warning { background: #302710; color: #f4d16f; } .pill.error { background: #35191c; color: #ffadb3; } }
+      `;
+    }
+
+    function ensureStatusHost(id, kind, reference) {
+      let host = documentRef.getElementById(id);
+      if (!host) {
+        host = documentRef.createElement(kind === 'card' ? 'div' : 'span');
+        host.id = id;
+        host.attachShadow({ mode: 'open' });
+        if (kind === 'card') {
+          Object.assign(host.style, { position: 'fixed', top: '14px', right: '14px', zIndex: '2147483647' });
+          documentRef.documentElement.append(host);
+        } else {
+          Object.assign(host.style, { display: 'inline-block', marginLeft: '10px', verticalAlign: 'middle' });
+          const heading = Array.from(documentRef.querySelectorAll('h1,h2,h3')).find((node) => new RegExp(`RFQ.*${String(reference || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i').test(node.textContent || ''))
+            || documentRef.querySelector('h1,h2,h3');
+          if (heading) heading.append(host);
+          else documentRef.body?.prepend(host);
+        }
+      }
+      return host;
+    }
+
+    function appendAction(parent, status, compact = false) {
+      if (status.quoteUrl) {
+        const link = documentRef.createElement('a');
+        link.className = compact ? `pill ${status.tone || ''}` : 'action';
+        link.href = status.quoteUrl;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = compact ? `${status.label} - Open in DataPlus` : 'Open quote in DataPlus';
+        parent.append(link);
+        return;
+      }
+      if (status.action === 'capture') {
+        const button = documentRef.createElement('button');
+        button.type = 'button';
+        button.className = compact ? `pill ${status.tone || ''}` : 'action';
+        button.textContent = compact ? status.label : 'Open DataPlus Capture';
+        button.addEventListener('click', () => runtimeMessage({ type: 'dataplus:open-sidepanel' }).catch(() => {}));
+        parent.append(button);
+        return;
+      }
+      if (status.action === 'signin') {
+        const link = documentRef.createElement('a');
+        link.className = compact ? `pill ${status.tone || ''}` : 'action';
+        link.href = status.baseUrl || 'https://dataplusapp.duckdns.org';
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = compact ? status.label : 'Sign in to DataPlus';
+        parent.append(link);
+        return;
+      }
+      const pill = documentRef.createElement('span');
+      pill.className = `pill ${status.tone || ''}`;
+      pill.textContent = status.label;
+      parent.append(pill);
+    }
+
+    function renderRfqStatus(status, reference) {
+      if (!documentRef) return;
+      const cardHost = ensureStatusHost('dataplus-rfq-status-card', 'card', reference);
+      const cardRoot = cardHost.shadowRoot;
+      const style = documentRef.createElement('style');
+      style.textContent = statusStyles();
+      const card = documentRef.createElement('section');
+      card.className = `card ${status.tone || ''}`;
+      const title = documentRef.createElement('div');
+      title.className = 'title';
+      const dot = documentRef.createElement('span');
+      dot.className = 'dot';
+      const titleText = documentRef.createElement('span');
+      titleText.textContent = status.label;
+      title.append(dot, titleText);
+      const detail = documentRef.createElement('div');
+      detail.className = 'detail';
+      detail.textContent = status.detail;
+      card.append(title, detail);
+      if (status.quoteUrl) {
+        const url = documentRef.createElement('span');
+        url.className = 'url';
+        url.textContent = status.quoteUrl;
+        card.append(url);
+      }
+      if (status.action || status.quoteUrl) appendAction(card, status);
+      cardRoot.replaceChildren(style, card);
+
+      const inlineHost = ensureStatusHost('dataplus-rfq-status-inline', 'inline', reference);
+      const inlineRoot = inlineHost.shadowRoot;
+      const inlineStyle = documentRef.createElement('style');
+      inlineStyle.textContent = statusStyles();
+      const inline = documentRef.createElement('span');
+      appendAction(inline, status, true);
+      inlineRoot.replaceChildren(inlineStyle, inline);
+    }
+
+    async function refreshRfqStatus() {
+      if (!isRfqPage() || statusRequestPending) return;
+      statusRequestPending = true;
+      const rfq = api.extractRfq(documentRef, locationRef);
+      const reference = String(rfq.externalId || '').trim();
+      renderRfqStatus({ label: 'Checking DataPlus...', detail: `Looking for ${reference || 'this RFQ'} in the quote pipeline.` }, reference);
+      try {
+        const result = await runtimeMessage({ type: 'dataplus:rfq-status', reference });
+        if (!result.connected) {
+          renderRfqStatus({ tone: 'warning', label: 'DataPlus sign-in required', detail: 'Sign in and connect DataPlus Capture to check or import this RFQ.', action: 'signin', baseUrl: result.baseUrl }, reference);
+        } else if (result.exists) {
+          const draftNumber = result.draft?.draftNumber || 'Quote';
+          const draftStatus = String(result.draft?.status || 'draft').replaceAll('_', ' ');
+          renderRfqStatus({ tone: 'success', label: `${draftNumber} already exists`, detail: `${reference} is in DataPlus with status ${draftStatus}.`, quoteUrl: result.quoteUrl }, reference);
+        } else {
+          renderRfqStatus({ label: 'Not yet in DataPlus', detail: `${reference} is ready to import as a draft quote.`, action: 'capture' }, reference);
+        }
+      } catch (error) {
+        renderRfqStatus({ tone: 'error', label: 'DataPlus check failed', detail: error.message || 'Refresh the page to try again.' }, reference);
+      } finally {
+        statusRequestPending = false;
+      }
+    }
+
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-      if (message?.type !== 'dataplus:extract-page') return false;
-      try { sendResponse({ ok: true, result: api.extractPage(document, location, message.template || {}) }); }
-      catch (error) { sendResponse({ ok: false, error: error.message || 'Unable to read this page.' }); }
+      if (message?.type === 'dataplus:extract-page') {
+        try { sendResponse({ ok: true, result: api.extractPage(document, location, message.template || {}) }); }
+        catch (error) { sendResponse({ ok: false, error: error.message || 'Unable to read this page.' }); }
+        return false;
+      }
+      if (message?.type === 'dataplus:refresh-rfq-status') {
+        refreshRfqStatus().then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: error.message }));
+        return true;
+      }
       return false;
     });
+
+    if (isRfqPage()) {
+      root.setTimeout(() => refreshRfqStatus(), 0);
+      root.addEventListener('focus', () => refreshRfqStatus());
+      documentRef.addEventListener('visibilitychange', () => { if (documentRef.visibilityState === 'visible') refreshRfqStatus(); });
+    }
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function createDataPlusExtractor() {
   function clean(value, maximum = 2000) {

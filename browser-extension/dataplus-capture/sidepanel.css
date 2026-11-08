@@ -82,6 +82,8 @@ input:focus, select:focus { border-color: #3a95ed; outline: 2px solid rgba(58,14
 .action-stack button { width: 100%; }
 .inline-message { padding: 10px; border: 1px solid #665420; border-radius: 6px; background: #28220f; color: #ecd58a; font-size: 11px; line-height: 1.45; }
 .inline-message.success { border-color: #236146; background: #102b20; color: #bdf3d7; }
+.quote-url-link { display: block; overflow: hidden; color: #79bcff; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.quote-url-link:hover { color: #b7dcff; text-decoration: underline; }
 
 .settings-section { display: grid; gap: 12px; padding: 4px 0 18px; border-bottom: 1px solid #252a31; }
 .settings-section + .settings-section { padding-top: 18px; }
