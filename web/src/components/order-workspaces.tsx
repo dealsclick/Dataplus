@@ -1700,6 +1700,7 @@ export function orderListSearchText(row: Record<string, unknown>) {
   const shipments = Array.isArray(row.shipments) ? row.shipments as Array<Record<string, unknown>> : []
   return [
     row.orderNumber,
+    row.draftNumber,
     row.reference,
     row.returnNumber,
     row.id,
@@ -1716,6 +1717,8 @@ export function orderListSearchText(row: Record<string, unknown>) {
     row.customerName,
     row.customerEmail,
     row.buyerEmail,
+    row.salesOwner,
+    row.nextAction,
     row.source,
     row.channelSource,
     row.salesChannel,

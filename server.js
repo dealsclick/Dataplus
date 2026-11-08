@@ -18378,6 +18378,47 @@ function quoteTermSelection(library, requestedIds, previousSnapshot = [], useDef
   };
 }
 
+function normalizeQuotePipelineStatus(value, fallback = "draft") {
+  const normalized = String(value || "").trim().toLowerCase();
+  return ["draft", "reviewing", "quoted", "sent", "accepted", "lost", "converted"].includes(normalized)
+    ? normalized
+    : fallback;
+}
+
+function quotePipelineInputStatus(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!["draft", "reviewing", "quoted", "sent", "accepted", "lost"].includes(normalized)) {
+    throw Object.assign(new Error("Select a valid quote status."), { statusCode: 400 });
+  }
+  return normalized;
+}
+
+function normalizeQuoteActivity(value) {
+  return (Array.isArray(value) ? value : []).slice(-100).map((entry = {}) => ({
+    id: String(entry.id || crypto.randomUUID()),
+    type: String(entry.type || "status_changed").trim(),
+    fromStatus: String(entry.fromStatus || "").trim().toLowerCase(),
+    toStatus: normalizeQuotePipelineStatus(entry.toStatus, "draft"),
+    message: String(entry.message || "").trim().slice(0, 500),
+    user: String(entry.user || "DataPlus user").trim().slice(0, 160),
+    createdAt: Number.isFinite(Date.parse(String(entry.createdAt || ""))) ? new Date(entry.createdAt).toISOString() : new Date().toISOString()
+  }));
+}
+
+function quotePipelineActivityEvent(fromStatus, toStatus, user, createdAt = new Date().toISOString(), type = "status_changed") {
+  const from = String(fromStatus || "").trim().toLowerCase();
+  const to = normalizeQuotePipelineStatus(toStatus, "draft");
+  return {
+    id: crypto.randomUUID(),
+    type,
+    fromStatus: from,
+    toStatus: to,
+    message: from && from !== to ? `Quote moved from ${from.replaceAll("_", " ")} to ${to.replaceAll("_", " ")}.` : `Quote entered ${to.replaceAll("_", " ")}.`,
+    user: String(user || "DataPlus user").trim().slice(0, 160) || "DataPlus user",
+    createdAt
+  };
+}
+
 function normalizeOrderDraft(db, draft = {}) {
   const createdAt = draft.createdAt || new Date().toISOString();
   const items = (Array.isArray(draft.items) ? draft.items : [])
@@ -18393,6 +18434,8 @@ function normalizeOrderDraft(db, draft = {}) {
     storedTermsSnapshot.length ? storedTermsSnapshot : undefined
   );
   const selectedTermsSnapshot = storedTermsSnapshot.length ? storedTermsSnapshot : quoteTermSnapshot(QUOTE_TERM_OPTIONS, selectedTermIds);
+  const status = normalizeQuotePipelineStatus(draft.status, "draft");
+  const salesOwner = String(draft.salesOwner || draft.owner || "").trim().slice(0, 160);
   return {
     id: draft.id || crypto.randomUUID(),
     draftNumber: String(draft.draftNumber || nextDraftNumber(db)).trim(),
@@ -18402,7 +18445,13 @@ function normalizeOrderDraft(db, draft = {}) {
     sourceOrderId: String(draft.sourceOrderId || "").trim(),
     sourceOrderNumber: String(draft.sourceOrderNumber || "").trim(),
     source: String(draft.source || "Manual").trim(),
-    status: String(draft.status || "draft").trim(),
+    status,
+    salesOwner,
+    nextAction: String(draft.nextAction || "").trim().slice(0, 500),
+    nextFollowUpAt: Number.isFinite(Date.parse(String(draft.nextFollowUpAt || ""))) ? new Date(draft.nextFollowUpAt).toISOString() : "",
+    statusChangedAt: Number.isFinite(Date.parse(String(draft.statusChangedAt || ""))) ? new Date(draft.statusChangedAt).toISOString() : createdAt,
+    statusChangedBy: String(draft.statusChangedBy || salesOwner || "DataPlus user").trim().slice(0, 160),
+    quoteActivity: normalizeQuoteActivity(draft.quoteActivity),
     buyer: String(draft.buyer || draft.customerName || "").trim(),
     buyerEmail: String(draft.buyerEmail || "").trim(),
     phone: String(draft.phone || "").trim(),
@@ -70793,6 +70842,8 @@ async function handleApi(req, res) {
     const db = await readOrderDraftWorkflowDb();
     await hydrateDraftLineCosts(db, body);
     const termSelection = quoteTermSelection(db.systemSettings?.quoteTerms, body.selectedTermIds, [], body.selectedTermIds === undefined);
+    const createdAt = new Date().toISOString();
+    const actor = String(authUser?.name || authUser?.username || authUser?.id || "DataPlus user").trim();
     const draft = normalizeOrderDraft(db, {
       source: body.source,
       buyer: body.buyer,
@@ -70807,7 +70858,15 @@ async function handleApi(req, res) {
       shippingAddress: body.shippingAddress,
       billingAddress: body.billingAddress,
       items: body.items,
-      status: "draft"
+      status: "draft",
+      salesOwner: body.salesOwner || actor,
+      nextAction: body.nextAction,
+      nextFollowUpAt: body.nextFollowUpAt,
+      statusChangedAt: createdAt,
+      statusChangedBy: actor,
+      quoteActivity: [quotePipelineActivityEvent("", "draft", actor, createdAt, "created")],
+      createdAt,
+      updatedAt: createdAt
     });
     db.orderDrafts = Array.isArray(db.orderDrafts) ? db.orderDrafts : [];
     db.orderDrafts.unshift(draft);
@@ -70820,6 +70879,8 @@ async function handleApi(req, res) {
     const current = (db.orderDrafts || []).find((row) => row.id === parts[2]);
     if (!current) return notFound(res);
     await hydrateDraftLineCosts(db, current);
+    const duplicatedAt = new Date().toISOString();
+    const actor = String(authUser?.name || authUser?.username || authUser?.id || "DataPlus user").trim();
     const duplicate = normalizeOrderDraft(db, {
       ...current,
       id: crypto.randomUUID(),
@@ -70830,8 +70891,14 @@ async function handleApi(req, res) {
       marketplaceOrderNumber: "",
       expiresAt: defaultQuoteExpiration(30),
       note: current.note ? `${current.note} / Duplicated from ${current.draftNumber}` : `Duplicated from ${current.draftNumber}`,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      status: "draft",
+      nextAction: "Review quote revision",
+      nextFollowUpAt: "",
+      statusChangedAt: duplicatedAt,
+      statusChangedBy: actor,
+      quoteActivity: [quotePipelineActivityEvent("", "draft", actor, duplicatedAt, "revision_created")],
+      createdAt: duplicatedAt,
+      updatedAt: duplicatedAt
     });
     db.orderDrafts.unshift(duplicate);
     await persistOrderDraftWorkflowDb(db);
@@ -70843,6 +70910,13 @@ async function handleApi(req, res) {
     const db = await readOrderDraftWorkflowDb();
     const current = (db.orderDrafts || []).find((row) => row.id === parts[2]);
     if (!current) return notFound(res);
+    const nextStatus = body.status === undefined ? normalizeQuotePipelineStatus(current.status, "draft") : quotePipelineInputStatus(body.status);
+    if (body.nextFollowUpAt && !Number.isFinite(Date.parse(String(body.nextFollowUpAt)))) return sendJson(res, 400, { error: "Select a valid follow-up date and time." });
+    const updatedAt = new Date().toISOString();
+    const actor = String(authUser?.name || authUser?.username || authUser?.id || "DataPlus user").trim();
+    const statusChanged = nextStatus !== normalizeQuotePipelineStatus(current.status, "draft");
+    const quoteActivity = normalizeQuoteActivity(current.quoteActivity);
+    if (statusChanged) quoteActivity.push(quotePipelineActivityEvent(current.status, nextStatus, actor, updatedAt));
     await hydrateDraftLineCosts(db, body.items ? body : current);
     const termSelection = body.selectedTermIds === undefined
       ? { selectedTermIds: current.selectedTermIds, selectedTermsSnapshot: current.selectedTermsSnapshot }
@@ -70862,8 +70936,14 @@ async function handleApi(req, res) {
       shippingAddress: body.shippingAddress ?? current.shippingAddress,
       billingAddress: body.billingAddress ?? current.billingAddress,
       items: body.items ?? current.items,
-      status: body.status ?? current.status,
-      updatedAt: new Date().toISOString()
+      status: nextStatus,
+      salesOwner: body.salesOwner ?? current.salesOwner,
+      nextAction: body.nextAction ?? current.nextAction,
+      nextFollowUpAt: body.nextFollowUpAt ?? current.nextFollowUpAt,
+      statusChangedAt: statusChanged ? updatedAt : current.statusChangedAt,
+      statusChangedBy: statusChanged ? actor : current.statusChangedBy,
+      quoteActivity,
+      updatedAt
     });
     Object.assign(current, updated);
     await persistOrderDraftWorkflowDb(db);
@@ -70910,6 +70990,8 @@ async function handleApi(req, res) {
     const db = await readOrderDraftWorkflowDb();
     db.inventory = products || [];
     const termSelection = quoteTermSelection(db.systemSettings?.quoteTerms, undefined, [], true);
+    const createdAt = new Date().toISOString();
+    const actor = String(authUser?.name || authUser?.username || authUser?.id || "DataPlus user").trim();
     const duplicate = normalizeOrderDraft(db, {
       buyer: order.buyer,
       source: order.source || "Manual",
@@ -70925,8 +71007,14 @@ async function handleApi(req, res) {
       sourceOrderId: order.id,
       sourceOrderNumber: order.orderNumber,
       revisionNumber: 1,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      status: "draft",
+      salesOwner: actor,
+      nextAction: "Review quote created from order",
+      statusChangedAt: createdAt,
+      statusChangedBy: actor,
+      quoteActivity: [quotePipelineActivityEvent("", "draft", actor, createdAt, "created_from_order")],
+      createdAt,
+      updatedAt: createdAt
     });
     db.orderDrafts = Array.isArray(db.orderDrafts) ? db.orderDrafts : [];
     db.orderDrafts.unshift(duplicate);
@@ -74906,6 +74994,8 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts.length === 2) {
     const body = await parseBody(req);
     const termSelection = quoteTermSelection(db.systemSettings?.quoteTerms, body.selectedTermIds, [], body.selectedTermIds === undefined);
+    const createdAt = new Date().toISOString();
+    const actor = String(authUser?.name || authUser?.username || authUser?.id || "DataPlus user").trim();
     const draft = normalizeOrderDraft(db, {
       source: body.source,
       buyer: body.buyer,
@@ -74920,7 +75010,15 @@ async function handleApi(req, res) {
       shippingAddress: body.shippingAddress,
       billingAddress: body.billingAddress,
       items: body.items,
-      status: "draft"
+      status: "draft",
+      salesOwner: body.salesOwner || actor,
+      nextAction: body.nextAction,
+      nextFollowUpAt: body.nextFollowUpAt,
+      statusChangedAt: createdAt,
+      statusChangedBy: actor,
+      quoteActivity: [quotePipelineActivityEvent("", "draft", actor, createdAt, "created")],
+      createdAt,
+      updatedAt: createdAt
     });
     db.orderDrafts = Array.isArray(db.orderDrafts) ? db.orderDrafts : [];
     db.orderDrafts.unshift(draft);
@@ -74931,6 +75029,8 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] && parts[3] === "duplicate") {
     const current = (db.orderDrafts || []).find((row) => row.id === parts[2]);
     if (!current) return notFound(res);
+    const duplicatedAt = new Date().toISOString();
+    const actor = String(authUser?.name || authUser?.username || authUser?.id || "DataPlus user").trim();
     const duplicate = normalizeOrderDraft(db, {
       ...current,
       id: crypto.randomUUID(),
@@ -74941,8 +75041,14 @@ async function handleApi(req, res) {
       marketplaceOrderNumber: "",
       expiresAt: defaultQuoteExpiration(30),
       note: current.note ? `${current.note} / Duplicated from ${current.draftNumber}` : `Duplicated from ${current.draftNumber}`,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      status: "draft",
+      nextAction: "Review quote revision",
+      nextFollowUpAt: "",
+      statusChangedAt: duplicatedAt,
+      statusChangedBy: actor,
+      quoteActivity: [quotePipelineActivityEvent("", "draft", actor, duplicatedAt, "revision_created")],
+      createdAt: duplicatedAt,
+      updatedAt: duplicatedAt
     });
     db.orderDrafts = Array.isArray(db.orderDrafts) ? db.orderDrafts : [];
     db.orderDrafts.unshift(duplicate);
@@ -74954,6 +75060,13 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const current = (db.orderDrafts || []).find((row) => row.id === parts[2]);
     if (!current) return notFound(res);
+    const nextStatus = body.status === undefined ? normalizeQuotePipelineStatus(current.status, "draft") : quotePipelineInputStatus(body.status);
+    if (body.nextFollowUpAt && !Number.isFinite(Date.parse(String(body.nextFollowUpAt)))) return sendJson(res, 400, { error: "Select a valid follow-up date and time." });
+    const updatedAt = new Date().toISOString();
+    const actor = String(authUser?.name || authUser?.username || authUser?.id || "DataPlus user").trim();
+    const statusChanged = nextStatus !== normalizeQuotePipelineStatus(current.status, "draft");
+    const quoteActivity = normalizeQuoteActivity(current.quoteActivity);
+    if (statusChanged) quoteActivity.push(quotePipelineActivityEvent(current.status, nextStatus, actor, updatedAt));
     const termSelection = body.selectedTermIds === undefined
       ? { selectedTermIds: current.selectedTermIds, selectedTermsSnapshot: current.selectedTermsSnapshot }
       : quoteTermSelection(db.systemSettings?.quoteTerms, body.selectedTermIds, current.selectedTermsSnapshot);
@@ -74972,8 +75085,14 @@ async function handleApi(req, res) {
       shippingAddress: body.shippingAddress ?? current.shippingAddress,
       billingAddress: body.billingAddress ?? current.billingAddress,
       items: body.items ?? current.items,
-      status: body.status ?? current.status,
-      updatedAt: new Date().toISOString()
+      status: nextStatus,
+      salesOwner: body.salesOwner ?? current.salesOwner,
+      nextAction: body.nextAction ?? current.nextAction,
+      nextFollowUpAt: body.nextFollowUpAt ?? current.nextFollowUpAt,
+      statusChangedAt: statusChanged ? updatedAt : current.statusChangedAt,
+      statusChangedBy: statusChanged ? actor : current.statusChangedBy,
+      quoteActivity,
+      updatedAt
     });
     Object.assign(current, updated);
     await writeDb(db);
@@ -75018,6 +75137,8 @@ async function handleApi(req, res) {
         cost: Number((db.inventory || []).find((row) => row.sku === order.sku)?.cost || 0)
       }];
     const termSelection = quoteTermSelection(db.systemSettings?.quoteTerms, undefined, [], true);
+    const createdAt = new Date().toISOString();
+    const actor = String(authUser?.name || authUser?.username || authUser?.id || "DataPlus user").trim();
     const duplicate = normalizeOrderDraft(db, {
       buyer: order.buyer,
       source: order.source || "Manual",
@@ -75033,8 +75154,14 @@ async function handleApi(req, res) {
       sourceOrderId: order.id,
       sourceOrderNumber: order.orderNumber,
       revisionNumber: 1,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      status: "draft",
+      salesOwner: actor,
+      nextAction: "Review quote created from order",
+      statusChangedAt: createdAt,
+      statusChangedBy: actor,
+      quoteActivity: [quotePipelineActivityEvent("", "draft", actor, createdAt, "created_from_order")],
+      createdAt,
+      updatedAt: createdAt
     });
     db.orderDrafts = Array.isArray(db.orderDrafts) ? db.orderDrafts : [];
     db.orderDrafts.unshift(duplicate);

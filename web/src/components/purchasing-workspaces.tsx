@@ -116,6 +116,19 @@ function quoteDateAfter(days: number) {
   return quoteDateKey(date)
 }
 
+function quoteLocalDateTime(value: unknown) {
+  const date = new Date(String(value || ""))
+  if (!Number.isFinite(date.getTime())) return ""
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
+  return local.toISOString().slice(0, 16)
+}
+
+function quoteIsoDateTime(value: string) {
+  if (!value) return ""
+  const date = new Date(value)
+  return Number.isFinite(date.getTime()) ? date.toISOString() : ""
+}
+
 type QuoteCarrierRate = {
   id: string
   providerId: string
@@ -306,6 +319,7 @@ export function DraftQuoteFieldDetailPage() {
   const autoEditOpenedRef = useRef(false)
   const [form, setForm] = useState({
     buyer: "", buyerEmail: "", phone: "", source: "Manual", status: "draft", note: "", customerNote: "",
+    salesOwner: "", nextAction: "", nextFollowUpAt: "",
     expiresAt: quoteDateAfter(30), selectedTermIds: [] as string[], customTerms: "",
     line1: "", line2: "", city: "", state: "", postalCode: "", country: "US",
     items: [] as QuoteLineForm[],
@@ -402,6 +416,7 @@ export function DraftQuoteFieldDetailPage() {
     setForm({
       buyer: String(draft.buyer || ""), buyerEmail: String(draft.buyerEmail || ""), phone: String(draft.phone || ""),
       source: String(draft.source || "Manual"), status: String(draft.status || "draft"), note: String(draft.note || ""),
+      salesOwner: String(draft.salesOwner || ""), nextAction: String(draft.nextAction || ""), nextFollowUpAt: quoteLocalDateTime(draft.nextFollowUpAt),
       customerNote: String(draft.customerNote || ""), expiresAt: String(draft.expiresAt || quoteDateAfter(30)),
       selectedTermIds: Array.isArray(draft.selectedTermIds) ? draft.selectedTermIds.map(String) : [], customTerms: String(draft.customTerms || ""),
       line1: String(address.line1 || address.address1 || ""), line2: String(address.line2 || address.address2 || ""), city: String(address.city || ""),
@@ -555,6 +570,7 @@ export function DraftQuoteFieldDetailPage() {
     try {
       await api(`/api/order-drafts/${encodeURIComponent(draftId)}`, { method: "PATCH", body: JSON.stringify({
         buyer: form.buyer.trim(), buyerEmail: form.buyerEmail.trim(), phone: form.phone.trim(), source: form.source, status: form.status,
+        salesOwner: form.salesOwner.trim(), nextAction: form.nextAction.trim(), nextFollowUpAt: quoteIsoDateTime(form.nextFollowUpAt),
         note: form.note.trim(), customerNote: form.customerNote.trim(), expiresAt: form.expiresAt, selectedTermIds: form.selectedTermIds, customTerms: form.customTerms.trim(),
         shippingAddress: { name: form.buyer.trim(), line1: form.line1.trim(), line2: form.line2.trim(), city: form.city.trim(), state: form.state.trim(), postalCode: form.postalCode.trim(), country: form.country.trim() }, items,
       }) })
@@ -651,6 +667,9 @@ export function DraftQuoteFieldDetailPage() {
   const hasCompleteMsrp = lines.length > 0 && missingMsrpCount === 0
   const expiresAt = String(draft?.expiresAt || "")
   const expired = Boolean(expiresAt && expiresAt < quoteDateKey(new Date()))
+  const nextFollowUpAt = String(draft?.nextFollowUpAt || "")
+  const followUpDue = Boolean(nextFollowUpAt && Date.parse(nextFollowUpAt) <= Date.now() && !["accepted", "lost"].includes(String(draft?.status || "")))
+  const quoteActivity = Array.isArray(draft?.quoteActivity) ? [...draft.quoteActivity as Array<Record<string, unknown>>].reverse() : []
   const selectedTermIds = Array.isArray(draft?.selectedTermIds) ? draft.selectedTermIds.map(String) : []
   const selectedTermSnapshot = Array.isArray(draft?.selectedTermsSnapshot) ? draft.selectedTermsSnapshot as QuoteTermDefinition[] : []
   const selectedTerms = selectedTermIds.map((id) => selectedTermSnapshot.find((term) => term.id === id) || quoteTermOptions.find((term) => term.id === id)).filter((term): term is QuoteTermDefinition => Boolean(term))
@@ -700,15 +719,18 @@ export function DraftQuoteFieldDetailPage() {
     </div>} />
 
     {loading ? <div className="grid gap-3"><Skeleton className="h-36" /><Skeleton className="h-72" /></div> : !draft ? <Card><CardContent className="p-8 text-center text-muted-foreground">This draft quote was not found.</CardContent></Card> : <>
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-8">
         <Detail label="Customer" value={String(draft.buyer || "Not assigned")} />
         <Detail label="Status" value={String(draft.status || "draft")} />
+        <Detail label="Sales owner" value={String(draft.salesOwner || "Unassigned")} />
         <Detail label="Quote total" value={moneyLabel(total)} />
         <Detail label="Gross margin" value={grossMargin === null ? `${numberLabel(lines.length - costedLines.length)} line cost${lines.length - costedLines.length === 1 ? "" : "s"} needed` : `${grossMargin.toFixed(1)}% · ${moneyLabel(grossProfit)}`} />
+        <Detail label="Next follow-up" value={nextFollowUpAt ? `${dateLabel(nextFollowUpAt)}${followUpDue ? " (due)" : ""}` : "Not scheduled"} />
         <Detail label="Valid until" value={expiresAt ? `${dateLabel(`${expiresAt}T12:00:00`)}${expired ? " (expired)" : ""}` : "Not set"} />
         <Detail label="Source" value={String(draft.source || "Manual")} />
       </div>
       {expired && !["accepted", "lost"].includes(String(draft.status || "")) ? <Alert variant="destructive"><Clock3 className="size-4" /><AlertTitle>Quote expired</AlertTitle><AlertDescription>Extend the validity date before sending or accepting this quote.</AlertDescription></Alert> : null}
+      {followUpDue ? <Alert><Clock3 className="size-4" /><AlertTitle>Follow-up is due</AlertTitle><AlertDescription>{String(draft.nextAction || "Contact the customer and record the next action.")}</AlertDescription></Alert> : null}
       <Card><CardHeader><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">Quote items</CardTitle><CardDescription>MSRP, MAP, selling price, supplier cost, and gross margin by line.</CardDescription></div><div className="flex flex-wrap gap-2">{hasCompleteMsrp ? <Badge variant="outline">{moneyLabel(savings)} customer savings</Badge> : <Badge variant="outline">{lines.length ? `MSRP missing on ${numberLabel(missingMsrpCount)} line${missingMsrpCount === 1 ? "" : "s"}` : "No quote lines"}</Badge>}{costsComplete ? <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">{grossMargin?.toFixed(1)}% total margin</Badge> : <Badge variant="outline" className="border-amber-500/40 text-amber-700 dark:text-amber-300">Cost needed on {numberLabel(lines.length - costedLines.length)} line{lines.length - costedLines.length === 1 ? "" : "s"}</Badge>}</div></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table className="min-w-[1380px]"><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Item</TableHead><TableHead>Supplier</TableHead><TableHead>Qty</TableHead><TableHead>MSRP</TableHead><TableHead>MAP</TableHead><TableHead>Price</TableHead><TableHead>Cost</TableHead><TableHead>Savings</TableHead><TableHead>Margin</TableHead><TableHead>Total</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
         {lines.map((line, index) => {
           const lineSavings = Math.max(0, Number(line.msrp || 0) - Number(line.price || 0)) * Number(line.qty || 0)
@@ -721,10 +743,11 @@ export function DraftQuoteFieldDetailPage() {
         })}
       </TableBody></Table></div></CardContent></Card>
       {enabledQuoteCarriers.length ? <Card><CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Shipping estimate</CardTitle><CardDescription>Compare the shared {enabledQuoteCarrierLabel} accounts for an accurate customer quote.</CardDescription></div><Button size="sm" variant={savedShippingEstimate ? "outline" : "default"} onClick={openShippingRates}><Truck className="size-4" /> {savedShippingEstimate ? "Refresh carrier rates" : "Get carrier rates"}</Button></div></CardHeader><CardContent className="grid gap-3">{savedShippingEstimate ? <><div className="grid gap-3 text-sm sm:grid-cols-5"><Detail label="Carrier / service" value={`${String(savedShippingEstimate.carrier || "Carrier")} ${String(savedShippingEstimate.service || "")}`} /><Detail label="Shipping" value={moneyLabel(shippingAmount)} /><Detail label="Package" value={`${String((savedShippingEstimate.package as Record<string, unknown>)?.weight || "-")} lb / ${String((savedShippingEstimate.package as Record<string, unknown>)?.length || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.width || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.height || "-")} in`} /><Detail label="Rate valid until" value={savedRateExpired ? "Expired - refresh required" : dateLabel(String(savedShippingEstimate.expiresAt || ""))} /><Detail label="Estimated quote total" value={moneyLabel(total)} /></div>{savedRateExpired ? <Alert variant="destructive"><Clock3 className="size-4" /><AlertTitle>Shipping rate expired</AlertTitle><AlertDescription>Refresh carrier rates before accepting or converting this quote.</AlertDescription></Alert> : null}</> : <p className="text-sm text-muted-foreground">No shipping rate has been added. Product subtotal is {moneyLabel(subtotal)}.</p>}</CardContent></Card> : null}
-      <div className="grid gap-4 lg:grid-cols-3">
+      <div className="grid gap-4 lg:grid-cols-4">
         <Card><CardHeader className="pb-3"><CardTitle className="text-sm">Internal notes</CardTitle><CardDescription>Visible only to DataPlus staff.</CardDescription></CardHeader><CardContent className="whitespace-pre-wrap text-sm text-muted-foreground">{String(draft.note || "No internal notes.")}</CardContent></Card>
         <Card><CardHeader className="pb-3"><CardTitle className="text-sm">Customer message</CardTitle><CardDescription>Included on every customer quote version.</CardDescription></CardHeader><CardContent className="whitespace-pre-wrap text-sm text-muted-foreground">{String(draft.customerNote || "No customer message.")}</CardContent></Card>
         <Card><CardHeader className="pb-3"><CardTitle className="text-sm">Quote terms</CardTitle><CardDescription>Only checked terms appear on customer PDFs.</CardDescription></CardHeader><CardContent className="grid gap-2 text-sm text-muted-foreground">{selectedTerms.map((term) => <div key={term.id} className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-600" /><span>{term.label}</span></div>)}{draft.customTerms ? <div className="whitespace-pre-wrap border-t pt-2">{String(draft.customTerms)}</div> : null}{!selectedTerms.length && !draft.customTerms ? "No terms selected." : null}</CardContent></Card>
+        <Card><CardHeader className="pb-3"><CardTitle className="text-sm">Pipeline activity</CardTitle><CardDescription>Recent stage changes and ownership.</CardDescription></CardHeader><CardContent className="grid gap-3 text-sm">{draft.nextAction ? <div><p className="font-medium">Next action</p><p className="text-muted-foreground">{String(draft.nextAction)}</p></div> : null}{quoteActivity.slice(0, 4).map((event) => <div key={String(event.id || event.createdAt)} className="border-l-2 pl-3"><p className="font-medium capitalize">{String(event.toStatus || event.type || "Updated").replaceAll("_", " ")}</p><p className="text-xs text-muted-foreground">{String(event.user || "DataPlus user")} · {dateLabel(String(event.createdAt || ""))}</p></div>)}{!draft.nextAction && !quoteActivity.length ? <p className="text-muted-foreground">No pipeline activity yet.</p> : null}</CardContent></Card>
       </div>
     </>}
 
@@ -918,6 +941,9 @@ export function DraftQuoteFieldDetailPage() {
                   <Field label="Phone"><Input type="tel" value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} /></Field>
                   <Field label="Status"><Select value={form.status} onValueChange={(status) => setForm({ ...form, status })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["draft", "reviewing", "quoted", "sent", "accepted", "lost"].map((status) => <SelectItem key={status} value={status}>{status.replace(/_/g, " ")}</SelectItem>)}</SelectContent></Select></Field>
                   <Field label="Source"><Select value={form.source} onValueChange={(source) => setForm({ ...form, source })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["Manual", "Phone", "Email", "Shopify"].map((source) => <SelectItem key={source} value={source}>{source}</SelectItem>)}</SelectContent></Select></Field>
+                  <Field label="Sales owner"><Input value={form.salesOwner} onChange={(event) => setForm({ ...form, salesOwner: event.target.value })} placeholder="Assigned salesperson" /></Field>
+                  <Field label="Next follow-up"><Input type="datetime-local" value={form.nextFollowUpAt} onChange={(event) => setForm({ ...form, nextFollowUpAt: event.target.value })} /></Field>
+                  <div className="sm:col-span-2"><Field label="Next action"><Input value={form.nextAction} onChange={(event) => setForm({ ...form, nextAction: event.target.value })} placeholder="Example: Call purchasing manager with revised pricing" /></Field></div>
                 </div>
               </TabsContent>
 

@@ -9,7 +9,7 @@ const quoteDocuments=require('../lib/quote-documents');
 const serverSource=require('node:fs').readFileSync(require.resolve('../server'),'utf8');
 const draftFunctions={crypto:require('node:crypto'),normalizeAddress:value=>value,...quoteDocuments,...require('../lib/product-price-floors')};
 require('node:vm').createContext(draftFunctions);
-for(const name of ['quoteSupplierCost','nextDraftNumber','nextOrderNumber','normalizeDraftLine','orderDraftTotals','normalizeDraftShippingEstimate','normalizeOrderDraft','buildOrderFromDraft']) {
+for(const name of ['quoteSupplierCost','nextDraftNumber','nextOrderNumber','normalizeDraftLine','orderDraftTotals','normalizeDraftShippingEstimate','normalizeQuotePipelineStatus','normalizeQuoteActivity','normalizeOrderDraft','buildOrderFromDraft']) {
   const start=serverSource.indexOf(`function ${name}(`);
   require('node:vm').runInContext(serverSource.slice(start,serverSource.indexOf('\nfunction ',start+1)),draftFunctions);
 }
@@ -176,6 +176,16 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   assert.equal(created.selectedTermsSnapshot.find(term=>term.id==='taxes').text,'Company-specific tax wording.');
   assert.equal(created.items[0].msrp,15);
   assert.equal(created.items[0].cost,null,'Company quote input cannot persist a LINQ or caller-provided cost');
+  assert.equal(created.salesOwner,'Owner');
+  assert.equal(created.statusChangedBy,'Owner');
+  assert.equal(created.quoteActivity[0].type,'created');
+  const pipelineUpdate=(await op(`/api/order-drafts/${created.id}`,'PATCH',{status:'reviewing',salesOwner:'Salesperson A',nextAction:'Call purchasing manager',nextFollowUpAt:'2026-11-10T15:30:00.000Z'})).response.data.draft;
+  assert.equal(pipelineUpdate.status,'reviewing');
+  assert.equal(pipelineUpdate.salesOwner,'Salesperson A');
+  assert.equal(pipelineUpdate.nextAction,'Call purchasing manager');
+  assert.equal(pipelineUpdate.nextFollowUpAt,'2026-11-10T15:30:00.000Z');
+  assert.equal(pipelineUpdate.quoteActivity.at(-1).fromStatus,'draft');
+  assert.equal(pipelineUpdate.quoteActivity.at(-1).toStatus,'reviewing');
   const competitorMatch=(await op(`/api/order-drafts/${created.id}/competitor-product/inspect`,'POST',{url:'https://example.com/match'})).response.data;
   assert.equal(competitorMatch.matches[0].sku,'ABC');
   assert.equal(competitorMatch.matches[0].matchBasis,'Page SKU');

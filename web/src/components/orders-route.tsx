@@ -1,5 +1,5 @@
 import { lazy, useEffect, useMemo, useRef, useState } from "react"
-import { AlertCircle, AlertTriangle, Archive, ArrowUpDown, Boxes, CalendarDays, CheckCircle2, ChevronDown, FileDown, FileText, History, ListChecks, Loader2, MoreHorizontal, Play, RefreshCw, RotateCcw, Search, ShieldCheck, ShoppingBag, SlidersHorizontal, Store, Truck, X } from "lucide-react"
+import { AlertCircle, AlertTriangle, Archive, ArrowUpDown, Boxes, CalendarDays, CheckCircle2, ChevronDown, CircleDollarSign, Columns3, FileDown, FileText, History, List, ListChecks, Loader2, MoreHorizontal, Play, RefreshCw, RotateCcw, Search, ShieldCheck, ShoppingBag, SlidersHorizontal, Store, TrendingUp, Truck, UserRound, X } from "lucide-react"
 import { toast } from "sonner"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -21,6 +21,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { BulkSearchActions } from "./bulk-search-csv-button"
 import { ImportDashboard } from "./import-dashboard"
 import { OrderReturnDetails } from "./order-return-details"
@@ -99,6 +100,59 @@ function OrderMultiSelect({ value, onValueChange, options, placeholder, searchPl
   </Popover>
 }
 
+const quotePipelineStages = [
+  { id: "draft", label: "Draft", description: "Building the proposal" },
+  { id: "reviewing", label: "Reviewing", description: "Internal pricing review" },
+  { id: "quoted", label: "Quoted", description: "Ready for the customer" },
+  { id: "sent", label: "Sent", description: "Awaiting a decision" },
+  { id: "accepted", label: "Accepted", description: "Won business" },
+  { id: "lost", label: "Lost", description: "Closed without an order" },
+] as const
+
+function quotePipelineStatus(value: unknown) {
+  const normalized = String(value || "draft").trim().toLowerCase()
+  return quotePipelineStages.some((stage) => stage.id === normalized) ? normalized : "draft"
+}
+
+function quotePipelineTotal(draft: Record<string, unknown>) {
+  if (draft.total !== null && draft.total !== undefined && draft.total !== "" && Number.isFinite(Number(draft.total))) return Number(draft.total)
+  return (Array.isArray(draft.items) ? draft.items as Array<Record<string, unknown>> : []).reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0) + Number((draft.shippingEstimate as Record<string, unknown> | undefined)?.amount || 0)
+}
+
+function QuotePipelineCard({ draft, updating, onStageChange }: { draft: Record<string, unknown>; updating: boolean; onStageChange: (draft: Record<string, unknown>, status: string) => void }) {
+  const id = String(draft.id || draft.draftNumber || "")
+  const status = quotePipelineStatus(draft.status)
+  const items = Array.isArray(draft.items) ? draft.items as Array<Record<string, unknown>> : []
+  const expiresAt = String(draft.expiresAt || "")
+  const expirationMs = expiresAt ? Date.parse(`${expiresAt}T23:59:59`) : Number.NaN
+  const daysToExpiration = Number.isFinite(expirationMs) ? Math.ceil((expirationMs - Date.now()) / 86_400_000) : null
+  const terminal = status === "accepted" || status === "lost"
+  const expired = !terminal && daysToExpiration !== null && daysToExpiration < 0
+  const expiring = !terminal && daysToExpiration !== null && daysToExpiration >= 0 && daysToExpiration <= 7
+  const followUpAt = String(draft.nextFollowUpAt || "")
+  const followUpMs = Date.parse(followUpAt)
+  const followUpDue = !terminal && Number.isFinite(followUpMs) && followUpMs <= Date.now()
+  return <article className="grid gap-3 rounded-md border bg-background p-3 shadow-sm">
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0"><a href={`/drafts/${encodeURIComponent(id)}`} className="font-semibold hover:underline">{String(draft.draftNumber || id)}</a><p className="truncate text-sm text-muted-foreground">{String(draft.buyer || "Customer not assigned")}</p></div>
+      <span className="shrink-0 font-semibold tabular-nums">{moneyLabel(quotePipelineTotal(draft))}</span>
+    </div>
+    <div className="flex flex-wrap gap-1.5">
+      <Badge variant="outline">{numberLabel(items.length)} line{items.length === 1 ? "" : "s"}</Badge>
+      {Number(draft.revisionNumber || 1) > 1 && <Badge variant="outline">Rev {numberLabel(Number(draft.revisionNumber))}</Badge>}
+      {expired && <Badge variant="destructive">Expired</Badge>}
+      {expiring && <Badge variant="outline" className="border-amber-500/50 text-amber-700 dark:text-amber-300">Expires in {daysToExpiration}d</Badge>}
+      {followUpDue && <Badge variant="destructive">Follow-up due</Badge>}
+    </div>
+    <div className="grid gap-1.5 text-xs text-muted-foreground">
+      <p className="flex items-center gap-1.5"><UserRound className="size-3.5" /><span className="truncate">{String(draft.salesOwner || "Unassigned")}</span></p>
+      <p className="flex items-center gap-1.5"><CalendarDays className="size-3.5" /><span>{followUpAt ? `Follow up ${dateLabel(followUpAt)}` : expiresAt ? `Valid until ${dateLabel(`${expiresAt}T12:00:00`)}` : "No follow-up scheduled"}</span></p>
+      {Boolean(draft.nextAction) && <p className="line-clamp-2 text-foreground">{String(draft.nextAction)}</p>}
+    </div>
+    <Select value={status} disabled={updating} onValueChange={(nextStatus) => onStageChange(draft, nextStatus)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent>{quotePipelineStages.map((stage) => <SelectItem key={stage.id} value={stage.id}>{stage.label}</SelectItem>)}</SelectContent></Select>
+  </article>
+}
+
 export function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } = {}) {
   const [transactionReturn, setTransactionReturn] = useState<Record<string, unknown> | null>(null)
   const orderRequestRef = useRef(0)
@@ -162,6 +216,10 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
   const [hasOrderChannel, setHasOrderChannel] = useState(false)
   const [warehouses, setWarehouses] = useState<Array<Record<string, unknown>>>([])
   const [quoteOpen, setQuoteOpen] = useState(false)
+  const [quoteView, setQuoteView] = useState<"pipeline" | "table">(() => window.localStorage.getItem("dataplus:quote-view") === "table" ? "table" : "pipeline")
+  const [quoteOwnerFilter, setQuoteOwnerFilter] = useState("all")
+  const [quoteAttentionFilter, setQuoteAttentionFilter] = useState("all")
+  const [quoteUpdatingId, setQuoteUpdatingId] = useState("")
   const [returnOpen, setReturnOpen] = useState(false)
   const [returnTotal, setReturnTotal] = useState(0)
   const [returnsRefreshKey, setReturnsRefreshKey] = useState(0)
@@ -522,6 +580,22 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to create quote.") }
     finally { setBusy(false) }
   }
+  async function updateQuoteStage(draft: Record<string, unknown>, nextStatus: string) {
+    const id = String(draft.id || "")
+    if (!id || quotePipelineStatus(draft.status) === nextStatus) return
+    setQuoteUpdatingId(id)
+    try {
+      const result = await api<{ draft?: Record<string, unknown> }>(`/api/order-drafts/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ status: nextStatus }) })
+      const saved = result.draft || { ...draft, status: nextStatus, updatedAt: new Date().toISOString() }
+      setData((current) => {
+        const next = { ...current, orderDrafts: (current.orderDrafts || []).map((row) => String(row.id || "") === id ? saved : row) }
+        writeWorkspaceCache("orders:drafts", next)
+        return next
+      })
+      toast.success(`${String(draft.draftNumber || "Quote")} moved to ${nextStatus.replaceAll("_", " ")}.`)
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update the quote stage.") }
+    finally { setQuoteUpdatingId("") }
+  }
   async function duplicateDraft(draft: Record<string, unknown>) {
     setBusy(true)
     try { const result = await api<{ draft?: Record<string, unknown> }>(`/api/order-drafts/${encodeURIComponent(String(draft.id || ""))}/duplicate`, { method: "POST" }); toast.success(`${String(result.draft?.draftNumber || "Quote")} duplicated.`); await load() }
@@ -602,6 +676,22 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
     : queueDefinitions
   const actionRequiredCount = orderRows.filter((row) => actionQueueIds.has(queueFor(row))).length
   const rows = tab === "orders" ? orderRows : tab === "drafts" ? data.orderDrafts || [] : data.returns || []
+  const quoteOwnerValues = [...new Set((data.orderDrafts || []).map((draft) => String(draft.salesOwner || "").trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right))
+  const quoteAttentionMatches = (draft: Record<string, unknown>) => {
+    if (quoteAttentionFilter === "all") return true
+    const status = quotePipelineStatus(draft.status)
+    const terminal = status === "accepted" || status === "lost"
+    const followUpMs = Date.parse(String(draft.nextFollowUpAt || ""))
+    const expiresAt = String(draft.expiresAt || "")
+    const expirationMs = expiresAt ? Date.parse(`${expiresAt}T23:59:59`) : Number.NaN
+    const daysToExpiration = Number.isFinite(expirationMs) ? Math.ceil((expirationMs - Date.now()) / 86_400_000) : null
+    if (quoteAttentionFilter === "follow_up_due") return !terminal && Number.isFinite(followUpMs) && followUpMs <= Date.now()
+    if (quoteAttentionFilter === "expiring") return !terminal && daysToExpiration !== null && daysToExpiration >= 0 && daysToExpiration <= 7
+    if (quoteAttentionFilter === "expired") return !terminal && daysToExpiration !== null && daysToExpiration < 0
+    if (quoteAttentionFilter === "unassigned") return !terminal && !String(draft.salesOwner || "").trim()
+    if (quoteAttentionFilter === "no_next_action") return !terminal && !String(draft.nextAction || "").trim()
+    return true
+  }
   const sourceValues = [...new Set([...rows.map(orderChannelFilterValue).filter(Boolean), ...(tab === "orders" ? ["Shopify", "eBay", "Temu", "TikTok Shop", "Walmart", "Manual", EBAY_LIVE_FILTER_VALUE, TIKTOK_LIVE_FILTER_VALUE] : [])])].sort((left, right) => orderChannelFilterLabel(left).localeCompare(orderChannelFilterLabel(right)))
   const statusValues = [...new Set([...rows.map((row) => normalizeOrderFilterValue(row.status || row.returnStatus)).filter(Boolean), ...(tab === "orders" ? ["new", "pending", "processing", "hold", "completed", "canceled", "refunded"] : [])])].sort((left, right) => left.localeCompare(right))
   const statusFilterOptions = statusValues.map((value) => ({ value, label: orderFilterLabel(value) }))
@@ -787,6 +877,8 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
     .filter((row) => tab !== "orders" || (orderWorkspace === "open" ? actionQueueIds.has(queueFor(row)) && (queue === "all" || queueFor(row) === queue) : queue === "all" || queueFor(row) === queue))
     .filter((row) => selectedStatuses.length === 0 || selectedStatuses.includes(normalizeOrderFilterValue(row.status || row.returnStatus)))
     .filter((row) => selectedSources.length === 0 || selectedSources.includes(normalizeOrderFilterValue(orderChannelFilterValue(row))))
+    .filter((row) => tab !== "drafts" || quoteOwnerFilter === "all" || String(row.salesOwner || "").toLowerCase() === quoteOwnerFilter.toLowerCase())
+    .filter((row) => tab !== "drafts" || quoteAttentionMatches(row))
     .filter((row) => orderWorkspace !== "all" || selectedPayments.length === 0 || selectedPayments.includes(normalizeOrderFilterValue(row.financialStatus || row.paymentStatus || "unpaid").replace(/\s+/g, "_")))
     .filter((row) => orderWorkspace !== "all" || selectedShippingStatuses.length === 0 || selectedShippingStatuses.includes(shippingStateFor(row)))
     .filter((row) => orderWorkspace !== "all" || selectedFulfillmentStatuses.length === 0 || selectedFulfillmentStatuses.some((filterValue) => normalizeOrderFilterValue(row.fulfillmentStatus || row.fulfillmentStage || row.status).includes(filterValue)))
@@ -810,7 +902,17 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
       const rightValue = sort.startsWith("total") ? Number(right.total || right.refundAmount || 0) : sort.startsWith("customer") ? String(right.buyer || right.customerName || "") : new Date(orderDateFor(right) || 0).getTime()
       const result = typeof leftValue === "number" && typeof rightValue === "number" ? leftValue - rightValue : String(leftValue).localeCompare(String(rightValue))
       return sort.endsWith("asc") ? result : -result
-    }), [rows, searchTerm, tab, queue, status, source, activeDateRange.from, activeDateRange.to, sort, orderWorkspace, paymentFilter, shippingFilter, fulfillmentFilter, deliveryFilter, labelFilter, returnFilter, outcomeFilter, exceptionFilter, poFilter, supplierFilter, brandFilter, carrierFilter, countryFilter, stateFilter, warehouseFilter, totalMinFilter, totalMaxFilter])
+    }), [rows, searchTerm, tab, queue, status, source, activeDateRange.from, activeDateRange.to, sort, orderWorkspace, paymentFilter, shippingFilter, fulfillmentFilter, deliveryFilter, labelFilter, returnFilter, outcomeFilter, exceptionFilter, poFilter, supplierFilter, brandFilter, carrierFilter, countryFilter, stateFilter, warehouseFilter, totalMinFilter, totalMaxFilter, quoteOwnerFilter, quoteAttentionFilter])
+  const filteredQuoteRows = tab === "drafts" ? filtered : []
+  const openQuoteRows = filteredQuoteRows.filter((draft) => !["accepted", "lost"].includes(quotePipelineStatus(draft.status)))
+  const acceptedQuoteCount = filteredQuoteRows.filter((draft) => quotePipelineStatus(draft.status) === "accepted").length
+  const lostQuoteCount = filteredQuoteRows.filter((draft) => quotePipelineStatus(draft.status) === "lost").length
+  const closedQuoteCount = acceptedQuoteCount + lostQuoteCount
+  const quotePipelineValue = openQuoteRows.reduce((sum, draft) => sum + quotePipelineTotal(draft), 0)
+  const dueQuoteCount = openQuoteRows.filter((draft) => {
+    const followUpMs = Date.parse(String(draft.nextFollowUpAt || ""))
+    return Number.isFinite(followUpMs) && followUpMs <= Date.now()
+  }).length
   const pageSize = 100
   const filteredTotal = orderWorkspace === "all" ? Number(data.total ?? filtered.length) : filtered.length
   const pageCount = orderWorkspace === "all" ? Math.max(1, Number(data.totalPages || Math.ceil(filteredTotal / pageSize))) : Math.max(1, Math.ceil(filtered.length / pageSize))
@@ -824,8 +926,8 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
   return <div className="grid gap-5">
     <PageHeader
       eyebrow="Operations"
-      title={tab === "orders" ? orderWorkspace === "open" ? "Open Orders" : "All Orders" : tab === "drafts" ? "Drafts & Quotes" : "Returns"}
-      description={tab === "drafts" ? "Build a priced customer proposal, revise it freely, then convert the accepted quote into an operational order." : tab === "returns" ? "Track the return from request through receiving, inspection, disposition, and any required refund." : orderWorkspace === "open" ? "A live work queue for paid orders that still need a decision, purchasing, or fulfillment action." : "Search, filter, save live views, and export every matching order. This view defaults to the last seven days."}
+      title={tab === "orders" ? orderWorkspace === "open" ? "Open Orders" : "All Orders" : tab === "drafts" ? "Quote Pipeline" : "Returns"}
+      description={tab === "drafts" ? "Track every proposal from draft through customer decision, with ownership, follow-ups, value, and expiration risk visible in one place." : tab === "returns" ? "Track the return from request through receiving, inspection, disposition, and any required refund." : orderWorkspace === "open" ? "A live work queue for paid orders that still need a decision, purchasing, or fulfillment action." : "Search, filter, save live views, and export every matching order. This view defaults to the last seven days."}
       action={<div className="flex flex-wrap gap-2">
         {tab === "orders" && orderWorkspace === "all" && <Button size="sm" variant="outline" disabled={loading || filteredTotal === 0} onClick={() => { setOrderExportScope(selectedIds.size ? "selected" : "filtered"); setOrderExportOpen(true) }}><FileDown className="size-4" /> Export</Button>}
         {tab === "orders" && <Button size="sm" variant="outline" disabled={busy || loading || !hasOrderChannel} title={!hasOrderChannel ? "No Shopify channel is connected to this company" : undefined} onClick={() => void importShopifyOrders()}><Store className="size-4" /> Import Shopify orders</Button>}
@@ -839,7 +941,7 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
     <div className="flex flex-wrap gap-1 rounded-md border bg-card p-1">
       <Button size="sm" variant={tab === "orders" && orderWorkspace === "open" ? "secondary" : "ghost"} asChild><a href="/orders">Open Orders <Badge variant="outline" className="ml-1.5">{numberLabel(actionRequiredCount)}</Badge></a></Button>
       <Button size="sm" variant={tab === "orders" && orderWorkspace === "all" ? "secondary" : "ghost"} asChild><a href="/orders/all">All Orders <Badge variant="outline" className="ml-1.5">{numberLabel(Number(orderMetrics.ytdCount || 0))}</Badge></a></Button>
-      <Button size="sm" variant={tab === "drafts" ? "secondary" : "ghost"} asChild><a href="/drafts">Drafts <Badge variant="outline" className="ml-1.5">{numberLabel(data.orderDrafts?.length)}</Badge></a></Button>
+      <Button size="sm" variant={tab === "drafts" ? "secondary" : "ghost"} asChild><a href="/drafts">Quotes <Badge variant="outline" className="ml-1.5">{numberLabel(data.orderDrafts?.length)}</Badge></a></Button>
       <Button size="sm" variant={tab === "returns" ? "secondary" : "ghost"} asChild><a href="/returns">Returns <Badge variant="outline" className="ml-1.5">{numberLabel(returnTotal)}</Badge></a></Button>
     </div>
     {tab === "orders" && <a className="text-sm text-primary underline" href="/orders/data-review">Data Review</a>}
@@ -850,6 +952,13 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
       <MetricCard label={orderWorkspace === "open" ? "Ready to ship" : "Matching orders"} value={numberLabel(orderWorkspace === "open" ? counts["ready-ship"] : filteredTotal)} icon={Truck} />
       <MetricCard label={orderWorkspace === "open" ? "Waiting for PO" : "YTD orders"} value={numberLabel(orderWorkspace === "open" ? counts["waiting-po"] : Number(orderMetrics.ytdCount || 0))} icon={Archive} />
       <MetricCard label={orderWorkspace === "open" ? "Needs attention" : "Rows on this page"} value={numberLabel(orderWorkspace === "open" ? counts.exceptions + counts.review : orderRows.length)} icon={orderWorkspace === "open" ? AlertCircle : ListChecks} />
+    </div>}
+    {tab === "drafts" && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <MetricCard label="Open quotes" value={numberLabel(openQuoteRows.length)} icon={FileText} />
+      <MetricCard label="Pipeline value" value={moneyLabel(quotePipelineValue)} icon={CircleDollarSign} />
+      <MetricCard label="Follow-ups due" value={numberLabel(dueQuoteCount)} icon={CalendarDays} />
+      <MetricCard label="Accepted" value={numberLabel(acceptedQuoteCount)} icon={CheckCircle2} />
+      <MetricCard label="Win rate" value={closedQuoteCount ? `${Math.round(acceptedQuoteCount / closedQuoteCount * 100)}%` : "-"} icon={TrendingUp} />
     </div>}
     {tab === "orders" && orderWorkspace === "open" && <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{visibleQueueDefinitions.map(([id, label, description]) => <Button key={id} size="sm" variant={queue === id ? "secondary" : "ghost"} className="shrink-0" title={description} onClick={() => setQueue(id)}>{id === "all" ? "All open" : label}<Badge variant="outline" className="ml-1.5">{numberLabel(id === "all" ? actionRequiredCount : counts[id])}</Badge></Button>)}</div>}
     {tab !== "returns" && <Card>
@@ -888,18 +997,41 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
           <datalist id="all-orders-suppliers">{supplierValues.map((value) => <option key={value} value={value} />)}</datalist><datalist id="all-orders-brands">{brandValues.map((value) => <option key={value} value={value} />)}</datalist><datalist id="all-orders-carriers">{carrierValues.map((value) => <option key={value} value={value} />)}</datalist><datalist id="all-orders-countries">{countryValues.map((value) => <option key={value} value={value} />)}</datalist><datalist id="all-orders-states">{stateValues.map((value) => <option key={value} value={value} />)}</datalist><datalist id="all-orders-warehouses">{warehouseValues.map((value) => <option key={value} value={value} />)}</datalist>
           {activeOrderViewId && <div className="flex items-center gap-2 text-xs text-muted-foreground"><Badge variant="secondary">Active view</Badge><span>{String(sharedOrderViews.find((view) => String(view.id || "") === activeOrderViewId)?.name || "Saved order view")}</span></div>}
           {activeOrderFilters.length > 0 && <div className="flex flex-wrap items-center gap-2">{activeOrderFilters.map((filter) => <Button key={filter.label} size="sm" variant="secondary" className="h-7 gap-1 px-2 text-xs" onClick={filter.clear}>{filter.label}: {filter.value}<X className="size-3" /></Button>)}<Button size="sm" variant="ghost" className="h-7" onClick={clearAllOrderFilters}>Clear filters</Button></div>}
+        </div> : tab === "drafts" ? <div className="grid gap-3">
+          <div className="flex flex-col gap-2 xl:flex-row xl:items-center">
+            <div className="relative min-w-0 flex-1"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search quote, customer, SKU, owner, or next action" /></div>
+            <ToggleGroup type="single" value={quoteView} onValueChange={(value) => { if (value === "pipeline" || value === "table") { setQuoteView(value); window.localStorage.setItem("dataplus:quote-view", value) } }} aria-label="Quote view" className="justify-start">
+              <ToggleGroupItem value="pipeline" aria-label="Pipeline view"><Columns3 className="size-4" /> Pipeline</ToggleGroupItem>
+              <ToggleGroupItem value="table" aria-label="Table view"><List className="size-4" /> Table</ToggleGroupItem>
+            </ToggleGroup>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+            <OrderMultiSelect value={status} onValueChange={setStatus} options={statusFilterOptions} placeholder="All stages" searchPlaceholder="Search quote stages" />
+            <OrderMultiSelect value={source} onValueChange={setSource} options={sourceFilterOptions} placeholder="All sources" searchPlaceholder="Search quote sources" />
+            <Select value={quoteOwnerFilter} onValueChange={setQuoteOwnerFilter}><SelectTrigger><SelectValue placeholder="All owners" /></SelectTrigger><SelectContent><SelectItem value="all">All owners</SelectItem>{quoteOwnerValues.map((owner) => <SelectItem key={owner} value={owner}>{owner}</SelectItem>)}</SelectContent></Select>
+            <Select value={quoteAttentionFilter} onValueChange={setQuoteAttentionFilter}><SelectTrigger><SelectValue placeholder="Any attention" /></SelectTrigger><SelectContent><SelectItem value="all">Any attention</SelectItem><SelectItem value="follow_up_due">Follow-up due</SelectItem><SelectItem value="expiring">Expires within 7 days</SelectItem><SelectItem value="expired">Expired</SelectItem><SelectItem value="unassigned">Unassigned owner</SelectItem><SelectItem value="no_next_action">Missing next action</SelectItem></SelectContent></Select>
+            <Select value={sort} onValueChange={setSort}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="created-desc">Newest quotes</SelectItem><SelectItem value="created-asc">Oldest quotes</SelectItem><SelectItem value="total-desc">Highest value</SelectItem><SelectItem value="total-asc">Lowest value</SelectItem><SelectItem value="customer-asc">Customer A-Z</SelectItem></SelectContent></Select>
+          </div>
         </div> : <div className="grid gap-2 xl:grid-cols-[minmax(300px,1fr)_170px_170px_170px]">
           <div className="flex min-w-0 flex-wrap gap-2"><div className="relative min-w-64 flex-1"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} onPaste={(event) => normalizePastedSearch(event, query, setQuery)} placeholder="Search or paste orders, SKUs, tracking..." /></div><BulkSearchActions onApply={setQuery} /></div>
           <OrderMultiSelect value={status} onValueChange={setStatus} options={statusFilterOptions} placeholder="All statuses" searchPlaceholder="Search statuses" />
           <OrderMultiSelect value={source} onValueChange={setSource} options={sourceFilterOptions} placeholder="All channels" searchPlaceholder="Search channels" />
           <Select value={sort} onValueChange={setSort}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="created-desc">Newest order date</SelectItem><SelectItem value="created-asc">Oldest order date</SelectItem><SelectItem value="total-desc">Highest total</SelectItem><SelectItem value="total-asc">Lowest total</SelectItem><SelectItem value="customer-asc">Customer A-Z</SelectItem></SelectContent></Select>
         </div>}
-        <CardDescription>{tab === "orders" && searchTerms.length > 1 ? `Showing exact matches for ${numberLabel(searchTerms.length)} pasted identifiers. ` : tab === "orders" && searchTerm.length >= 2 ? "Search checks all orders by internal order, channel order number, customer, address, SKU, and tracking. " : tab === "orders" && orderWorkspace === "all" ? `Showing ${activeDateRange.label}. ` : tab === "orders" ? "Showing all actionable work regardless of age. " : ""}{numberLabel(visibleRows.length)} of {numberLabel(filteredTotal)} filtered records shown, page {numberLabel(currentPage)} of {numberLabel(pageCount)}.</CardDescription>
+        <CardDescription>{tab === "drafts" ? `${numberLabel(filteredQuoteRows.length)} matching quotes. Pipeline totals follow the active filters.` : <>{tab === "orders" && searchTerms.length > 1 ? `Showing exact matches for ${numberLabel(searchTerms.length)} pasted identifiers. ` : tab === "orders" && searchTerm.length >= 2 ? "Search checks all orders by internal order, channel order number, customer, address, SKU, and tracking. " : tab === "orders" && orderWorkspace === "all" ? `Showing ${activeDateRange.label}. ` : tab === "orders" ? "Showing all actionable work regardless of age. " : ""}{numberLabel(visibleRows.length)} of {numberLabel(filteredTotal)} filtered records shown, page {numberLabel(currentPage)} of {numberLabel(pageCount)}.</>}</CardDescription>
       </CardHeader>
       {selectedVisible.length > 0 && <div className="flex flex-wrap items-center gap-2 border-b bg-muted/30 px-4 py-2"><span className="text-sm font-medium">{selectedVisible.length} selected</span><Button size="sm" disabled={busy} onClick={() => void createSupplierPos(selectedVisible.map((row) => String(row.id)))}>Create supplier POs</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "approve")}>Approve</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "hold")}>Put on hold</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "done")}>Mark done</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => setSelectedIds(new Set())}>Clear</Button></div>}
       <CardContent className="p-0">
         {tab === "drafts" && loading && <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div>}
-        {tab === "drafts" && !loading && <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Quote</TableHead><TableHead>Customer</TableHead><TableHead>Ship to</TableHead><TableHead>Items</TableHead><TableHead>Total</TableHead><TableHead>Status</TableHead><TableHead>Valid until</TableHead><TableHead>Source</TableHead><TableHead>Updated</TableHead><TableHead /></TableRow></TableHeader><TableBody>{filtered.map((draft, index) => { const id = String(draft.id || ""); const address = (draft.shippingAddress || {}) as Record<string, unknown>; const shipTo = [address.city, address.state || address.province, address.postalCode || address.zip].filter(Boolean).join(", ") || "No address"; const items = Array.isArray(draft.items) ? draft.items as Array<Record<string, unknown>> : []; const total = items.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0); const expiresAt = String(draft.expiresAt || ""); const expired = Boolean(expiresAt && expiresAt < localDateKey(new Date())); return <TableRow key={`${id}-${index}`}><TableCell><a href={`/drafts/${encodeURIComponent(id || String(draft.draftNumber || ""))}`} className="font-medium hover:underline">{String(draft.draftNumber || id)}</a></TableCell><TableCell><div>{String(draft.buyer || "-")}</div><p className="text-xs text-muted-foreground">{String(draft.buyerEmail || "")}</p></TableCell><TableCell>{shipTo}</TableCell><TableCell>{numberLabel(items.reduce((sum, item) => sum + Number(item.qty || 0), 0))}</TableCell><TableCell className="font-medium">{moneyLabel(total)}</TableCell><TableCell><Badge variant="outline">{String(draft.status || "draft")}</Badge></TableCell><TableCell>{expiresAt ? <Badge variant={expired ? "destructive" : "outline"}>{dateLabel(`${expiresAt}T12:00:00`)}</Badge> : "Not set"}</TableCell><TableCell>{String(draft.source || "Manual")}</TableCell><TableCell>{dateLabel(String(draft.updatedAt || draft.createdAt || ""))}</TableCell><TableCell><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" title="Quote actions"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem asChild><a href={`/drafts/${encodeURIComponent(id || String(draft.draftNumber || ""))}`}>Open quote</a></DropdownMenuItem><DropdownMenuItem onSelect={() => void duplicateDraft(draft)}>Duplicate quote</DropdownMenuItem><DropdownMenuItem onSelect={() => void convertDraft(draft)}>Convert to order</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem asChild><a href={`/api/order-drafts/${encodeURIComponent(id)}/export/pdf`} target="_blank" rel="noreferrer">Download standard PDF</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell></TableRow> })}{!filtered.length && <TableRow><TableCell colSpan={10} className="h-28 text-center text-muted-foreground">No draft quotes match the current filters.</TableCell></TableRow>}</TableBody></Table></div>}
+        {tab === "drafts" && !loading && quoteView === "pipeline" && <div className="overflow-x-auto p-4"><div className="grid min-w-[1740px] grid-cols-6 gap-3">{quotePipelineStages.map((stage) => {
+          const stageRows = filteredQuoteRows.filter((draft) => quotePipelineStatus(draft.status) === stage.id)
+          const stageValue = stageRows.reduce((sum, draft) => sum + quotePipelineTotal(draft), 0)
+          return <section key={stage.id} className="min-w-0 rounded-md border bg-muted/20">
+            <header className="border-b px-3 py-3"><div className="flex items-center justify-between gap-2"><div><h3 className="font-semibold">{stage.label}</h3><p className="text-xs text-muted-foreground">{stage.description}</p></div><Badge variant="secondary">{numberLabel(stageRows.length)}</Badge></div><p className="mt-2 text-sm font-semibold tabular-nums">{moneyLabel(stageValue)}</p></header>
+            <div className="grid max-h-[66vh] content-start gap-2 overflow-y-auto p-2">{stageRows.map((draft) => <QuotePipelineCard key={String(draft.id || draft.draftNumber)} draft={draft} updating={quoteUpdatingId === String(draft.id || "")} onStageChange={(row, nextStatus) => void updateQuoteStage(row, nextStatus)} />)}{!stageRows.length && <p className="px-2 py-8 text-center text-xs text-muted-foreground">No matching quotes</p>}</div>
+          </section>
+        })}</div></div>}
+        {tab === "drafts" && !loading && quoteView === "table" && <div className="overflow-x-auto"><Table className="min-w-[1280px]"><TableHeader><TableRow><TableHead>Quote</TableHead><TableHead>Customer</TableHead><TableHead>Owner</TableHead><TableHead>Items</TableHead><TableHead>Total</TableHead><TableHead>Stage</TableHead><TableHead>Follow-up</TableHead><TableHead>Valid until</TableHead><TableHead>Next action</TableHead><TableHead>Updated</TableHead><TableHead /></TableRow></TableHeader><TableBody>{filteredQuoteRows.map((draft, index) => { const id = String(draft.id || ""); const items = Array.isArray(draft.items) ? draft.items as Array<Record<string, unknown>> : []; const expiresAt = String(draft.expiresAt || ""); const expired = Boolean(expiresAt && expiresAt < localDateKey(new Date())); const followUpAt = String(draft.nextFollowUpAt || ""); const followUpDue = Boolean(followUpAt && Date.parse(followUpAt) <= Date.now() && !["accepted", "lost"].includes(quotePipelineStatus(draft.status))); return <TableRow key={`${id}-${index}`}><TableCell><a href={`/drafts/${encodeURIComponent(id || String(draft.draftNumber || ""))}`} className="font-medium hover:underline">{String(draft.draftNumber || id)}</a><p className="text-xs text-muted-foreground">Rev {numberLabel(Number(draft.revisionNumber || 1))}</p></TableCell><TableCell><div>{String(draft.buyer || "-")}</div><p className="text-xs text-muted-foreground">{String(draft.buyerEmail || "")}</p></TableCell><TableCell>{String(draft.salesOwner || "Unassigned")}</TableCell><TableCell>{numberLabel(items.reduce((sum, item) => sum + Number(item.qty || 0), 0))}</TableCell><TableCell className="font-medium">{moneyLabel(quotePipelineTotal(draft))}</TableCell><TableCell><Select value={quotePipelineStatus(draft.status)} disabled={quoteUpdatingId === id} onValueChange={(nextStatus) => void updateQuoteStage(draft, nextStatus)}><SelectTrigger className="h-8 w-32 text-xs"><SelectValue /></SelectTrigger><SelectContent>{quotePipelineStages.map((stage) => <SelectItem key={stage.id} value={stage.id}>{stage.label}</SelectItem>)}</SelectContent></Select></TableCell><TableCell>{followUpAt ? <Badge variant={followUpDue ? "destructive" : "outline"}>{dateLabel(followUpAt)}</Badge> : "Not scheduled"}</TableCell><TableCell>{expiresAt ? <Badge variant={expired ? "destructive" : "outline"}>{dateLabel(`${expiresAt}T12:00:00`)}</Badge> : "Not set"}</TableCell><TableCell className="max-w-64 truncate" title={String(draft.nextAction || "")}>{String(draft.nextAction || "Not set")}</TableCell><TableCell>{dateLabel(String(draft.updatedAt || draft.createdAt || ""))}</TableCell><TableCell><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" title="Quote actions"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem asChild><a href={`/drafts/${encodeURIComponent(id || String(draft.draftNumber || ""))}`}>Open quote</a></DropdownMenuItem><DropdownMenuItem onSelect={() => void duplicateDraft(draft)}>Duplicate quote</DropdownMenuItem><DropdownMenuItem onSelect={() => void convertDraft(draft)}>Convert to order</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem asChild><a href={`/api/order-drafts/${encodeURIComponent(id)}/export/pdf`} target="_blank" rel="noreferrer">Download standard PDF</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell></TableRow> })}{!filteredQuoteRows.length && <TableRow><TableCell colSpan={11} className="h-28 text-center text-muted-foreground">No quotes match the current filters.</TableCell></TableRow>}</TableBody></Table></div>}
         {tab !== "drafts" && <>
         {loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead className="w-10"><Checkbox aria-label="Select visible records" checked={visibleRows.length > 0 && selectedVisible.length === visibleRows.length} onCheckedChange={(checked) => setSelectedIds(checked === true ? new Set(visibleRows.map((row) => String(row.id || ""))) : new Set())} /></TableHead><TableHead>{tab === "orders" ? "Order" : "Return"}</TableHead>{showAllColumn("date") && <TableHead>{tab === "orders" ? "Order date" : "Updated"}</TableHead>}{showAllColumn("customer") && <TableHead>Customer</TableHead>}{showAllColumn("fulfillBy") && <TableHead>{tab === "orders" ? "Fulfill by" : "Warehouse"}</TableHead>}{showAllColumn("channel") && <TableHead>{tab === "orders" ? "Channel" : "Reason"}</TableHead>}{showAllColumn("total") && <TableHead>{tab === "orders" ? "Revenue" : "Amount"}</TableHead>}{showAllColumn("shipping") && <TableHead>Customer shipping</TableHead>}{showAllColumn("labelCost") && <TableHead>Label cost</TableHead>}{showAllColumn("profit") && <TableHead>Est. profit</TableHead>}{showAllColumn("payment") && <TableHead>{tab === "orders" ? "Payment status" : "Status"}</TableHead>}{showAllColumn("fulfillment") && <TableHead>{tab === "orders" ? (orderWorkspace === "all" ? "Fulfillment status" : "Supply") : "Disposition"}</TableHead>}{showAllColumn("items") && <TableHead>{tab === "orders" ? (orderWorkspace === "all" ? "Items" : "PO") : "Channel sync"}</TableHead>}{showAllColumn("supplier") && <TableHead>Supplier</TableHead>}{showAllColumn("po") && <TableHead>Purchase order</TableHead>}{showAllColumn("carrier") && <TableHead>Carrier</TableHead>}{showAllColumn("tracking") && <TableHead>Tracking</TableHead>}{showAllColumn("delivery") && <TableHead>{tab === "orders" ? (orderWorkspace === "all" ? "Delivery status" : "Channel") : "Channel"}</TableHead>}{showAllColumn("destination") && <TableHead>Ship to</TableHead>}{showAllColumn("updated") && <TableHead>Last updated</TableHead>}<TableHead /></TableRow></TableHeader><TableBody>{visibleRows.map((row, index) => {
           const reference = String(tab === "orders" ? row.orderNumber || row.id || "-" : row.returnNumber || row.reference || row.id || "-")
