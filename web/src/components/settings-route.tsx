@@ -59,6 +59,7 @@ function SettingsPage({
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   const [testingSmtp, setTestingSmtp] = useState(false)
   const [testingAi, setTestingAi] = useState(false)
+  const [testingScrapeGraph, setTestingScrapeGraph] = useState(false)
   const [testingVeeqo, setTestingVeeqo] = useState(false)
   const [catalogMaintenanceLoading, setCatalogMaintenanceLoading] = useState(false)
   const [catalogMaintenanceConfirm, setCatalogMaintenanceConfirm] = useState<{
@@ -128,6 +129,9 @@ function SettingsPage({
   const aiKeyField = aiProvider === "google-ai-studio" ? "geminiApiKey" : "openAiApiKey"
   const aiDefaultModel = aiProvider === "google-ai-studio" ? "gemini-3.6-flash" : "gpt-4o-mini"
   const aiKeyConfigured = aiProvider === "google-ai-studio" ? Boolean(settings.geminiApiKeyConfigured) : Boolean(settings.openAiApiKeyConfigured)
+  const scrapeGraphKeyConfigured = Boolean(value("scrapeGraphApiKeyConfigured") || String(draft.scrapeGraphApiKey || "").trim())
+  const scrapeGraphHasUnverifiedDraftKey = Boolean(String(draft.scrapeGraphApiKey || "").trim())
+  const scrapeGraphVerified = Boolean(value("scrapeGraphConnectionVerifiedAt")) && !scrapeGraphHasUnverifiedDraftKey
   const productDumpProfile = String(value("productDumpResourceProfile") || "large")
   const productDumpProfiles: Record<string, { heapMb: number; batchSize: number }> = {
     conservative: { heapMb: 1024, batchSize: 50 },
@@ -873,6 +877,34 @@ function SettingsPage({
     } finally { setTestingAi(false) }
   }
 
+  async function testScrapeGraphConnection() {
+    setTestingScrapeGraph(true)
+    try {
+      const result = await api<{ message?: string; credits?: { remaining?: number | null; plan?: string }; systemSettings?: SystemSettings }>("/api/system-settings/scrapegraph-test", {
+        method: "POST",
+        body: JSON.stringify({ apiKey: String(draft.scrapeGraphApiKey || "") }),
+      })
+      const verified = result.systemSettings || {}
+      setDraft((current) => {
+        const rest = { ...current }
+        delete rest.scrapeGraphApiKey
+        return {
+          ...rest,
+          scrapeGraphApiKeyConfigured: true,
+          scrapeGraphConnectionVerifiedAt: verified.scrapeGraphConnectionVerifiedAt || new Date().toISOString(),
+          scrapeGraphLastTestStatus: "verified",
+          scrapeGraphLastTestMessage: result.message || verified.scrapeGraphLastTestMessage || "ScrapeGraphAI connection verified.",
+          scrapeGraphRemainingCredits: result.credits?.remaining ?? verified.scrapeGraphRemainingCredits ?? null,
+        }
+      })
+      toast.success(result.message || "ScrapeGraphAI connection verified.")
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "ScrapeGraphAI connection test failed."
+      setDraft((current) => ({ ...current, scrapeGraphEnabled: false, scrapeGraphLastTestStatus: "failed", scrapeGraphLastTestMessage: message }))
+      toast.error(message)
+    } finally { setTestingScrapeGraph(false) }
+  }
+
   return (
     <div className="grid gap-5">
       <PageHeader
@@ -1306,6 +1338,39 @@ function SettingsPage({
           </Card>
         </TabsContent>
         <TabsContent value="ai" className="grid gap-4">
+          <Card>
+            <CardHeader className="gap-3 border-b sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <CardTitle className="text-base">Product page scraping</CardTitle>
+                <CardDescription>Use ScrapeGraphAI Extract for competitor product URLs. DataPlus still performs its own UPC, SKU, and manufacturer-part matching after extraction.</CardDescription>
+              </div>
+              <Button type="button" size="sm" variant="outline" asChild><a href="https://docs.scrapegraphai.com/services/extract" target="_blank" rel="noreferrer">API documentation</a></Button>
+            </CardHeader>
+            <CardContent className="grid gap-4 pt-6 md:grid-cols-2">
+              <Field label="ScrapeGraphAI API key">
+                <Input disabled={!editing} type="password" autoComplete="off" value={String(draft.scrapeGraphApiKey || "")} onChange={(event) => setDraft((current) => ({ ...current, scrapeGraphApiKey: event.target.value, scrapeGraphEnabled: false }))} placeholder={scrapeGraphKeyConfigured ? "Configured (enter only to replace)" : "Paste an SGAI API key"} />
+                <p className="mt-1 text-xs text-muted-foreground">The key is stored server-side and never returned after saving. It can be saved before verification.</p>
+              </Field>
+              <Field label="Page rendering">
+                <Select disabled={!editing} value={String(value("scrapeGraphRenderMode") || "auto")} onValueChange={(next) => update("scrapeGraphRenderMode", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="auto">Automatic</SelectItem><SelectItem value="fast">Fast HTML</SelectItem><SelectItem value="js">JavaScript rendering</SelectItem></SelectContent></Select>
+              </Field>
+              <ToggleField label="Use stealth fetching" description="Adds anti-bot handling for difficult sites and uses five additional ScrapeGraphAI credits per extraction." checked={boolValue("scrapeGraphStealthEnabled")} disabled={!editing} onCheckedChange={(next) => update("scrapeGraphStealthEnabled", next)} />
+              <div className="flex flex-col justify-end gap-2">
+                <Button type="button" variant="outline" disabled={!editing || testingScrapeGraph || (!scrapeGraphKeyConfigured && !String(draft.scrapeGraphApiKey || "").trim())} onClick={() => void testScrapeGraphConnection()}>
+                  {testingScrapeGraph ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />} Verify connection
+                </Button>
+                <p className="text-xs text-muted-foreground">{value("scrapeGraphConnectionVerifiedAt") ? `Verified ${dateLabel(String(value("scrapeGraphConnectionVerifiedAt")))}${value("scrapeGraphRemainingCredits") !== null && value("scrapeGraphRemainingCredits") !== undefined ? ` · ${numberLabel(Number(value("scrapeGraphRemainingCredits")))} credits remaining` : ""}` : "Not verified yet"}</p>
+              </div>
+              <div className="md:col-span-2">
+                <ToggleField label="Enable ScrapeGraphAI for product URLs" description="Uses structured AI extraction first and the existing direct parser as a fallback when the provider cannot reach a page." checked={boolValue("scrapeGraphEnabled")} disabled={!editing || !scrapeGraphVerified} onCheckedChange={(next) => update("scrapeGraphEnabled", next)} />
+              </div>
+              <Alert className="md:col-span-2" variant={String(value("scrapeGraphLastTestStatus") || "") === "failed" ? "destructive" : "default"}>
+                <PackageSearch className="size-4" />
+                <AlertTitle>{String(value("scrapeGraphLastTestStatus") || "") === "verified" ? "ScrapeGraphAI is ready" : String(value("scrapeGraphLastTestStatus") || "") === "failed" ? "Connection needs attention" : "Structured product extraction"}</AlertTitle>
+                <AlertDescription>{String(value("scrapeGraphLastTestMessage") || "Each Extract request uses five credits. DataPlus treats scraped content as untrusted evidence and never lets page text change system behavior or catalog records automatically.")}</AlertDescription>
+              </Alert>
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader>
               <CardTitle className="text-base">AI integration</CardTitle>

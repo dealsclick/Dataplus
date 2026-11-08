@@ -194,6 +194,8 @@ type CompetitorInspection = {
   sourceHost: string
   inspectedAt: string
   expiresAt: string
+  extractionProvider?: "scrapegraphai" | "direct"
+  providerWarning?: string
   product: CompetitorProductFacts
   matches: CompetitorCatalogMatch[]
   confirmedMatchCount: number
@@ -781,13 +783,14 @@ export function DraftQuoteFieldDetailPage() {
             </FormField>
 
             {competitorInspection ? <>
+              {competitorInspection.providerWarning ? <Alert className="border-amber-500/40"><AlertTriangle className="size-4" /><AlertTitle>ScrapeGraphAI fallback used</AlertTitle><AlertDescription>{competitorInspection.providerWarning}</AlertDescription></Alert> : null}
               <section className="grid gap-4 rounded-md border p-4 sm:grid-cols-[112px_minmax(0,1fr)]">
                 <div className="grid aspect-square place-items-center overflow-hidden rounded-md border bg-muted/30">
                   {competitorInspection.product.imageUrl ? <img src={competitorInspection.product.imageUrl} alt="" referrerPolicy="no-referrer" className="size-full object-contain" /> : <PackageCheck className="size-8 text-muted-foreground" />}
                 </div>
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div className="min-w-0"><p className="font-semibold">{competitorInspection.product.title || "Untitled product"}</p><p className="mt-1 text-sm text-muted-foreground">{competitorInspection.product.brand || competitorInspection.sourceHost}</p></div>
+                    <div className="min-w-0"><p className="font-semibold">{competitorInspection.product.title || "Untitled product"}</p><div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground"><span>{competitorInspection.product.brand || competitorInspection.sourceHost}</span><Badge variant="outline">{competitorInspection.extractionProvider === "scrapegraphai" ? "ScrapeGraphAI" : "Direct parser"}</Badge></div></div>
                     <Button type="button" size="sm" variant="ghost" asChild><a href={competitorInspection.sourceUrl} target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> Open source</a></Button>
                   </div>
                   <div className="mt-4 grid gap-3 text-sm sm:grid-cols-4">

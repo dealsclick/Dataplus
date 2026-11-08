@@ -97,6 +97,7 @@ const companyOperationsHandler = createCompanyOperationsHandler({
   purchaseUps: (input) => upsRating.createShipment(input, process.env, carrierCredentials.getUps()),
   validateAddress: validateCompanyQuoteAddress,
   competitorProducts,
+  competitorInspectOptions: async () => ({ scrapeGraph: getScrapeGraphRuntimeConfig(await readRuntimeSystemSettings(dbCache.data?.systemSettings || {})) }),
   createCompetitorDraftProduct: createQuoteCompetitorDraftProduct,
   attachmentRoot: () => path.join(DATA_DIR, "company-order-attachments")
 });
@@ -1474,6 +1475,16 @@ const DEFAULT_SYSTEM_SETTINGS = {
   warehouseScannerSoundIntensity: "medium",
   warehouseScannerVibrationEnabled: true,
   warehouseScannerVibrationIntensity: "medium",
+  scrapeGraphEnabled: false,
+  scrapeGraphApiBaseUrl: "https://v2-api.scrapegraphai.com/api",
+  scrapeGraphApiKey: "",
+  scrapeGraphRenderMode: "auto",
+  scrapeGraphStealthEnabled: false,
+  scrapeGraphConnectionVerifiedAt: "",
+  scrapeGraphConnectionKeyFingerprint: "",
+  scrapeGraphLastTestStatus: "not_tested",
+  scrapeGraphLastTestMessage: "",
+  scrapeGraphRemainingCredits: null,
   aiEnabled: false,
   aiProvider: "openai",
   aiApiKey: "",
@@ -6201,6 +6212,22 @@ function normalizeSystemSettings(settings = {}) {
   normalized.warehouseScannerVibrationIntensity = ["low", "medium", "high"].includes(String(normalized.warehouseScannerVibrationIntensity || "").toLowerCase())
     ? String(normalized.warehouseScannerVibrationIntensity).toLowerCase()
     : "medium";
+  normalized.scrapeGraphEnabled = normalized.scrapeGraphEnabled === true || String(normalized.scrapeGraphEnabled).toLowerCase() === "true";
+  normalized.scrapeGraphApiBaseUrl = "https://v2-api.scrapegraphai.com/api";
+  normalized.scrapeGraphApiKey = String(normalized.scrapeGraphApiKey || process.env.SGAI_API_KEY || "").trim();
+  normalized.scrapeGraphRenderMode = ["auto", "fast", "js"].includes(String(normalized.scrapeGraphRenderMode || "").toLowerCase())
+    ? String(normalized.scrapeGraphRenderMode).toLowerCase()
+    : "auto";
+  normalized.scrapeGraphStealthEnabled = normalized.scrapeGraphStealthEnabled === true || String(normalized.scrapeGraphStealthEnabled).toLowerCase() === "true";
+  normalized.scrapeGraphConnectionVerifiedAt = sourceTextValue(normalized.scrapeGraphConnectionVerifiedAt || "");
+  normalized.scrapeGraphConnectionKeyFingerprint = sourceTextValue(normalized.scrapeGraphConnectionKeyFingerprint || "");
+  normalized.scrapeGraphLastTestStatus = ["not_tested", "verified", "failed"].includes(String(normalized.scrapeGraphLastTestStatus || "").toLowerCase())
+    ? String(normalized.scrapeGraphLastTestStatus).toLowerCase()
+    : "not_tested";
+  normalized.scrapeGraphLastTestMessage = sourceTextValue(normalized.scrapeGraphLastTestMessage || "").slice(0, 500);
+  normalized.scrapeGraphRemainingCredits = normalized.scrapeGraphRemainingCredits === null || normalized.scrapeGraphRemainingCredits === undefined || normalized.scrapeGraphRemainingCredits === ""
+    ? null
+    : Math.max(0, Number(normalized.scrapeGraphRemainingCredits) || 0);
   normalized.aiEnabled = normalized.aiEnabled === true || String(normalized.aiEnabled).toLowerCase() === "true";
   normalized.aiProvider = ["openai", "google-ai-studio"].includes(String(normalized.aiProvider || "").toLowerCase()) ? String(normalized.aiProvider).toLowerCase() : "openai";
   const legacyAiKey = String(normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || "").trim();
@@ -6718,7 +6745,7 @@ function authRequirementForRequest(req, url, parts = []) {
     if (pathname === "/api/quote-terms") return { area: "settings.sales", action: method === "GET" ? "view" : "edit" };
     if (/^\/api\/shipping-providers(?:\/|$)/.test(pathname)) return { area: method === "GET" ? "settings" : "settings.security", action: method === "GET" ? "view" : "credentials" };
     if (/\/wiki\b/.test(pathname)) return { area: "settings.integrations", action: method === "GET" ? "view" : "edit" };
-    if (/credential|ai-test|smtp-test|api-key|auth/i.test(pathname)) return { area: "settings.security", action: "credentials" };
+    if (/credential|ai-test|scrapegraph-test|smtp-test|api-key|auth/i.test(pathname)) return { area: "settings.security", action: "credentials" };
     if (/backup/.test(pathname)) return { area: "settings.backups", action: "backup" };
     if (/catalog|source|datadump|supplier-index|category/i.test(pathname)) return { area: "settings.catalog", action: /reset|cleanup|rebuild|maintenance/i.test(pathname) ? "maintenance" : "edit" };
     if (/data-source|feed|integration|shopify|ebay|smtp/i.test(pathname)) return { area: "settings.integrations", action: /credential|test/i.test(pathname) ? "credentials" : "edit" };
@@ -6896,8 +6923,9 @@ function publicSystemSettings(settings = {}) {
   const normalized = normalizeSystemSettings(settings);
   const openAiApiKeyConfigured = Boolean(normalized.openAiApiKey || normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY);
   const geminiApiKeyConfigured = Boolean(normalized.geminiApiKey || process.env.GEMINI_API_KEY);
+  const scrapeGraphApiKeyConfigured = Boolean(normalized.scrapeGraphApiKey || process.env.SGAI_API_KEY);
   const aiApiKeyConfigured = normalized.aiProvider === "google-ai-studio" ? geminiApiKeyConfigured : openAiApiKeyConfigured;
-  return { ...normalized, productDumpResourceProfileDetails: productDumpResourceProfile(normalized), vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), dataSourceFeeds: normalized.dataSourceFeeds.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, authPermissionAreas: AUTH_PERMISSION_AREAS, authPermissionTemplates: normalized.authPermissionTemplates.map(publicAuthPermissionTemplate), authPermissionAuditLog: normalized.authPermissionAuditLog.map(normalizeAuthPermissionAuditEvent), systemUsers: normalized.systemUsers.map(publicSystemUser), smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), veeqoApiKey: "", veeqoApiKeyConfigured: Boolean(normalized.veeqoApiKey || process.env.VEEQO_API_KEY), veeqoClientSecret: "", veeqoClientSecretConfigured: Boolean(normalized.veeqoClientSecret || process.env.VEEQO_CLIENT_SECRET), veeqoAccessToken: "", veeqoAccessTokenConfigured: Boolean(normalized.veeqoAccessToken || process.env.VEEQO_ACCESS_TOKEN), veeqoAuthMode: normalized.veeqoAccessToken || process.env.VEEQO_ACCESS_TOKEN ? "oauth" : normalized.veeqoApiKey || process.env.VEEQO_API_KEY ? "api_key" : "not_connected", wikiApiConfigured: Boolean(process.env.BOOKSTACK_API_TOKEN_ID && process.env.BOOKSTACK_API_TOKEN_SECRET), aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
+  return { ...normalized, productDumpResourceProfileDetails: productDumpResourceProfile(normalized), vendorFeedSchedules: normalized.vendorFeedSchedules.map(publicVendorFeedSchedule), dataSourceFeeds: normalized.dataSourceFeeds.map(publicVendorFeedSchedule), aiToolScopeDefinitions: AI_TOOL_SCOPE_DEFINITIONS, authPermissionAreas: AUTH_PERMISSION_AREAS, authPermissionTemplates: normalized.authPermissionTemplates.map(publicAuthPermissionTemplate), authPermissionAuditLog: normalized.authPermissionAuditLog.map(normalizeAuthPermissionAuditEvent), systemUsers: normalized.systemUsers.map(publicSystemUser), smtpPassword: "", smtpPasswordConfigured: Boolean(normalized.smtpPassword), veeqoApiKey: "", veeqoApiKeyConfigured: Boolean(normalized.veeqoApiKey || process.env.VEEQO_API_KEY), veeqoClientSecret: "", veeqoClientSecretConfigured: Boolean(normalized.veeqoClientSecret || process.env.VEEQO_CLIENT_SECRET), veeqoAccessToken: "", veeqoAccessTokenConfigured: Boolean(normalized.veeqoAccessToken || process.env.VEEQO_ACCESS_TOKEN), veeqoAuthMode: normalized.veeqoAccessToken || process.env.VEEQO_ACCESS_TOKEN ? "oauth" : normalized.veeqoApiKey || process.env.VEEQO_API_KEY ? "api_key" : "not_connected", wikiApiConfigured: Boolean(process.env.BOOKSTACK_API_TOKEN_ID && process.env.BOOKSTACK_API_TOKEN_SECRET), scrapeGraphApiKey: "", scrapeGraphApiKeyConfigured, scrapeGraphConnectionKeyFingerprint: "", aiApiKey: "", openAiApiKey: "", geminiApiKey: "", aiApiKeyConfigured, openAiApiKeyConfigured, geminiApiKeyConfigured, warehouseImageAnalysisApiKey: "", warehouseImageAnalysisApiKeyConfigured: openAiApiKeyConfigured, warehouseAuditAdminPinHash: "", warehouseAuditAdminPinSalt: "", warehouseAuditAdminPinConfigured: Boolean(normalized.warehouseAuditAdminPinHash) };
 }
 
 function publicBootstrapSystemSettings(settings = {}) {
@@ -6953,6 +6981,18 @@ function getAiRuntimeConfig(settings = {}) {
     : String(normalized.openAiApiKey || normalized.aiApiKey || normalized.warehouseImageAnalysisApiKey || process.env.OPENAI_API_KEY || "").trim();
   const model = String(normalized.aiModel || (provider === "google-ai-studio" ? "gemini-3.6-flash" : "gpt-4o-mini")).trim();
   return { provider, apiKey, model };
+}
+
+function getScrapeGraphRuntimeConfig(settings = {}) {
+  const normalized = normalizeSystemSettings(settings);
+  return {
+    enabled: normalized.scrapeGraphEnabled === true,
+    apiKey: String(normalized.scrapeGraphApiKey || process.env.SGAI_API_KEY || "").trim(),
+    baseUrl: "https://v2-api.scrapegraphai.com/api",
+    renderMode: normalized.scrapeGraphRenderMode,
+    stealth: normalized.scrapeGraphStealthEnabled === true,
+    timeoutMs: 90_000
+  };
 }
 
 function interactionOutputText(payload = {}) {
@@ -68315,6 +68355,50 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "POST" && url.pathname === "/api/system-settings/scrapegraph-test") {
+    const body = await parseBody(req);
+    const current = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
+    const submittedKey = String(body.apiKey || "").trim();
+    const apiKey = submittedKey || String(current.scrapeGraphApiKey || process.env.SGAI_API_KEY || "").trim();
+    if (!apiKey) return sendJson(res, 400, { error: "Enter a ScrapeGraphAI API key before testing the connection." });
+    const testedAt = new Date().toISOString();
+    try {
+      const response = await fetch("https://v2-api.scrapegraphai.com/api/credits", {
+        method: "GET",
+        headers: { "Accept": "application/json", "SGAI-APIKEY": apiKey },
+        signal: AbortSignal.timeout(20_000)
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const detail = String(payload?.error?.message || payload?.error || payload?.message || `HTTP ${response.status}`).slice(0, 300);
+        throw new Error(`ScrapeGraphAI rejected the connection: ${detail}.`);
+      }
+      const creditsValue = payload?.remaining ?? payload?.credits?.remaining ?? payload?.data?.remaining ?? payload?.available_credits;
+      const remainingCredits = Number.isFinite(Number(creditsValue)) ? Math.max(0, Number(creditsValue)) : null;
+      const message = `ScrapeGraphAI connection verified${remainingCredits === null ? "" : ` with ${remainingCredits.toLocaleString()} credits remaining`}.`;
+      const next = writeSystemSettingsStore({
+        ...current,
+        ...(submittedKey ? { scrapeGraphApiKey: submittedKey } : {}),
+        scrapeGraphApiBaseUrl: "https://v2-api.scrapegraphai.com/api",
+        scrapeGraphConnectionVerifiedAt: testedAt,
+        scrapeGraphConnectionKeyFingerprint: crypto.createHash("sha256").update(apiKey).digest("hex"),
+        scrapeGraphLastTestStatus: "verified",
+        scrapeGraphLastTestMessage: message,
+        scrapeGraphRemainingCredits: remainingCredits
+      });
+      publicStateJsonCache = null;
+      if (dbCache.data) dbCache.data.systemSettings = next;
+      appendChannelApiLog({ channel: "ScrapeGraphAI", transport: "HTTP", method: "GET", path: "/api/credits", operation: "ScrapeGraphAI connection test", statusCode: 200, ok: true, message });
+      return sendJson(res, 200, { message, credits: { remaining: remainingCredits, plan: payload?.plan || payload?.data?.plan || "" }, systemSettings: publicSystemSettings(next) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to verify the ScrapeGraphAI connection.";
+      const next = writeSystemSettingsStore({ ...current, scrapeGraphLastTestStatus: "failed", scrapeGraphLastTestMessage: message });
+      if (dbCache.data) dbCache.data.systemSettings = next;
+      appendChannelApiLog({ channel: "ScrapeGraphAI", transport: "HTTP", method: "GET", path: "/api/credits", operation: "ScrapeGraphAI connection test failed", statusCode: 502, ok: false, message });
+      return sendJson(res, 502, { error: message, systemSettings: publicSystemSettings(next) });
+    }
+  }
+
   if (req.method === "POST" && url.pathname === "/api/system-settings/ai-test") {
     const body = await parseBody(req);
     const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
@@ -68399,8 +68483,20 @@ async function handleApi(req, res) {
       else if (typeof DEFAULT_SYSTEM_SETTINGS[field] === "number") current[field] = Number(body[field] || 0);
       else if (Array.isArray(DEFAULT_SYSTEM_SETTINGS[field])) current[field] = Array.isArray(body[field]) ? body[field] : current[field];
       else if (DEFAULT_SYSTEM_SETTINGS[field] && typeof DEFAULT_SYSTEM_SETTINGS[field] === "object") current[field] = body[field] && typeof body[field] === "object" ? body[field] : current[field];
-      else if (["smtpPassword", "veeqoApiKey", "veeqoClientSecret", "veeqoAccessToken", "aiApiKey", "openAiApiKey", "geminiApiKey", "warehouseImageAnalysisApiKey"].includes(field) && !String(body[field] || "")) current[field] = current[field];
+      else if (["smtpPassword", "veeqoApiKey", "veeqoClientSecret", "veeqoAccessToken", "scrapeGraphApiKey", "aiApiKey", "openAiApiKey", "geminiApiKey", "warehouseImageAnalysisApiKey"].includes(field) && !String(body[field] || "")) current[field] = current[field];
       else current[field] = String(body[field] || "");
+    }
+    const scrapeGraphConfig = getScrapeGraphRuntimeConfig(current);
+    const scrapeGraphFingerprint = scrapeGraphConfig.apiKey ? crypto.createHash("sha256").update(scrapeGraphConfig.apiKey).digest("hex") : "";
+    if (current.scrapeGraphConnectionKeyFingerprint && current.scrapeGraphConnectionKeyFingerprint !== scrapeGraphFingerprint) {
+      current.scrapeGraphConnectionVerifiedAt = "";
+      current.scrapeGraphConnectionKeyFingerprint = "";
+      current.scrapeGraphLastTestStatus = "not_tested";
+      current.scrapeGraphLastTestMessage = "Verify the replacement API key before enabling ScrapeGraphAI.";
+      current.scrapeGraphRemainingCredits = null;
+    }
+    if (current.scrapeGraphEnabled && (!scrapeGraphConfig.apiKey || !current.scrapeGraphConnectionVerifiedAt || current.scrapeGraphConnectionKeyFingerprint !== scrapeGraphFingerprint)) {
+      current.scrapeGraphEnabled = false;
     }
     const aiConfig = getAiRuntimeConfig(current);
     const verifiedFingerprint = aiConfig.apiKey ? crypto.createHash("sha256").update(`${aiConfig.provider}:${aiConfig.apiKey}`).digest("hex") : "";
@@ -70719,7 +70815,8 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const scopeKey = `${LEGACY_TENANT}:${LEGACY_COMPANY}:${String(authUser?.id || "unknown")}:${String(rawDraft.id || parts[2])}`;
     if (parts[4] === "inspect") {
-      const inspection = await competitorProducts.inspectCompetitorUrl(body.url, { scopeKey });
+      const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
+      const inspection = await competitorProducts.inspectCompetitorUrl(body.url, { scopeKey, scrapeGraph: getScrapeGraphRuntimeConfig(settings) });
       const matches = await quoteCompetitorCatalogCandidates(inspection.product);
       return sendJson(res, 200, {
         inspectionId: inspection.inspectionId,
@@ -70727,6 +70824,8 @@ async function handleApi(req, res) {
         sourceHost: inspection.sourceHost,
         inspectedAt: inspection.inspectedAt,
         expiresAt: inspection.expiresAt,
+        extractionProvider: inspection.extractionProvider,
+        providerWarning: inspection.providerWarning,
         product: inspection.product,
         matches,
         confirmedMatchCount: matches.filter((match) => match.confirmedIdentifier).length,

@@ -5,7 +5,8 @@ const {
   isPublicAddress,
   matchCatalogCandidates,
   normalizeSourceUrl,
-  readInspection
+  readInspection,
+  scrapeGraphExtractProduct
 } = require('../lib/competitor-products');
 
 const html = `<!doctype html><html><head>
@@ -52,6 +53,41 @@ assert.throws(() => normalizeSourceUrl('ftp://example.com/product'), /HTTP and H
 assert.throws(() => normalizeSourceUrl('https://user:secret@example.com/product'), /usernames or passwords/);
 
 (async () => {
+  let scrapeGraphRequest = null;
+  const scrapeGraphFetch = async (url, options) => {
+    scrapeGraphRequest = { url, options, body: JSON.parse(options.body) };
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ id: 'sg-request-1', json: { title: 'AI Milwaukee Drill Kit', brand: 'Milwaukee', gtin: '0 45242 123456', sku: '48-22-4094', mpn: '48-22-4094', imageUrl: 'https://cdn.example.com/ai-tool.jpg', competitorPrice: '$109.95', currency: 'usd' } })
+    };
+  };
+  const extracted = await scrapeGraphExtractProduct('https://shop.example.com/products/drill', { apiKey: 'secret-key', renderMode: 'js', stealth: true, fetch: scrapeGraphFetch });
+  assert.equal(scrapeGraphRequest.url, 'https://v2-api.scrapegraphai.com/api/extract');
+  assert.equal(scrapeGraphRequest.options.headers['SGAI-APIKEY'], 'secret-key');
+  assert.equal(scrapeGraphRequest.body.fetchConfig.mode, 'js');
+  assert.equal(scrapeGraphRequest.body.fetchConfig.stealth, true);
+  assert.equal(extracted.product.gtin, '045242123456');
+  assert.equal(extracted.product.competitorPrice, 109.95);
+  assert.equal(extracted.product.currency, 'USD');
+
+  const providerInspection = await inspectCompetitorUrl('https://shop.example.com/products/drill', {
+    scopeKey: 'tenant:company:user:provider-draft',
+    scrapeGraph: { enabled: true, apiKey: 'secret-key', fetch: scrapeGraphFetch }
+  });
+  assert.equal(providerInspection.extractionProvider, 'scrapegraphai');
+  assert.equal(providerInspection.providerRequestId, 'sg-request-1');
+  assert.equal(providerInspection.product.title, 'AI Milwaukee Drill Kit');
+
+  const fallbackInspection = await inspectCompetitorUrl('https://shop.example.com/products/drill', {
+    scopeKey: 'tenant:company:user:fallback-draft',
+    scrapeGraph: { enabled: true, apiKey: 'secret-key', fetch: async () => { throw new Error('provider offline'); } },
+    fetchHtml: async () => ({ html, finalUrl: 'https://shop.example.com/products/drill', statusCode: 200, headers: { 'content-type': 'text/html' } })
+  });
+  assert.equal(fallbackInspection.extractionProvider, 'direct');
+  assert.match(fallbackInspection.providerWarning, /provider offline/i);
+  assert.equal(fallbackInspection.product.title, 'Milwaukee Drill Kit');
+
   const inspection = await inspectCompetitorUrl('https://shop.example.com/products/drill#details', {
     scopeKey: 'tenant:company:user:draft',
     fetchHtml: async () => ({ html, finalUrl: 'https://shop.example.com/products/drill', statusCode: 200, headers: { 'content-type': 'text/html' } })
