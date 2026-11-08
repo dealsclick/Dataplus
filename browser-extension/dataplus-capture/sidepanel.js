@@ -5,6 +5,7 @@ const state = {
   quotes: [],
   selectedQuoteId: '',
   capture: null,
+  existingRfqQuote: null,
   matches: [],
   selectedMatchKey: '',
   activeHost: '',
@@ -183,6 +184,14 @@ async function loadWorkspace() {
   renderContext();
 }
 
+async function findExistingRfqQuote(rfq) {
+  const reference = String(rfq?.externalId || '').trim();
+  if (!reference) return null;
+  const query = new URLSearchParams({ source: 'BuySupply DW RFQ', reference });
+  const payload = await api(`/api/order-drafts/import-match?${query.toString()}`);
+  return payload?.draft || null;
+}
+
 function normalizedIdentifier(value) {
   return String(value || '').normalize('NFKC').toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
@@ -247,8 +256,15 @@ function renderRfq(rfq) {
   }
   root.append(lines);
 
-  const existing = state.quotes.find((quote) => String(quote.marketplaceOrderNumber || '').toLowerCase() === String(rfq.externalId || '').toLowerCase());
+  const existing = state.existingRfqQuote;
   const actions = element('div', 'action-stack');
+  if (existing) {
+    actions.append(element(
+      'div',
+      'inline-message success',
+      `${existing.draftNumber || 'This quote'} already exists in DataPlus with status ${String(existing.status || 'draft').replaceAll('_', ' ')}. A duplicate will not be created.`
+    ));
+  }
   const button = element('button', existing ? 'secondary-button' : 'primary-button', existing ? `Open ${existing.draftNumber || 'existing draft'}` : 'Import as draft quote');
   button.type = 'button';
   button.addEventListener('click', () => existing ? openQuote(existing.id) : importRfq(rfq));
@@ -332,6 +348,7 @@ async function scanPage() {
     const capture = await extractCurrentPage();
     state.capture = capture;
     state.activeHost = capture.sourceHost || '';
+    state.existingRfqQuote = capture.kind === 'rfq' ? await findExistingRfqQuote(capture) : null;
     state.matches = capture.kind === 'product' ? await findCatalogMatches(capture) : [];
     const exact = state.matches.find((match) => match.matchBasis !== 'Catalog suggestion');
     state.selectedMatchKey = String(exact?.id || exact?.sku || '');
@@ -339,7 +356,11 @@ async function scanPage() {
     byId('template-host').textContent = state.activeHost || 'Scan a product page first.';
     await loadTemplateFields();
     renderCapture();
-    setNotice(capture.kind === 'rfq' ? `${capture.externalId || 'RFQ'} is ready to import.` : `${state.matches.length} catalog match${state.matches.length === 1 ? '' : 'es'} found.`, 'success');
+    setNotice(capture.kind === 'rfq'
+      ? state.existingRfqQuote
+        ? `${state.existingRfqQuote.draftNumber || 'A quote'} already exists for ${capture.externalId || 'this RFQ'}.`
+        : `${capture.externalId || 'RFQ'} is ready to import.`
+      : `${state.matches.length} catalog match${state.matches.length === 1 ? '' : 'es'} found.`, 'success');
   } catch (error) {
     setNotice(error.message || 'The current page could not be scanned.', 'error');
   } finally { setBusy(false); renderContext(); }
@@ -349,6 +370,14 @@ async function importRfq(rfq) {
   if (!rfq.items.length) return setNotice('This RFQ does not contain importable line items.', 'error');
   setBusy(true);
   try {
+    await requireConnectedSession();
+    const existing = await findExistingRfqQuote(rfq);
+    if (existing) {
+      state.existingRfqQuote = existing;
+      renderCapture();
+      setNotice(`${existing.draftNumber || 'This quote'} already exists. Open it instead of importing another copy.`, 'success');
+      return;
+    }
     const payload = await api('/api/order-drafts', {
       method: 'POST',
       body: {
@@ -374,6 +403,7 @@ async function importRfq(rfq) {
     await loadQuotes();
     state.selectedQuoteId = String(payload.draft?.id || state.selectedQuoteId);
     await chrome.storage.local.set({ selectedQuoteId: state.selectedQuoteId });
+    state.existingRfqQuote = payload.draft || null;
     renderContext();
     renderQuotes();
     renderCapture();
@@ -496,15 +526,40 @@ async function connect() {
   finally { setBusy(false); renderContext(); }
 }
 
-async function initialize() {
-  const status = await runtimeMessage({ type: 'dataplus:connection-status' });
+function applyConnectionStatus(status = {}) {
   state.connected = status.connected === true;
-  state.baseUrl = status.baseUrl || '';
+  state.baseUrl = status.baseUrl || state.baseUrl || '';
   byId('base-url-input').value = state.baseUrl;
   byId('connection-panel').hidden = state.connected;
   byId('workspace').hidden = !state.connected;
-  byId('connection-label').textContent = state.connected ? `${status.user?.name || status.user?.username || 'Connected'} · expires ${dateLabel(status.expiresAt)}` : 'Not connected';
+  byId('connection-label').textContent = state.connected
+    ? `${status.user?.name || status.user?.username || 'Connected'} · expires ${dateLabel(status.expiresAt)}`
+    : 'Not connected';
+}
+
+async function requireConnectedSession() {
+  const status = await runtimeMessage({ type: 'dataplus:connection-status' });
+  applyConnectionStatus(status);
+  if (!state.connected) {
+    state.organization = null;
+    state.quotes = [];
+    state.selectedQuoteId = '';
+    throw new Error('Sign in to DataPlus and connect the extension before importing a quote.');
+  }
+  return status;
+}
+
+async function initialize() {
+  const status = await runtimeMessage({ type: 'dataplus:connection-status' });
+  applyConnectionStatus(status);
   if (state.connected) await loadWorkspace();
+  else {
+    state.organization = null;
+    state.quotes = [];
+    state.selectedQuoteId = '';
+    state.capture = null;
+    state.existingRfqQuote = null;
+  }
   await updateActiveHost();
 }
 

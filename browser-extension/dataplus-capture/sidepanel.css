@@ -7,6 +7,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; min-width: 320px; min-height: 100vh; background: #0b0d10; color: #e7e9ee; }
 button, input, select { font: inherit; letter-spacing: 0; }
 button { cursor: pointer; }
@@ -80,6 +81,7 @@ input:focus, select:focus { border-color: #3a95ed; outline: 2px solid rgba(58,14
 .action-stack { display: grid; gap: 8px; padding-top: 2px; }
 .action-stack button { width: 100%; }
 .inline-message { padding: 10px; border: 1px solid #665420; border-radius: 6px; background: #28220f; color: #ecd58a; font-size: 11px; line-height: 1.45; }
+.inline-message.success { border-color: #236146; background: #102b20; color: #bdf3d7; }
 
 .settings-section { display: grid; gap: 12px; padding: 4px 0 18px; border-bottom: 1px solid #252a31; }
 .settings-section + .settings-section { padding-top: 18px; }

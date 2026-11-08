@@ -18533,6 +18533,16 @@ function normalizeOrderDraft(db, draft = {}) {
   };
 }
 
+function importedOrderDraftMatch(drafts, source, reference) {
+  const normalizedSource = String(source || "").trim().toLowerCase();
+  const normalizedReference = String(reference || "").trim().toLowerCase();
+  if (!normalizedSource || !normalizedReference) return null;
+  return (Array.isArray(drafts) ? drafts : []).find((draft) =>
+    String(draft.source || "").trim().toLowerCase() === normalizedSource
+    && String(draft.marketplaceOrderNumber || "").trim().toLowerCase() === normalizedReference
+  ) || null;
+}
+
 async function sendOrderDraftExport(res, draft, format = "pdf", variant = "standard") {
   const address = draft.shippingAddress || {};
   const items = Array.isArray(draft.items) ? draft.items : [];
@@ -70876,6 +70886,15 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { orderDrafts, draftsLoaded: true, storage: "postgres" });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] === "import-match" && parts.length === 3 && postgres.isPostgresEnabled()) {
+    const source = String(url.searchParams.get("source") || "").trim();
+    const reference = String(url.searchParams.get("reference") || "").trim();
+    if (!source || !reference) return sendJson(res, 400, { error: "Choose an import source and reference." });
+    const drafts = await postgres.readStateField("orderDrafts").catch(() => []);
+    const draft = importedOrderDraftMatch(drafts, source, reference);
+    return sendJson(res, 200, { exists: Boolean(draft), draft });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] && parts[3] === "competitor-product" && ["inspect", "create"].includes(parts[4]) && parts.length === 5 && postgres.isPostgresEnabled()) {
     const drafts = await postgres.readStateField("orderDrafts").catch(() => []);
     const rawDraft = (drafts || []).find((row) => String(row.id || "") === String(parts[2]) || String(row.draftNumber || "").toLowerCase() === String(parts[2]).toLowerCase());
@@ -71011,7 +71030,7 @@ async function handleApi(req, res) {
     const importReference = String(body.marketplaceOrderNumber || "").trim();
     const importSource = String(body.source || "").trim().toLowerCase();
     const existingImport = importReference && importSource === "buysupply dw rfq"
-      ? (db.orderDrafts || []).find((draft) => String(draft.marketplaceOrderNumber || "").trim().toLowerCase() === importReference.toLowerCase() && String(draft.source || "").trim().toLowerCase() === importSource)
+      ? importedOrderDraftMatch(db.orderDrafts, importSource, importReference)
       : null;
     if (existingImport) return sendJson(res, 200, { draft: existingImport, duplicate: true, state: publicState({ ...db, inventory: [] }, { lite: true }) });
     await hydrateDraftLineCosts(db, body);
@@ -75165,12 +75184,20 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { order, state: publicState(db) });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] === "import-match" && parts.length === 3) {
+    const source = String(url.searchParams.get("source") || "").trim();
+    const reference = String(url.searchParams.get("reference") || "").trim();
+    if (!source || !reference) return sendJson(res, 400, { error: "Choose an import source and reference." });
+    const draft = importedOrderDraftMatch(db.orderDrafts, source, reference);
+    return sendJson(res, 200, { exists: Boolean(draft), draft });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts.length === 2) {
     const body = await parseBody(req);
     const importReference = String(body.marketplaceOrderNumber || "").trim();
     const importSource = String(body.source || "").trim().toLowerCase();
     const existingImport = importReference && importSource === "buysupply dw rfq"
-      ? (db.orderDrafts || []).find((draft) => String(draft.marketplaceOrderNumber || "").trim().toLowerCase() === importReference.toLowerCase() && String(draft.source || "").trim().toLowerCase() === importSource)
+      ? importedOrderDraftMatch(db.orderDrafts, importSource, importReference)
       : null;
     if (existingImport) return sendJson(res, 200, { draft: existingImport, duplicate: true, state: publicState(db) });
     const termSelection = quoteTermSelection(db.systemSettings?.quoteTerms, body.selectedTermIds, [], body.selectedTermIds === undefined);

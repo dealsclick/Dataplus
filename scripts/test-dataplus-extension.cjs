@@ -8,6 +8,9 @@ const manifest = JSON.parse(fs.readFileSync(path.join(extensionRoot, 'manifest.j
 const extractor = require(path.join(extensionRoot, 'content.js'));
 const server = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
 const companyOperations = fs.readFileSync(path.join(root, 'lib', 'company-operations-http.js'), 'utf8');
+const sidepanel = fs.readFileSync(path.join(extensionRoot, 'sidepanel.js'), 'utf8');
+const sidepanelHtml = fs.readFileSync(path.join(extensionRoot, 'sidepanel.html'), 'utf8');
+const sidepanelCss = fs.readFileSync(path.join(extensionRoot, 'sidepanel.css'), 'utf8');
 
 assert.equal(manifest.manifest_version, 3);
 assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
@@ -40,8 +43,14 @@ assert.match(server, /sessionType: "browser_extension"/);
 assert.match(server, /function requestSessionToken/);
 assert.match(server, /registerExtractedProduct\(body\.extractedProduct/);
 assert.match(server, /importSource === "buysupply dw rfq"/);
+assert.match(server, /parts\[2\] === "import-match"/);
 assert.match(companyOperations, /body\.extractedProduct/);
 assert.match(companyOperations, /importSource==='buysupply dw rfq'/);
+assert.match(companyOperations, /parts\[2\]==='import-match'/);
+assert.match(sidepanel, /findExistingRfqQuote/);
+assert.match(sidepanel, /requireConnectedSession/);
+assert.match(sidepanelHtml, /Sign in to DataPlus first/);
+assert.match(sidepanelCss, /\[hidden\]\s*\{\s*display:\s*none\s*!important;/);
 
 for (const file of ['background.js', 'content.js', 'sidepanel.js']) {
   const source = fs.readFileSync(path.join(extensionRoot, file), 'utf8');
