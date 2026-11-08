@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "DataPlus Capture",
+  "description": "Import BuySupply RFQs, match competitor products, and add products to DataPlus quotes.",
+  "version": "0.1.0",
+  "permissions": [
+    "activeTab",
+    "cookies",
+    "sidePanel",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://dataplusapp.duckdns.org/*",
+    "http://localhost:4173/*",
+    "http://127.0.0.1:4173/*",
+    "https://*/*",
+    "http://*/*"
+  ],
+  "action": {
+    "default_title": "Open DataPlus Capture"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*/*", "http://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

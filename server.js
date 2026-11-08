@@ -39,7 +39,7 @@ const companyStore = createCompanyStore(() => postgres.getPool(), {
   })
 });
 function companySelection(req) {
-  return readAuthSessions()[authSessionStorageKey(cookieValue(req, "dataplus_session"))]?.companyScope || null;
+  return readAuthSessions()[authSessionStorageKey(requestSessionToken(req))]?.companyScope || null;
 }
 function notificationScope(req) {
   const selected = companySelection(req);
@@ -78,7 +78,7 @@ const companyHandler = createCompanyHandler({
   canManageMembers: (user, method) => userCan(user, 'users.permissions', method === 'GET' ? 'view' : 'permissions'),
   users: () => readSystemSettingsStore(dbCache.data?.systemSettings || {}).systemUsers || [],
   setSelection(req, scope) {
-    const token = cookieValue(req, "dataplus_session");
+    const token = requestSessionToken(req);
     const sessions = readAuthSessions();
     const sessionKey = authSessionStorageKey(token);
     if (!sessions[sessionKey]) throw Object.assign(new Error("Sign in again."), { statusCode: 401 });
@@ -6608,8 +6608,13 @@ function authSessionDeviceLabel(userAgent = "") {
   return platform === "Unknown device" && browser === "Unknown browser" ? "Unknown browser session" : `${browser} on ${platform}`;
 }
 
+function authSessionLabel(session = {}) {
+  if (session.sessionType === "browser_extension") return "DataPlus Chrome extension";
+  return authSessionDeviceLabel(session.userAgent);
+}
+
 function touchAuthSession(req, force = false) {
-  const token = cookieValue(req, "dataplus_session");
+  const token = requestSessionToken(req);
   if (!token) return null;
   const sessions = readAuthSessions();
   const sessionKey = authSessionStorageKey(token);
@@ -6629,7 +6634,7 @@ function touchAuthSession(req, force = false) {
 }
 
 function publicAuthSessions(req, user = {}) {
-  const currentToken = cookieValue(req, "dataplus_session");
+  const currentToken = requestSessionToken(req);
   const currentSessionKey = authSessionStorageKey(currentToken);
   const now = Date.now();
   const sessions = readAuthSessions();
@@ -6646,7 +6651,7 @@ function publicAuthSessions(req, user = {}) {
     rows.push({
       id: authSessionPublicId(token),
       current: token === currentSessionKey,
-      device: authSessionDeviceLabel(session.userAgent),
+      device: authSessionLabel(session),
       ipAddress: session.ipAddress || "",
       createdAt: session.createdAt || "",
       lastSeenAt: session.lastSeenAt || session.createdAt || "",
@@ -6680,6 +6685,14 @@ function cookieValue(req, name) {
   return match ? decodeURIComponent(match.slice(prefix.length)) : "";
 }
 
+function requestSessionToken(req) {
+  const cookieToken = cookieValue(req, "dataplus_session");
+  if (cookieToken) return cookieToken;
+  const authorization = String(req.headers.authorization || "").trim();
+  const match = /^Bearer\s+([A-Za-z0-9_-]{32,256})$/i.exec(authorization);
+  return match ? match[1] : "";
+}
+
 function setAuthCookie(res, token, maxAgeSeconds = 60 * 60 * 24 * 14) {
   res.setHeader("Set-Cookie", `dataplus_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}`);
 }
@@ -6689,7 +6702,7 @@ function clearAuthCookie(res) {
 }
 
 function currentAuthUser(req, settings = readSystemSettingsStore(dbCache.data?.systemSettings || {})) {
-  const token = cookieValue(req, "dataplus_session");
+  const token = requestSessionToken(req);
   if (!token) return null;
   const sessions = readAuthSessions();
   const session = sessions[authSessionStorageKey(token)];
@@ -18344,6 +18357,13 @@ function normalizeDraftLine(db, line = {}, index = 0) {
     selectedSupplierSku: String(line.selectedSupplierSku || "").trim(),
     selectedSupplierProductId: String(line.selectedSupplierProductId || "").trim(),
     selectedSupplierUom: String(line.selectedSupplierUom || "").trim(),
+    sourceUrl: String(line.sourceUrl || "").trim().slice(0, 2048),
+    sourceHost: String(line.sourceHost || "").trim().slice(0, 255),
+    sourcePageSku: String(line.sourcePageSku || "").trim().slice(0, 160),
+    competitorPrice: quoteSupplierCost(line.competitorPrice),
+    competitorCurrency: String(line.competitorCurrency || "USD").trim().toUpperCase().slice(0, 3) || "USD",
+    competitorObservedAt: Number.isFinite(Date.parse(String(line.competitorObservedAt || ""))) ? new Date(line.competitorObservedAt).toISOString() : "",
+    catalogMatchBasis: String(line.catalogMatchBasis || "").trim().slice(0, 120),
     note: String(line.note || "").trim(),
     sortOrder: Number(line.sortOrder ?? index)
   };
@@ -53089,6 +53109,54 @@ async function handleApi(req, res) {
       : { authenticated: false, permissionAreas: AUTH_PERMISSION_AREAS });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/auth/extension/connect") {
+    const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
+    const user = currentAuthUser(req, settings);
+    const sourceToken = requestSessionToken(req);
+    const sessions = readAuthSessions();
+    const sourceSession = sourceToken ? sessions[authSessionStorageKey(sourceToken)] : null;
+    if (!user || !sourceSession || sourceSession.sessionType === "browser_extension") {
+      return sendJson(res, 401, { error: "Sign in to DataPlus in this browser before connecting the extension." });
+    }
+    const token = crypto.randomBytes(32).toString("base64url");
+    const connectedAt = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    sessions[authSessionStorageKey(token)] = {
+      userId: user.id,
+      companyScope: sourceSession.companyScope || null,
+      sessionType: "browser_extension",
+      parentSessionId: authSessionPublicId(sourceToken),
+      createdAt: connectedAt,
+      lastSeenAt: connectedAt,
+      expiresAt,
+      ipAddress: requestIpAddress(req),
+      userAgent: "DataPlus Chrome extension"
+    };
+    await writeAuthSessions(sessions);
+    void recordUserActivity(req, user, { eventType: "security", action: "Connected DataPlus Chrome extension", sessionId: authSessionPublicId(token) });
+    return sendJson(res, 201, {
+      authenticated: true,
+      token,
+      expiresAt,
+      user: publicAuthUser(user, await authFeatureAccess(user)),
+      selection: sourceSession.companyScope || null
+    });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/auth/extension/disconnect") {
+    const token = requestSessionToken(req);
+    const sessions = readAuthSessions();
+    const sessionKey = authSessionStorageKey(token);
+    const session = token ? sessions[sessionKey] : null;
+    if (!session || session.sessionType !== "browser_extension") return sendJson(res, 200, { disconnected: true });
+    const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
+    const user = currentAuthUser(req, settings);
+    delete sessions[sessionKey];
+    await writeAuthSessions(sessions);
+    if (user) void recordUserActivity(req, user, { eventType: "security", action: "Disconnected DataPlus Chrome extension", sessionId: authSessionPublicId(token) });
+    return sendJson(res, 200, { disconnected: true });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/auth/login") {
     const body = await parseBody(req);
     const login = sourceTextValue(body.username || body.email || body.login || "").toLowerCase();
@@ -70815,8 +70883,9 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const scopeKey = `${LEGACY_TENANT}:${LEGACY_COMPANY}:${String(authUser?.id || "unknown")}:${String(rawDraft.id || parts[2])}`;
     if (parts[4] === "inspect") {
-      const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
-      const inspection = await competitorProducts.inspectCompetitorUrl(body.url, { scopeKey, scrapeGraph: getScrapeGraphRuntimeConfig(settings) });
+      const inspection = body.extractedProduct && typeof body.extractedProduct === "object"
+        ? competitorProducts.registerExtractedProduct(body.extractedProduct, { scopeKey, sourceUrl: body.url })
+        : await competitorProducts.inspectCompetitorUrl(body.url, { scopeKey, scrapeGraph: getScrapeGraphRuntimeConfig(await readRuntimeSystemSettings(dbCache.data?.systemSettings || {})) });
       const matches = await quoteCompetitorCatalogCandidates(inspection.product);
       return sendJson(res, 200, {
         inspectionId: inspection.inspectionId,
@@ -70939,6 +71008,12 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts.length === 2 && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = await readOrderDraftWorkflowDb();
+    const importReference = String(body.marketplaceOrderNumber || "").trim();
+    const importSource = String(body.source || "").trim().toLowerCase();
+    const existingImport = importReference && importSource === "buysupply dw rfq"
+      ? (db.orderDrafts || []).find((draft) => String(draft.marketplaceOrderNumber || "").trim().toLowerCase() === importReference.toLowerCase() && String(draft.source || "").trim().toLowerCase() === importSource)
+      : null;
+    if (existingImport) return sendJson(res, 200, { draft: existingImport, duplicate: true, state: publicState({ ...db, inventory: [] }, { lite: true }) });
     await hydrateDraftLineCosts(db, body);
     const termSelection = quoteTermSelection(db.systemSettings?.quoteTerms, body.selectedTermIds, [], body.selectedTermIds === undefined);
     const createdAt = new Date().toISOString();
@@ -70970,7 +71045,7 @@ async function handleApi(req, res) {
     db.orderDrafts = Array.isArray(db.orderDrafts) ? db.orderDrafts : [];
     db.orderDrafts.unshift(draft);
     await persistOrderDraftWorkflowDb(db);
-    return sendJson(res, 200, { draft, state: publicState({ ...db, inventory: [] }, { lite: true }) });
+    return sendJson(res, 200, { draft, duplicate: false, state: publicState({ ...db, inventory: [] }, { lite: true }) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] && parts[3] === "duplicate" && postgres.isPostgresEnabled()) {
@@ -75092,6 +75167,12 @@ async function handleApi(req, res) {
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts.length === 2) {
     const body = await parseBody(req);
+    const importReference = String(body.marketplaceOrderNumber || "").trim();
+    const importSource = String(body.source || "").trim().toLowerCase();
+    const existingImport = importReference && importSource === "buysupply dw rfq"
+      ? (db.orderDrafts || []).find((draft) => String(draft.marketplaceOrderNumber || "").trim().toLowerCase() === importReference.toLowerCase() && String(draft.source || "").trim().toLowerCase() === importSource)
+      : null;
+    if (existingImport) return sendJson(res, 200, { draft: existingImport, duplicate: true, state: publicState(db) });
     const termSelection = quoteTermSelection(db.systemSettings?.quoteTerms, body.selectedTermIds, [], body.selectedTermIds === undefined);
     const createdAt = new Date().toISOString();
     const actor = String(authUser?.name || authUser?.username || authUser?.id || "DataPlus user").trim();
@@ -75122,7 +75203,7 @@ async function handleApi(req, res) {
     db.orderDrafts = Array.isArray(db.orderDrafts) ? db.orderDrafts : [];
     db.orderDrafts.unshift(draft);
     await writeDb(db);
-    return sendJson(res, 200, { draft, state: publicState(db) });
+    return sendJson(res, 200, { draft, duplicate: false, state: publicState(db) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] && parts[3] === "duplicate") {

@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DataPlus Capture</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand-mark" aria-hidden="true">DP</div>
+    <div class="brand-copy">
+      <strong>DataPlus Capture</strong>
+      <span id="connection-label">Checking connection...</span>
+    </div>
+    <button id="refresh-button" class="icon-button" type="button" title="Refresh">↻</button>
+  </header>
+
+  <div id="notice" class="notice" role="status" hidden></div>
+
+  <section id="connection-panel" class="connection-panel" hidden>
+    <div>
+      <strong>Connect to DataPlus</strong>
+      <p>Use your existing DataPlus sign-in. The extension session remains active for 30 days and can be revoked from DataPlus.</p>
+    </div>
+    <div class="button-row">
+      <button id="connect-button" class="primary-button" type="button">Connect</button>
+      <button id="open-login-button" class="secondary-button" type="button">Open DataPlus</button>
+    </div>
+  </section>
+
+  <main id="workspace" hidden>
+    <section class="context-bar">
+      <label>
+        <span>Company</span>
+        <select id="company-select"></select>
+      </label>
+      <label>
+        <span>Open quote</span>
+        <select id="quote-select"></select>
+      </label>
+      <button id="open-quote-button" class="icon-button context-open" type="button" title="Open quote in DataPlus">↗</button>
+    </section>
+
+    <nav class="tabs" aria-label="Extension sections">
+      <button class="tab-button active" type="button" data-tab="capture">Capture</button>
+      <button class="tab-button" type="button" data-tab="quotes">Quotes</button>
+      <button class="tab-button" type="button" data-tab="settings">Settings</button>
+    </nav>
+
+    <section id="capture-tab" class="tab-panel">
+      <div class="section-heading">
+        <div>
+          <h1>Current page</h1>
+          <p id="page-host">Open an RFQ or product page.</p>
+        </div>
+        <button id="scan-button" class="primary-button" type="button">Scan page</button>
+      </div>
+      <div id="capture-result" class="capture-result empty-state">
+        Scan the current page to preview its RFQ or product information.
+      </div>
+    </section>
+
+    <section id="quotes-tab" class="tab-panel" hidden>
+      <div class="section-heading">
+        <div><h1>Quote pipeline</h1><p>Choose a quote to keep it open while browsing supplier and competitor pages.</p></div>
+      </div>
+      <div id="quote-list" class="quote-list"></div>
+    </section>
+
+    <section id="settings-tab" class="tab-panel" hidden>
+      <div class="settings-section">
+        <h1>Connection</h1>
+        <label><span>DataPlus URL</span><input id="base-url-input" type="url" spellcheck="false"></label>
+        <div class="button-row">
+          <button id="save-settings-button" class="primary-button" type="button">Save URL</button>
+          <button id="disconnect-button" class="danger-button" type="button">Disconnect</button>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="section-heading compact"><div><h1>Site extraction template</h1><p id="template-host">Scan a product page first.</p></div></div>
+        <div class="selector-grid">
+          <label><span>Title selector</span><input id="selector-title" placeholder="h1.product-title"></label>
+          <label><span>Price selector</span><input id="selector-price" placeholder="[data-price]"></label>
+          <label><span>SKU selector</span><input id="selector-sku" placeholder=".product-sku"></label>
+          <label><span>UPC / GTIN selector</span><input id="selector-gtin" placeholder=".upc"></label>
+          <label><span>MPN selector</span><input id="selector-mpn" placeholder=".manufacturer-part"></label>
+          <label><span>Brand selector</span><input id="selector-brand" placeholder=".brand"></label>
+          <label><span>Image selector</span><input id="selector-image" placeholder="img.product-image"></label>
+        </div>
+        <button id="save-template-button" class="secondary-button" type="button">Save template for this site</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>
