@@ -99,7 +99,7 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   const attachmentRoot=require('node:fs').mkdtempSync(require('node:path').join(require('node:os').tmpdir(),'dataplus-company-labels-'));
   t.after(()=>require('node:fs').rmSync(attachmentRoot,{recursive:true,force:true}));
   let state={orders:[],orderDrafts:[],returns:[],customers:[],connections:[],warehouses:[],inventory:[],purchaseOrders:[],suppliers:[],vendors:[],brands:[],sequence:{},orderViews:[]};
-  let response=null,exported=null;
+  let response=null,exported=null,selectedCompanyProduct=null;
   const store={
     authorize:async(_user,requested)=>{assert.deepEqual(requested,scope);return {id:'buysupply',name:'BuySupply',profile:BUYSUPPLY_PUBLIC_PROFILE};},
     operationalState:async()=>state,
@@ -118,6 +118,19 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
       {id:'veeqo',name:'Veeqo',enabled:true,companyRates:true,companyLabels:false},
     ],
     companyCarrierPreference:async()=>({selectionMode:'preferred_carrier',preferredProviderId:'usps',rateTtlMinutes:30}),
+    selectProduct:async(_user,_scope,input)=>{selectedCompanyProduct=input;return {saved:true,product:input};},
+  };
+  const competitorHelpers=require('../lib/competitor-products');
+  const competitorInspections=new Map();
+  const competitorService={
+    ...competitorHelpers,
+    inspectCompetitorUrl:async(url,{scopeKey})=>{
+      const noMatch=String(url).includes('no-match');
+      const record={inspectionId:noMatch?'no-match-inspection':'match-inspection',scopeKey,sourceUrl:String(url),sourceHost:'example.com',inspectedAt:'2026-11-07T12:00:00.000Z',expiresAt:'2026-11-07T12:15:00.000Z',
+        product:{title:noMatch?'New item':'Current item',brand:'Brand',description:'',gtin:'',sku:noMatch?'UNKNOWN':'ABC',mpn:'',imageUrl:'',competitorPrice:12.5,currency:'USD',structuredDataFound:true,identifiersFound:1}};
+      competitorInspections.set(record.inspectionId,record);return record;
+    },
+    readInspection:(id,scopeKey)=>{const record=competitorInspections.get(id);assert.equal(record.scopeKey,scopeKey);return record;},
   };
   const operations=createCompanyOperationsHandler({
     store,selection:()=>scope,sendJson:(_res,status,data)=>{response={status,data};},parseBody:async req=>req.body,
@@ -130,6 +143,8 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
     },
     quoteUsps:async()=>({status:{ok:true},rates:[{id:'usps-ground',carrier:'USPS',service:'Ground Advantage',amount:9,currency:'USD'}]}),
     quoteVeeqo:async()=>{throw new Error('Veeqo test account unavailable');},
+    competitorProducts:competitorService,
+    createCompetitorDraftProduct:async({inspection,overrides})=>({id:'shared-new',sku:'DPS20001',title:overrides.title || inspection.product.title,status:'Draft',catalogReviewStatus:'needs_details'}),
     purchaseUps:async input=>{
       assert.equal(input.serviceCode,'03');assert.equal(input.package.weight,5);assert.equal(input.to.postalCode,'10001');
       return {content:Buffer.from('GIF89a'),mimeType:'image/gif',format:'GIF',trackingNumber:'1Z999AA10123456784',shipmentIdentificationNumber:'1Z999AA10123456784',service:'UPS Ground',serviceCode:'03',amount:8.5,currency:'USD',transactionId:'test-transaction'};
@@ -161,6 +176,15 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   assert.equal(created.selectedTermsSnapshot.find(term=>term.id==='taxes').text,'Company-specific tax wording.');
   assert.equal(created.items[0].msrp,15);
   assert.equal(created.items[0].cost,null,'Company quote input cannot persist a LINQ or caller-provided cost');
+  const competitorMatch=(await op(`/api/order-drafts/${created.id}/competitor-product/inspect`,'POST',{url:'https://example.com/match'})).response.data;
+  assert.equal(competitorMatch.matches[0].sku,'ABC');
+  assert.equal(competitorMatch.matches[0].matchBasis,'Page SKU');
+  const competitorNoMatch=(await op(`/api/order-drafts/${created.id}/competitor-product/inspect`,'POST',{url:'https://example.com/no-match'})).response.data;
+  assert.equal(competitorNoMatch.matches.length,0);
+  const competitorCreated=(await op(`/api/order-drafts/${created.id}/competitor-product/create`,'POST',{inspectionId:competitorNoMatch.inspectionId,confirmNoMatch:true,product:{title:'New item'}})).response.data;
+  assert.equal(competitorCreated.product.sku,'DPS20001');
+  assert.equal(selectedCompanyProduct.productId,'shared-new');
+  assert.equal(selectedCompanyProduct.status,'draft');
   const supplierOptions=(await op(`/api/order-drafts/${created.id}/supplier-options?sku=ABC`)).response.data.options;
   assert.equal(supplierOptions.length,2);
   assert.equal(supplierOptions[0].supplierName,'Lowest Cost Supply');
@@ -479,10 +503,12 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     await assert.rejects(store.importer.rollback(owner,linq,{batchId:upload.id,confirm:true}),/not found/);
     await store.importer.rollback(owner,buy,{batchId:duplicate.id,confirm:true});assert.equal((await store.importer.report(owner,buy,new URLSearchParams())).summary.orders,2);
     const {createCompanyOperationsHandler}=require('../lib/company-operations-http');
+    const competitorProductHelpers=require('../lib/competitor-products');
     let activeScope=buy,operationalResponse;
     const operations=createCompanyOperationsHandler({store,selection:()=>activeScope,sendJson:(_r,status,data)=>{operationalResponse={status,data};},sendHtml:(_r,status,html)=>{operationalResponse={status,html};},parseBody:async req=>req.body,
       normalizeDraft:draftFunctions.normalizeOrderDraft,
       buildOrder:draftFunctions.buildOrderFromDraft,
+      competitorProducts:{...competitorProductHelpers,inspectCompetitorUrl:async()=>({inspectionId:'inspection-1',sourceUrl:'https://example.com/product',sourceHost:'example.com',inspectedAt:new Date().toISOString(),expiresAt:new Date(Date.now()+60000).toISOString(),product:{title:'Test product',brand:'Brand',description:'',gtin:'',sku:'SKU1',mpn:'MPN',imageUrl:'',competitorPrice:null,currency:'USD',structuredDataFound:true,identifiersFound:2}})},
       purchaseUps:async()=>({content:Buffer.from('GIF89a'),trackingNumber:'1Z999AA10123456784',service:'UPS Ground',amount:8.25,currency:'USD'})});
     const op=async(path,method='GET',body={},user=owner)=>{await operations({method,body},{},new URL(path,'http://localhost'),user);return operationalResponse;};
     assert.equal((await op('/api/state')).data.connections.length,0);
@@ -495,6 +521,10 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.notEqual(draft.id,'injected');
     assert.equal(draft.tenantId,buy.tenantId);
     assert.equal(draft.companyId,buy.companyId);
+    const competitorLookup=(await op(`/api/order-drafts/${draft.id}/competitor-product/inspect`,'POST',{url:'https://example.com/product'})).data;
+    assert.equal(competitorLookup.matches[0].sku,'BUY1');
+    assert.equal(competitorLookup.matches[0].matchBasis,'Page SKU');
+    assert.equal(competitorLookup.matches[0].reviewRequired,true);
     assert.equal((await op('/api/orders/references')).data.connections.length,0);
     assert.deepEqual((await op('/api/orders/references')).data.warehouses,[]);
     const prospectCustomer=(await op('/api/customers')).data.customers[0];

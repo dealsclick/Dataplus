@@ -29,6 +29,7 @@ const { evaluateFulfillmentIntervention } = require("./lib/fulfillment-intervent
 const { splitFulfillmentRoutes } = require("./lib/fulfillment-package-split");
 const { fulfillmentRowVisibleInAllShipments, orderVisibleInAllShipments } = require("./lib/fulfillment-shipment-visibility");
 const { QUOTE_EXPORT_VARIANTS, QUOTE_TERM_OPTIONS, buildQuotePdf, defaultQuoteExpiration, defaultQuoteTermIds, normalizeQuoteExpiration, normalizeQuoteTermIds, normalizeQuoteTermLibrary, normalizeQuoteTermSnapshot, quoteTermSnapshot, quoteTerms } = require("./lib/quote-documents");
+const competitorProducts = require("./lib/competitor-products");
 const { createCompanyHandler } = require("./lib/company-http");
 const { resolveMentionedUsers } = require("./lib/order-mentions");
 const companyStore = createCompanyStore(() => postgres.getPool(), {
@@ -95,6 +96,8 @@ const companyOperationsHandler = createCompanyOperationsHandler({
   quoteVeeqo: quoteCompanyVeeqo,
   purchaseUps: (input) => upsRating.createShipment(input, process.env, carrierCredentials.getUps()),
   validateAddress: validateCompanyQuoteAddress,
+  competitorProducts,
+  createCompetitorDraftProduct: createQuoteCompetitorDraftProduct,
   attachmentRoot: () => path.join(DATA_DIR, "company-order-attachments")
 });
 const { importProgress } = require("./lib/import-progress");
@@ -47348,6 +47351,136 @@ async function quoteSupplierOptionsForSku(sku = "") {
   };
 }
 
+async function quoteCompetitorCatalogCandidates(extracted = {}) {
+  if (!postgres.isPostgresEnabled()) return [];
+  const terms = [...new Set([extracted.gtin, extracted.sku, extracted.mpn].map((value) => String(value || "").trim()).filter(Boolean))];
+  if (!terms.length) return [];
+  const rows = [];
+  const seen = new Set();
+  const add = (product) => {
+    const key = String(product?.id || product?.productId || product?.sku || "").trim().toLowerCase();
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    rows.push(product);
+  };
+  const pages = await Promise.all(terms.map(async (term) => {
+    const [direct, page] = await Promise.all([
+      postgres.readProductByKey(term).catch(() => null),
+      postgres.listProducts({ q: term, page: 1, limit: 50, fastPage: true, includeVendorOffers: true, filters: { vendorScope: "all" } }).catch(() => null)
+    ]);
+    return { direct, products: page?.items || page?.inventory || [] };
+  }));
+  for (const page of pages) {
+    add(page.direct);
+    for (const product of page.products) add(product);
+  }
+  return competitorProducts.matchCatalogCandidates(extracted, rows);
+}
+
+function quoteCompetitorOverride(value, fallback, maximum) {
+  const text = String(value === undefined ? fallback || "" : value || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  return text.slice(0, maximum);
+}
+
+async function createQuoteCompetitorDraftProduct({ inspection, overrides = {}, actor = "DataPlus user" } = {}) {
+  if (!postgres.isPostgresEnabled()) throw Object.assign(new Error("PostgreSQL is required to create a shared draft SKU."), { statusCode: 503 });
+  if (!inspection?.product || !inspection?.sourceUrl) throw Object.assign(new Error("Inspect the competitor product page again."), { statusCode: 410 });
+  if (inspection.createdProduct?.sku) {
+    return await postgres.readProductByKey(inspection.createdProduct.id || inspection.createdProduct.sku).catch(() => null) || inspection.createdProduct;
+  }
+  const requestedGtin = String(overrides.gtin ?? inspection.product.gtin ?? "").trim();
+  if (requestedGtin && !competitorProducts.gtinKey(requestedGtin)) {
+    throw Object.assign(new Error("UPC / GTIN must contain 8, 12, 13, or 14 digits."), { statusCode: 400 });
+  }
+  const effectiveIdentifiers = {
+    ...inspection.product,
+    gtin: requestedGtin,
+    mpn: quoteCompetitorOverride(overrides.mpn, inspection.product.mpn, 120)
+  };
+  const currentMatches = await quoteCompetitorCatalogCandidates(effectiveIdentifiers);
+  if (currentMatches.some((match) => match.confirmedIdentifier)) {
+    throw Object.assign(new Error("A catalog SKU now matches this UPC or GTIN. Use the matching SKU instead of creating another product."), { statusCode: 409, matches: currentMatches });
+  }
+  const sku = String(await postgres.nextWarehouseSkuAtomic() || "").trim();
+  if (!sku) throw Object.assign(new Error("Automatic SKU generation is unavailable."), { statusCode: 503 });
+  const now = new Date().toISOString();
+  const id = crypto.randomUUID();
+  const source = inspection.product;
+  const gtin = requestedGtin.replace(/\D/g, "");
+  const title = quoteCompetitorOverride(overrides.title, source.title || `Unidentified product from ${inspection.sourceHost}`, 300);
+  if (!title) throw Object.assign(new Error("Enter a product title before creating the draft SKU."), { statusCode: 400 });
+  const brand = quoteCompetitorOverride(overrides.brand, source.brand, 160);
+  const mpn = effectiveIdentifiers.mpn;
+  const observedPrice = source.competitorPrice === null || source.competitorPrice === undefined ? null : Number(source.competitorPrice);
+  const competitorObservation = Number.isFinite(observedPrice) ? [{
+    sourceUrl: inspection.sourceUrl,
+    sourceHost: inspection.sourceHost,
+    price: Number(observedPrice.toFixed(2)),
+    currency: String(source.currency || "USD").toUpperCase().slice(0, 3),
+    observedAt: inspection.inspectedAt
+  }] : [];
+  const product = {
+    id,
+    sku,
+    title,
+    marketplaceTitle: title,
+    barcode: gtin,
+    upc: gtin.length === 12 ? gtin : "",
+    gtin,
+    brand,
+    manufacturer: brand,
+    mfrPartNumber: mpn,
+    manufacturerPartNumber: mpn,
+    qty: 0,
+    stockQty: 0,
+    reserved: 0,
+    reorderPoint: 0,
+    active: true,
+    status: "Draft",
+    condition: "New",
+    source: "quote-competitor-url",
+    category: "",
+    mainCategory: "",
+    supplier: "",
+    vendorSku: "",
+    shortDescription: quoteCompetitorOverride(overrides.description, source.description, 1_000),
+    uom: "EA",
+    uomQty: 1,
+    packageQuantity: "1",
+    cost: null,
+    price: 0,
+    images: [],
+    defaultImage: "",
+    tags: ["quote-url-create", "needs-product-details"],
+    catalogReviewStatus: "needs_details",
+    catalogAttentionRequired: true,
+    catalogAttentionReason: "Created from a competitor URL and requires catalog review before marketplace launch.",
+    needsProductDetails: true,
+    createdAt: now,
+    updatedAt: now,
+    createdBy: String(actor || "DataPlus user").trim() || "DataPlus user",
+    createdMethod: "Quote competitor URL",
+    createdSource: "Competitor URL",
+    createdSourceDetail: inspection.sourceHost,
+    competitorPriceObservations: competitorObservation,
+    competitorResearch: {
+      inspectionId: inspection.inspectionId,
+      sourceUrl: inspection.sourceUrl,
+      sourceHost: inspection.sourceHost,
+      imageUrl: source.imageUrl || "",
+      pageSku: source.sku || "",
+      inspectedAt: inspection.inspectedAt,
+      structuredDataFound: source.structuredDataFound === true
+    }
+  };
+  await postgres.upsertProductsFromState([product], { insertOnly: true });
+  await postgres.upsertInventoryLevelsFromProducts([product]);
+  inspection.createdProduct = product;
+  await redisCache.deleteByPrefix("dataplus:products:");
+  await redisCache.deleteByPrefix("dataplus:product-detail:");
+  return product;
+}
+
 function normalizeAuditDemandSku(value) {
   return String(value || "").trim().toLowerCase()
     .replace(/[-_](?:[0-9]+(?:pc|pk|pack|ct|cs|case|bx|ea)|ea|each)$/i, "");
@@ -70528,6 +70661,40 @@ async function handleApi(req, res) {
     const drafts = await postgres.readStateField("orderDrafts").catch(() => []);
     const orderDrafts = Array.isArray(drafts) ? drafts.sort((left, right) => new Date(right.updatedAt || right.createdAt || 0).getTime() - new Date(left.updatedAt || left.createdAt || 0).getTime()) : [];
     return sendJson(res, 200, { orderDrafts, draftsLoaded: true, storage: "postgres" });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] && parts[3] === "competitor-product" && ["inspect", "create"].includes(parts[4]) && parts.length === 5 && postgres.isPostgresEnabled()) {
+    const drafts = await postgres.readStateField("orderDrafts").catch(() => []);
+    const rawDraft = (drafts || []).find((row) => String(row.id || "") === String(parts[2]) || String(row.draftNumber || "").toLowerCase() === String(parts[2]).toLowerCase());
+    if (!rawDraft) return notFound(res);
+    const body = await parseBody(req);
+    const scopeKey = `${LEGACY_TENANT}:${LEGACY_COMPANY}:${String(authUser?.id || "unknown")}:${String(rawDraft.id || parts[2])}`;
+    if (parts[4] === "inspect") {
+      const inspection = await competitorProducts.inspectCompetitorUrl(body.url, { scopeKey });
+      const matches = await quoteCompetitorCatalogCandidates(inspection.product);
+      return sendJson(res, 200, {
+        inspectionId: inspection.inspectionId,
+        sourceUrl: inspection.sourceUrl,
+        sourceHost: inspection.sourceHost,
+        inspectedAt: inspection.inspectedAt,
+        expiresAt: inspection.expiresAt,
+        product: inspection.product,
+        matches,
+        confirmedMatchCount: matches.filter((match) => match.confirmedIdentifier).length,
+        message: matches.length ? `${matches.length} possible catalog match${matches.length === 1 ? "" : "es"} found.` : "No catalog SKU matched the product identifiers."
+      });
+    }
+    if (body.confirmNoMatch !== true) return sendJson(res, 400, { error: "Confirm that none of the suggested catalog SKUs match this product." });
+    const inspection = competitorProducts.readInspection(body.inspectionId, scopeKey);
+    const matches = await quoteCompetitorCatalogCandidates(inspection.product);
+    if (matches.some((match) => match.confirmedIdentifier)) {
+      return sendJson(res, 409, { error: "A catalog SKU matches this UPC or GTIN. Use the matching SKU instead.", matches });
+    }
+    const product = await createQuoteCompetitorDraftProduct({ inspection, overrides: body.product || {}, actor: authUser?.name || authUser?.id || "DataPlus user" });
+    return sendJson(res, 201, {
+      product: { ...competitorProducts.candidateProjection(product), status: product.status, catalogReviewStatus: product.catalogReviewStatus },
+      message: `${product.sku} was created as a draft SKU and added to Catalog Readiness.`
+    });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {

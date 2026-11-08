@@ -155,6 +155,37 @@ type QuoteSupplierOption = {
   isPrimary?: boolean
 }
 type QuoteCatalogPricing = { mapPrice: number | null; listPrice: number | null }
+type CompetitorProductFacts = {
+  title: string
+  brand: string
+  description: string
+  gtin: string
+  sku: string
+  mpn: string
+  imageUrl: string
+  competitorPrice: number | null
+  currency: string
+  structuredDataFound: boolean
+  identifiersFound: number
+}
+type CompetitorCatalogMatch = ProductItem & {
+  matchBasis: string
+  reviewRequired: boolean
+  confirmedIdentifier: boolean
+  manufacturerPartNumber?: string
+  barcode?: string
+}
+type CompetitorInspection = {
+  inspectionId: string
+  sourceUrl: string
+  sourceHost: string
+  inspectedAt: string
+  expiresAt: string
+  product: CompetitorProductFacts
+  matches: CompetitorCatalogMatch[]
+  confirmedMatchCount: number
+  message: string
+}
 type QuoteLineForm = {
   sku: string
   title: string
@@ -252,6 +283,12 @@ export function DraftQuoteFieldDetailPage() {
   const [similarLoading, setSimilarLoading] = useState(false)
   const [similarLineIndex, setSimilarLineIndex] = useState(-1)
   const [similarResults, setSimilarResults] = useState<Array<Record<string, unknown>>>([])
+  const [competitorOpen, setCompetitorOpen] = useState(false)
+  const [competitorUrl, setCompetitorUrl] = useState("")
+  const [competitorBusy, setCompetitorBusy] = useState(false)
+  const [competitorCreateBusy, setCompetitorCreateBusy] = useState(false)
+  const [competitorInspection, setCompetitorInspection] = useState<CompetitorInspection | null>(null)
+  const [competitorDraft, setCompetitorDraft] = useState({ title: "", brand: "", gtin: "", mpn: "", description: "" })
   const [warehouses, setWarehouses] = useState<Array<Record<string, unknown>>>([])
   const [quoteTermOptions, setQuoteTermOptions] = useState<QuoteTermDefinition[]>([])
   const [quoteCarriers, setQuoteCarriers] = useState<QuoteCarrierAccess[]>([])
@@ -405,7 +442,7 @@ export function DraftQuoteFieldDetailPage() {
   }, [loading, draft, draftId])
 
   const updateLine = (index: number, patch: Partial<QuoteLineForm>) => setForm((current) => ({ ...current, items: current.items.map((line, lineIndex) => lineIndex === index ? { ...line, ...patch } : line) }))
-  const addCatalogItem = (item: ProductItem) => {
+  const addCatalogItem = (item: ProductItem, notify = true) => {
     const sku = String(item.sku || "").trim()
     if (!sku) return
     const rawCost = item.sellUnitCost ?? item.sourceCost ?? item.cost
@@ -423,7 +460,52 @@ export function DraftQuoteFieldDetailPage() {
     })
     setCatalogQuery("")
     setCatalogResults([])
-    toast.success(`${sku} added to the quote.`)
+    if (notify) toast.success(`${sku} added to the quote.`)
+  }
+  const openCompetitorLookup = () => {
+    setCompetitorUrl("")
+    setCompetitorInspection(null)
+    setCompetitorDraft({ title: "", brand: "", gtin: "", mpn: "", description: "" })
+    setCompetitorOpen(true)
+  }
+  const inspectCompetitorUrl = async () => {
+    if (!competitorUrl.trim()) return toast.error("Paste a public product URL.")
+    setCompetitorBusy(true)
+    try {
+      const result = await api<CompetitorInspection>(`/api/order-drafts/${encodeURIComponent(draftId)}/competitor-product/inspect`, { method: "POST", body: JSON.stringify({ url: competitorUrl.trim() }) })
+      setCompetitorInspection(result)
+      setCompetitorDraft({
+        title: result.product.title || "",
+        brand: result.product.brand || "",
+        gtin: result.product.gtin || "",
+        mpn: result.product.mpn || "",
+        description: result.product.description || "",
+      })
+      if (result.matches.length) toast.success(result.message)
+      else toast.message(result.message)
+    } catch (error) {
+      setCompetitorInspection(null)
+      toast.error(error instanceof Error ? error.message : "Unable to inspect this product page.")
+    } finally { setCompetitorBusy(false) }
+  }
+  const addCompetitorMatch = (match: CompetitorCatalogMatch) => {
+    addCatalogItem(match)
+    setCompetitorOpen(false)
+  }
+  const createCompetitorSku = async () => {
+    if (!competitorInspection || !competitorDraft.title.trim()) return toast.error("Enter a product title before creating the draft SKU.")
+    setCompetitorCreateBusy(true)
+    try {
+      const result = await api<{ product: ProductItem; message?: string }>(`/api/order-drafts/${encodeURIComponent(draftId)}/competitor-product/create`, {
+        method: "POST",
+        body: JSON.stringify({ inspectionId: competitorInspection.inspectionId, confirmNoMatch: true, product: competitorDraft })
+      })
+      addCatalogItem(result.product, false)
+      setCompetitorOpen(false)
+      toast.success(result.message || `${String(result.product.sku || "Draft SKU")} was created.`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to create the draft SKU.")
+    } finally { setCompetitorCreateBusy(false) }
   }
   const findSimilar = async (line: Record<string, unknown>, index: number) => {
     setSimilarOpen(true); setSimilarLineIndex(index); setSimilarResults([]); setSimilarLoading(true)
@@ -659,6 +741,66 @@ export function DraftQuoteFieldDetailPage() {
       {quotePdfVersions.map((version) => { const disabled = version.id === "savings" && !hasCompleteMsrp; const selected = exportVariant === version.id; return <button key={version.id} type="button" disabled={disabled} onClick={() => setExportVariant(version.id)} className={cn("flex items-start gap-3 rounded-md border p-4 text-left transition-colors", selected && "border-primary bg-primary/5", disabled && "cursor-not-allowed opacity-50")}><span className={cn("mt-0.5 grid size-5 shrink-0 place-items-center rounded-full border", selected && "border-primary bg-primary text-primary-foreground")}>{selected ? <CheckCircle2 className="size-3.5" /> : null}</span><span className="min-w-0"><span className="block font-medium">{version.title}</span><span className="mt-1 block text-sm text-muted-foreground">{version.description}</span>{disabled ? <span className="mt-1 block text-xs font-medium text-amber-600">Add MSRP to every quote line to use this version.</span> : null}</span></button> })}
     </div><DialogFooter><Button variant="outline" onClick={() => setExportOpen(false)}>Cancel</Button><Button onClick={() => window.open(`/api/order-drafts/${encodeURIComponent(draftId)}/export/pdf?variant=${exportVariant}`, "_blank", "noopener,noreferrer")}><Printer className="size-4" /> Open PDF</Button></DialogFooter></DialogContent></Dialog>
 
+    <Dialog open={competitorOpen} onOpenChange={(open) => { if (!competitorBusy && !competitorCreateBusy) setCompetitorOpen(open) }}>
+      <DialogContent className="flex h-[100dvh] max-h-[100dvh] w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none p-0 sm:h-auto sm:max-h-[92dvh] sm:w-[calc(100vw-2rem)] sm:!max-w-5xl sm:rounded-lg">
+        <DialogHeader className="shrink-0 border-b px-4 py-4 pr-12 sm:px-6">
+          <DialogTitle>Add product from URL</DialogTitle>
+          <DialogDescription>Inspect a public product page, then choose an existing DataPlus SKU or create a local draft SKU.</DialogDescription>
+        </DialogHeader>
+        <ScrollArea className="min-h-0 flex-1">
+          <div className="grid gap-6 p-4 sm:p-6">
+            <FormField>
+              <FieldLabel htmlFor="competitor-product-url">Product URL</FieldLabel>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Input id="competitor-product-url" autoFocus inputMode="url" value={competitorUrl} onChange={(event) => setCompetitorUrl(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void inspectCompetitorUrl() } }} placeholder="https://competitor.example/product" />
+                <Button type="button" className="shrink-0" disabled={competitorBusy || !competitorUrl.trim()} onClick={() => void inspectCompetitorUrl()}>{competitorBusy ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Inspect page</Button>
+              </div>
+            </FormField>
+
+            {competitorInspection ? <>
+              <section className="grid gap-4 rounded-md border p-4 sm:grid-cols-[112px_minmax(0,1fr)]">
+                <div className="grid aspect-square place-items-center overflow-hidden rounded-md border bg-muted/30">
+                  {competitorInspection.product.imageUrl ? <img src={competitorInspection.product.imageUrl} alt="" referrerPolicy="no-referrer" className="size-full object-contain" /> : <PackageCheck className="size-8 text-muted-foreground" />}
+                </div>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0"><p className="font-semibold">{competitorInspection.product.title || "Untitled product"}</p><p className="mt-1 text-sm text-muted-foreground">{competitorInspection.product.brand || competitorInspection.sourceHost}</p></div>
+                    <Button type="button" size="sm" variant="ghost" asChild><a href={competitorInspection.sourceUrl} target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> Open source</a></Button>
+                  </div>
+                  <div className="mt-4 grid gap-3 text-sm sm:grid-cols-4">
+                    <Detail label="UPC / GTIN" value={competitorInspection.product.gtin || "Not found"} />
+                    <Detail label="Page SKU" value={competitorInspection.product.sku || "Not found"} />
+                    <Detail label="MPN" value={competitorInspection.product.mpn || "Not found"} />
+                    <Detail label="Observed price" value={competitorInspection.product.competitorPrice === null ? "Not found" : `${competitorInspection.product.currency} ${moneyLabel(competitorInspection.product.competitorPrice)}`} />
+                  </div>
+                  {competitorInspection.product.competitorPrice !== null ? <p className="mt-3 text-xs text-muted-foreground">Observed price is stored as timestamped market evidence. It does not change cost, MAP, MSRP, or quote price.</p> : null}
+                </div>
+              </section>
+
+              {competitorInspection.matches.length ? <section className="grid gap-3">
+                <div><h3 className="font-semibold">Catalog matches</h3><p className="mt-1 text-sm text-muted-foreground">Choose the correct independent SKU. MPN and page-SKU matches require review.</p></div>
+                <div className="overflow-x-auto rounded-md border"><Table className="min-w-[760px]"><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Product</TableHead><TableHead>Matched by</TableHead><TableHead>Identifier</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>{competitorInspection.matches.map((match) => <TableRow key={String(match.id || match.sku)}><TableCell className="font-mono text-xs font-semibold">{String(match.sku)}</TableCell><TableCell><p className="max-w-md truncate font-medium">{String(match.title || match.sku)}</p><p className="text-xs text-muted-foreground">{String(match.brand || "")}</p></TableCell><TableCell><Badge variant={match.reviewRequired ? "outline" : "secondary"}>{match.matchBasis}</Badge></TableCell><TableCell className="font-mono text-xs">{match.matchBasis === "UPC / GTIN" ? String(match.barcode || competitorInspection.product.gtin) : match.matchBasis === "Manufacturer part number" ? String(match.manufacturerPartNumber || competitorInspection.product.mpn) : competitorInspection.product.sku}</TableCell><TableCell className="text-right"><Button type="button" size="sm" onClick={() => addCompetitorMatch(match)}>Add to quote</Button></TableCell></TableRow>)}</TableBody></Table></div>
+              </section> : <Alert><Info className="size-4" /><AlertTitle>No catalog SKU matched</AlertTitle><AlertDescription>Review the extracted facts below, then create a local draft SKU.</AlertDescription></Alert>}
+
+              {competitorInspection.confirmedMatchCount === 0 ? <section className="grid gap-4 border-t pt-6">
+                <div><h3 className="font-semibold">Create local draft SKU</h3><p className="mt-1 text-sm text-muted-foreground">The new SKU remains in Catalog Readiness until its product details are reviewed.</p></div>
+                {competitorInspection.matches.length ? <Alert><AlertTriangle className="size-4" /><AlertTitle>Possible identifier matches need review</AlertTitle><AlertDescription>Use a candidate above when it is the same product. Create a new SKU only when none of those records match.</AlertDescription></Alert> : null}
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Field label="Product title"><Input value={competitorDraft.title} onChange={(event) => setCompetitorDraft((current) => ({ ...current, title: event.target.value }))} /></Field>
+                  <Field label="Brand"><Input value={competitorDraft.brand} onChange={(event) => setCompetitorDraft((current) => ({ ...current, brand: event.target.value }))} /></Field>
+                  <Field label="UPC / GTIN"><Input inputMode="numeric" value={competitorDraft.gtin} onChange={(event) => setCompetitorDraft((current) => ({ ...current, gtin: event.target.value }))} /></Field>
+                  <Field label="Manufacturer part number"><Input value={competitorDraft.mpn} onChange={(event) => setCompetitorDraft((current) => ({ ...current, mpn: event.target.value }))} /></Field>
+                  <div className="sm:col-span-2"><Field label="Description"><Textarea className="min-h-24" value={competitorDraft.description} onChange={(event) => setCompetitorDraft((current) => ({ ...current, description: event.target.value }))} /></Field></div>
+                </div>
+                <div className="flex justify-end"><Button type="button" disabled={competitorCreateBusy || !competitorDraft.title.trim()} onClick={() => void createCompetitorSku()}>{competitorCreateBusy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} Create draft SKU and add</Button></div>
+              </section> : <Alert><CheckCircle2 className="size-4" /><AlertTitle>Confirmed identifier match found</AlertTitle><AlertDescription>Use one of the matching DataPlus SKUs above. Creating a duplicate SKU is disabled.</AlertDescription></Alert>}
+            </> : <div className="grid min-h-48 place-items-center rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"><div><Link2 className="mx-auto mb-3 size-7" /><p>Paste a public product page to search UPC, GTIN, page SKU, and manufacturer part number.</p></div></div>}
+          </div>
+        </ScrollArea>
+        <DialogFooter className="shrink-0 border-t bg-background px-4 py-4 sm:px-6"><Button type="button" variant="outline" disabled={competitorBusy || competitorCreateBusy} onClick={() => setCompetitorOpen(false)}>Close</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+
     <Dialog open={similarOpen} onOpenChange={setSimilarOpen}><DialogContent className="max-h-[88vh] max-w-4xl overflow-y-auto"><DialogHeader><DialogTitle>Similar SKUs</DialogTitle><DialogDescription>Suggestions prioritize active catalog items, availability, category match, and lower sell price when possible.</DialogDescription></DialogHeader>{similarLoading ? <div className="grid min-h-32 place-items-center"><Loader2 className="size-6 animate-spin text-primary" /></div> : <div className="grid gap-2">{similarResults.map((item) => <div key={String(item.sku)} className="grid gap-3 rounded-md border p-3 sm:grid-cols-[minmax(120px,0.35fr)_minmax(0,1fr)_120px_120px_auto]"><div className="font-mono text-xs font-semibold">{String(item.sku || "")}</div><div className="min-w-0"><p className="truncate font-medium">{String(item.title || item.sku || "")}</p><p className="truncate text-xs text-muted-foreground">{String(item.reason || "Catalog alternative")}</p></div><div><p className="text-xs text-muted-foreground">Available</p><p className="font-medium">{numberLabel(Number(item.available || 0))}</p></div><div><p className="text-xs text-muted-foreground">Price</p><p className="font-medium">{moneyLabel(Number(item.price || 0))}</p></div><Button size="sm" onClick={() => applySimilar(item)}>Apply</Button></div>)}{!similarResults.length && <div className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground">No similar SKUs found for this line.</div>}</div>}<DialogFooter><Button variant="outline" onClick={() => setSimilarOpen(false)}>Close</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={editorOpen} onOpenChange={(open) => { if (!busy) setEditorOpen(open) }}>
@@ -701,7 +843,10 @@ export function DraftQuoteFieldDetailPage() {
                 </div>
 
                 <FormField>
-                  <FieldLabel htmlFor="quote-catalog-search">Add catalog product</FieldLabel>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <FieldLabel htmlFor="quote-catalog-search">Add catalog product</FieldLabel>
+                    <Button type="button" size="sm" variant="outline" onClick={openCompetitorLookup}><Link2 className="size-4" /> Add from URL</Button>
+                  </div>
                   <Command shouldFilter={false} className="rounded-md border shadow-xs">
                     <CommandInput id="quote-catalog-search" autoFocus value={catalogQuery} onValueChange={setCatalogQuery} placeholder="Search SKU, UPC, title, or brand" />
                     {catalogQuery.trim().length >= 2 ? <CommandList className="border-t">
