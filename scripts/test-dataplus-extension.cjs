@@ -15,9 +15,10 @@ const background = fs.readFileSync(path.join(extensionRoot, 'background.js'), 'u
 const content = fs.readFileSync(path.join(extensionRoot, 'content.js'), 'utf8');
 
 assert.equal(manifest.manifest_version, 3);
-assert.equal(manifest.version, '0.2.1');
+assert.equal(manifest.version, '0.2.2');
 assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
 assert.ok(manifest.permissions.includes('cookies'));
+assert.ok(manifest.permissions.includes('scripting'));
 assert.ok(manifest.permissions.includes('sidePanel'));
 assert.ok(manifest.host_permissions.includes('https://dataplusapp.duckdns.org/*'));
 
@@ -63,6 +64,8 @@ assert.match(sidepanel, /match\.mapPrice/);
 assert.match(sidepanel, /availableLabel\(match\)/);
 assert.match(sidepanel, /Open \$\{match\.sku \|\| 'product'\} in DataPlus/);
 assert.match(sidepanel, /chrome\.tabs\.onActivated/);
+assert.match(sidepanel, /chrome\.scripting\.executeScript/);
+assert.match(sidepanel, /requestPageExtraction\(tab\.id, template\)/);
 assert.match(sidepanel, /quote-url-link/);
 assert.match(background, /dataplus:rfq-status/);
 assert.match(background, /dataplus:rfq-statuses/);

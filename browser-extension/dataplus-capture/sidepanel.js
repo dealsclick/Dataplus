@@ -97,17 +97,41 @@ async function savedTemplates() {
   return saved.siteTemplates && typeof saved.siteTemplates === 'object' ? saved.siteTemplates : {};
 }
 
-async function extractCurrentPage() {
-  const tab = await activeTab();
-  const url = new URL(tab.url || 'https://invalid.local');
-  const templates = await savedTemplates();
+function requestPageExtraction(tabId, template) {
   return new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(tab.id, { type: 'dataplus:extract-page', template: templates[url.hostname] || {} }, (response) => {
-      if (chrome.runtime.lastError) return reject(new Error('This page cannot be scanned. Open a normal website page and try again.'));
-      if (!response?.ok) return reject(new Error(response?.error || 'The page could not be scanned.'));
+    chrome.tabs.sendMessage(tabId, { type: 'dataplus:extract-page', template }, (response) => {
+      if (chrome.runtime.lastError) {
+        const error = new Error(chrome.runtime.lastError.message || 'The page scanner is unavailable.');
+        error.code = 'scanner_unavailable';
+        reject(error);
+        return;
+      }
+      if (!response?.ok) {
+        reject(new Error(response?.error || 'The page could not be scanned.'));
+        return;
+      }
       resolve(response.result);
     });
   });
+}
+
+async function extractCurrentPage() {
+  const tab = await activeTab();
+  const url = new URL(tab.url || 'https://invalid.local');
+  if (!/^https?:$/i.test(url.protocol)) throw new Error('Open a normal website page before scanning.');
+  const templates = await savedTemplates();
+  const template = templates[url.hostname] || {};
+  try {
+    return await requestPageExtraction(tab.id, template);
+  } catch (error) {
+    if (error?.code !== 'scanner_unavailable') throw error;
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+      return await requestPageExtraction(tab.id, template);
+    } catch (recoveryError) {
+      throw new Error('This page cannot be scanned. Open a normal website page and try again.', { cause: recoveryError });
+    }
+  }
 }
 
 function currentCompany() {
