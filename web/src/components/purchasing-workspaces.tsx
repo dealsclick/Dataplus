@@ -345,6 +345,7 @@ function QuoteSupplierPicker({ line, options, loading, onSelect }: { line: Quote
 export function DraftQuoteFieldDetailPage() {
   const draftId = decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
   const [draft, setDraft] = useState<Record<string, unknown> | null>(null)
+  const [customerProfileId, setCustomerProfileId] = useState("")
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [editorOpen, setEditorOpen] = useState(false)
@@ -394,8 +395,9 @@ export function DraftQuoteFieldDetailPage() {
   const load = async () => {
     setLoading(true)
     try {
-      const result = await api<{ draft?: Record<string, unknown>; warehouses?: Array<Record<string, unknown>>; quoteTerms?: QuoteTermDefinition[]; carriers?: QuoteCarrierAccess[]; carrierPreference?: QuoteCarrierPreference }>(`/api/order-drafts/${encodeURIComponent(draftId)}`)
+      const result = await api<{ draft?: Record<string, unknown>; customerId?: string; warehouses?: Array<Record<string, unknown>>; quoteTerms?: QuoteTermDefinition[]; carriers?: QuoteCarrierAccess[]; carrierPreference?: QuoteCarrierPreference }>(`/api/order-drafts/${encodeURIComponent(draftId)}`)
       setDraft(result.draft || null)
+      setCustomerProfileId(String(result.customerId || result.draft?.customerId || ""))
       setQuoteTermOptions(result.quoteTerms || [])
       setWarehouses(result.warehouses || [])
       setQuoteCarriers(result.carriers || [])
@@ -915,7 +917,7 @@ export function DraftQuoteFieldDetailPage() {
 
         <aside className="order-1 grid content-start gap-4 xl:order-2 xl:sticky xl:top-20 xl:self-start">
           <Card className="overflow-hidden">
-            <CardHeader className="border-b pb-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><CardDescription>Customer</CardDescription><CardTitle className="mt-1 truncate text-lg">{customerName}</CardTitle></div><div className="grid size-9 shrink-0 place-items-center rounded-md bg-primary/10 text-primary"><Users className="size-4" /></div></div></CardHeader>
+            <CardHeader className="border-b pb-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><CardDescription>Customer</CardDescription><CardTitle className="mt-1 truncate text-lg">{customerProfileId ? <a className="text-primary hover:underline" href={`/customers/${encodeURIComponent(customerProfileId)}`}>{customerName}</a> : customerName}</CardTitle></div><div className="grid size-9 shrink-0 place-items-center rounded-md bg-primary/10 text-primary"><Users className="size-4" /></div></div></CardHeader>
             <CardContent className="grid gap-5 pt-5">
               <section className="grid gap-2.5 text-sm">
                 <h3 className="font-semibold">Contact</h3>

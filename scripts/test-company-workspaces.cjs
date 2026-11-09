@@ -281,11 +281,16 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   assert.equal(prospectList.customers[0].name,'Buyer');
   assert.equal(prospectList.customers[0].segment,'prospect');
   const customerId=prospectList.customers[0].id;
-  const customerUpdate=(await op(`/api/customers/${customerId}`,'PATCH',{notes:'BuySupply-only note',tags:'Wholesale, Priority'})).response.data.customer;
+  const customerUpdate=(await op(`/api/customers/${customerId}`,'PATCH',{notes:'BuySupply-only note',tags:'Wholesale, Priority',taxExempt:true,paymentTerms:'Net 30',taxExemptionNumber:'NY-EX-1001',taxExemptionJurisdiction:'New York',taxExemptionExpiresAt:'2027-12-31',taxExemptionNotes:'Certificate reviewed by accounting.'})).response.data.customer;
   assert.equal(customerUpdate.notes,'BuySupply-only note');
   assert.deepEqual(customerUpdate.tags,['Wholesale','Priority']);
+  assert.equal(customerUpdate.taxExempt,true);
+  assert.equal(customerUpdate.paymentTerms,'Net 30');
+  assert.equal(customerUpdate.taxExemptionNumber,'NY-EX-1001');
   assert.equal(customerUpdate.timeline.length,1);
   assert.equal((await op(`/api/customers/${customerId}`)).response.data.customer.notes,'BuySupply-only note');
+  assert.equal(draftDetail.customerId,customerId);
+  assert.equal(draftDetail.draft.customerId,customerId);
   const suggestion=(await op(`/api/order-drafts/${created.id}/similar-skus?lineIndex=0&sku=ABC`)).response.data.alternatives[0];
   assert.equal(suggestion.sku,'ALT-1');
   assert.equal(suggestion.price,25.5);

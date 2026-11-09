@@ -18845,7 +18845,7 @@ function addCustomerTimeline(customer, event) {
 }
 
 function updateCustomerProfile(customer, body) {
-  const textFields = new Set(["name", "company", "customerType", "status", "email", "phone", "preferredChannel", "notes"]);
+  const textFields = new Set(["name", "company", "customerType", "status", "email", "phone", "preferredChannel", "paymentTerms", "taxExemptionNumber", "taxExemptionJurisdiction", "taxExemptionExpiresAt", "taxExemptionNotes", "notes"]);
   const booleanFields = new Set(["taxExempt", "marketingOptIn"]);
   const addressFields = new Set(["label", "name", "company", "line1", "line2", "city", "state", "postalCode", "country", "phone"]);
   const changes = [];
