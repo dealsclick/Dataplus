@@ -106,6 +106,33 @@ async function rfqStatus(reference) {
   };
 }
 
+async function rfqStatuses(references) {
+  const normalizedReferences = [...new Set((Array.isArray(references) ? references : [])
+    .map((value) => String(value || '').trim()).filter(Boolean))].slice(0, 100);
+  const current = await settings();
+  if (!normalizedReferences.length) throw new Error('No RFQ references were detected on this page.');
+  if (!current.extensionToken) return { connected: false, baseUrl: current.baseUrl, matches: [] };
+  const status = await connectionStatus();
+  if (!status.connected) return { connected: false, baseUrl: current.baseUrl, matches: [] };
+  const payload = await apiRequest('/api/order-drafts/import-matches', {
+    method: 'POST',
+    body: { source: 'BuySupply DW RFQ', references: normalizedReferences }
+  });
+  return {
+    connected: true,
+    baseUrl: current.baseUrl,
+    matches: (Array.isArray(payload?.matches) ? payload.matches : []).map((match) => {
+      const draft = match?.draft || null;
+      return {
+        reference: String(match?.reference || ''),
+        exists: Boolean(draft),
+        draft: draft ? { id: draft.id, draftNumber: draft.draftNumber || '', status: draft.status || 'draft' } : null,
+        quoteUrl: draft?.id ? `${current.baseUrl}/drafts/${encodeURIComponent(String(draft.id))}` : ''
+      };
+    })
+  };
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 });
@@ -127,6 +154,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === 'dataplus:disconnect') return disconnect();
     if (message?.type === 'dataplus:connection-status') return connectionStatus();
     if (message?.type === 'dataplus:rfq-status') return rfqStatus(message.reference);
+    if (message?.type === 'dataplus:rfq-statuses') return rfqStatuses(message.references);
     if (message?.type === 'dataplus:open-sidepanel') {
       if (!sender.tab?.id) throw new Error('Open DataPlus Capture from a website tab.');
       await chrome.sidePanel.open({ tabId: sender.tab.id });

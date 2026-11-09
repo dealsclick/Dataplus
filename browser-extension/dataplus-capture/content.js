@@ -6,11 +6,20 @@
     const documentRef = root?.document;
     const locationRef = root?.location;
     let statusRequestPending = false;
+    let indexStatusRequestPending = false;
+    let lastIndexReferencesKey = '';
+    let indexMutationTimer = null;
 
     const isRfqPage = () => Boolean(
       documentRef
       && /dw\.buysupply\.com$/i.test(String(locationRef?.hostname || ''))
       && /\/baskets\/view\//i.test(String(locationRef?.pathname || ''))
+    );
+
+    const isRfqIndexPage = () => Boolean(
+      documentRef
+      && /dw\.buysupply\.com$/i.test(String(locationRef?.hostname || ''))
+      && /^\/rfqs\/website\/?$/i.test(String(locationRef?.pathname || ''))
     );
 
     function runtimeMessage(message) {
@@ -42,6 +51,23 @@
         .pill.warning { border-color: #9b7622; background: #fff7da; color: #73530c; }
         .pill.error { border-color: #a74e55; background: #fff0f1; color: #842f36; }
         @media (prefers-color-scheme: dark) { .pill { background: #142638; color: #b9dcff; } .pill.success { background: #112c20; color: #8ee7b7; } .pill.warning { background: #302710; color: #f4d16f; } .pill.error { background: #35191c; color: #ffadb3; } }
+      `;
+    }
+
+    function indexStatusStyles() {
+      return `
+        :host { color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+        * { box-sizing: border-box; letter-spacing: 0; }
+        .status { display: inline-flex; max-width: 150px; min-height: 26px; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid #68727d; border-radius: 999px; background: #f2f4f6; color: #46515c; font: 650 11px/1.2 Inter, ui-sans-serif, system-ui, sans-serif; text-decoration: none; white-space: nowrap; }
+        .status.success { border-color: #23865b; background: #e7f8ef; color: #11623f; }
+        .status.warning { border-color: #9b7622; background: #fff7da; color: #73530c; }
+        .status.error { border-color: #a74e55; background: #fff0f1; color: #842f36; }
+        a.status:hover { filter: brightness(.96); text-decoration: underline; }
+        .dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: #87919b; }
+        .success .dot { background: #22a669; } .warning .dot { background: #c49518; } .error .dot { background: #d54a54; }
+        .wrap { display: grid; justify-items: start; gap: 3px; }
+        .meta { max-width: 150px; overflow: hidden; color: #68727d; font: 500 10px/1.2 Inter, ui-sans-serif, system-ui, sans-serif; text-overflow: ellipsis; white-space: nowrap; }
+        @media (prefers-color-scheme: dark) { .status { border-color: #46505b; background: #222930; color: #c1c9d1; } .status.success { border-color: #23865b; background: #112c20; color: #8ee7b7; } .status.warning { border-color: #9b7622; background: #302710; color: #f4d16f; } .status.error { border-color: #a74e55; background: #35191c; color: #ffadb3; } .meta { color: #929da8; } }
       `;
     }
 
@@ -138,6 +164,123 @@
       inlineRoot.replaceChildren(inlineStyle, inline);
     }
 
+    function rfqIndexEntries() {
+      const entries = [];
+      const seenRows = new Set();
+      for (const link of documentRef.querySelectorAll('a[href*="/baskets/view/"]')) {
+        const row = link.closest('tr');
+        if (!row || seenRows.has(row)) continue;
+        const reference = String(row.textContent || '').match(/\bQ-\d{6}-[A-Z0-9]+\b/i)?.[0] || '';
+        if (!reference) continue;
+        seenRows.add(row);
+        entries.push({ row, reference });
+      }
+      return entries;
+    }
+
+    function ensureRfqIndexColumns(entries) {
+      const table = entries[0]?.row.closest('table');
+      const headerRow = table?.querySelector('thead tr');
+      if (headerRow && !headerRow.querySelector('[data-dataplus-rfq-header]')) {
+        const header = documentRef.createElement('th');
+        header.setAttribute('data-dataplus-rfq-header', 'true');
+        header.scope = 'col';
+        header.textContent = 'DataPlus';
+        Object.assign(header.style, { minWidth: '142px', whiteSpace: 'nowrap' });
+        headerRow.insertBefore(header, headerRow.lastElementChild);
+      }
+      for (const entry of entries) {
+        let cell = entry.row.querySelector(':scope > [data-dataplus-rfq-cell]');
+        if (!cell) {
+          cell = documentRef.createElement('td');
+          cell.setAttribute('data-dataplus-rfq-cell', entry.reference);
+          Object.assign(cell.style, { minWidth: '142px', verticalAlign: 'middle' });
+          entry.row.insertBefore(cell, entry.row.lastElementChild);
+          const host = documentRef.createElement('span');
+          host.attachShadow({ mode: 'open' });
+          cell.append(host);
+        }
+        entry.host = cell.firstElementChild;
+      }
+    }
+
+    function renderRfqIndexCell(entry, status) {
+      const rootNode = entry.host?.shadowRoot;
+      if (!rootNode) return;
+      const style = documentRef.createElement('style');
+      style.textContent = indexStatusStyles();
+      const wrap = documentRef.createElement('span');
+      wrap.className = 'wrap';
+      const element = status.quoteUrl || status.href ? documentRef.createElement('a') : documentRef.createElement('span');
+      element.className = `status ${status.tone || ''}`;
+      if (element.tagName === 'A') {
+        element.href = status.quoteUrl || status.href;
+        element.target = '_blank';
+        element.rel = 'noopener noreferrer';
+        element.title = status.quoteUrl || status.href;
+      }
+      const dot = documentRef.createElement('span');
+      dot.className = 'dot';
+      const label = documentRef.createElement('span');
+      label.textContent = status.label;
+      element.append(dot, label);
+      wrap.append(element);
+      if (status.meta) {
+        const meta = documentRef.createElement('span');
+        meta.className = 'meta';
+        meta.textContent = status.meta;
+        wrap.append(meta);
+      }
+      rootNode.replaceChildren(style, wrap);
+    }
+
+    async function refreshRfqIndexStatus(force = false) {
+      if (!isRfqIndexPage() || indexStatusRequestPending) return;
+      const entries = rfqIndexEntries();
+      if (!entries.length) return;
+      ensureRfqIndexColumns(entries);
+      const references = entries.map((entry) => entry.reference);
+      const key = references.map((reference) => reference.toLowerCase()).join('|');
+      if (!force && key === lastIndexReferencesKey) return;
+      indexStatusRequestPending = true;
+      for (const entry of entries) renderRfqIndexCell(entry, { label: 'Checking...' });
+      try {
+        const result = await runtimeMessage({ type: 'dataplus:rfq-statuses', references });
+        if (!result.connected) {
+          for (const entry of entries) renderRfqIndexCell(entry, { tone: 'warning', label: 'Sign in required', href: result.baseUrl, meta: 'Connect DataPlus Capture' });
+        } else {
+          const matches = new Map((result.matches || []).map((match) => [String(match.reference || '').toLowerCase(), match]));
+          for (const entry of entries) {
+            const match = matches.get(entry.reference.toLowerCase());
+            if (match?.exists) {
+              renderRfqIndexCell(entry, {
+                tone: 'success',
+                label: match.draft?.draftNumber || 'Open quote',
+                meta: String(match.draft?.status || 'draft').replaceAll('_', ' '),
+                quoteUrl: match.quoteUrl
+              });
+            } else {
+              renderRfqIndexCell(entry, { label: 'Not imported' });
+            }
+          }
+        }
+        lastIndexReferencesKey = key;
+      } catch (error) {
+        lastIndexReferencesKey = '';
+        for (const entry of entries) renderRfqIndexCell(entry, { tone: 'error', label: 'Check failed', meta: error.message || 'Try again' });
+      } finally {
+        indexStatusRequestPending = false;
+      }
+    }
+
+    function scheduleRfqIndexStatus(force = false) {
+      if (indexMutationTimer) root.clearTimeout(indexMutationTimer);
+      indexMutationTimer = root.setTimeout(() => {
+        indexMutationTimer = null;
+        refreshRfqIndexStatus(force).catch(() => {});
+      }, 120);
+    }
+
     async function refreshRfqStatus() {
       if (!isRfqPage() || statusRequestPending) return;
       statusRequestPending = true;
@@ -169,7 +312,7 @@
         return false;
       }
       if (message?.type === 'dataplus:refresh-rfq-status') {
-        refreshRfqStatus().then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: error.message }));
+        Promise.all([refreshRfqStatus(), refreshRfqIndexStatus(true)]).then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: error.message }));
         return true;
       }
       return false;
@@ -179,6 +322,14 @@
       root.setTimeout(() => refreshRfqStatus(), 0);
       root.addEventListener('focus', () => refreshRfqStatus());
       documentRef.addEventListener('visibilitychange', () => { if (documentRef.visibilityState === 'visible') refreshRfqStatus(); });
+    }
+    if (isRfqIndexPage()) {
+      scheduleRfqIndexStatus(true);
+      root.addEventListener('focus', () => scheduleRfqIndexStatus(true));
+      documentRef.addEventListener('visibilitychange', () => { if (documentRef.visibilityState === 'visible') scheduleRfqIndexStatus(true); });
+      if (documentRef.body && typeof MutationObserver !== 'undefined') {
+        new MutationObserver(() => scheduleRfqIndexStatus()).observe(documentRef.body, { childList: true, subtree: true });
+      }
     }
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function createDataPlusExtractor() {

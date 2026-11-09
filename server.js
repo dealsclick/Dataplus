@@ -18543,6 +18543,35 @@ function importedOrderDraftMatch(drafts, source, reference) {
   ) || null;
 }
 
+function importedOrderDraftMatches(drafts, source, references) {
+  const normalizedSource = String(source || "").trim().toLowerCase();
+  const uniqueReferences = [];
+  const seen = new Set();
+  for (const value of Array.isArray(references) ? references : []) {
+    const reference = String(value || "").trim().slice(0, 160);
+    const key = reference.toLowerCase();
+    if (!reference || seen.has(key)) continue;
+    seen.add(key);
+    uniqueReferences.push({ reference, key });
+  }
+  if (!normalizedSource || !uniqueReferences.length) return [];
+  const wanted = new Set(uniqueReferences.map((item) => item.key));
+  const matches = new Map();
+  for (const draft of Array.isArray(drafts) ? drafts : []) {
+    if (String(draft.source || "").trim().toLowerCase() !== normalizedSource) continue;
+    const key = String(draft.marketplaceOrderNumber || "").trim().toLowerCase();
+    if (wanted.has(key) && !matches.has(key)) matches.set(key, draft);
+  }
+  return uniqueReferences.map(({ reference, key }) => {
+    const draft = matches.get(key) || null;
+    return {
+      reference,
+      exists: Boolean(draft),
+      draft: draft ? { id: draft.id, draftNumber: draft.draftNumber || "", status: draft.status || "draft" } : null
+    };
+  });
+}
+
 async function sendOrderDraftExport(res, draft, format = "pdf", variant = "standard") {
   const address = draft.shippingAddress || {};
   const items = Array.isArray(draft.items) ? draft.items : [];
@@ -70895,6 +70924,15 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { exists: Boolean(draft), draft });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] === "import-matches" && parts.length === 3 && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const source = String(body.source || "").trim();
+    const references = Array.isArray(body.references) ? body.references.slice(0, 100) : [];
+    if (!source || !references.length) return sendJson(res, 400, { error: "Choose an import source and at least one reference." });
+    const drafts = await postgres.readStateField("orderDrafts").catch(() => []);
+    return sendJson(res, 200, { matches: importedOrderDraftMatches(drafts, source, references) });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] && parts[3] === "competitor-product" && ["inspect", "create"].includes(parts[4]) && parts.length === 5 && postgres.isPostgresEnabled()) {
     const drafts = await postgres.readStateField("orderDrafts").catch(() => []);
     const rawDraft = (drafts || []).find((row) => String(row.id || "") === String(parts[2]) || String(row.draftNumber || "").toLowerCase() === String(parts[2]).toLowerCase());
@@ -75190,6 +75228,14 @@ async function handleApi(req, res) {
     if (!source || !reference) return sendJson(res, 400, { error: "Choose an import source and reference." });
     const draft = importedOrderDraftMatch(db.orderDrafts, source, reference);
     return sendJson(res, 200, { exists: Boolean(draft), draft });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] === "import-matches" && parts.length === 3) {
+    const body = await parseBody(req);
+    const source = String(body.source || "").trim();
+    const references = Array.isArray(body.references) ? body.references.slice(0, 100) : [];
+    if (!source || !references.length) return sendJson(res, 400, { error: "Choose an import source and at least one reference." });
+    return sendJson(res, 200, { matches: importedOrderDraftMatches(db.orderDrafts, source, references) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "order-drafts" && parts.length === 2) {

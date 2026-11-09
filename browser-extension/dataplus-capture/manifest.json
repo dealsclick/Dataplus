@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "DataPlus Capture",
   "description": "Import BuySupply RFQs, match competitor products, and add products to DataPlus quotes.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "permissions": [
     "activeTab",
     "cookies",
