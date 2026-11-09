@@ -18385,6 +18385,21 @@ function orderDraftTotals(items = []) {
   return items.reduce((sum, item) => sum + Number(item.qty || 0) * Number(item.price || 0), 0);
 }
 
+function roundCurrency(value) {
+  return Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+}
+
+function normalizeQuoteTax(value = {}, taxableAmount = 0) {
+  const taxExempt = value.taxExempt === true;
+  const taxMode = String(value.taxMode || "rate").trim().toLowerCase() === "manual" ? "manual" : "rate";
+  const rawRate = Number(value.taxRate || 0);
+  const taxRate = Number.isFinite(rawRate) ? Math.min(100, Math.max(0, rawRate)) : 0;
+  const rawAmount = Number(value.taxAmount || 0);
+  const manualAmount = Number.isFinite(rawAmount) ? Math.max(0, rawAmount) : 0;
+  const taxAmount = taxExempt ? 0 : roundCurrency(taxMode === "manual" ? manualAmount : Math.max(0, taxableAmount) * taxRate / 100);
+  return { taxExempt, taxMode, taxRate, taxAmount };
+}
+
 function normalizeDraftShippingEstimate(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const amount = Number(value.amount);
@@ -18500,6 +18515,8 @@ function normalizeOrderDraft(db, draft = {}) {
   const revisionNumber = Math.max(1, Number(draft.revisionNumber || 1));
   const shippingEstimate = normalizeDraftShippingEstimate(draft.shippingEstimate);
   const subtotal = orderDraftTotals(items);
+  const shippingAmount = Number(shippingEstimate?.amount || 0);
+  const tax = normalizeQuoteTax(draft, subtotal + shippingAmount);
   const storedTermsSnapshot = normalizeQuoteTermSnapshot(draft.selectedTermsSnapshot);
   const selectedTermIds = normalizeQuoteTermIds(
     Array.isArray(draft.selectedTermIds) ? draft.selectedTermIds : storedTermsSnapshot.map((term) => term.id),
@@ -18539,7 +18556,8 @@ function normalizeOrderDraft(db, draft = {}) {
     items,
     shippingEstimate,
     subtotal,
-    total: subtotal + Number(shippingEstimate?.amount || 0),
+    ...tax,
+    total: roundCurrency(subtotal + shippingAmount + tax.taxAmount),
     createdAt,
     updatedAt: draft.updatedAt || createdAt
   };
@@ -18608,7 +18626,10 @@ async function sendOrderDraftExport(res, draft, format = "pdf", variant = "stand
       lineTotal: Number(item.qty || 0) * Number(item.price || 0),
       shippingService: draft.shippingEstimate?.service || "",
       shippingAmount: Number(draft.shippingEstimate?.amount || 0),
-      quoteTotal: Number(draft.total || orderDraftTotals(items) + Number(draft.shippingEstimate?.amount || 0)),
+      taxExempt: draft.taxExempt === true,
+      taxRate: Number(draft.taxRate || 0),
+      taxAmount: Number(draft.taxAmount || 0),
+      quoteTotal: Number(draft.total || orderDraftTotals(items) + Number(draft.shippingEstimate?.amount || 0) + Number(draft.taxAmount || 0)),
       shipTo,
       customerNote: draft.customerNote || "",
       terms
@@ -18630,7 +18651,10 @@ async function sendOrderDraftExport(res, draft, format = "pdf", variant = "stand
       lineTotal: 0,
       shippingService: draft.shippingEstimate?.service || "",
       shippingAmount: Number(draft.shippingEstimate?.amount || 0),
-      quoteTotal: Number(draft.total || Number(draft.shippingEstimate?.amount || 0)),
+      taxExempt: draft.taxExempt === true,
+      taxRate: Number(draft.taxRate || 0),
+      taxAmount: Number(draft.taxAmount || 0),
+      quoteTotal: Number(draft.total || Number(draft.shippingEstimate?.amount || 0) + Number(draft.taxAmount || 0)),
       shipTo,
       customerNote: draft.customerNote || "",
       terms
@@ -18713,7 +18737,9 @@ function buildOrderFromDraft(db, draft, user = "Luis") {
   }));
   const first = items[0] || {};
   const shippingCost = Number(draft.shippingEstimate?.amount || 0);
-  const total = orderDraftTotals(items) + shippingCost;
+  const subtotal = orderDraftTotals(items);
+  const tax = normalizeQuoteTax(draft, subtotal + shippingCost);
+  const total = roundCurrency(subtotal + shippingCost + tax.taxAmount);
   const productCost = items.every((item) => item.cost !== null)
     ? items.reduce((sum, item) => sum + Number(item.qty || 0) * Number(item.cost), 0)
     : null;
@@ -18743,7 +18769,11 @@ function buildOrderFromDraft(db, draft, user = "Luis") {
     shipDate: "",
     productCost,
     marketplaceFees: 0,
-    shippingCost,
+    subtotal,
+    shippingPaid: shippingCost,
+    shippingAmount: shippingCost,
+    shippingCost: 0,
+    ...tax,
     quotedShipping: draft.shippingEstimate || null,
     refundAmount: 0,
     notes: draft.note || "",
@@ -18768,6 +18798,36 @@ function buildOrderFromDraft(db, draft, user = "Luis") {
       }
     ]
   };
+}
+
+function applyOrderTaxUpdate(order, body = {}) {
+  if (!["taxExempt", "taxMode", "taxRate", "taxAmount"].some((field) => body[field] !== undefined)) return [];
+  const previous = {
+    taxExempt: order.taxExempt === true,
+    taxMode: String(order.taxMode || "manual"),
+    taxRate: Number(order.taxRate || 0),
+    taxAmount: Number(order.taxAmount || 0)
+  };
+  const itemSubtotal = (Array.isArray(order.items) ? order.items : []).reduce((sum, item) => sum + Number(item.qty || 0) * Number(item.price || 0), 0);
+  const subtotal = itemSubtotal || Number(order.subtotal || 0);
+  const shippingAmount = Number(order.shippingPaid ?? order.shippingAmount ?? order.shippingPrice ?? order.quotedShipping?.amount ?? 0) || 0;
+  const discountAmount = Math.max(0, Number(order.discountAmount ?? order.discount ?? order.totalDiscount ?? 0) || 0);
+  const tax = normalizeQuoteTax({
+    taxExempt: body.taxExempt ?? order.taxExempt,
+    taxMode: body.taxMode ?? order.taxMode ?? "manual",
+    taxRate: body.taxRate ?? order.taxRate,
+    taxAmount: body.taxAmount ?? order.taxAmount
+  }, subtotal + shippingAmount);
+  Object.assign(order, tax, {
+    subtotal: roundCurrency(subtotal),
+    total: roundCurrency(subtotal + shippingAmount + tax.taxAmount - discountAmount)
+  });
+  const changes = [];
+  if (previous.taxExempt !== tax.taxExempt) changes.push(`tax exemption changed to ${tax.taxExempt ? "exempt" : "taxable"}`);
+  if (!tax.taxExempt && (previous.taxMode !== tax.taxMode || previous.taxRate !== tax.taxRate || previous.taxAmount !== tax.taxAmount)) {
+    changes.push(`sales tax changed to ${tax.taxAmount.toFixed(2)}`);
+  }
+  return changes;
 }
 
 function addCustomerTimeline(customer, event) {
@@ -62287,6 +62347,7 @@ async function handleApi(req, res) {
         changes.push(`${field === "address" ? "shipping" : "billing"} address updated`);
       }
     }
+    changes.push(...applyOrderTaxUpdate(order, body));
     order.updatedAt = new Date().toISOString();
     if (changes.length) {
       addOrderTimeline(order, {
@@ -71275,6 +71336,10 @@ async function handleApi(req, res) {
       marketplaceOrderNumber: body.marketplaceOrderNumber,
       note: body.note,
       customerNote: body.customerNote,
+      taxExempt: body.taxExempt,
+      taxMode: body.taxMode,
+      taxRate: body.taxRate,
+      taxAmount: body.taxAmount,
       expiresAt: body.expiresAt || defaultQuoteExpiration(30),
       ...termSelection,
       customTerms: body.customTerms,
@@ -71353,11 +71418,16 @@ async function handleApi(req, res) {
       marketplaceOrderNumber: body.marketplaceOrderNumber ?? current.marketplaceOrderNumber,
       note: body.note ?? current.note,
       customerNote: body.customerNote ?? current.customerNote,
+      taxExempt: body.taxExempt ?? current.taxExempt,
+      taxMode: body.taxMode ?? current.taxMode,
+      taxRate: body.taxRate ?? current.taxRate,
+      taxAmount: body.taxAmount ?? current.taxAmount,
       expiresAt: body.expiresAt ?? current.expiresAt,
       ...termSelection,
       customTerms: body.customTerms ?? current.customTerms,
       shippingAddress: body.shippingAddress ?? current.shippingAddress,
       billingAddress: body.billingAddress ?? current.billingAddress,
+      shippingEstimate: body.shippingEstimate ?? current.shippingEstimate,
       items: body.items ?? current.items,
       status: nextStatus,
       salesOwner: body.salesOwner ?? current.salesOwner,
@@ -75401,6 +75471,7 @@ async function handleApi(req, res) {
         order[field] = newValue;
       }
     }
+    changes.push(...applyOrderTaxUpdate(order, body));
     order.updatedAt = new Date().toISOString();
     if (changes.length) {
       addOrderTimeline(order, {
@@ -75449,6 +75520,10 @@ async function handleApi(req, res) {
       marketplaceOrderNumber: body.marketplaceOrderNumber,
       note: body.note,
       customerNote: body.customerNote,
+      taxExempt: body.taxExempt,
+      taxMode: body.taxMode,
+      taxRate: body.taxRate,
+      taxAmount: body.taxAmount,
       expiresAt: body.expiresAt || defaultQuoteExpiration(30),
       ...termSelection,
       customTerms: body.customTerms,
@@ -75524,11 +75599,16 @@ async function handleApi(req, res) {
       marketplaceOrderNumber: body.marketplaceOrderNumber ?? current.marketplaceOrderNumber,
       note: body.note ?? current.note,
       customerNote: body.customerNote ?? current.customerNote,
+      taxExempt: body.taxExempt ?? current.taxExempt,
+      taxMode: body.taxMode ?? current.taxMode,
+      taxRate: body.taxRate ?? current.taxRate,
+      taxAmount: body.taxAmount ?? current.taxAmount,
       expiresAt: body.expiresAt ?? current.expiresAt,
       ...termSelection,
       customTerms: body.customTerms ?? current.customTerms,
       shippingAddress: body.shippingAddress ?? current.shippingAddress,
       billingAddress: body.billingAddress ?? current.billingAddress,
+      shippingEstimate: body.shippingEstimate ?? current.shippingEstimate,
       items: body.items ?? current.items,
       status: nextStatus,
       salesOwner: body.salesOwner ?? current.salesOwner,

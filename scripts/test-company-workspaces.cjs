@@ -9,7 +9,7 @@ const quoteDocuments=require('../lib/quote-documents');
 const serverSource=require('node:fs').readFileSync(require.resolve('../server'),'utf8');
 const draftFunctions={crypto:require('node:crypto'),normalizeAddress:value=>value,...quoteDocuments,...require('../lib/product-price-floors')};
 require('node:vm').createContext(draftFunctions);
-for(const name of ['quoteSupplierCost','nextDraftNumber','nextOrderNumber','normalizeDraftLine','orderDraftTotals','normalizeDraftShippingEstimate','normalizeQuotePipelineStatus','normalizeQuoteActivity','normalizeOrderDraft','buildOrderFromDraft']) {
+for(const name of ['quoteSupplierCost','nextDraftNumber','nextOrderNumber','normalizeDraftLine','orderDraftTotals','roundCurrency','normalizeQuoteTax','normalizeDraftShippingEstimate','normalizeQuotePipelineStatus','normalizeQuoteActivity','normalizeOrderDraft','buildOrderFromDraft']) {
   const start=serverSource.indexOf(`function ${name}(`);
   require('node:vm').runInContext(serverSource.slice(start,serverSource.indexOf('\nfunction ',start+1)),draftFunctions);
 }
@@ -40,6 +40,25 @@ test('quote customer messages remain separate from internal notes',()=>{
   const order=draftFunctions.buildOrderFromDraft(db,draft,'Sales user');
   assert.equal(order.notes,'Staff follow-up only');
   assert.equal(order.customerNote,'Pricing is valid for 14 days.');
+});
+
+test('quote tax supports rates, manual amounts, exemptions, and order conversion',()=>{
+  const db={inventory:[],orders:[],orderDrafts:[],sequence:{order:1000,draft:1000}};
+  const rated=draftFunctions.normalizeOrderDraft(db,{items:[{sku:'A',qty:2,price:50}],shippingEstimate:{amount:10,service:'Ground',package:{weight:5,length:10,width:8,height:6}},taxMode:'rate',taxRate:8.875});
+  assert.equal(rated.subtotal,100);
+  assert.equal(rated.taxAmount,9.76);
+  assert.equal(rated.total,119.76);
+  const manual=draftFunctions.normalizeOrderDraft(db,{...rated,taxMode:'manual',taxAmount:7.25});
+  assert.equal(manual.taxAmount,7.25);
+  assert.equal(manual.total,117.25);
+  const exempt=draftFunctions.normalizeOrderDraft(db,{...manual,taxExempt:true});
+  assert.equal(exempt.taxAmount,0);
+  assert.equal(exempt.total,110);
+  const order=draftFunctions.buildOrderFromDraft(db,rated,'Sales user');
+  assert.equal(order.taxRate,8.875);
+  assert.equal(order.taxAmount,9.76);
+  assert.equal(order.shippingPaid,10);
+  assert.equal(order.total,119.76);
 });
 
 test('quote supplier selections preserve zero cost and make unknown total cost explicit',()=>{
@@ -289,6 +308,12 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   assert.equal(converted.items[0].listPrice,15);
   assert.equal(converted.items[0].mapPrice,8);
   assert.equal(converted.items[0].priceOverridden,true);
+  const taxedOrder=(await op(`/api/orders/${converted.id}`,'PATCH',{taxExempt:false,taxMode:'rate',taxRate:10,taxAmount:0})).response.data.order;
+  assert.equal(taxedOrder.taxAmount,2.85);
+  assert.equal(taxedOrder.total,31.35);
+  const exemptOrder=(await op(`/api/orders/${converted.id}`,'PATCH',{taxExempt:true,taxMode:'rate',taxRate:10})).response.data.order;
+  assert.equal(exemptOrder.taxAmount,0);
+  assert.equal(exemptOrder.total,28.5);
   const routeId=`company-route:${converted.id}:0`;
   const orderRates=(await op(`/api/orders/${converted.id}/shipping/rates`,'POST',{warehouseId:warehouse.id,packageWeight:5,packageLength:10,packageWidth:8,packageHeight:6,routeIds:[routeId]})).response.data;
   assert.equal(orderRates.rateReview.package.weight,5,'Order label dialog package field names are accepted');

@@ -372,6 +372,9 @@ function OrderDetailWorkspace() {
   const walmartIdentifiers = order ? walmartOrderIdentifiers(order, orderReferences) : { purchaseOrderId: "", channelOrderId: "" }
   const channelOrderUrl = order ? channelOrderUrlFor(order, isWalmartOrder ? walmartIdentifiers.purchaseOrderId : channelOrderNumber, shopifyAdminUrl) : ""
   const pnl = (order?.profitLoss || {}) as Record<string, unknown>
+  const orderTaxExempt = order?.taxExempt === true
+  const orderTaxAmount = orderTaxExempt ? 0 : Math.max(0, Number(order?.taxAmount || 0))
+  const orderTaxRate = Math.max(0, Number(order?.taxRate || 0))
   const trackingCarrierOptions = enabledCarrierNames(fulfillmentCarriers)
   const shipmentServiceOptions = enabledCarrierServices(fulfillmentCarriers, carrier, service)
   const trackingEditServiceOptions = enabledCarrierServices(fulfillmentCarriers, trackingEditDraft.carrier, trackingEditDraft.service)
@@ -686,6 +689,7 @@ function OrderDetailWorkspace() {
       <CardContent className="grid gap-2 text-sm">
         <div className="flex justify-between"><span>Items</span><span>{moneyLabel(Number(pnl.itemRevenue || order.subtotal || order.total || 0))}</span></div>
         <div className="flex justify-between"><span>Customer shipping</span><span>{moneyLabel(Number(pnl.shippingCollected || order.shippingPaid || 0))}</span></div>
+        <div className="flex justify-between"><span>Sales tax</span><span>{orderTaxExempt ? "Tax exempt" : `${moneyLabel(orderTaxAmount)}${orderTaxRate > 0 ? ` (${orderTaxRate}%)` : ""}`}</span></div>
         {Number(order.shippingCost || 0) > 0 && <div className="flex justify-between text-muted-foreground"><span>Label cost</span><span>{moneyLabel(Number(order.shippingCost || 0))}</span></div>}
         <div className="flex justify-between border-t pt-2 font-medium"><span>Revenue total</span><span>{moneyLabel(Number(order.total || 0))}</span></div>
         <div className="flex justify-between text-sm font-medium"><span>Est. profit</span><span className={Number(pnl.grossProfit || 0) < 0 ? "text-destructive" : ""}>{moneyLabel(Number(pnl.grossProfit || 0))}</span></div>

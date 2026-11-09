@@ -77,6 +77,7 @@ import {
   Save,
   Search,
   SendHorizontal,
+  ShieldCheck,
   SlidersHorizontal,
   Trash2,
   Truck,
@@ -382,6 +383,7 @@ export function DraftQuoteFieldDetailPage() {
   const [form, setForm] = useState({
     buyer: "", buyerEmail: "", phone: "", source: "Manual", status: "draft", note: "", customerNote: "",
     salesOwner: "", nextAction: "", nextFollowUpAt: "",
+    taxExempt: false, taxMode: "rate" as "rate" | "manual", taxRate: "", taxAmount: "",
     expiresAt: quoteDateAfter(30), selectedTermIds: [] as string[], customTerms: "",
     line1: "", line2: "", city: "", state: "", postalCode: "", country: "US",
     items: [] as QuoteLineForm[],
@@ -519,6 +521,8 @@ export function DraftQuoteFieldDetailPage() {
       source: String(draft.source || "Manual"), status: String(draft.status || "draft"), note: String(draft.note || ""),
       salesOwner: String(draft.salesOwner || ""), nextAction: String(draft.nextAction || ""), nextFollowUpAt: quoteLocalDateTime(draft.nextFollowUpAt),
       customerNote: String(draft.customerNote || ""), expiresAt: String(draft.expiresAt || quoteDateAfter(30)),
+      taxExempt: draft.taxExempt === true, taxMode: String(draft.taxMode || "rate") === "manual" ? "manual" : "rate",
+      taxRate: String(draft.taxRate || ""), taxAmount: String(draft.taxAmount || ""),
       selectedTermIds: Array.isArray(draft.selectedTermIds) ? draft.selectedTermIds.map(String) : [], customTerms: String(draft.customTerms || ""),
       line1: String(address.line1 || address.address1 || ""), line2: String(address.line2 || address.address2 || ""), city: String(address.city || ""),
       state: String(address.state || address.province || ""), postalCode: String(address.postalCode || address.zip || ""), country: String(address.country || "US"),
@@ -687,6 +691,7 @@ export function DraftQuoteFieldDetailPage() {
       await api(`/api/order-drafts/${encodeURIComponent(draftId)}`, { method: "PATCH", body: JSON.stringify({
         buyer: form.buyer.trim(), buyerEmail: form.buyerEmail.trim(), phone: form.phone.trim(), source: form.source, status: form.status,
         salesOwner: form.salesOwner.trim(), nextAction: form.nextAction.trim(), nextFollowUpAt: quoteIsoDateTime(form.nextFollowUpAt),
+        taxExempt: form.taxExempt, taxMode: form.taxMode, taxRate: Number(form.taxRate || 0), taxAmount: Number(form.taxAmount || 0),
         note: form.note.trim(), customerNote: form.customerNote.trim(), expiresAt: form.expiresAt, selectedTermIds: form.selectedTermIds, customTerms: form.customTerms.trim(),
         shippingAddress: { name: form.buyer.trim(), line1: form.line1.trim(), line2: form.line2.trim(), city: form.city.trim(), state: form.state.trim(), postalCode: form.postalCode.trim(), country: form.country.trim() }, items,
       }) })
@@ -772,7 +777,10 @@ export function DraftQuoteFieldDetailPage() {
   const enabledQuoteCarriers = quoteCarriers.filter((provider) => provider.enabled && provider.companyRates)
   const enabledQuoteCarrierLabel = enabledQuoteCarriers.map((provider) => provider.name).join(", ")
   const shippingAmount = Number(savedShippingEstimate?.amount || 0)
-  const total = subtotal + shippingAmount
+  const taxExempt = draft?.taxExempt === true
+  const taxRate = Math.max(0, Number(draft?.taxRate || 0))
+  const taxAmount = taxExempt ? 0 : Math.max(0, Number(draft?.taxAmount || 0))
+  const total = subtotal + shippingAmount + taxAmount
   const resolvedLineSources = lines.map((line) => {
     const skuKey = String(line.sku || "").trim().toLowerCase()
     const options = supplierOptionsBySku[skuKey] || []
@@ -816,7 +824,11 @@ export function DraftQuoteFieldDetailPage() {
   const formCostsComplete = form.items.length > 0 && formCostedLines.length === form.items.length
   const formGrossProfit = formCostsComplete ? formSubtotal - formProductCost : null
   const formGrossMargin = formGrossProfit === null ? null : quoteMarginPercent(formSubtotal, formProductCost)
-  const formEstimatedTotal = formSubtotal + shippingAmount
+  const formTaxableAmount = formSubtotal + shippingAmount
+  const formTaxAmount = form.taxExempt ? 0 : form.taxMode === "manual"
+    ? Math.max(0, Number(form.taxAmount || 0))
+    : Math.round((formTaxableAmount * Math.max(0, Number(form.taxRate || 0)) / 100 + Number.EPSILON) * 100) / 100
+  const formEstimatedTotal = formTaxableAmount + formTaxAmount
   const editorSections = ["customer", "items", "delivery", "terms", "notes"] as const
   const editorSectionIndex = editorSections.indexOf(editorSection)
   const editorCompletion = {
@@ -856,9 +868,10 @@ export function DraftQuoteFieldDetailPage() {
       {followUpDue ? <Alert><Clock3 className="size-4" /><AlertTitle>Follow-up is due</AlertTitle><AlertDescription>{String(draft.nextAction || "Contact the customer and record the next action.")}</AlertDescription></Alert> : null}
       <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_340px] 2xl:grid-cols-[minmax(0,1fr)_380px]">
         <main className="order-2 grid min-w-0 content-start gap-4 xl:order-1">
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
             <Detail label="Status" value={String(draft.status || "draft")} />
             <Detail label="Quote total" value={moneyLabel(total)} />
+            <Detail label="Sales tax" value={taxExempt ? "Tax exempt" : `${moneyLabel(taxAmount)}${taxRate > 0 ? ` · ${taxRate}%` : ""}`} />
             <Detail label="Gross margin" value={grossMargin === null ? `${numberLabel(lines.length - costedLines.length)} line cost${lines.length - costedLines.length === 1 ? "" : "s"} needed` : `${grossMargin.toFixed(1)}% · ${moneyLabel(grossProfit)}`} />
             <Detail label="Valid until" value={expiresAt ? `${dateLabel(`${expiresAt}T12:00:00`)}${expired ? " (expired)" : ""}` : "Not set"} />
           </div>
@@ -883,7 +896,7 @@ export function DraftQuoteFieldDetailPage() {
           return <TableRow key={`${String(line.sku)}-${index}`}><TableCell><div className="flex min-w-72 items-center gap-3"><CatalogImage src={productImage || undefined} alt={productTitle} className="size-12 shrink-0" imageClassName="p-1" /><div className="min-w-0">{line.catalogProductId ? <a className="font-mono text-xs font-semibold text-primary hover:underline" href={`/products/${encodeURIComponent(catalogSku)}`}>{String(line.sku || "-")}</a> : <p className="font-mono text-xs">{String(line.sku || "-")}</p>}<p className="mt-0.5 whitespace-normal font-medium leading-5">{productTitle}</p><div className="mt-1 flex flex-wrap items-center gap-1.5">{line.catalogProductId ? <Badge variant="outline" className={line.catalogMatchReviewRequired ? "border-amber-500/40 text-amber-700 dark:text-amber-300" : "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"}>{line.catalogMatchReviewRequired ? "Catalog candidate" : "Catalog matched"}</Badge> : <Badge variant="outline" className="border-red-500/40 text-red-700 dark:text-red-300">Not in catalog</Badge>}{line.catalogMatchBasis ? <span className="text-xs text-muted-foreground">{String(line.catalogMatchBasis)}</span> : null}</div></div></div></TableCell><TableCell><p className="font-medium">{supplierLoading ? "Loading sources..." : supplierName}</p><p className="font-mono text-xs text-muted-foreground">{supplierSku}</p><div className="mt-1 flex flex-wrap gap-1">{lineSource?.suggested && supplierOption ? <Badge variant="outline" className="border-blue-500/40 text-blue-700 dark:text-blue-300">{supplierQtyKnown && Number(supplierQty) > 0 ? "Lowest available cost" : "Lowest cost suggestion"}</Badge> : supplierOption ? <Badge variant="outline" className="border-emerald-500/40 text-emerald-700 dark:text-emerald-300">Selected source</Badge> : null}{lineSource?.options.length ? <Badge variant="outline">{lineSource.options.length} option{lineSource.options.length === 1 ? "" : "s"}</Badge> : null}</div></TableCell><TableCell>{numberLabel(Number(line.qty || 0))}</TableCell><TableCell>{Number(line.msrp || 0) > 0 ? moneyLabel(Number(line.msrp)) : "Not set"}</TableCell><TableCell>{lineMap > 0 ? moneyLabel(lineMap) : "Not set"}</TableCell><TableCell><p className={cn("font-medium", lineMap > 0 && Number(line.price || 0) < lineMap ? "text-destructive" : "")}>{moneyLabel(Number(line.price || 0))}</p>{lineMap > 0 && Number(line.price || 0) < lineMap ? <p className="text-xs text-destructive">Below MAP</p> : lineSavings > 0 ? <p className="text-xs text-emerald-600">{moneyLabel(lineSavings)} saved</p> : null}</TableCell><TableCell className="font-semibold tabular-nums">{supplierLoading && lineCost === null ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : lineCost === null ? <span className="text-muted-foreground">Not available</span> : <><span>{moneyLabel(lineCost)}</span>{lineSource?.suggested ? <span className="mt-0.5 block text-xs font-normal text-blue-600">Current suggestion</span> : null}</>}</TableCell><TableCell>{supplierLoading ? <Skeleton className="h-5 w-20" /> : supplierQtyKnown ? <><p className={cn("font-medium", Number(supplierQty) > 0 ? "text-emerald-600" : "text-destructive")}>{Number(supplierQty) > 0 ? `${numberLabel(Number(supplierQty))} available` : "Out of stock"}</p><p className="text-xs text-muted-foreground">Supplier inventory{supplierOption?.uom ? ` · ${supplierOption.uom}` : ""}</p></> : <span className="text-sm text-muted-foreground">Not reported</span>}</TableCell><TableCell className={cn("font-medium", lineProfit !== null && lineProfit < 0 ? "text-destructive" : lineProfit !== null ? "text-emerald-600" : "text-muted-foreground")}>{lineMargin === null ? "Cost needed" : `${lineMargin.toFixed(1)}% · ${moneyLabel(lineProfit)}`}</TableCell><TableCell className="font-medium">{moneyLabel(lineRevenue)}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" onClick={() => void findSimilar(line, index)}><Search className="size-4" /> Find similar</Button></TableCell></TableRow>
         })}
       </TableBody></Table></div></CardContent></Card>
-      {enabledQuoteCarriers.length ? <Card><CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Shipping estimate</CardTitle><CardDescription>Compare the shared {enabledQuoteCarrierLabel} accounts for an accurate customer quote.</CardDescription></div><Button size="sm" variant={savedShippingEstimate ? "outline" : "default"} onClick={openShippingRates}><Truck className="size-4" /> {savedShippingEstimate ? "Refresh carrier rates" : "Get carrier rates"}</Button></div></CardHeader><CardContent className="grid gap-3">{savedShippingEstimate ? <><div className="grid gap-3 text-sm sm:grid-cols-5"><Detail label="Carrier / service" value={`${String(savedShippingEstimate.carrier || "Carrier")} ${String(savedShippingEstimate.service || "")}`} /><Detail label="Shipping" value={moneyLabel(shippingAmount)} /><Detail label="Package" value={`${String((savedShippingEstimate.package as Record<string, unknown>)?.weight || "-")} lb / ${String((savedShippingEstimate.package as Record<string, unknown>)?.length || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.width || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.height || "-")} in`} /><Detail label="Rate valid until" value={savedRateExpired ? "Expired - refresh required" : dateLabel(String(savedShippingEstimate.expiresAt || ""))} /><Detail label="Estimated quote total" value={moneyLabel(total)} /></div>{savedRateExpired ? <Alert variant="destructive"><Clock3 className="size-4" /><AlertTitle>Shipping rate expired</AlertTitle><AlertDescription>Refresh carrier rates before accepting or converting this quote.</AlertDescription></Alert> : null}</> : <p className="text-sm text-muted-foreground">No shipping rate has been added. Product subtotal is {moneyLabel(subtotal)}.</p>}</CardContent></Card> : null}
+      {enabledQuoteCarriers.length ? <Card><CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Shipping estimate</CardTitle><CardDescription>Compare the shared {enabledQuoteCarrierLabel} accounts for an accurate customer quote.</CardDescription></div><Button size="sm" variant={savedShippingEstimate ? "outline" : "default"} onClick={openShippingRates}><Truck className="size-4" /> {savedShippingEstimate ? "Refresh carrier rates" : "Get carrier rates"}</Button></div></CardHeader><CardContent className="grid gap-3">{savedShippingEstimate ? <><div className="grid gap-3 text-sm sm:grid-cols-3 xl:grid-cols-6"><Detail label="Carrier / service" value={`${String(savedShippingEstimate.carrier || "Carrier")} ${String(savedShippingEstimate.service || "")}`} /><Detail label="Shipping" value={moneyLabel(shippingAmount)} /><Detail label="Sales tax" value={taxExempt ? "Tax exempt" : moneyLabel(taxAmount)} /><Detail label="Package" value={`${String((savedShippingEstimate.package as Record<string, unknown>)?.weight || "-")} lb / ${String((savedShippingEstimate.package as Record<string, unknown>)?.length || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.width || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.height || "-")} in`} /><Detail label="Rate valid until" value={savedRateExpired ? "Expired - refresh required" : dateLabel(String(savedShippingEstimate.expiresAt || ""))} /><Detail label="Estimated quote total" value={moneyLabel(total)} /></div>{savedRateExpired ? <Alert variant="destructive"><Clock3 className="size-4" /><AlertTitle>Shipping rate expired</AlertTitle><AlertDescription>Refresh carrier rates before accepting or converting this quote.</AlertDescription></Alert> : null}</> : <p className="text-sm text-muted-foreground">No shipping rate has been added. Product subtotal is {moneyLabel(subtotal)} and sales tax is {taxExempt ? "exempt" : moneyLabel(taxAmount)}.</p>}</CardContent></Card> : null}
           <Card>
             <CardHeader className="pb-3"><CardTitle className="text-sm">Quote details</CardTitle><CardDescription>Notes, customer-facing terms, and recent pipeline activity.</CardDescription></CardHeader>
             <CardContent>
@@ -1116,6 +1129,10 @@ export function DraftQuoteFieldDetailPage() {
                   <Field label="Next follow-up"><Input type="datetime-local" value={form.nextFollowUpAt} onChange={(event) => setForm({ ...form, nextFollowUpAt: event.target.value })} /></Field>
                   <div className="sm:col-span-2"><Field label="Next action"><Input value={form.nextAction} onChange={(event) => setForm({ ...form, nextAction: event.target.value })} placeholder="Example: Call purchasing manager with revised pricing" /></Field></div>
                 </div>
+                <section className="grid gap-4 rounded-md border bg-muted/20 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-sm font-semibold">Sales tax</h3><p className="mt-1 text-xs text-muted-foreground">Tax is calculated on products plus any saved customer shipping charge.</p></div><label className="flex items-center gap-2 text-sm font-medium"><Switch checked={form.taxExempt} onCheckedChange={(taxExempt) => setForm((current) => ({ ...current, taxExempt }))} /> Customer/company is tax exempt</label></div>
+                  {!form.taxExempt ? <div className="grid gap-4 sm:grid-cols-3"><Field label="Tax entry"><Select value={form.taxMode} onValueChange={(taxMode: "rate" | "manual") => setForm((current) => ({ ...current, taxMode }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="rate">Tax rate</SelectItem><SelectItem value="manual">Manual amount</SelectItem></SelectContent></Select></Field>{form.taxMode === "rate" ? <Field label="Tax rate (%)"><Input type="number" min="0" max="100" step="0.001" inputMode="decimal" value={form.taxRate} onChange={(event) => setForm((current) => ({ ...current, taxRate: event.target.value }))} placeholder="8.875" /></Field> : <Field label="Tax amount"><Input type="number" min="0" step="0.01" inputMode="decimal" value={form.taxAmount} onChange={(event) => setForm((current) => ({ ...current, taxAmount: event.target.value }))} placeholder="0.00" /></Field>}<Detail label="Calculated tax" value={moneyLabel(formTaxAmount)} /></div> : <Alert><ShieldCheck className="size-4" /><AlertTitle>Tax exempt</AlertTitle><AlertDescription>No sales tax will be added to this quote or the converted order.</AlertDescription></Alert>}
+                </section>
               </TabsContent>
 
               <TabsContent value="delivery" className="m-0 grid gap-6">
@@ -1172,6 +1189,7 @@ export function DraftQuoteFieldDetailPage() {
                     <div className={cn("flex justify-between gap-3", formGrossProfit !== null && formGrossProfit < 0 ? "text-destructive" : formGrossProfit !== null ? "text-emerald-600" : "text-amber-600")}><span>Gross profit</span><span className="font-medium tabular-nums">{formGrossProfit === null ? "Cost needed" : moneyLabel(formGrossProfit)}</span></div>
                     <div className={cn("flex justify-between gap-3", formGrossMargin !== null && formGrossMargin < 0 ? "text-destructive" : formGrossMargin !== null ? "text-emerald-600" : "text-amber-600")}><span>Gross margin</span><span className="font-medium tabular-nums">{formGrossMargin === null ? "-" : `${formGrossMargin.toFixed(1)}%`}</span></div>
                     <div className="flex justify-between gap-3"><span>Saved shipping</span><span className="font-medium tabular-nums">{savedShippingEstimate ? moneyLabel(shippingAmount) : "Not quoted"}</span></div>
+                    <div className="flex justify-between gap-3"><span>Sales tax</span><span className="font-medium tabular-nums">{form.taxExempt ? "Exempt" : moneyLabel(formTaxAmount)}</span></div>
                     <div className="mt-2 flex justify-between gap-3 border-t pt-3 text-base font-semibold"><span>Estimated total</span><span className="tabular-nums">{moneyLabel(formEstimatedTotal)}</span></div>
                   </div>
                 </section>
