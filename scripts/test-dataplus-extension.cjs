@@ -15,12 +15,16 @@ const background = fs.readFileSync(path.join(extensionRoot, 'background.js'), 'u
 const content = fs.readFileSync(path.join(extensionRoot, 'content.js'), 'utf8');
 
 assert.equal(manifest.manifest_version, 3);
-assert.equal(manifest.version, '0.2.3');
+assert.equal(manifest.version, '0.2.4');
 assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
 assert.ok(manifest.permissions.includes('cookies'));
 assert.ok(manifest.permissions.includes('scripting'));
 assert.ok(manifest.permissions.includes('sidePanel'));
 assert.ok(manifest.host_permissions.includes('https://dataplusapp.duckdns.org/*'));
+for (const size of [16, 32, 48, 128]) {
+  assert.equal(manifest.icons[String(size)], `icons/icon-${size}.png`);
+  assert.ok(fs.existsSync(path.join(extensionRoot, manifest.icons[String(size)])), `extension icon ${size}px must exist`);
+}
 
 assert.deepEqual(extractor.parseShippingSummary('+91424234 • test tet • NY • NY 4244'), {
   phone: '+91424234',
@@ -94,6 +98,8 @@ assert.match(content, /dataplus:competitor-search/);
 assert.match(content, /DataPlus competitor research/);
 assert.match(sidepanelHtml, /Sign in to DataPlus first/);
 assert.match(sidepanelHtml, /BuySupply RFQs are checked automatically/);
+assert.match(sidepanelHtml, /id="extension-version"/);
+assert.match(sidepanel, /chrome\.runtime\.getManifest\(\)/);
 assert.match(sidepanelCss, /\[hidden\]\s*\{\s*display:\s*none\s*!important;/);
 assert.match(sidepanelCss, /\.match-commercial/);
 

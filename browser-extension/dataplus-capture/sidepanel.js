@@ -15,6 +15,8 @@ const state = {
 };
 
 const byId = (id) => document.getElementById(id);
+const extensionManifest = chrome.runtime.getManifest();
+byId('extension-version').textContent = `Version ${extensionManifest.version}`;
 
 function element(tag, className = '', text = '') {
   const node = document.createElement(tag);
