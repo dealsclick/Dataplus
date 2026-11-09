@@ -63,6 +63,7 @@ import {
   Info,
   Link2,
   Loader2,
+  Mail,
   MessageSquare,
   MoreHorizontal,
   PackageCheck,
@@ -759,6 +760,7 @@ export function DraftQuoteFieldDetailPage() {
     <PageHeader eyebrow="Operations / Draft quote" title={String(draft?.draftNumber || draftId || "Quote")} description="A customer proposal that remains editable until accepted and converted into an order." action={<div className="flex flex-wrap gap-2">
       <Button size="sm" variant="outline" asChild><a href="/drafts">Back to drafts</a></Button>
       <Button size="sm" disabled={busy || !draft} onClick={openEditor}><Pencil className="size-4" /> Edit quote</Button>
+      <Button size="sm" variant="outline" disabled={busy || !draft} asChild><a href={`/api/order-drafts/${encodeURIComponent(draftId)}/export/email.eml?variant=standard`} target="_blank" rel="noreferrer" onClick={() => toast.success("Outlook quote draft generated with the PDF attached.")}><Mail className="size-4" /> Email quote</a></Button>
       <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" disabled={busy || !draft}><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end">
         <DropdownMenuLabel>Quote status</DropdownMenuLabel>
         {["draft", "reviewing", "quoted", "sent", "accepted", "lost"].map((status) => <DropdownMenuItem key={status} onSelect={() => void updateStatus(status)}>{status.replace(/_/g, " ")}</DropdownMenuItem>)}
@@ -818,7 +820,7 @@ export function DraftQuoteFieldDetailPage() {
 
     <Dialog open={exportOpen} onOpenChange={setExportOpen}><DialogContent className="w-[calc(100vw-2rem)] max-w-3xl"><DialogHeader><DialogTitle>Print or save quote PDF</DialogTitle><DialogDescription>Choose the customer-facing version for this conversation. Internal notes are excluded from every version.</DialogDescription></DialogHeader><div className="grid gap-2">
       {quotePdfVersions.map((version) => { const disabled = version.id === "savings" && !hasCompleteMsrp; const selected = exportVariant === version.id; return <button key={version.id} type="button" disabled={disabled} onClick={() => setExportVariant(version.id)} className={cn("flex items-start gap-3 rounded-md border p-4 text-left transition-colors", selected && "border-primary bg-primary/5", disabled && "cursor-not-allowed opacity-50")}><span className={cn("mt-0.5 grid size-5 shrink-0 place-items-center rounded-full border", selected && "border-primary bg-primary text-primary-foreground")}>{selected ? <CheckCircle2 className="size-3.5" /> : null}</span><span className="min-w-0"><span className="block font-medium">{version.title}</span><span className="mt-1 block text-sm text-muted-foreground">{version.description}</span>{disabled ? <span className="mt-1 block text-xs font-medium text-amber-600">Add MSRP to every quote line to use this version.</span> : null}</span></button> })}
-    </div><DialogFooter><Button variant="outline" onClick={() => setExportOpen(false)}>Cancel</Button><Button onClick={() => window.open(`/api/order-drafts/${encodeURIComponent(draftId)}/export/pdf?variant=${exportVariant}`, "_blank", "noopener,noreferrer")}><Printer className="size-4" /> Open PDF</Button></DialogFooter></DialogContent></Dialog>
+    </div><DialogFooter><Button variant="outline" onClick={() => setExportOpen(false)}>Cancel</Button><Button variant="outline" asChild><a href={`/api/order-drafts/${encodeURIComponent(draftId)}/export/email.eml?variant=${exportVariant}`} target="_blank" rel="noreferrer" onClick={() => toast.success("Outlook quote draft generated with the selected PDF attached.")}><Mail className="size-4" /> Email with Outlook</a></Button><Button onClick={() => window.open(`/api/order-drafts/${encodeURIComponent(draftId)}/export/pdf?variant=${exportVariant}`, "_blank", "noopener,noreferrer")}><Printer className="size-4" /> Open PDF</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={competitorOpen} onOpenChange={(open) => { if (!competitorBusy && !competitorCreateBusy) setCompetitorOpen(open) }}>
       <DialogContent className="flex h-[100dvh] max-h-[100dvh] w-screen max-w-none flex-col gap-0 overflow-hidden rounded-none p-0 sm:h-auto sm:max-h-[92dvh] sm:w-[calc(100vw-2rem)] sm:!max-w-5xl sm:rounded-lg">

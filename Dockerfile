@@ -18,6 +18,7 @@ RUN cd web && npm ci --include=dev
 COPY server.js db.js ./
 COPY lib ./lib
 COPY public ./public
+COPY browser-extension ./browser-extension
 COPY scripts ./scripts
 COPY web ./web
 

@@ -29,6 +29,8 @@ const { evaluateFulfillmentIntervention } = require("./lib/fulfillment-intervent
 const { splitFulfillmentRoutes } = require("./lib/fulfillment-package-split");
 const { fulfillmentRowVisibleInAllShipments, orderVisibleInAllShipments } = require("./lib/fulfillment-shipment-visibility");
 const { QUOTE_EXPORT_VARIANTS, QUOTE_TERM_OPTIONS, buildQuotePdf, defaultQuoteExpiration, defaultQuoteTermIds, normalizeQuoteExpiration, normalizeQuoteTermIds, normalizeQuoteTermLibrary, normalizeQuoteTermSnapshot, quoteTermSnapshot, quoteTerms } = require("./lib/quote-documents");
+const { buildInvoicePdf, buildOutlookDraft, invoiceEmailContent, orderCompanyProfile, quoteEmailContent, safeFileName } = require("./lib/customer-documents");
+const { createStoredZip } = require("./lib/zip-archive");
 const competitorProducts = require("./lib/competitor-products");
 const { createCompanyHandler } = require("./lib/company-http");
 const { resolveMentionedUsers } = require("./lib/order-mentions");
@@ -6736,6 +6738,7 @@ function authAreaForPath(pathname = "") {
 function authRequirementForRequest(req, url, parts = []) {
   const pathname = url.pathname || "";
   const method = req.method || "GET";
+  if (pathname === "/api/system/releases" || pathname.startsWith("/api/system/extensions")) return { area: "overview", action: "view" };
   if (pathname === "/api/fulfillment/diagnostics/client") return { area: "fulfillment", action: "view" };
   if (pathname === "/api/performance/client") return { area: "overview", action: "view" };
   if (pathname === "/api/performance/diagnostics") return { area: "settings.operations", action: "view" };
@@ -18631,6 +18634,22 @@ async function sendOrderDraftExport(res, draft, format = "pdf", variant = "stand
     }];
     return sendCsv(res, rowsToCsv(rows), `${draft.draftNumber || "draft-quote"}.csv`);
   }
+  if (format === "email.eml") {
+    if (!QUOTE_EXPORT_VARIANTS.includes(variant)) return sendJson(res, 400, { error: "Unsupported quote PDF version." });
+    if (variant === "savings" && (!items.length || items.some((item) => !(Number(item.msrp || 0) > 0)))) return sendJson(res, 409, { error: "Add MSRP to every quote line before creating a savings proposal." });
+    const pdf = await buildQuotePdf(draft, variant);
+    const companyName = orderCompanyProfile(draft.companyProfile || {}).name;
+    const message = quoteEmailContent(draft, companyName);
+    const quoteNumber = safeFileName(draft.draftNumber || draft.id || "quote", "quote");
+    const email = buildOutlookDraft({ ...message, attachmentName: `${quoteNumber}.pdf`, attachment: pdf });
+    res.writeHead(200, {
+      "Content-Type": "message/rfc822",
+      "Content-Length": email.length,
+      "Content-Disposition": `attachment; filename="${quoteNumber}-outlook.eml"`,
+      "Cache-Control": "private, no-store"
+    });
+    return res.end(email);
+  }
   if (format !== "pdf") return sendJson(res, 400, { error: "Unsupported export format." });
   if (!QUOTE_EXPORT_VARIANTS.includes(variant)) return sendJson(res, 400, { error: "Unsupported quote PDF version." });
   if (variant === "savings" && (!items.length || items.some((item) => !(Number(item.msrp || 0) > 0)))) return sendJson(res, 409, { error: "Add MSRP to every quote line before creating a savings proposal." });
@@ -18640,6 +18659,29 @@ async function sendOrderDraftExport(res, draft, format = "pdf", variant = "stand
     "Content-Type": "application/pdf",
     "Content-Length": pdf.length,
     "Content-Disposition": `inline; filename="${safeImportFileName(`${draft.draftNumber || "draft-quote"}${suffix}`, "draft-quote")}.pdf"`,
+    "Cache-Control": "private, no-store"
+  });
+  return res.end(pdf);
+}
+
+async function sendOrderInvoiceDocument(res, order, profile = {}, emailDraft = false) {
+  const pdf = await buildInvoicePdf(order, profile);
+  const reference = safeFileName(order.orderNumber || order.id || "order", "order");
+  if (emailDraft) {
+    const message = invoiceEmailContent(order, orderCompanyProfile(profile).name);
+    const email = buildOutlookDraft({ ...message, attachmentName: `invoice-${reference}.pdf`, attachment: pdf });
+    res.writeHead(200, {
+      "Content-Type": "message/rfc822",
+      "Content-Length": email.length,
+      "Content-Disposition": `attachment; filename="invoice-${reference}-outlook.eml"`,
+      "Cache-Control": "private, no-store"
+    });
+    return res.end(email);
+  }
+  res.writeHead(200, {
+    "Content-Type": "application/pdf",
+    "Content-Length": pdf.length,
+    "Content-Disposition": `inline; filename="invoice-${reference}.pdf"`,
     "Cache-Control": "private, no-store"
   });
   return res.end(pdf);
@@ -53305,8 +53347,9 @@ async function handleApi(req, res) {
 
   const isNotificationRequest = url.pathname === "/api/notifications" || url.pathname.startsWith("/api/notifications/");
   const isCollaborationRequest = isNotificationRequest || url.pathname === "/api/mentions" || url.pathname.startsWith("/api/mentions/") || (req.method === "POST" && url.pathname === "/api/activity");
-  if (!changingOwnPassword && !isCollaborationRequest && await companyOperationsHandler(req,res,url,authUser)) return;
-  if (!changingOwnPassword && (postgres.isPostgresEnabled() || companySelection(req))) {
+  const isSharedSystemRequest = url.pathname === "/api/system/releases" || url.pathname.startsWith("/api/system/extensions");
+  if (!changingOwnPassword && !isCollaborationRequest && !isSharedSystemRequest && await companyOperationsHandler(req,res,url,authUser)) return;
+  if (!changingOwnPassword && !isSharedSystemRequest && (postgres.isPostgresEnabled() || companySelection(req))) {
     try {
       if (isCollaborationRequest) await companyStore.authorize(authUser, notificationScope(req));
       else await companyStore.legacyAccess(authUser, companySelection(req));
@@ -60704,6 +60747,12 @@ async function handleApi(req, res) {
     const cacheKey = `dataplus:order-detail:v8:${order.id}:`;
     await redisCache.setJson(cacheKey, payload, 300);
     return sendJson(res, 200, payload);
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && ["invoice.pdf", "invoice-email.eml"].includes(parts[3]) && postgres.isPostgresEnabled()) {
+    const order = await postgres.readOrderByKey(parts[2]);
+    if (!order) return notFound(res);
+    return sendOrderInvoiceDocument(res, order, readSystemSettingsStore(authSettings), parts[3] === "invoice-email.eml");
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "packing-slip" && postgres.isPostgresEnabled()) {
@@ -68677,6 +68726,54 @@ async function handleApi(req, res) {
       processRssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
       uptimeSeconds: Math.round(process.uptime())
     });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/system/extensions") {
+    const extensionDirectory = path.join(__dirname, "browser-extension", "dataplus-capture");
+    const manifestPath = path.join(extensionDirectory, "manifest.json");
+    const manifest = fs.existsSync(manifestPath) ? JSON.parse(fs.readFileSync(manifestPath, "utf8")) : {};
+    return sendJson(res, 200, {
+      extensions: [{
+        id: "dataplus-capture",
+        name: String(manifest.name || "DataPlus Capture"),
+        version: String(manifest.version || "Unavailable"),
+        browser: "Chrome and Microsoft Edge",
+        purpose: "Import BuySupply RFQs, match catalog products, and capture competitor product details without leaving the source website.",
+        features: [
+          "Automatically detects BuySupply RFQs and existing DataPlus quotes",
+          "Imports RFQs into the company quote pipeline",
+          "Matches website products to the DataPlus catalog",
+          "Adds competitor products and pricing to open quotes",
+          "Saves reusable extraction templates for supported websites"
+        ],
+        downloadUrl: "/api/system/extensions/dataplus-capture/download",
+        available: fs.existsSync(manifestPath)
+      }]
+    });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/system/extensions/dataplus-capture/download") {
+    const extensionDirectory = path.join(__dirname, "browser-extension", "dataplus-capture");
+    if (!fs.existsSync(path.join(extensionDirectory, "manifest.json"))) return sendJson(res, 404, { error: "The DataPlus Capture package is not available in this deployment." });
+    const entries = [];
+    const collect = (directory, prefix = "dataplus-capture") => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        if (entry.name.startsWith(".")) continue;
+        const filePath = path.join(directory, entry.name);
+        const archiveName = `${prefix}/${entry.name}`;
+        if (entry.isDirectory()) collect(filePath, archiveName);
+        else if (entry.isFile()) entries.push({ name: archiveName, content: fs.readFileSync(filePath), modifiedAt: fs.statSync(filePath).mtime });
+      }
+    };
+    collect(extensionDirectory);
+    const archive = createStoredZip(entries);
+    res.writeHead(200, {
+      "Content-Type": "application/zip",
+      "Content-Length": archive.length,
+      "Content-Disposition": "attachment; filename=dataplus-capture-extension.zip",
+      "Cache-Control": "private, no-store"
+    });
+    return res.end(archive);
   }
 
   if (req.method === "GET" && url.pathname === "/api/system/releases") {

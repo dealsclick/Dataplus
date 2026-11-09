@@ -1,0 +1,30 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const root = path.resolve(__dirname, "..");
+const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
+const company = fs.readFileSync(path.join(root, "lib", "company-operations-http.js"), "utf8");
+const app = fs.readFileSync(path.join(root, "web", "src", "App.tsx"), "utf8");
+const extensions = fs.readFileSync(path.join(root, "web", "src", "components", "extensions-route.tsx"), "utf8");
+const quotes = fs.readFileSync(path.join(root, "web", "src", "components", "purchasing-workspaces.tsx"), "utf8");
+const orders = fs.readFileSync(path.join(root, "web", "src", "components", "order-detail-route.tsx"), "utf8");
+const dockerfile = fs.readFileSync(path.join(root, "Dockerfile"), "utf8");
+
+assert.match(app, /extensions: "\/extensions"/);
+assert.match(app, /<Puzzle className="size-4" \/> Extensions/);
+assert.match(app, /view === "extensions" && <ExtensionsRoute/);
+assert.match(extensions, /<TabsTrigger value="extensions"/);
+assert.match(extensions, /<TabsTrigger value="changes"/);
+assert.match(extensions, /ReleaseHistorySettings active=/);
+assert.match(server, /\/api\/system\/extensions\/dataplus-capture\/download/);
+assert.match(server, /createStoredZip\(entries\)/);
+assert.match(dockerfile, /COPY browser-extension \.\/browser-extension/);
+assert.match(quotes, /export\/email\.eml\?variant=standard/);
+assert.match(quotes, /Email quote/);
+assert.match(orders, /invoice-email\.eml/);
+assert.match(orders, /Email invoice/);
+assert.match(server, /invoice-email\.eml/);
+assert.match(company, /invoice-email\.eml/);
+assert.match(server, /isSharedSystemRequest[\s\S]*system\/extensions/);
+console.log("Extension center and quote/invoice Outlook actions are wired into both company scopes.");

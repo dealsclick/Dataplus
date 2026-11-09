@@ -24,6 +24,7 @@ MoreHorizontal,
 PackageSearch,
 Pencil,
 Play,
+Puzzle,
 RefreshCw,
 RotateCcw,
 Save,
@@ -97,6 +98,7 @@ const BrandsPage = lazy(() => import("./components/vendor-workspaces").then((mod
 const BrandDetailPage = lazy(() => import("./components/vendor-workspaces").then((module) => ({ default: module.BrandDetailPage })))
 const SalesReportsPage = lazy(() => import("./components/catalog-workspaces").then((module) => ({ default: module.SalesReportsPage })))
 const ShippingReportsPage = lazy(() => import("./components/catalog-workspaces").then((module) => ({ default: module.ShippingReportsPage })))
+const ExtensionsRoute = lazy(() => import("./components/extensions-route").then((module) => ({ default: module.ExtensionsRoute })))
 
 import { Alert,AlertDescription,AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -139,7 +141,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 
-type AppView = "order-imports" | "order-review" | "accounting" | "shipping-disputes" | "sales-reports" | "shipping-reports" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "inventory-reports" | "operations" | "customers" | "customer-detail" | "messages" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "return-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "wiki" | "settings"
+type AppView = "order-imports" | "order-review" | "accounting" | "shipping-disputes" | "sales-reports" | "shipping-reports" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "inventory-reports" | "operations" | "customers" | "customer-detail" | "messages" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "return-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "wiki" | "extensions" | "settings"
 
 type FulfillmentRateRefreshItem = {
   orderId: string
@@ -1528,6 +1530,7 @@ const viewPaths: Record<AppView, string> = {
   "brand-detail": "/brands",
   "ai-chat": "/ai",
   wiki: "/workspace/wiki",
+  extensions: "/extensions",
   settings: "/settings",
 }
 
@@ -1565,6 +1568,7 @@ function viewFromPath(pathname = "/"): AppView {
   if (path.startsWith("/vendors")) return "vendors"
   if (path.startsWith("/ai")) return "ai-chat"
   if (path === "/workspace/wiki") return "wiki"
+  if (path.startsWith("/extensions")) return "extensions"
   if (path.startsWith("/settings")) return "settings"
   return "overview"
 }
@@ -1665,6 +1669,7 @@ const viewPermissionArea: Record<AppView, string> = {
   "brand-detail": "brands.profiles",
   "ai-chat": "ai",
   wiki: "settings.integrations",
+  extensions: "overview",
   settings: "settings",
 }
 
@@ -2728,7 +2733,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
       fulfillment={userCan(authUser, "fulfillment", "view") ? <FulfillmentPage /> : <p>Fulfillment access is required.</p>}
       inventory={userCan(authUser, "warehouse.inventory", "view") ? <InventoryWorkspace /> : <p>Inventory access is required.</p>}
       brand={<><SystemBrandMark settings={state.systemSettings} className="size-8" /><span className="truncate font-semibold">Warehouse</span></>}
-      account={<DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" className="max-w-44"><Users className="size-4" /><span className="truncate">{authUser.name || authUser.username || "Account"}</span><ChevronDown className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-72 max-w-[calc(100vw-1rem)]"><DropdownMenuLabel><span className="block truncate text-sm text-foreground">{authUser.name || authUser.username}</span><span className="block truncate font-normal">{authUser.role || "Warehouse user"}</span></DropdownMenuLabel><DropdownMenuSeparator /><CompanyMenuItems /><DropdownMenuSeparator /><DropdownMenuItem asChild><a href="/warehouse/warehouses"><Warehouse className="size-4" /> Full app</a></DropdownMenuItem><DropdownMenuItem onClick={() => setPasswordOpen(true)}><LockKeyhole className="size-4" /> Change password</DropdownMenuItem><DropdownMenuItem variant="destructive" onClick={() => void signOut()}><UnlockKeyhole className="size-4" /> Sign out</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
+      account={<DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" className="max-w-44"><Users className="size-4" /><span className="truncate">{authUser.name || authUser.username || "Account"}</span><ChevronDown className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-72 max-w-[calc(100vw-1rem)]"><DropdownMenuLabel><span className="block truncate text-sm text-foreground">{authUser.name || authUser.username}</span><span className="block truncate font-normal">{authUser.role || "Warehouse user"}</span></DropdownMenuLabel><DropdownMenuSeparator /><CompanyMenuItems /><DropdownMenuSeparator /><DropdownMenuItem asChild><a href="/warehouse/warehouses"><Warehouse className="size-4" /> Full app</a></DropdownMenuItem><DropdownMenuItem asChild><a href="/extensions"><Puzzle className="size-4" /> Extensions</a></DropdownMenuItem><DropdownMenuItem onClick={() => setPasswordOpen(true)}><LockKeyhole className="size-4" /> Change password</DropdownMenuItem><DropdownMenuItem variant="destructive" onClick={() => void signOut()}><UnlockKeyhole className="size-4" /> Sign out</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
       canReceive={userCan(authUser, "warehouse.receiving", "view")}
       canManageBins={userCan(authUser, "warehouse.locations", "view")}
       canAudit={userCan(authUser, "warehouse.audits", "view")}
@@ -2939,6 +2944,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                     <CompanyMenuItems />
                     <DropdownMenuSeparator />
                     {userCan(authUser, "warehouse", "view") && <DropdownMenuItem asChild className="sm:hidden"><a href="/warehouse/mobile"><Warehouse className="size-4" /> Warehouse Mobile</a></DropdownMenuItem>}
+                    <DropdownMenuItem onClick={() => { window.history.pushState({}, "", "/extensions"); setView("extensions") }}><Puzzle className="size-4" /> Extensions</DropdownMenuItem>
                     <DropdownMenuCheckboxItem checked={colorblindMode} onCheckedChange={(checked) => updateColorblindMode(checked === true)}><Accessibility className="size-4" /> Colorblind-friendly colors</DropdownMenuCheckboxItem>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem onClick={() => setPasswordOpen(true)}><LockKeyhole className="size-4" /> Change password</DropdownMenuItem>
@@ -3100,6 +3106,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 {view === "category-detail" && <StandaloneCategoryPage />}
                 {view === "ai-chat" && <DavidChatPage settings={state.systemSettings || {}} onOpenSettings={() => navigateTo("settings")} />}
                 {view === "wiki" && <WikiWorkspace settings={state.systemSettings || {}} onSaveSettings={saveSystemSettings} />}
+                {view === "extensions" && <ExtensionsRoute />}
                 {view === "vendors" && (
                   <VendorsPage
                     vendors={state.vendors || []}
@@ -3149,6 +3156,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 <Separator className="my-3" />
                 <div className="grid grid-cols-2 gap-1">
                   {userCanView(authUser, "settings") && <Button variant={view === "settings" ? "secondary" : "ghost"} className="h-11 justify-start" onClick={() => openMobileView("settings")}><Settings className="size-4" />Settings</Button>}
+                  <Button variant={view === "extensions" ? "secondary" : "ghost"} className="h-11 justify-start" onClick={() => openMobileView("extensions")}><Puzzle className="size-4" />Extensions</Button>
                   <Button variant="ghost" className="h-11 justify-start" onClick={() => { setTheme(resolvedTheme === "dark" ? "light" : "dark"); setMobileMenuOpen(false) }}>{resolvedTheme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}{resolvedTheme === "dark" ? "Light mode" : "Dark mode"}</Button>
                   <Button variant={colorblindMode ? "secondary" : "ghost"} className="h-11 justify-start" aria-pressed={colorblindMode} onClick={() => updateColorblindMode(!colorblindMode)}><Accessibility className="size-4" />Colorblind colors</Button>
                   <Button variant="ghost" className="h-11 justify-start" onClick={() => { setMobileMenuOpen(false); setPasswordOpen(true) }}><LockKeyhole className="size-4" />Password</Button>
