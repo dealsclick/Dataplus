@@ -582,6 +582,18 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal((await op('/api/inventory/BUY1/operations')).data.inventoryConnected,false);
     assert.equal((await op('/api/inventory/BUY1/channel-availability')).data.availability.length,0);
     assert.equal((await op('/api/inventory/BUY1/suppliers')).data.matches[0].cost,7.25);
+    const competitorResearch=(await op('/api/inventory/BUY1/competitors')).data;
+    assert.equal(competitorResearch.product.sku,'BUY1');
+    assert.deepEqual(competitorResearch.scope,buy);
+    assert.equal(competitorResearch.searchTargets.length,3);
+    assert.equal(competitorResearch.searchTargets[0].identifierType,'Manufacturer part number');
+    const savedCompetitor=(await op('/api/inventory/BUY1/competitors','POST',{confirmed:true,sourceUrl:'https://www.zoro.com/example/i/G1234/',title:'Test product at Zoro',mpn:'MPN',price:12.5,currency:'USD'})).data;
+    assert.equal(savedCompetitor.offer.competitorKey,'zoro');
+    assert.equal(savedCompetitor.offer.matchBasis,'Exact manufacturer part number');
+    assert.equal((await op('/api/inventory/BUY1/competitors')).data.offers.length,1);
+    activeScope=newScope;
+    assert.equal((await op('/api/inventory/NEW1/competitors')).data.offers.length,0,'Competitor offers remain isolated by company');
+    activeScope=buy;
     assert.equal((await op('/api/inventory/DOES-NOT-EXIST')).status,404);
     const draft=(await op('/api/order-drafts','POST',{buyer:'Buyer',items:[{sku:'ABC',qty:2,price:10}],id:'injected',tenantId:'other'})).data.draft;
     assert.notEqual(draft.id,'injected');

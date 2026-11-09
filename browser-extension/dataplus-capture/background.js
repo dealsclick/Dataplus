@@ -1,4 +1,9 @@
 const DEFAULT_BASE_URL = "https://dataplusapp.duckdns.org";
+const COMPETITOR_HOSTS = new Map([
+  ['homedepot.com', 'home-depot'],
+  ['globalindustrial.com', 'global-industrial'],
+  ['zoro.com', 'zoro']
+]);
 
 function normalizeBaseUrl(value) {
   const fallback = DEFAULT_BASE_URL;
@@ -21,6 +26,73 @@ async function settings() {
     extensionToken: String(saved.extensionToken || ''),
     extensionExpiresAt: String(saved.extensionExpiresAt || '')
   };
+}
+
+function competitorHostKey(hostname) {
+  return COMPETITOR_HOSTS.get(String(hostname || '').toLowerCase().replace(/^www\./, '')) || '';
+}
+
+function sanitizeResearchContext(value) {
+  if (!value || typeof value !== 'object') throw new Error('DataPlus did not provide valid competitor research details.');
+  const product = value.product && typeof value.product === 'object' ? value.product : {};
+  const target = value.target && typeof value.target === 'object' ? value.target : {};
+  const scope = value.scope && typeof value.scope === 'object' ? value.scope : {};
+  const sku = String(product.sku || '').trim().slice(0, 160);
+  if (!sku) throw new Error('The DataPlus SKU is required before searching a competitor.');
+  let searchUrl;
+  try { searchUrl = new URL(String(target.searchUrl || '')); } catch { throw new Error('The competitor search URL is invalid.'); }
+  const competitorKey = competitorHostKey(searchUrl.hostname);
+  if (!competitorKey || !['http:', 'https:'].includes(searchUrl.protocol)) throw new Error('Choose a supported competitor website.');
+  return {
+    version: 1,
+    scope: {
+      tenantId: String(scope.tenantId || '').trim().slice(0, 200),
+      companyId: String(scope.companyId || '').trim().slice(0, 200)
+    },
+    product: {
+      productId: String(product.productId || '').trim().slice(0, 200),
+      sku,
+      sourceSku: String(product.sourceSku || '').trim().slice(0, 160),
+      title: String(product.title || '').trim().slice(0, 500),
+      brand: String(product.brand || '').trim().slice(0, 240),
+      manufacturer: String(product.manufacturer || '').trim().slice(0, 240),
+      mfrPartNumber: String(product.mfrPartNumber || '').trim().slice(0, 160),
+      barcode: String(product.barcode || '').replace(/\D/g, '').slice(0, 14),
+      defaultImage: String(product.defaultImage || '').trim().slice(0, 2000)
+    },
+    target: {
+      key: competitorKey,
+      name: String(target.name || competitorKey).trim().slice(0, 160),
+      query: String(target.query || '').trim().slice(0, 200),
+      identifierType: String(target.identifierType || 'SKU').trim().slice(0, 120),
+      searchUrl: searchUrl.toString()
+    },
+    startedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+  };
+}
+
+async function setCompetitorContext(value) {
+  const context = sanitizeResearchContext(value);
+  if (!context.scope.tenantId || !context.scope.companyId) throw new Error('The active DataPlus company could not be identified.');
+  await apiRequest('/api/organization/select', { method: 'POST', body: context.scope });
+  await chrome.storage.local.set({ competitorResearchContext: context });
+  return context;
+}
+
+async function competitorContext() {
+  const saved = await chrome.storage.local.get('competitorResearchContext');
+  const context = saved.competitorResearchContext;
+  if (!context || !context.expiresAt || Date.parse(context.expiresAt) <= Date.now()) {
+    await chrome.storage.local.remove('competitorResearchContext');
+    return null;
+  }
+  return context;
+}
+
+async function clearCompetitorContext() {
+  await chrome.storage.local.remove('competitorResearchContext');
+  return { cleared: true };
 }
 
 async function apiRequest(path, options = {}) {
@@ -155,6 +227,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === 'dataplus:connection-status') return connectionStatus();
     if (message?.type === 'dataplus:rfq-status') return rfqStatus(message.reference);
     if (message?.type === 'dataplus:rfq-statuses') return rfqStatuses(message.references);
+    if (message?.type === 'dataplus:set-competitor-context') return setCompetitorContext(message.context);
+    if (message?.type === 'dataplus:competitor-context') return competitorContext();
+    if (message?.type === 'dataplus:clear-competitor-context') return clearCompetitorContext();
     if (message?.type === 'dataplus:open-sidepanel') {
       if (!sender.tab?.id) throw new Error('Open DataPlus Capture from a website tab.');
       await chrome.sidePanel.open({ tabId: sender.tab.id });

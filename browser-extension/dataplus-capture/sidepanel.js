@@ -8,6 +8,8 @@ const state = {
   existingRfqQuote: null,
   matches: [],
   selectedMatchKey: '',
+  researchContext: null,
+  savedCompetitorOffer: null,
   activeHost: '',
   busy: false
 };
@@ -62,6 +64,11 @@ function runtimeMessage(message) {
 
 function api(path, options = {}) {
   return runtimeMessage({ type: 'dataplus:api', path, options });
+}
+
+async function loadResearchContext() {
+  state.researchContext = await runtimeMessage({ type: 'dataplus:competitor-context' });
+  return state.researchContext;
 }
 
 async function activeTab() {
@@ -284,6 +291,18 @@ function renderRfq(rfq) {
   root.append(actions);
 }
 
+function normalizedIdentifier(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function researchMatchSummary(product, context) {
+  const target = context?.product || {};
+  if (target.barcode && product.gtin && String(target.barcode).replace(/\D/g, '') === String(product.gtin).replace(/\D/g, '')) return 'Exact UPC / GTIN match';
+  if (target.mfrPartNumber && product.mpn && normalizedIdentifier(target.mfrPartNumber) === normalizedIdentifier(product.mpn)) return 'Exact manufacturer part number match';
+  if (target.sku && product.sku && normalizedIdentifier(target.sku) === normalizedIdentifier(product.sku)) return 'Exact SKU match';
+  return 'No exact identifier match. Confirm visually before saving.';
+}
+
 function renderProduct(product) {
   const root = byId('capture-result');
   root.className = 'capture-result';
@@ -308,6 +327,22 @@ function renderProduct(product) {
   summary.append(summaryItem('Observed price', product.competitorPrice === null ? 'Not found' : money(product.competitorPrice, product.currency)));
   root.append(summary);
 
+  const research = state.researchContext;
+  const researchHost = String(research?.target?.searchUrl || '').replace(/^https?:\/\//, '').split('/')[0].replace(/^www\./, '').toLowerCase();
+  const pageHost = String(product.sourceHost || '').replace(/^www\./, '').toLowerCase();
+  const researchingThisSite = Boolean(research?.product?.sku && researchHost === pageHost);
+  if (researchingThisSite) {
+    root.append(element('div', 'inline-message', `Mapping this page to ${research.product.sku} · ${researchMatchSummary(product, research)}`));
+  }
+  if (state.savedCompetitorOffer?.sku) {
+    const saved = element('div', 'inline-message success', `${state.savedCompetitorOffer.competitorName || 'Competitor'} was saved to ${state.savedCompetitorOffer.sku}.`);
+    const link = element('button', 'link-button', 'View product in DataPlus');
+    link.type = 'button';
+    link.addEventListener('click', () => runtimeMessage({ type: 'dataplus:open-tab', path: `/products/${encodeURIComponent(state.savedCompetitorOffer.sku)}` }));
+    saved.append(link);
+    root.append(saved);
+  }
+
   root.append(element('h3', 'subheading', state.matches.length ? 'DataPlus catalog matches' : 'No catalog match found'));
   if (state.matches.length) {
     const matches = element('div', 'match-list');
@@ -330,6 +365,12 @@ function renderProduct(product) {
   }
 
   const actions = element('div', 'action-stack');
+  if (researchingThisSite) {
+    const save = element('button', 'primary-button', `Save competitor match to ${research.product.sku}`);
+    save.type = 'button';
+    save.addEventListener('click', () => saveCompetitorMatch(product, research));
+    actions.append(save);
+  }
   const selected = state.matches.find((match) => String(match.id || match.sku || '') === state.selectedMatchKey);
   const addLabel = selected ? 'Add matched product to open quote' : state.matches.length ? 'Select a catalog product' : 'Create draft SKU and add to quote';
   const add = element('button', 'primary-button', addLabel);
@@ -359,7 +400,9 @@ async function scanPage({ automatic = false } = {}) {
   setNotice(automatic ? 'Checking this RFQ in DataPlus...' : 'Scanning the current page...');
   try {
     const capture = await extractCurrentPage();
+    if (state.capture?.sourceUrl !== capture.sourceUrl) state.savedCompetitorOffer = null;
     state.capture = capture;
+    if (capture.kind === 'product') await loadResearchContext();
     state.activeHost = capture.sourceHost || '';
     state.existingRfqQuote = capture.kind === 'rfq' ? await findExistingRfqQuote(capture) : null;
     state.matches = capture.kind === 'product' ? await findCatalogMatches(capture) : [];
@@ -430,6 +473,39 @@ async function importRfq(rfq) {
       : `${payload.draft?.draftNumber || 'Draft quote'} was imported and opened.`, 'success');
   } catch (error) { setNotice(error.message || 'The RFQ could not be imported.', 'error'); }
   finally { setBusy(false); renderContext(); }
+}
+
+async function saveCompetitorMatch(product, research) {
+  const sku = String(research?.product?.sku || '').trim();
+  if (!sku) return setNotice('Start competitor research from a DataPlus product first.', 'error');
+  const exact = researchMatchSummary(product, research).startsWith('Exact');
+  if (!exact && !window.confirm(`No exact UPC, MPN, or SKU match was detected for ${sku}. Save this page as a user-confirmed visual match?`)) return;
+  setBusy(true);
+  try {
+    const result = await api(`/api/inventory/${encodeURIComponent(sku)}/competitors`, {
+      method: 'POST',
+      body: {
+        confirmed: true,
+        sourceUrl: product.sourceUrl,
+        title: product.title,
+        brand: product.brand,
+        sku: product.sku,
+        gtin: product.gtin,
+        mpn: product.mpn,
+        imageUrl: product.imageUrl,
+        price: product.competitorPrice,
+        currency: product.currency || 'USD',
+        observedAt: new Date().toISOString()
+      }
+    });
+    state.savedCompetitorOffer = { ...(result.offer || {}), sku };
+    state.researchContext = null;
+    await runtimeMessage({ type: 'dataplus:clear-competitor-context' });
+    setNotice(`${result.offer?.competitorName || product.sourceHost || 'Competitor'} was saved to ${sku}.`, 'success');
+    renderCapture();
+  } catch (error) {
+    setNotice(error.message || 'The competitor match could not be saved.', 'error');
+  } finally { setBusy(false); renderContext(); }
 }
 
 async function addProductToQuote(product, match) {
@@ -562,7 +638,14 @@ async function autoScanRfqPage(force = false) {
   const tab = await activeTab();
   const url = new URL(tab.url || 'https://invalid.local');
   const isRfq = /dw\.buysupply\.com$/i.test(url.hostname) && /\/baskets\/view\//i.test(url.pathname);
-  if (!isRfq) return;
+  const context = await loadResearchContext();
+  const targetHost = (() => { try { return new URL(context?.target?.searchUrl || '').hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; } })();
+  const activeHost = url.hostname.replace(/^www\./, '').toLowerCase();
+  const searchPage = (activeHost === 'homedepot.com' && /^\/s\//i.test(url.pathname))
+    || (activeHost === 'globalindustrial.com' && /^\/searchResult/i.test(url.pathname))
+    || (activeHost === 'zoro.com' && /^\/search/i.test(url.pathname));
+  const isCompetitorProduct = Boolean(context?.product?.sku && targetHost === activeHost && !searchPage);
+  if (!isRfq && !isCompetitorProduct) return;
   const key = `${tab.id}:${url.href}`;
   if (!force && key === lastAutoScanKey) return;
   lastAutoScanKey = key;
@@ -614,6 +697,7 @@ async function initialize() {
     state.existingRfqQuote = null;
   }
   await updateActiveHost();
+  if (state.connected) await loadResearchContext();
   if (state.connected) scheduleAutoScan();
 }
 

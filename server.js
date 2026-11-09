@@ -54487,6 +54487,19 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { released: true, order, item: publicInventoryItem(item, { shopifyStatusMap: readShopifyStatusMapSync(), sourceEnrichmentMap: readProductSourceEnrichmentSync() }) });
   }
 
+  if (["GET", "POST"].includes(req.method) && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "competitors" && parts.length === 4 && postgres.isPostgresEnabled()) {
+    const scope = notificationScope(req);
+    try {
+      if (req.method === "GET") {
+        return sendJson(res, 200, { ...await companyStore.competitorOffers(authUser, scope, decodeURIComponent(parts[2])), scope });
+      }
+      const saved = await companyStore.saveCompetitorOffer(authUser, scope, decodeURIComponent(parts[2]), await parseBody(req));
+      return sendJson(res, 201, saved);
+    } catch (error) {
+      return sendJson(res, error.statusCode || 500, { error: error.statusCode ? error.message : "Unable to save the competitor product." });
+    }
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[2] !== "export.csv" && parts.length === 3) {
     if (postgres.isPostgresEnabled()) {
       const cacheKey = `dataplus:product-detail:v4:${crypto.createHash("sha1").update(String(parts[2]).toLowerCase()).digest("hex")}`;
@@ -68743,6 +68756,8 @@ async function handleApi(req, res) {
           "Automatically detects BuySupply RFQs and existing DataPlus quotes",
           "Imports RFQs into the company quote pipeline",
           "Matches website products to the DataPlus catalog",
+          "Searches Home Depot, Global Industrial, and Zoro from a DataPlus SKU",
+          "Saves user-confirmed competitor matches to the product Buy Box",
           "Adds competitor products and pricing to open quotes",
           "Saves reusable extraction templates for supported websites"
         ],

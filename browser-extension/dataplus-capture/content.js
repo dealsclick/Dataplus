@@ -32,6 +32,55 @@
       });
     }
 
+    const isDataPlusPage = () => /^(dataplusapp\.duckdns\.org|localhost|127\.0\.0\.1)$/i.test(String(locationRef?.hostname || ''));
+    const competitorKeyForHost = (hostname) => ({
+      'homedepot.com': 'home-depot',
+      'globalindustrial.com': 'global-industrial',
+      'zoro.com': 'zoro'
+    })[String(hostname || '').toLowerCase().replace(/^www\./, '')] || '';
+
+    function renderCompetitorResearchStatus(context) {
+      if (!documentRef || !context?.product?.sku || competitorKeyForHost(locationRef?.hostname) !== context?.target?.key) return;
+      let host = documentRef.getElementById('dataplus-competitor-research');
+      if (!host) {
+        host = documentRef.createElement('div');
+        host.id = 'dataplus-competitor-research';
+        host.attachShadow({ mode: 'open' });
+        Object.assign(host.style, { position: 'fixed', right: '14px', bottom: '14px', zIndex: '2147483647' });
+        documentRef.documentElement.append(host);
+      }
+      const rootNode = host.shadowRoot;
+      const style = documentRef.createElement('style');
+      style.textContent = `:host{color-scheme:dark;font-family:Inter,ui-sans-serif,system-ui,sans-serif}*{box-sizing:border-box;letter-spacing:0}.card{width:min(320px,calc(100vw - 28px));padding:12px;border:1px solid #35506e;border-radius:7px;background:#111820;color:#edf4fb;box-shadow:0 12px 32px rgba(0,0,0,.28);font-size:12px;line-height:1.4}.title{font-size:13px;font-weight:750}.detail{margin-top:5px;color:#b4c0cc}.sku{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#8bc5ff}.action{display:inline-flex;min-height:30px;align-items:center;justify-content:center;margin-top:9px;padding:5px 10px;border:1px solid #4899e8;border-radius:5px;background:#2186eb;color:#fff;font:inherit;font-weight:700;cursor:pointer}`;
+      const card = documentRef.createElement('section');
+      card.className = 'card';
+      const title = documentRef.createElement('div');
+      title.className = 'title';
+      title.textContent = 'DataPlus competitor research';
+      const detail = documentRef.createElement('div');
+      detail.className = 'detail';
+      detail.append('Select the correct result for ');
+      const sku = documentRef.createElement('span');
+      sku.className = 'sku';
+      sku.textContent = context.product.sku;
+      detail.append(sku, '. On its product page, open DataPlus Capture to confirm the match.');
+      const button = documentRef.createElement('button');
+      button.type = 'button';
+      button.className = 'action';
+      button.textContent = 'Open DataPlus Capture';
+      button.addEventListener('click', () => runtimeMessage({ type: 'dataplus:open-sidepanel' }).catch(() => {}));
+      card.append(title, detail, button);
+      rootNode.replaceChildren(style, card);
+    }
+
+    if (isDataPlusPage()) {
+      root.addEventListener('dataplus:competitor-search', (event) => {
+        runtimeMessage({ type: 'dataplus:set-competitor-context', context: event?.detail }).catch(() => {});
+      });
+    } else if (competitorKeyForHost(locationRef?.hostname)) {
+      runtimeMessage({ type: 'dataplus:competitor-context' }).then(renderCompetitorResearchStatus).catch(() => {});
+    }
+
     function statusStyles() {
       return `
         :host { color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
