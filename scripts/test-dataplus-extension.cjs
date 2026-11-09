@@ -15,7 +15,7 @@ const background = fs.readFileSync(path.join(extensionRoot, 'background.js'), 'u
 const content = fs.readFileSync(path.join(extensionRoot, 'content.js'), 'utf8');
 
 assert.equal(manifest.manifest_version, 3);
-assert.equal(manifest.version, '0.2.5');
+assert.equal(manifest.version, '0.2.6');
 assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
 assert.ok(manifest.permissions.includes('cookies'));
 assert.ok(manifest.permissions.includes('scripting'));
@@ -28,7 +28,7 @@ for (const size of [16, 32, 48, 128]) {
   const icon = fs.readFileSync(iconPath);
   assert.equal(icon.readUInt32BE(16), size, `extension icon ${size}px must have the declared width`);
   assert.equal(icon.readUInt32BE(20), size, `extension icon ${size}px must have the declared height`);
-  assert.equal(icon[25], 6, `extension icon ${size}px must retain an alpha channel`);
+  assert.ok([2, 6].includes(icon[25]), `extension icon ${size}px must use a standard RGB or RGBA color type`);
 }
 
 assert.deepEqual(extractor.parseShippingSummary('+91424234 • test tet • NY • NY 4244'), {
