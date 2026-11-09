@@ -19944,6 +19944,7 @@ async function queueProductDumpImportJob(db = {}, body = {}, options = {}) {
   }
 
   const operation = String(options.operation || body.operation || "Product dump import").trim() || "Product dump import";
+  const background = body.background === true || body.discoveryOnly === true || options.scheduled === true;
   const job = createImportJob(db, {
     section: "Source Catalog",
     category: "Product datadump",
@@ -19955,6 +19956,7 @@ async function queueProductDumpImportJob(db = {}, body = {}, options = {}) {
     processedRows: 0,
     progressPercent: 0,
     phase: "queued",
+    background,
     workerTask: "product-dump-import",
     workerPayload: {
       path: dumpPath,
@@ -19965,6 +19967,7 @@ async function queueProductDumpImportJob(db = {}, body = {}, options = {}) {
       discoveryOnly: body.discoveryOnly === true,
       discoverFirst: body.discoverFirst !== false,
       downloadFtp,
+      background,
       ...(downloadFtp ? {
         ftpHost: dataSourceFeed.ftpHost,
         ftpPort: dataSourceFeed.ftpPort,

@@ -10,6 +10,7 @@ async function main() {
   const result = await dataplus.queueProductDumpImportJob(db, {
     downloadFtp: true,
     discoveryOnly: true,
+    background: true,
     syncMode: 'catalog',
     postImportInventoryMode: 'disabled',
     postImportPriceMode: 'disabled',
