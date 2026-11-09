@@ -577,7 +577,7 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(companyProduct.price,13.97);
     assert.equal(companyProduct.cost,7.25);
     assert.equal(companyProduct.companyInventoryConnected,false);
-    assert.equal(companyProduct.companyCosts[0].supplierName,'Buy Supplier');
+    assert.equal(companyProduct.companyCosts[0].supplierName,'Supplier');
     assert.equal(companyProduct.qty,undefined);
     assert.equal((await op('/api/inventory/BUY1/operations')).data.inventoryConnected,false);
     assert.equal((await op('/api/inventory/BUY1/channel-availability')).data.availability.length,0);
