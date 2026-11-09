@@ -99,7 +99,7 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   const attachmentRoot=require('node:fs').mkdtempSync(require('node:path').join(require('node:os').tmpdir(),'dataplus-company-labels-'));
   t.after(()=>require('node:fs').rmSync(attachmentRoot,{recursive:true,force:true}));
   let state={orders:[],orderDrafts:[],returns:[],customers:[],connections:[],warehouses:[],inventory:[],purchaseOrders:[],suppliers:[],vendors:[],brands:[],sequence:{},orderViews:[]};
-  let response=null,exported=null,selectedCompanyProduct=null,directCatalogLookups=0,wildcardCatalogLookups=0;
+  let response=null,exported=null,selectedCompanyProduct=null,directCatalogLookups=0,wildcardCatalogLookups=0,targetedDraftReads=0;
   const catalogRows=[
     {product_id:'current',source_sku:'ABC',title:'Current item',default_image:'/current.jpg',cost:999,raw:{secret:true}},
     {product_id:'alternate',source_sku:'ALT-1',title:'Alternative item',brand:'Brand',manufacturer:'Maker',mfr_part_number:'MPN-1',barcode:'0123',default_image:'/image.jpg',uom:'Each',sell_price:'25.50',cost:888,raw:{secret:true}},
@@ -108,6 +108,7 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   const store={
     authorize:async(_user,requested)=>{assert.deepEqual(requested,scope);return {id:'buysupply',name:'BuySupply',profile:BUYSUPPLY_PUBLIC_PROFILE};},
     operationalState:async()=>state,
+    orderDraftWorkspace:async(_user,_scope,key)=>{targetedDraftReads++;return {draft:state.orderDrafts.find(row=>row.id===key || row.draftNumber===key) || null,warehouses:state.warehouses,quoteTerms:state.quoteTerms || []};},
     updateOperationalState:async(_user,_scope,_action,work)=>work(state),
     catalogProduct:async(_user,_scope,key)=>{directCatalogLookups++;return catalogRows.find(row=>String(row.source_sku).toLowerCase()===String(key).toLowerCase()) || null;},
     catalog:async()=>{wildcardCatalogLookups++;return {rows:catalogRows};},
@@ -189,6 +190,11 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   assert.equal(created.items[0].image,'/current.jpg');
   assert.ok(directCatalogLookups>0);
   assert.equal(wildcardCatalogLookups,0,'Exact draft SKUs use the indexed product lookup instead of wildcard search');
+  const catalogLookupsBeforeDetail=directCatalogLookups;
+  const draftDetail=(await op(`/api/order-drafts/${created.id}`)).response.data;
+  assert.equal(draftDetail.draft.id,created.id);
+  assert.equal(targetedDraftReads,1,'Draft detail reads one company record instead of reconstructing the workspace');
+  assert.equal(directCatalogLookups,catalogLookupsBeforeDetail,'Saved catalog matches do not block draft rendering on repeat enrichment');
   assert.equal(created.salesOwner,'Owner');
   assert.equal(created.statusChangedBy,'Owner');
   assert.equal(created.quoteActivity[0].type,'created');
