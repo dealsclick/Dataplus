@@ -512,7 +512,7 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     await store.selectProduct(owner,linq,{productId:'p1',sku:'LINQ1'});
     await assert.rejects(store.saveCost(owner,linq,{productId:'p1',vendorAccountId:vendor.id,unitCost:'9',uom:'Each'}),error=>error.code==='23503');
     assert.equal((await store.costs(owner,linq,'p1')).length,0);
-    assert.equal((await pool.query('select cost from products')).rows[0].cost,'888');
+    assert.equal((await pool.query('select cost from products')).rows[0].cost,'8.50');
     await store.saveMember(owner,tenantId,{userId:staff.id,companyIds:['buysupply']},[owner,staff]);
     await store.authorize(staff,buy);
     assert.equal((await store.companyProfile(staff,buy)).displayName,'BuySupply');
