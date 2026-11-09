@@ -167,8 +167,7 @@
     function rfqIndexEntries() {
       const entries = [];
       const seenRows = new Set();
-      for (const link of documentRef.querySelectorAll('a[href*="/baskets/view/"]')) {
-        const row = link.closest('tr');
+      for (const row of documentRef.querySelectorAll('table tr')) {
         if (!row || seenRows.has(row)) continue;
         const reference = String(row.textContent || '').match(/\bQ-\d{6}-[A-Z0-9]+\b/i)?.[0] || '';
         if (!reference) continue;
@@ -187,7 +186,7 @@
         header.scope = 'col';
         header.textContent = 'DataPlus';
         Object.assign(header.style, { minWidth: '142px', whiteSpace: 'nowrap' });
-        headerRow.insertBefore(header, headerRow.lastElementChild);
+        headerRow.insertBefore(header, headerRow.children[1] || null);
       }
       for (const entry of entries) {
         let cell = entry.row.querySelector(':scope > [data-dataplus-rfq-cell]');
@@ -195,7 +194,7 @@
           cell = documentRef.createElement('td');
           cell.setAttribute('data-dataplus-rfq-cell', entry.reference);
           Object.assign(cell.style, { minWidth: '142px', verticalAlign: 'middle' });
-          entry.row.insertBefore(cell, entry.row.lastElementChild);
+          entry.row.insertBefore(cell, entry.row.children[1] || null);
           const host = documentRef.createElement('span');
           host.attachShadow({ mode: 'open' });
           cell.append(host);
