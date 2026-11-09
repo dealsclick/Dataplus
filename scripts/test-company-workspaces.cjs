@@ -569,7 +569,11 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal((await op('/api/orders')).data.orders.length,0);
     const companyInventory=(await op('/api/inventory?q=SKU1')).data.inventory[0];
     assert.equal(companyInventory.price,13.97);
-    assert.equal(companyInventory.cost,null);
+    assert.equal(companyInventory.cost,7.25);
+    assert.equal(companyInventory.supplier,'Supplier');
+    assert.equal(companyInventory.mapPrice,null);
+    assert.equal(companyInventory.available,null);
+    assert.equal(companyInventory.inventoryConnected,false);
     assert.equal(companyInventory.status,'active');
     const companyProduct=(await op('/api/inventory/BUY1')).data.item;
     assert.equal(companyProduct.companyCatalogView,true);

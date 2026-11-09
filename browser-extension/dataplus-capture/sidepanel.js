@@ -30,6 +30,21 @@ function money(value, currency = 'USD') {
   catch { return `$${number.toFixed(2)}`; }
 }
 
+function numericValue(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function availableLabel(product = {}) {
+  if (product.inventoryConnected === false) return 'Not connected';
+  const explicit = numericValue(product.available);
+  const quantity = numericValue(product.qty ?? product.stockQty);
+  const reserved = numericValue(product.reserved) || 0;
+  const available = explicit === null && quantity !== null ? quantity - reserved : explicit;
+  return available === null ? 'Unknown' : Math.max(0, available).toLocaleString('en-US');
+}
+
 function dateLabel(value) {
   const date = new Date(value || 0);
   return Number.isFinite(date.getTime()) ? date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : '';
@@ -348,7 +363,9 @@ function renderProduct(product) {
     const matches = element('div', 'match-list');
     for (const match of state.matches) {
       const key = String(match.id || match.sku || '');
-      const button = element('button', `match-row${key === state.selectedMatchKey ? ' selected' : ''}`);
+      const selected = key === state.selectedMatchKey;
+      const row = element('div', `match-row-shell${selected ? ' selected' : ''}`);
+      const button = element('button', 'match-row');
       button.type = 'button';
       button.append(element('strong', '', `${match.sku || 'SKU'} · ${match.title || 'Catalog product'}`));
       const meta = element('div', 'match-meta');
@@ -356,8 +373,23 @@ function renderProduct(product) {
       if (match.price !== null && match.price !== undefined) meta.append(element('span', '', money(match.price)));
       if (match.brand) meta.append(element('span', '', match.brand));
       button.append(meta);
+      const supplier = match.supplier || match.vendor || match.vendorOffers?.[0]?.supplier || 'Not set';
+      const cost = numericValue(match.sellUnitCost ?? match.cost);
+      const mapPrice = numericValue(match.mapPrice);
+      const commercial = element('div', 'match-commercial');
+      commercial.append(summaryItem('Supplier', supplier));
+      commercial.append(summaryItem('Cost', cost === null ? 'Not set' : money(cost)));
+      commercial.append(summaryItem('MAP', mapPrice === null ? 'Not set' : money(mapPrice)));
+      commercial.append(summaryItem('Available', availableLabel(match)));
+      button.append(commercial);
       button.addEventListener('click', () => { state.selectedMatchKey = key; renderCapture(); });
-      matches.append(button);
+      const open = element('button', 'match-open', '↗');
+      open.type = 'button';
+      open.title = `Open ${match.sku || 'product'} in DataPlus`;
+      open.setAttribute('aria-label', open.title);
+      open.addEventListener('click', () => runtimeMessage({ type: 'dataplus:open-tab', path: `/products/${encodeURIComponent(match.sku || key)}` }));
+      row.append(button, open);
+      matches.append(row);
     }
     root.append(matches);
   } else {

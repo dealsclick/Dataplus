@@ -27865,6 +27865,7 @@ function publicInventoryItem(item = {}, context = {}) {
   item = applySourceCategoryMainPromotion(item, context.systemSettings || readSystemSettingsStore(dbCache.data?.systemSettings || {}));
   const cost = sourceCatalogCost(item);
   const pricedItem = { ...item, cost, sourceCost: cost };
+  const priceFloors = sourcePriceFloors(pricedItem);
   const sellUnitCost = productSellUnitCost(pricedItem, rulesDb);
   const uomInfo = productUomInfo(item);
   const shippingClassification = productShippingClassification(item);
@@ -27981,6 +27982,7 @@ function publicInventoryItem(item = {}, context = {}) {
     channelInventoryPreview: productChannelInventoryPreview(item, rulesDb),
     price: websitePrice,
     websitePrice,
+    mapPrice: priceFloors.mapPrice > 0 ? priceFloors.mapPrice : null,
     cost,
     sourceCost: cost,
     sellUnitCost,
@@ -28136,6 +28138,7 @@ function publicInventoryListItem(item = {}, context = {}) {
   );
   const cost = sourceCatalogCost(item);
   const pricedItem = { ...item, cost, sourceCost: cost };
+  const priceFloors = sourcePriceFloors(pricedItem);
   const sellUnitCost = productSellUnitCost(pricedItem, rulesDb);
   const systemVariants = systemProductVariants(pricedItem, rulesDb);
   const primaryVariant = systemVariants[0] || {};
@@ -28235,6 +28238,7 @@ function publicInventoryListItem(item = {}, context = {}) {
     })),
     price: websitePrice,
     websitePrice,
+    mapPrice: priceFloors.mapPrice > 0 ? priceFloors.mapPrice : null,
     cost,
     sellUnitCost,
     listPrice,
