@@ -102,6 +102,8 @@ const companyOperationsHandler = createCompanyOperationsHandler({
   competitorInspectOptions: async () => ({ scrapeGraph: getScrapeGraphRuntimeConfig(await readRuntimeSystemSettings(dbCache.data?.systemSettings || {})) }),
   createCompetitorDraftProduct: createQuoteCompetitorDraftProduct,
   readSharedCatalogProduct: readSharedCompanyCatalogProduct,
+  readSharedCatalogSupplierCoverage: readSharedCompanyCatalogSupplierCoverage,
+  readSharedQuoteSupplierOptions: quoteSupplierOptionsForSku,
   attachmentRoot: () => path.join(DATA_DIR, "company-order-attachments")
 });
 const { importProgress } = require("./lib/import-progress");
@@ -28141,6 +28143,69 @@ async function readSharedCompanyCatalogProduct(key) {
   });
 }
 
+async function readSharedCompanyCatalogSupplierCoverage(key) {
+  if (!postgres.isPostgresEnabled()) return null;
+  const product = await postgres.readProductByKey(String(key || ""));
+  if (!product) return null;
+  const cacheKey = `dataplus:supplier-coverage:v2:${crypto.createHash("sha1").update(`${String(product.sku || key).toLowerCase()}|${String(product.updatedAt || "")}`).digest("hex")}`;
+  const cached = await redisCache.getJson(cacheKey);
+  if (cached) return { ...cached, cached: true };
+  const [coverage, similarity] = await Promise.all([
+    postgres.readProductSupplierLinks({ productId: product.id, sku: product.sku }),
+    postgres.readProductSimilarityGroup({ productId: product.id, sku: product.sku })
+  ]);
+  const coverageMatches = Array.isArray(coverage.matches) ? coverage.matches : [];
+  const primarySupplier = product.supplier || product.vendor || "";
+  const primarySku = product.vendorSku || product.sku || "";
+  const exists = coverageMatches.some((row) => {
+    const confirmed = ["confirmed", "approved", ""].includes(String(row.matchStatus || "").toLowerCase());
+    const supplierIdentifiers = [row.sourceSku, row.vendorSku, row.sku]
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean);
+    return confirmed
+      && String(row.supplier || "").toLowerCase() === String(primarySupplier).toLowerCase()
+      && supplierIdentifiers.includes(String(primarySku).trim().toLowerCase());
+  });
+  const matches = exists || !primarySupplier ? coverageMatches : [{
+    supplier: primarySupplier,
+    supplierCode: product.supplierCode || "",
+    sku: product.sku || "",
+    sourceSku: primarySku,
+    vendorSku: primarySku,
+    title: product.marketplaceTitle || product.title || "",
+    brand: product.brand || "",
+    manufacturer: product.manufacturer || "",
+    mfrPartNumber: product.mfrPartNumber || "",
+    barcode: product.barcode || "",
+    category: product.mainCategory || product.category || "",
+    sourceCategory: product.sourceCategory || "",
+    cost: product.cost,
+    qty: product.qty ?? product.stockQty,
+    stockStatus: product.stockStatus || "",
+    uom: product.uom || "",
+    uomQty: product.uomQty,
+    discontinued: Boolean(product.toBeDiscontinued),
+    defaultImage: product.defaultImage || "",
+    updatedAt: product.updatedAt || "",
+    matchType: "primary",
+    matchStatus: "confirmed",
+    requiresReview: false
+  }, ...coverageMatches];
+  const confirmedMatches = matches.filter((row) => ["confirmed", "approved", ""].includes(String(row.matchStatus || "").toLowerCase()));
+  const supplierCount = new Set(confirmedMatches.map((row) => String(row.supplierCode || row.supplier || "").trim().toLowerCase()).filter(Boolean)).size;
+  const relatedSkus = Array.isArray(similarity.members) ? similarity.members : [];
+  const payload = {
+    matchType: coverage.matchType,
+    supplierCount,
+    pendingReviewCount: Number(coverage.pendingReviewCount || 0),
+    matches,
+    relatedSkuCount: Math.max(0, relatedSkus.length - 1),
+    relatedSkus
+  };
+  await redisCache.setJson(cacheKey, payload, 300);
+  return payload;
+}
+
 function ebayCategoryText(value = "") {
   return String(value || "").trim();
 }
@@ -54635,63 +54700,8 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "suppliers" && parts.length === 4 && postgres.isPostgresEnabled()) {
-    const product = await postgres.readProductByKey(parts[2]);
-    if (!product) return notFound(res);
-    const cacheKey = `dataplus:supplier-coverage:v2:${crypto.createHash("sha1").update(`${String(product.sku || parts[2]).toLowerCase()}|${String(product.updatedAt || "")}`).digest("hex")}`;
-    const cached = await redisCache.getJson(cacheKey);
-    if (cached) return sendJson(res, 200, { ...cached, cached: true });
-    const [coverage, similarity] = await Promise.all([
-      postgres.readProductSupplierLinks({ productId: product.id, sku: product.sku }),
-      postgres.readProductSimilarityGroup({ productId: product.id, sku: product.sku })
-    ]);
-    const primarySupplier = product.supplier || product.vendor || "";
-    const primarySku = product.vendorSku || product.sku || "";
-    const exists = (coverage.matches || []).some((row) => {
-      const confirmed = ["confirmed", "approved", ""].includes(String(row.matchStatus || "").toLowerCase());
-      const supplierIdentifiers = [row.sourceSku, row.vendorSku, row.sku]
-        .map((value) => String(value || "").trim().toLowerCase())
-        .filter(Boolean);
-      return confirmed
-        && String(row.supplier || "").toLowerCase() === String(primarySupplier).toLowerCase()
-        && supplierIdentifiers.includes(String(primarySku).trim().toLowerCase());
-    });
-    const matches = exists || !primarySupplier ? coverage.matches : [{
-      supplier: primarySupplier,
-      supplierCode: product.supplierCode || "",
-      sku: product.sku || "",
-      sourceSku: primarySku,
-      vendorSku: primarySku,
-      title: product.marketplaceTitle || product.title || "",
-      brand: product.brand || "",
-      manufacturer: product.manufacturer || "",
-      mfrPartNumber: product.mfrPartNumber || "",
-      barcode: product.barcode || "",
-      category: product.mainCategory || product.category || "",
-      sourceCategory: product.sourceCategory || "",
-      cost: product.cost,
-      qty: product.qty ?? product.stockQty,
-      stockStatus: product.stockStatus || "",
-      uom: product.uom || "",
-      uomQty: product.uomQty,
-      discontinued: Boolean(product.toBeDiscontinued),
-      defaultImage: product.defaultImage || "",
-      updatedAt: product.updatedAt || "",
-      matchType: "primary",
-      matchStatus: "confirmed",
-      requiresReview: false
-    }, ...(coverage.matches || [])];
-    const confirmedMatches = matches.filter((row) => ["confirmed", "approved", ""].includes(String(row.matchStatus || "").toLowerCase()));
-    const supplierCount = new Set(confirmedMatches.map((row) => String(row.supplierCode || row.supplier || "").trim().toLowerCase()).filter(Boolean)).size;
-    const relatedSkus = Array.isArray(similarity.members) ? similarity.members : [];
-    const payload = {
-      matchType: coverage.matchType,
-      supplierCount,
-      pendingReviewCount: Number(coverage.pendingReviewCount || 0),
-      matches,
-      relatedSkuCount: Math.max(0, relatedSkus.length - 1),
-      relatedSkus
-    };
-    await redisCache.setJson(cacheKey, payload, 300);
+    const payload = await readSharedCompanyCatalogSupplierCoverage(parts[2]);
+    if (!payload) return notFound(res);
     return sendJson(res, 200, payload);
   }
 

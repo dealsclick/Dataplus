@@ -99,16 +99,18 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   const attachmentRoot=require('node:fs').mkdtempSync(require('node:path').join(require('node:os').tmpdir(),'dataplus-company-labels-'));
   t.after(()=>require('node:fs').rmSync(attachmentRoot,{recursive:true,force:true}));
   let state={orders:[],orderDrafts:[],returns:[],customers:[],connections:[],warehouses:[],inventory:[],purchaseOrders:[],suppliers:[],vendors:[],brands:[],sequence:{},orderViews:[]};
-  let response=null,exported=null,selectedCompanyProduct=null;
+  let response=null,exported=null,selectedCompanyProduct=null,directCatalogLookups=0,wildcardCatalogLookups=0;
+  const catalogRows=[
+    {product_id:'current',source_sku:'ABC',title:'Current item',default_image:'/current.jpg',cost:999,raw:{secret:true}},
+    {product_id:'alternate',source_sku:'ALT-1',title:'Alternative item',brand:'Brand',manufacturer:'Maker',mfr_part_number:'MPN-1',barcode:'0123',default_image:'/image.jpg',uom:'Each',sell_price:'25.50',cost:888,raw:{secret:true}},
+    {product_id:'rfq-product',source_sku:'4510-01-521-9866',title:'PURELL-SKILCRAFT Wall Dispenser',brand:'AbilityOne',manufacturer:'AbilityOne',mfr_part_number:'4510-01-521-9866',default_image:'/rfq-product.jpg',uom:'Each'},
+  ];
   const store={
     authorize:async(_user,requested)=>{assert.deepEqual(requested,scope);return {id:'buysupply',name:'BuySupply',profile:BUYSUPPLY_PUBLIC_PROFILE};},
     operationalState:async()=>state,
     updateOperationalState:async(_user,_scope,_action,work)=>work(state),
-    catalog:async()=>({rows:[
-      {product_id:'current',source_sku:'ABC',title:'Current item',default_image:'/current.jpg',cost:999,raw:{secret:true}},
-      {product_id:'alternate',source_sku:'ALT-1',title:'Alternative item',brand:'Brand',manufacturer:'Maker',mfr_part_number:'MPN-1',barcode:'0123',default_image:'/image.jpg',uom:'Each',sell_price:'25.50',cost:888,raw:{secret:true}},
-      {product_id:'rfq-product',source_sku:'4510-01-521-9866',title:'PURELL-SKILCRAFT Wall Dispenser',brand:'AbilityOne',manufacturer:'AbilityOne',mfr_part_number:'4510-01-521-9866',default_image:'/rfq-product.jpg',uom:'Each'},
-    ]}),
+    catalogProduct:async(_user,_scope,key)=>{directCatalogLookups++;return catalogRows.find(row=>String(row.source_sku).toLowerCase()===String(key).toLowerCase()) || null;},
+    catalog:async()=>{wildcardCatalogLookups++;return {rows:catalogRows};},
     costs:async(_user,_scope,productId)=>productId==='current' ? [
       {vendor_account_id:'vendor-standard',unit_cost:'6.00',uom:'Each',supplier_name:'Standard Supply'},
       {vendor_account_id:'vendor-low',unit_cost:'4.00',uom:'Each',supplier_name:'Lowest Cost Supply'},
@@ -146,6 +148,10 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
     quoteVeeqo:async()=>{throw new Error('Veeqo test account unavailable');},
     competitorProducts:competitorService,
     createCompetitorDraftProduct:async({inspection,overrides})=>({id:'shared-new',sku:'DPS20001',title:overrides.title || inspection.product.title,status:'Draft',catalogReviewStatus:'needs_details'}),
+    readSharedQuoteSupplierOptions:async sku=>sku==='ABC'?{mapPrice:12,listPrice:20,options:[
+      {key:'supplier:zoro',productId:'current',supplierName:'Zoro',supplierSku:'ABC-Z',managedSku:'ABC',cost:5,qty:3,uom:'Each',selectable:true,isPrimary:true},
+      {key:'product:cei',productId:'cei-product',supplierName:'CEI',supplierSku:'ABC-C',managedSku:'BUY-ABC',cost:8,qty:14,uom:'Each',selectable:true,related:true}
+    ]}:{options:[]},
     purchaseUps:async input=>{
       assert.equal(input.serviceCode,'03');assert.equal(input.package.weight,5);assert.equal(input.to.postalCode,'10001');
       return {content:Buffer.from('GIF89a'),mimeType:'image/gif',format:'GIF',trackingNumber:'1Z999AA10123456784',shipmentIdentificationNumber:'1Z999AA10123456784',service:'UPS Ground',serviceCode:'03',amount:8.5,currency:'USD',transactionId:'test-transaction'};
@@ -181,6 +187,8 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   assert.equal(created.items[0].catalogMatchedSku,'ABC');
   assert.equal(created.items[0].catalogMatchBasis,'Catalog SKU');
   assert.equal(created.items[0].image,'/current.jpg');
+  assert.ok(directCatalogLookups>0);
+  assert.equal(wildcardCatalogLookups,0,'Exact draft SKUs use the indexed product lookup instead of wildcard search');
   assert.equal(created.salesOwner,'Owner');
   assert.equal(created.statusChangedBy,'Owner');
   assert.equal(created.quoteActivity[0].type,'created');
@@ -210,10 +218,14 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   assert.equal(selectedCompanyProduct.productId,'shared-new');
   assert.equal(selectedCompanyProduct.status,'draft');
   const supplierOptions=(await op(`/api/order-drafts/${created.id}/supplier-options?sku=ABC`)).response.data.options;
-  assert.equal(supplierOptions.length,2);
+  assert.equal(supplierOptions.length,4);
   assert.equal(supplierOptions[0].supplierName,'Lowest Cost Supply');
   assert.equal(supplierOptions[0].cost,4);
-  assert.equal((await op(`/api/order-drafts/${created.id}/supplier-options?sku=ABC`)).response.data.product.image,'/current.jpg');
+  const supplierOptionsResponse=(await op(`/api/order-drafts/${created.id}/supplier-options?sku=ABC`)).response.data;
+  assert.equal(supplierOptionsResponse.product.image,'/current.jpg');
+  assert.equal(supplierOptionsResponse.costScope,'organization-shared');
+  assert.equal(supplierOptionsResponse.mapPrice,12);
+  assert.ok(supplierOptions.some(option=>option.supplierName==='CEI' && option.qty===14));
   const withSupplier=(await op(`/api/order-drafts/${created.id}`,'PATCH',{items:[{
     sku:'ABC',title:'Current item',qty:2,price:10,priceOverridden:true,listPrice:15,mapPrice:8,selectedSupplierKey:'vendor:vendor-low'
   }]})).response.data.draft;
@@ -319,6 +331,17 @@ test('company product detail shares the complete normalized catalog while preser
       id:'product-1',sku:'BUSB1441513GEC',title:'Touch Up Paint',marketplaceTitle:'Touch Up Paint, Munsell Green',supplier:'Global',vendorSku:'B1441513',
       shortDescription:'Shared description',cost:55.95,sellUnitCost:55.95,price:71.62,websitePrice:71.62,
       itemLength:2.7,itemWidth:2.7,itemHeight:7.75,itemWeight:1.1,packageLength:2.7,packageWidth:2.7,packageHeight:7.75,packageWeight:1.1
+    }:null,
+    readSharedCatalogSupplierCoverage:async key=>key==='BUSB1441513GEC'?{
+      matchType:'upc',supplierCount:2,pendingReviewCount:0,
+      matches:[
+        {supplier:'Global',vendorSku:'B1441513',cost:55.95,qty:4,matchType:'primary',matchStatus:'confirmed'},
+        {supplier:'CEI',vendorSku:'CEI-PAINT',cost:49.25,qty:11,matchType:'upc',matchStatus:'confirmed'}
+      ],
+      relatedSkuCount:1,relatedSkus:[
+        {productId:'product-1',sku:'BUSB1441513GEC',supplier:'Global',cost:55.95,isCurrent:true},
+        {productId:'product-2',sku:'BUYPAINTCEI',supplier:'CEI',cost:49.25,isCurrent:false,matchTypes:['upc']}
+      ]
     }:null});
   const get=async(path)=>{await handler({method:'GET'},{},new URL(path,'http://localhost'),user);return response;};
   const detail=await get('/api/inventory/BUSB1441513GEC');
@@ -341,7 +364,11 @@ test('company product detail shares the complete normalized catalog while preser
   assert.equal(operations.data.inventoryConnected,true);
   assert.equal(operations.data.warehouses[0].name,'Staten Island 2');
   assert.equal((await get('/api/inventory/BUSB1441513GEC/channel-availability')).data.availability.length,0);
-  assert.equal((await get('/api/inventory/BUSB1441513GEC/suppliers')).data.matches[0].supplier,'BuySupply vendor');
+  const supplierCoverage=(await get('/api/inventory/BUSB1441513GEC/suppliers')).data;
+  assert.equal(supplierCoverage.supplierCount,2);
+  assert.equal(supplierCoverage.matches[1].supplier,'CEI');
+  assert.equal(supplierCoverage.relatedSkus[1].sku,'BUYPAINTCEI');
+  assert.equal(supplierCoverage.inventorySharedAcrossCompanies,true);
   assert.equal((await get('/api/inventory/MISSING')).status,404);
 });
 
