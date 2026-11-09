@@ -167,7 +167,7 @@
     function rfqIndexEntries() {
       const entries = [];
       const seenRows = new Set();
-      for (const row of documentRef.querySelectorAll('table tr')) {
+      for (const row of documentRef.querySelectorAll('.rfq-row:not(.rfq-row--head), table tr')) {
         if (!row || seenRows.has(row)) continue;
         const reference = String(row.textContent || '').match(/\bQ-\d{6}-[A-Z0-9]+\b/i)?.[0] || '';
         if (!reference) continue;
@@ -178,28 +178,18 @@
     }
 
     function ensureRfqIndexColumns(entries) {
-      const table = entries[0]?.row.closest('table');
-      const headerRow = table?.querySelector('thead tr');
-      if (headerRow && !headerRow.querySelector('[data-dataplus-rfq-header]')) {
-        const header = documentRef.createElement('th');
-        header.setAttribute('data-dataplus-rfq-header', 'true');
-        header.scope = 'col';
-        header.textContent = 'DataPlus';
-        Object.assign(header.style, { minWidth: '142px', whiteSpace: 'nowrap' });
-        headerRow.insertBefore(header, headerRow.children[1] || null);
-      }
       for (const entry of entries) {
-        let cell = entry.row.querySelector(':scope > [data-dataplus-rfq-cell]');
-        if (!cell) {
-          cell = documentRef.createElement('td');
-          cell.setAttribute('data-dataplus-rfq-cell', entry.reference);
-          Object.assign(cell.style, { minWidth: '142px', verticalAlign: 'middle' });
-          entry.row.insertBefore(cell, entry.row.children[1] || null);
-          const host = documentRef.createElement('span');
+        const nameCell = entry.row.querySelector('.rfq-name-cell') || entry.row.querySelector('td,th') || entry.row.firstElementChild;
+        if (!nameCell) continue;
+        let host = nameCell.querySelector(':scope > [data-dataplus-rfq-cell]');
+        if (!host) {
+          host = documentRef.createElement('span');
+          host.setAttribute('data-dataplus-rfq-cell', entry.reference);
+          Object.assign(host.style, { display: 'block', marginTop: '5px' });
           host.attachShadow({ mode: 'open' });
-          cell.append(host);
+          nameCell.append(host);
         }
-        entry.host = cell.firstElementChild;
+        entry.host = host;
       }
     }
 
