@@ -1,7 +1,15 @@
 const assert = require("node:assert/strict");
-const { createDiscovery } = require("../lib/product-dump-discovery");
+const { createBoundedIdentitySet, createDiscovery } = require("../lib/product-dump-discovery");
 
 async function main() {
+  const bounded = createBoundedIdentitySet(2);
+  bounded.add("one");
+  bounded.add("two");
+  bounded.add("three");
+  assert.equal(bounded.size, 2);
+  assert.equal(bounded.has("one"), false);
+  assert.equal(bounded.has("two"), true);
+  assert.equal(bounded.has("THREE"), true);
   const saved = [], savedSources = [], reports = [];
   const options = {
     vendors: [
