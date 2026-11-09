@@ -241,7 +241,8 @@ async function readSchedulerState(fields = []) {
 function schedulerDb(state = {}) {
   return dataplus.normalizeDb({
     connections: Array.isArray(state.connections) ? state.connections : [],
-    channels: Array.isArray(state.channels) ? state.channels : []
+    channels: Array.isArray(state.channels) ? state.channels : [],
+    systemSettings: state.systemSettings && typeof state.systemSettings === "object" ? state.systemSettings : {}
   });
 }
 
@@ -523,7 +524,9 @@ function latestSuccessfulProductDumpJob(jobs = []) {
   return (jobs || [])
     .filter((job) => {
       const status = String(job.status || "").toLowerCase();
+      const importType = String(job.workerPayload?.importType || "pipeline").toLowerCase();
       return status === "success"
+        && importType !== "sku-creation"
         && (String(job.workerTask || "").toLowerCase() === "product-dump-import" || /product dump/i.test(`${job.operation || ""} ${job.name || ""}`));
     })
     .sort((a, b) => new Date(b.finishedAt || b.updatedAt || b.createdAt || 0) - new Date(a.finishedAt || a.updatedAt || a.createdAt || 0))[0] || null;
@@ -531,8 +534,9 @@ function latestSuccessfulProductDumpJob(jobs = []) {
 
 function latestProductDumpJob(jobs = []) {
   return (jobs || [])
-    .filter((job) => String(job.workerTask || "").toLowerCase() === "product-dump-import"
-      || /product dump|product datadump/i.test(`${job.operation || ""} ${job.name || ""}`))
+    .filter((job) => String(job.workerPayload?.importType || "pipeline").toLowerCase() !== "sku-creation"
+      && (String(job.workerTask || "").toLowerCase() === "product-dump-import"
+        || /product dump|product datadump/i.test(`${job.operation || ""} ${job.name || ""}`)))
     .sort((a, b) => new Date(b.finishedAt || b.updatedAt || b.createdAt || 0) - new Date(a.finishedAt || a.updatedAt || a.createdAt || 0))[0] || null;
 }
 
@@ -737,6 +741,36 @@ async function checkScheduledVendorFeedImports(force = false) {
       const stateKey = `${feed.id}:${scheduledJob.key}:${today}:${slot}`;
       const previous = scheduleState[stateKey] || {};
       if (previous.lastQueuedDate === today) continue;
+      const localPath = vendorFeedLocalPath(feed);
+      if (feed.dataSourceFeed && feed.fileFormat === "bson-gzip") {
+        const result = await dataplus.queueProductDumpPipeline(schedulerDb(docs), {
+          path: localPath,
+          downloadFtp: true,
+          background: true,
+          syncMode: scheduledJob.syncMode,
+          postImportInventoryMode: feed.postImportInventoryMode || "dry-run",
+          postImportPriceMode: feed.postImportPriceMode || "dry-run"
+        }, {
+          scheduled: true,
+          creationOperation: `Scheduled ${feed.name} missing SKU creation`,
+          refreshOperation: `Scheduled ${feed.name} ${scheduledJob.label} price & inventory refresh`
+        });
+        const stageJobs = result.jobs || [result.job];
+        scheduleState[stateKey] = {
+          ...previous,
+          lastCheckedAt: new Date(nowMs).toISOString(),
+          lastQueuedAt: result.duplicate ? (previous.lastQueuedAt || "") : new Date(nowMs).toISOString(),
+          lastQueuedDate: today,
+          lastJobId: result.refreshJob?.id || result.job?.id || "",
+          skuCreationJobId: result.creationJob?.id || "",
+          commercialRefreshJobId: result.refreshJob?.id || "",
+          lastSkipReason: result.duplicate ? "The required datadump stages are already active." : ""
+        };
+        jobs.push(...stageJobs.filter((row) => row && !jobs.some((job) => job.id === row.id)));
+        queued = !result.duplicate || queued;
+        console.log(`[${WORKER_ID}] ${result.duplicate ? "reused active" : "queued"} scheduled ${feed.name} SKU creation and commercial refresh (${stageJobs.map((row) => row.jobNumber || row.id).join(", ")})`);
+        continue;
+      }
       const duplicate = jobs.find((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase())
         && ["product-dump-import", "vendor-feed-import"].includes(String(job.workerTask || ""))
         && String(job.workerPayload?.feedId || "") === String(feed.id || ""));
@@ -744,7 +778,6 @@ async function checkScheduledVendorFeedImports(force = false) {
         scheduleState[stateKey] = { ...previous, lastCheckedAt: new Date(nowMs).toISOString(), lastQueuedDate: today, lastJobId: duplicate.id, lastSkipReason: "An import for this feed is already active." };
         continue;
       }
-      const localPath = vendorFeedLocalPath(feed);
       const job = {
       id: crypto.randomUUID(),
       section: "Source Catalog",
@@ -2103,6 +2136,23 @@ async function runVendorFeedImportJob(job) {
 async function runProductDumpImportJob(job) {
   await assertFeedSupplierNotRetired(job);
   const payload = job.workerPayload || {};
+  const importType = ["sku-creation", "commercial-refresh", "pipeline"].includes(String(payload.importType || "").toLowerCase())
+    ? String(payload.importType).toLowerCase()
+    : payload.discoveryOnly === true ? "sku-creation" : payload.discoverFirst === false ? "commercial-refresh" : "pipeline";
+  const prerequisiteJobId = String(payload.prerequisiteJobId || job.prerequisiteJobId || "").trim();
+  if (prerequisiteJobId) {
+    const prerequisite = await postgres.readOperationJob(prerequisiteJobId);
+    const prerequisiteStatus = String(prerequisite?.status || "missing").toLowerCase();
+    if (!["success", "warning"].includes(prerequisiteStatus)) {
+      return persistJob(job, {
+        status: "warning",
+        phase: "prerequisite_incomplete",
+        message: `Price and inventory refresh was not started because SKU creation Job ${prerequisite?.jobNumber || prerequisiteJobId} is ${prerequisiteStatus}.`,
+        details: "Retry SKU creation first. The commercial refresh remains separate so a creation problem cannot be mistaken for a successful price or inventory update.",
+        finishedAt: new Date().toISOString()
+      });
+    }
+  }
   // Keep the supervisor process lean while the BSON importer runs in its own
   // child process. Loading the full application state here caused the parent
   // and child RSS to cross the catalog lane memory budget before streaming
@@ -2125,7 +2175,9 @@ async function runProductDumpImportJob(job) {
     : "split";
   const args = ["scripts/import-product-dump.js"];
   if (payload.path) args.push(String(payload.path));
-  if (payload.downloadFtp === true) args.push("--ftp");
+  const shouldDownloadFtp = payload.downloadFtp === true
+    || (payload.downloadIfMissing === true && payload.path && !fs.existsSync(String(payload.path)));
+  if (shouldDownloadFtp) args.push("--ftp");
   args.push("--job-id", String(job.id));
   if (payload.postgresOnly !== false) {
     args.push("--postgres-only");
@@ -2145,6 +2197,10 @@ async function runProductDumpImportJob(job) {
     currentFile: String(payload.path || payload.ftpRemotePath || "Product datadump"),
     message: payload.postgresOnly === false
       ? "Worker is importing the product dump..."
+      : importType === "sku-creation"
+        ? `Worker is scanning the datadump for missing SKUs using the ${resourceProfile.label} resource profile...`
+        : importType === "commercial-refresh"
+          ? `Worker is refreshing prices and inventory using the ${resourceProfile.label} resource profile...`
       : `Worker is streaming the product dump into PostgreSQL using the ${resourceProfile.label} resource profile...`,
     startedAt: job.startedAt || new Date().toISOString()
   });
@@ -2178,7 +2234,7 @@ async function runProductDumpImportJob(job) {
       cwd: ROOT,
       env: {
         ...process.env,
-        ...(payload.downloadFtp === true ? {
+        ...(shouldDownloadFtp ? {
           PRODUCT_DUMP_FTP_HOST: String(payload.ftpHost || ""),
           PRODUCT_DUMP_FTP_PORT: String(payload.ftpPort || 21),
           PRODUCT_DUMP_FTP_USER: String(payload.ftpUsername || ""),
@@ -2212,6 +2268,9 @@ async function runProductDumpImportJob(job) {
           }
           current = normalizeJobPatch(current, {
             phase: "discovering_new_skus", discovery,
+            processedRows: Number(discovery.scanned || 0),
+            changed: Number(discovery.added || 0),
+            missingCount: Number(discovery.excluded || 0),
             message: `New SKU discovery: ${Number(discovery.scanned).toLocaleString()} scanned, ${Number(discovery.added).toLocaleString()} added, ${Number(discovery.needsReview).toLocaleString()} identifier similarities flagged.`
           });
         } catch { /* A partial output line will be followed by the next cumulative update. */ }
@@ -2259,14 +2318,23 @@ async function runProductDumpImportJob(job) {
     await postgres.upsertOperationArtifact(current, "original");
   }
   const summaryMatch = outputText.match(/(?:Normalized|Imported)\s+(\d+)\s+catalog products\s+\((\d+)\s+skipped\)/i);
-  const finalProcessedRows = summaryMatch ? Number(summaryMatch[1]) + Number(summaryMatch[2]) : current.processedRows;
-  const finalChanged = summaryMatch ? Number(summaryMatch[1]) : current.changed;
-  const finalMissing = summaryMatch ? Number(summaryMatch[2]) : current.missingCount;
+  const discoverySummary = current.discovery && typeof current.discovery === "object" ? current.discovery : {};
+  const finalProcessedRows = importType === "sku-creation"
+    ? Number(discoverySummary.scanned || current.processedRows || 0)
+    : summaryMatch ? Number(summaryMatch[1]) + Number(summaryMatch[2]) : current.processedRows;
+  const finalChanged = importType === "sku-creation"
+    ? Number(discoverySummary.added || current.changed || 0)
+    : summaryMatch ? Number(summaryMatch[1]) : current.changed;
+  const finalMissing = importType === "sku-creation"
+    ? Number(discoverySummary.excluded || current.missingCount || 0)
+    : summaryMatch ? Number(summaryMatch[2]) : current.missingCount;
   if (finalProcessedRows <= 0) {
     return persistJob(current, {
       status: "failed",
       phase: "failed",
-      message: "Product dump import finished without processing any source records. No pricing, inventory, or source catalog products were updated.",
+      message: importType === "sku-creation"
+        ? "Datadump SKU creation finished without scanning any source records."
+        : "Product dump import finished without processing any source records. No pricing, inventory, or source catalog products were updated.",
       details: outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "),
       totalRows: 0,
       processedRows: 0,
@@ -2281,8 +2349,9 @@ async function runProductDumpImportJob(job) {
   let analyzeResult = { tables: [] };
   let supplierCoverageResult = null;
   let supplierCoverageError = "";
-  const shouldRefreshSupplierCoverage = payload.refreshSupplierCoverage === true || syncMode !== "reconciliation";
-  if (payload.postgresOnly !== false && postgres.isPostgresEnabled()) {
+  const shouldRefreshSupplierCoverage = importType !== "sku-creation"
+    && (payload.refreshSupplierCoverage === true || syncMode !== "reconciliation");
+  if (importType !== "sku-creation" && payload.postgresOnly !== false && postgres.isPostgresEnabled()) {
     const postImportHeartbeatTimer = setInterval(() => {
       writeHeartbeat("running", current).catch((error) => console.error("Unable to refresh product dump post-import heartbeat:", error.message || error));
     }, Math.max(1000, Math.min(HEARTBEAT_MS, 5000)));
@@ -2331,7 +2400,7 @@ async function runProductDumpImportJob(job) {
   }
   const followOn = [];
   const discoveredProducts = Math.max(0, Number(current.discovery?.added || 0));
-  if (discoveredProducts > 0) {
+  if (importType !== "sku-creation" && discoveredProducts > 0) {
     const stateDb = dataplus.normalizeDb(await dataplus.readDbFast({ skipInventory: true }));
     const channelEnabled = (name) => {
       const channel = (stateDb.connections || []).find((entry) => String(entry.name || "").toLowerCase() === name.toLowerCase());
@@ -2397,8 +2466,12 @@ async function runProductDumpImportJob(job) {
   return persistJob(current, {
     status: supplierCoverageError ? "warning" : "success",
     phase: supplierCoverageError ? "completed_with_warning" : "complete",
-    message: supplierCoverageError ? "Product dump import finished, but supplier coverage needs review." : "Product dump import and supplier coverage rebuild finished.",
-    details: [outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "), analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : "", supplierCoverageResult ? `Stored ${Number(supplierCoverageResult.supplierLinks || 0).toLocaleString()} product-to-supplier links and refreshed coverage for ${Number(supplierCoverageResult.productsUpdated || 0).toLocaleString()} approved products and ${Number(supplierCoverageResult.vendorItemsUpdated || 0).toLocaleString()} source records from ${Number(supplierCoverageResult.keys || 0).toLocaleString()} matched identities.` : "", !shouldRefreshSupplierCoverage ? "Supplier coverage was unchanged and skipped for this reconciliation-only refresh." : "", supplierCoverageError ? `Supplier coverage rebuild failed: ${supplierCoverageError}` : "", ...followOn].filter(Boolean).join(" "),
+    message: supplierCoverageError
+      ? "Product dump import finished, but supplier coverage needs review."
+      : importType === "sku-creation"
+        ? `Datadump SKU creation finished: ${Number(finalProcessedRows || 0).toLocaleString()} checked and ${Number(finalChanged || 0).toLocaleString()} missing SKUs created.`
+        : "Product dump price and inventory refresh finished.",
+    details: [outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "), analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : "", supplierCoverageResult ? `Stored ${Number(supplierCoverageResult.supplierLinks || 0).toLocaleString()} product-to-supplier links and refreshed coverage for ${Number(supplierCoverageResult.productsUpdated || 0).toLocaleString()} approved products and ${Number(supplierCoverageResult.vendorItemsUpdated || 0).toLocaleString()} source records from ${Number(supplierCoverageResult.keys || 0).toLocaleString()} matched identities.` : "", !shouldRefreshSupplierCoverage ? importType === "sku-creation" ? "Commercial updates and supplier coverage are handled by the separate refresh stage." : "Supplier coverage was unchanged and skipped for this reconciliation-only refresh." : "", supplierCoverageError ? `Supplier coverage rebuild failed: ${supplierCoverageError}` : "", ...followOn].filter(Boolean).join(" "),
     totalRows: finalProcessedRows || current.totalRows || 0,
     processedRows: finalProcessedRows || current.processedRows || 0,
     changed: finalChanged || current.changed || 0,
@@ -2566,6 +2639,36 @@ async function runJob(job) {
   return null;
 }
 
+function retryableProductDumpFailure(error) {
+  return /memory|heap|sig(?:abrt|kill|term)|terminated|worker process|process exited|econn|etimedout|socket|ftp|network|temporar|heartbeat/i.test(String(error?.message || error || ""));
+}
+
+async function requeueProductDumpAfterTransientFailure(job, error) {
+  const latest = await postgres.readOperationJob(job.id).catch(() => null) || job;
+  const payload = latest.workerPayload || job.workerPayload || {};
+  await postgres.getPool().query(`
+    update vendor_feed_runs
+    set status = 'interrupted', finished_at = now(), updated_at = now(),
+        raw = raw || $2::jsonb
+    where job_id = $1 and lower(status) = 'running'
+  `, [String(job.id), JSON.stringify({ interruption: String(error?.message || error || "Datadump worker interruption") })]).catch(() => {});
+  const retryCount = Math.max(0, Number(payload.automaticRetryCount || 0)) + 1;
+  const delayMinutes = [5, 15, 30, 60, 120][Math.min(retryCount - 1, 4)];
+  const scheduledFor = new Date(Date.now() + delayMinutes * 60_000).toISOString();
+  return persistJob(latest, {
+    status: "queued",
+    phase: "retry_scheduled",
+    scheduledFor,
+    workerId: "",
+    workerLastSeenAt: "",
+    finishedAt: "",
+    workerPayload: { ...payload, automaticRetryCount: retryCount },
+    message: `Datadump ${payload.importType === "sku-creation" ? "SKU creation" : "price and inventory refresh"} was interrupted and will retry automatically at ${scheduledFor}.`,
+    details: `Automatic retry ${retryCount}. Completed inserts and source updates are retained; the next pass safely skips existing SKUs and unchanged rows. Last interruption: ${error?.message || error}`,
+    errors: [String(error?.message || error || "Datadump worker interruption")]
+  });
+}
+
 async function tick() {
   await writeHeartbeat("idle");
   let job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS, lane: WORKER_LANE });
@@ -2603,14 +2706,18 @@ async function tick() {
     console.log(`[${WORKER_ID}] finished ${job.id}`);
   } catch (error) {
     console.error(`[${WORKER_ID}] failed ${job.id}:`, error.message || error);
-    await persistJob(job, {
-      status: /canceled|cancelled|stopped/i.test(String(error.message || "")) ? "stopped" : "failed",
-      phase: "failed",
-      message: error.message || "Worker job failed.",
-      missingCount: 1,
-      errors: [error.message || "Worker job failed."],
-      finishedAt: new Date().toISOString()
-    });
+    if (job.workerTask === "product-dump-import" && retryableProductDumpFailure(error)) {
+      await requeueProductDumpAfterTransientFailure(job, error);
+    } else {
+      await persistJob(job, {
+        status: /canceled|cancelled|stopped/i.test(String(error.message || "")) ? "stopped" : "failed",
+        phase: "failed",
+        message: error.message || "Worker job failed.",
+        missingCount: 1,
+        errors: [error.message || "Worker job failed."],
+        finishedAt: new Date().toISOString()
+      });
+    }
   }
   const supervisorNotified = await sendSupervisorMessage({ type: "dataplus-worker-job-finished", jobId: job.id, task: job.workerTask, workerId: WORKER_ID, lane: WORKER_LANE });
   if (supervisorNotified || !EXIT_AFTER_JOB) {

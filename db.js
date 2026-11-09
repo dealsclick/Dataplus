@@ -15284,7 +15284,7 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all"
           )
         )
         and (
-          coalesce(raw ->> 'workerTask', '') not in ('category-mapping-refresh', 'category-mapping-bulk-refresh', 'walmart-existing-launch', 'walmart-bulk-launch', 'walmart-pricing')
+          coalesce(raw ->> 'workerTask', '') not in ('product-dump-import', 'category-mapping-refresh', 'category-mapping-bulk-refresh', 'walmart-existing-launch', 'walmart-bulk-launch', 'walmart-pricing')
           or coalesce(nullif(raw ->> 'scheduledFor', ''), '1970-01-01T00:00:00.000Z')
             <= to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
         )

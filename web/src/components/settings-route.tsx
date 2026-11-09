@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { AlertCircle, CheckCircle2, Copy, Database, Eye, FileDown, FileUp, Loader2, LockKeyhole, Mail, PackageSearch, Pencil, Play, Power, RefreshCw, RotateCcw, Save, Search, ShieldCheck, Trash2, Users, Warehouse } from "lucide-react"
+import { AlertCircle, CheckCircle2, Copy, Database, Eye, FileDown, FileUp, Loader2, LockKeyhole, Mail, PackagePlus, PackageSearch, Pencil, Play, Power, RefreshCw, RotateCcw, Save, Search, ShieldCheck, Trash2, Users, Warehouse } from "lucide-react"
 import { toast } from "sonner"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -1667,9 +1667,10 @@ function SettingsPage({
                     { path: "/api/catalog/facets/refresh", label: "Refresh filter values", description: "Recounts supplier, brand, category, and stock-status options.", icon: <RefreshCw className="size-4" /> },
                     { path: "/api/catalog/supplier-index/rebuild", label: "Supplier matching index", description: "Rebuilds cached supplier relationships and creates a downloadable match-method report.", icon: <Users className="size-4" /> },
                     { path: "/api/catalog/datawarehouse-inventory/reclassify", label: "Reclassify DataWarehouse inventory", description: "Moves imported supplier-feed stock into the virtual DataWarehouse location while preserving receipt- and audit-backed physical stock.", icon: <Warehouse className="size-4" />, body: { dryRun: false } },
-                    { path: "/api/source-catalog/pricing-inventory/refresh", label: "Refresh pricing and inventory", description: "Imports cost, price, stock, promotions, and closeout changes from the product dump.", icon: <PackageSearch className="size-4" /> },
+                    { path: "/api/source-catalog/product-dump/import", label: "Create missing datadump SKUs", description: "Scans the latest datadump, skips every existing SKU, and creates only missing independent catalog products.", icon: <PackagePlus className="size-4" />, body: { importType: "sku-creation", downloadFtp: true, background: true } },
+                    { path: "/api/source-catalog/product-dump/import", label: "Refresh pricing and inventory", description: "Runs the separate commercial pass for cost, price, stock, promotions, and closeout changes.", icon: <PackageSearch className="size-4" />, body: { importType: "commercial-refresh", downloadFtp: true, background: true } },
                     { path: "/api/categories/summary-index/rebuild", label: "Rebuild category index", description: "Rebuilds category summaries used by the main catalog and category mappings.", icon: <RotateCcw className="size-4" />, body: { scope: "both" } },
-                  ].map((action) => <div key={action.path} className="flex min-h-20 items-center gap-3 rounded-md border bg-background p-4">
+                  ].map((action) => <div key={`${action.path}:${action.label}`} className="flex min-h-20 items-center gap-3 rounded-md border bg-background p-4">
                     <span className="flex size-9 shrink-0 items-center justify-center rounded-md border bg-muted/50">{action.icon}</span>
                     <span className="min-w-0 flex-1"><span className="block font-medium">{action.label}</span><span className="mt-1 block text-xs leading-5 text-muted-foreground">{action.description}</span></span>
                     <Button type="button" size="sm" variant="outline" className="shrink-0" disabled={catalogMaintenanceLoading} onClick={() => requestCatalogMaintenance({ ...action, description: action.description })}>

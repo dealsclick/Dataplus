@@ -127,6 +127,45 @@ async function markInterruptedJob(claim, incident = {}) {
   };
   try {
     await client.connect();
+    if (String(claim.task || "") === "product-dump-import") {
+      const current = await client.query("select raw from operations_jobs where job_id = $1 limit 1", [String(claim.jobId)]);
+      const raw = current.rows[0]?.raw && typeof current.rows[0].raw === "object" ? current.rows[0].raw : {};
+      const workerPayload = raw.workerPayload && typeof raw.workerPayload === "object" ? raw.workerPayload : {};
+      const retryCount = Math.max(0, Number(workerPayload.automaticRetryCount || 0)) + 1;
+      const delayMinutes = [5, 15, 30, 60, 120][Math.min(retryCount - 1, 4)];
+      const scheduledFor = new Date(Date.now() + delayMinutes * 60_000).toISOString();
+      const retryMessage = `Datadump ${workerPayload.importType === "sku-creation" ? "SKU creation" : "price and inventory refresh"} was interrupted and will retry automatically at ${scheduledFor}.`;
+      const retryPatch = {
+        ...patch,
+        status: "queued",
+        phase: "retry_scheduled",
+        scheduledFor,
+        finishedAt: "",
+        workerId: "",
+        workerLastSeenAt: "",
+        message: retryMessage,
+        details: `Automatic retry ${retryCount}. Completed work is retained and the next idempotent pass will skip existing SKUs and unchanged rows. ${message}`,
+        workerPayload: { ...workerPayload, automaticRetryCount: retryCount }
+      };
+      await client.query(`
+        update vendor_feed_runs
+        set status = 'interrupted', finished_at = now(), updated_at = now(),
+            raw = raw || $2::jsonb
+        where job_id = $1 and lower(status) = 'running'
+      `, [String(claim.jobId), JSON.stringify({ interruption: message })]);
+      const retried = await client.query(`
+        update operations_jobs
+        set status = 'queued',
+            message = $3,
+            ended_at = null,
+            updated_at = now(),
+            raw = coalesce(raw, '{}'::jsonb) || $4::jsonb
+        where job_id = $1
+          and lower(status) = 'running'
+          and coalesce(raw ->> 'workerId', '') = $2
+      `, [String(claim.jobId), String(claim.workerId), retryMessage, JSON.stringify(retryPatch)]);
+      return retried.rowCount > 0;
+    }
     const result = await client.query(`
       update operations_jobs
       set status = 'warning',

@@ -1484,17 +1484,9 @@ async function buildCatalogChangeSnapshotFromCurrentCatalog() {
 
 async function discoverCatalogProducts(dumpPath, options) {
   const postgres = require("../db");
-  const app = require("../server");
   const { createDiscovery } = require("../lib/product-dump-discovery");
-  const [vendors, systemSettings] = await Promise.all([
-    postgres.readStateField("vendors"),
-    postgres.readStateField("systemSettings")
-  ]);
-  const db = app.normalizeDb({
-    vendors: Array.isArray(vendors) ? vendors : [],
-    systemSettings: systemSettings && typeof systemSettings === "object" ? systemSettings : {},
-    inventory: []
-  });
+  const systemSettings = await postgres.readStateField("systemSettings");
+  const settings = systemSettings && typeof systemSettings === "object" ? systemSettings : {};
   const started = Date.now();
   const discoveryRunId = crypto.randomUUID();
   if (!options.dryRun) await createVendorFeedRun({ id: discoveryRunId, jobId: options.jobId, sourceFile: path.basename(dumpPath), status: "running", startedAt: new Date().toISOString() });
@@ -1503,19 +1495,27 @@ async function discoverCatalogProducts(dumpPath, options) {
   const writer = fs.createWriteStream(reportPath);
   const done = finished(writer);
   const discovery = createDiscovery({
-    vendors: db.vendors || [],
-    settings: app.readSystemSettingsStore(db.systemSettings || {}),
+    settings,
     lookup: (rows) => postgres.readProductDiscoveryMatches(rows),
     normalize: (row) => {
-      const item = app.upsertInventoryProductFromCatalog({ ...db, inventory: [] }, row, {
-        createdBy: "DataPlus", createdMethod: "Datadump discovery",
-        createdSource: "Internal universal datadump", createdSourceDetail: `Job ${options.jobId}`
-      }).item;
-      if (item) {
-        app.applyProductShippingClassification(item);
-        item.price = item.websitePrice = app.websitePriceFromRule(item, null, undefined, {}, db);
-      }
-      return item;
+      const now = new Date().toISOString();
+      return upsertDataWarehouseStock({
+        id: crypto.randomUUID(),
+        ...row,
+        qty: Number(row.stockQty ?? row.qty ?? 0),
+        reserved: 0,
+        reorderPoint: Number(row.reorderPoint || 0),
+        shadowSkus: [],
+        serialUnits: [],
+        warehouseStock: [],
+        sources: { ...(row.sources || {}), catalog: row.sku },
+        createdAt: now,
+        createdBy: "DataPlus",
+        createdMethod: "Datadump SKU creation",
+        createdSource: "Internal universal datadump",
+        createdSourceDetail: `Job ${options.jobId}`,
+        updatedAt: now
+      }, row.stockQty ?? row.qty ?? 0, row.productDumpUpdatedAt || row.updatedAt);
     },
     save: async (rows, sources) => {
       if (options.dryRun) return { products: rows.length };
@@ -1527,6 +1527,7 @@ async function discoverCatalogProducts(dumpPath, options) {
   });
   const supplierInventory = require("../lib/datadump-suppliers").createSupplierInventory();
   const batch = [];
+  const discoveryBatchSize = Math.max(25, Math.min(250, Number(options.batchSize || 100) || 100));
   let read = 0;
   let lastAdded = 0;
   const flush = async () => {
@@ -1549,7 +1550,7 @@ async function discoverCatalogProducts(dumpPath, options) {
         if (product) batch.push(product);
         else { discovery.counts.scanned += 1; discovery.counts.excluded += 1; }
       }
-      if (batch.length >= 1000 || read % 10000 === 0) await flush();
+      if (batch.length >= discoveryBatchSize || read % 10000 === 0) await flush();
     });
     await flush();
     const supplierRows = supplierInventory.rows();

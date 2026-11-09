@@ -28,11 +28,15 @@ const discoveryStart = importerSource.indexOf("async function discoverCatalogPro
 const discoveryEnd = importerSource.indexOf("\nasync function main", discoveryStart);
 const discoveryStartup = importerSource.slice(discoveryStart, discoveryEnd);
 assert.doesNotMatch(discoveryStartup, /readDbFast\(/, "product discovery must not load application state");
+assert.doesNotMatch(discoveryStartup, /require\(["']\.\.\/server["']\)/, "SKU creation must not load the full application server into the import child");
 assert.doesNotMatch(discoveryStartup, /readProductDiscoveryKeys\(/, "product discovery must not load every catalog identity");
 assert.match(discoveryStartup, /readProductDiscoveryMatches\(rows\)/, "product discovery resolves identities in bounded PostgreSQL batches");
 assert.match(deploymentSource, /ACTIVE_PRODUCT_DUMP[\s\S]+workerTask[^\n]+product-dump-import/, "deployments detect an active product dump");
 assert.match(deploymentSource, /PRESERVE_BACKGROUND_WORKER[\s\S]+DEPLOY_SERVICES\+\=\(worker-background\)/, "deployments preserve the background worker while a product dump is active");
-assert.match(serverSource, /const background = body\.background === true \|\| body\.discoveryOnly === true/, "corrective datadump discovery is routed to the background worker");
+assert.match(serverSource, /const background = body\.background === true \|\| discoveryOnly \|\| options\.scheduled === true/, "datadump SKU creation is routed to the background worker");
+assert.match(serverSource, /queueProductDumpPipeline[\s\S]+importType: "sku-creation"[\s\S]+importType: "commercial-refresh"/, "datadump pipelines persist separate SKU creation and commercial refresh jobs");
+assert.match(workerSource, /importType === "sku-creation"[\s\S]+discoverySummary\.scanned/, "creation-only completion uses discovery progress instead of the commercial summary");
+assert.match(workerSource, /requeueProductDumpAfterTransientFailure/, "transient datadump interruptions are requeued automatically");
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "dataplus-worker-proc-"));
 function fakeProcess(pid, rssKb, children = []) {

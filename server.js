@@ -19982,9 +19982,28 @@ async function findActiveImportJobByWorkerTask(db = {}, workerTask = "") {
   }) || null;
 }
 
+function productDumpImportType(body = {}) {
+  const requested = String(body.importType || body.stage || "").trim().toLowerCase();
+  if (["sku-creation", "commercial-refresh", "pipeline"].includes(requested)) return requested;
+  if (body.discoveryOnly === true) return "sku-creation";
+  if (body.discoverFirst === false) return "commercial-refresh";
+  return "pipeline";
+}
+
+async function findActiveProductDumpStage(db = {}, importType = "pipeline") {
+  const jobs = postgres.isPostgresEnabled() ? await mergedImportJobsAsync(db) : mergedImportJobs(db);
+  return (jobs || []).find((job) => {
+    if (!["queued", "running"].includes(String(job.status || "").toLowerCase())) return false;
+    if (String(job.workerTask || "") !== "product-dump-import") return false;
+    const activeType = productDumpImportType(job.workerPayload || {});
+    return activeType === importType || activeType === "pipeline" || importType === "pipeline";
+  }) || null;
+}
+
 async function queueProductDumpImportJob(db = {}, body = {}, options = {}) {
   if (!postgres.isPostgresEnabled()) throw new Error("Product datadump imports require PostgreSQL.");
-  const existing = options.force === true ? null : await findActiveImportJobByWorkerTask(db, "product-dump-import");
+  const importType = productDumpImportType(body);
+  const existing = options.force === true ? null : await findActiveProductDumpStage(db, importType);
   if (existing) return { duplicate: true, job: existing };
 
   const settings = readSystemSettingsStore(db.systemSettings || {});
@@ -20007,7 +20026,11 @@ async function queueProductDumpImportJob(db = {}, body = {}, options = {}) {
   }
 
   const operation = String(options.operation || body.operation || "Product dump import").trim() || "Product dump import";
-  const background = body.background === true || body.discoveryOnly === true || options.scheduled === true;
+  const discoveryOnly = importType === "sku-creation" || body.discoveryOnly === true;
+  const discoverFirst = importType === "pipeline" && body.discoverFirst !== false;
+  const background = body.background === true || discoveryOnly || options.scheduled === true;
+  const prerequisiteJobId = String(body.prerequisiteJobId || "").trim();
+  const includeFtpConnection = Boolean(dataSourceFeed && (downloadFtp || body.downloadIfMissing === true));
   const job = createImportJob(db, {
     section: "Source Catalog",
     category: "Product datadump",
@@ -20020,6 +20043,7 @@ async function queueProductDumpImportJob(db = {}, body = {}, options = {}) {
     progressPercent: 0,
     phase: "queued",
     background,
+    prerequisiteJobId,
     workerTask: "product-dump-import",
     workerPayload: {
       path: dumpPath,
@@ -20027,11 +20051,14 @@ async function queueProductDumpImportJob(db = {}, body = {}, options = {}) {
       batchSize: Math.max(25, Math.min(1000, Number(body.batchSize || 100) || 100)),
       limit,
       syncMode,
-      discoveryOnly: body.discoveryOnly === true,
-      discoverFirst: body.discoverFirst !== false,
+      importType,
+      discoveryOnly,
+      discoverFirst,
       downloadFtp,
+      downloadIfMissing: body.downloadIfMissing === true,
       background,
-      ...(downloadFtp ? {
+      prerequisiteJobId,
+      ...(includeFtpConnection ? {
         ftpHost: dataSourceFeed.ftpHost,
         ftpPort: dataSourceFeed.ftpPort,
         ftpUsername: dataSourceFeed.ftpUsername,
@@ -20043,8 +20070,10 @@ async function queueProductDumpImportJob(db = {}, body = {}, options = {}) {
       feedId: dataSourceFeed?.id || "product-datadump",
       requestedBy: String(options.requestedBy || body.requestedBy || "DataPlus").trim() || "DataPlus"
     },
-    message: body.discoveryOnly === true
-      ? "Product datadump catch-up queued. Every valid missing SKU will be created independently regardless of supplier participation."
+    message: discoveryOnly
+      ? "Datadump SKU creation queued. Existing SKUs will be skipped and every valid missing SKU will be created independently."
+      : importType === "commercial-refresh"
+        ? "Datadump price and inventory refresh queued separately from SKU creation."
       : limit
         ? `Product dump ${syncMode} import queued for ${limit.toLocaleString()} rows. PostgreSQL change detection and saved post-import modes will be applied.`
         : `Product dump ${syncMode} import queued. PostgreSQL change detection and saved post-import modes will be applied.`
@@ -20052,6 +20081,33 @@ async function queueProductDumpImportJob(db = {}, body = {}, options = {}) {
   await postgres.upsertOperationJob(job);
   upsertImportJobStore(job);
   return { duplicate: false, job };
+}
+
+async function queueProductDumpPipeline(db = {}, body = {}, options = {}) {
+  const creation = await queueProductDumpImportJob(db, {
+    ...body,
+    importType: "sku-creation",
+    discoveryOnly: true,
+    discoverFirst: true,
+    postImportInventoryMode: "disabled",
+    postImportPriceMode: "disabled"
+  }, { ...options, operation: options.creationOperation || "Product datadump SKU creation" });
+  const refresh = await queueProductDumpImportJob(db, {
+    ...body,
+    importType: "commercial-refresh",
+    discoveryOnly: false,
+    discoverFirst: false,
+    downloadFtp: false,
+    downloadIfMissing: body.downloadFtp === true,
+    prerequisiteJobId: creation.job.id
+  }, { ...options, operation: options.refreshOperation || "Product datadump price & inventory refresh" });
+  return {
+    duplicate: creation.duplicate && refresh.duplicate,
+    job: creation.job,
+    jobs: [creation.job, refresh.job],
+    creationJob: creation.job,
+    refreshJob: refresh.job
+  };
 }
 
 async function queueSourceCatalogFacetsRefreshJob(db = {}, options = {}) {
@@ -23104,6 +23160,7 @@ function getWalmartMarketplace() {
            or (
              coalesce(raw ->> 'workerTask', '') = 'product-dump-import'
              and coalesce(raw #>> '{workerPayload,feedId}', '') = 'product-datadump'
+             and coalesce(raw #>> '{workerPayload,importType}', 'pipeline') <> 'sku-creation'
            )
         order by coalesce(ended_at, updated_at, started_at, created_at) desc, job_id desc
         limit 1
@@ -70412,8 +70469,17 @@ async function handleApi(req, res) {
   if (req.method === "POST" && url.pathname === "/api/source-catalog/product-dump/import" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = normalizeDb(await readDbFast({ skipInventory: true }));
-    const result = await queueProductDumpImportJob(db, body);
-    return sendJson(res, result.duplicate ? 200 : 202, { queued: true, duplicate: result.duplicate, job: normalizeImportJob(result.job), state: publicState({ ...db, inventory: [] }, { lite: true }), message: result.duplicate ? "A Product datadump import is already queued or running." : result.job.message });
+    const result = productDumpImportType(body) === "pipeline"
+      ? await queueProductDumpPipeline(db, body)
+      : await queueProductDumpImportJob(db, body);
+    return sendJson(res, result.duplicate ? 200 : 202, {
+      queued: true,
+      duplicate: result.duplicate,
+      job: normalizeImportJob(result.job),
+      jobs: (result.jobs || [result.job]).map(normalizeImportJob),
+      state: publicState({ ...db, inventory: [] }, { lite: true }),
+      message: result.duplicate ? "The requested Product datadump stage is already queued or running." : result.job.message
+    });
   }
 
   if (req.method === "POST" && url.pathname === "/api/source-catalog/pricing-inventory/refresh" && postgres.isPostgresEnabled()) {
@@ -78591,6 +78657,7 @@ module.exports = {
   queueEbayTaxonomySyncJob,
   queueAiCategoryReviewJob,
   queueProductDumpImportJob,
+  queueProductDumpPipeline,
   readDbFast,
   readExportMappingsApiStore,
   readSystemSettingsStore,
