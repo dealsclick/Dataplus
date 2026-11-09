@@ -961,8 +961,14 @@ export type CatalogItem = {
 
 export type ProductItem = CatalogItem & {
   companyCatalogView?: boolean
+  companyFullCatalogView?: boolean
+  companyCatalogReadOnly?: boolean
   companySelected?: boolean
+  companyStatus?: string
+  companySellPrice?: number | null
+  companyLowestCost?: number | null
   companyInventoryConnected?: boolean
+  inventorySharedAcrossCompanies?: boolean
   companyCosts?: Array<{ vendorId?: string; supplierName?: string; cost?: number | null; uom?: string; updatedAt?: string | null }>
   sourceOnly?: boolean
   marketplaceTitle?: string

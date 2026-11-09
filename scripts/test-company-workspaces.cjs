@@ -300,7 +300,7 @@ test('company membership routes require user permission management before readin
   }
 });
 
-test('company product detail shares physical inventory while commercial data stays company-owned',async()=>{
+test('company product detail shares the complete normalized catalog while preserving company overrides',async()=>{
   const {createCompanyOperationsHandler}=require('../lib/company-operations-http');
   const scope={tenantId:'tenant-1',companyId:'buy'},user={id:'user-1'};
   const store={
@@ -314,14 +314,25 @@ test('company product detail shares physical inventory while commercial data sta
     costs:async()=>[{vendor_account_id:'vendor-1',supplier_name:'BuySupply vendor',unit_cost:'51.25',uom:'Each',updated_at:'2026-11-09T12:00:00.000Z'}]
   };
   let response;
-  const handler=createCompanyOperationsHandler({store,selection:()=>scope,sendJson:(_res,status,data)=>{response={status,data};},sendHtml:()=>{},parseBody:async()=>({})});
+  const handler=createCompanyOperationsHandler({store,selection:()=>scope,sendJson:(_res,status,data)=>{response={status,data};},sendHtml:()=>{},parseBody:async()=>({}),
+    readSharedCatalogProduct:async key=>key==='BUSB1441513GEC'?{
+      id:'product-1',sku:'BUSB1441513GEC',title:'Touch Up Paint',marketplaceTitle:'Touch Up Paint, Munsell Green',supplier:'Global',vendorSku:'B1441513',
+      shortDescription:'Shared description',cost:55.95,sellUnitCost:55.95,price:71.62,websitePrice:71.62,
+      itemLength:2.7,itemWidth:2.7,itemHeight:7.75,itemWeight:1.1,packageLength:2.7,packageWidth:2.7,packageHeight:7.75,packageWeight:1.1
+    }:null});
   const get=async(path)=>{await handler({method:'GET'},{},new URL(path,'http://localhost'),user);return response;};
   const detail=await get('/api/inventory/BUSB1441513GEC');
   assert.equal(detail.status,200);
   assert.equal(detail.data.item.sku,'BUY-PAINT');
   assert.equal(detail.data.item.sourceSku,'BUSB1441513GEC');
-  assert.equal(detail.data.item.cost,51.25);
-  assert.equal(detail.data.item.price,79.93);
+  assert.equal(detail.data.item.cost,55.95);
+  assert.equal(detail.data.item.price,71.62);
+  assert.equal(detail.data.item.companyLowestCost,51.25);
+  assert.equal(detail.data.item.companySellPrice,79.93);
+  assert.equal(detail.data.item.companyFullCatalogView,true);
+  assert.equal(detail.data.item.companyCatalogReadOnly,true);
+  assert.equal(detail.data.item.shortDescription,'Shared description');
+  assert.equal(detail.data.item.packageWeight,1.1);
   assert.equal(detail.data.item.companyInventoryConnected,true);
   assert.equal(detail.data.item.inventorySharedAcrossCompanies,true);
   assert.equal(detail.data.item.qty,14);
@@ -360,8 +371,8 @@ test('company isolation, catalog projection, access changes, persistence and HTT
   const credentialEnv={DATAPLUS_CREDENTIALS_ENCRYPTION_KEY:'11'.repeat(32)};
   const store=createCompanyStore(()=>pool,{credentialEnv});
   try {
-    await pool.query(`create table products(product_id text primary key,sku text,title text,brand text,manufacturer text,mfr_part_number text,barcode text,main_category text,default_image text,uom text,cost numeric,raw jsonb);
-      insert into products values('p1','SKU1','Test product','Brand','Manufacturer','MPN','012345','Category',null,'Each',888,'{"secret":"LINQ-private","price":999}');
+    await pool.query(`create table products(product_id text primary key,sku text,title text,brand text,manufacturer text,mfr_part_number text,barcode text,main_category text,default_image text,uom text,vendor_sku text,supplier text,supplier_code text,cost numeric,price numeric,qty numeric,raw jsonb);
+      insert into products values('p1','SKU1','Test product','Brand','Manufacturer','MPN','012345','Category',null,'Each','VSKU1','Global','GLB',8.50,12.75,99,'{"secret":"LINQ-private","price":999}');
       create table inventory_levels(product_id text not null references products(product_id) on delete cascade,location_key text not null,on_hand numeric not null default 0,available numeric not null default 0,reserved numeric not null default 0,committed numeric not null default 0,incoming numeric not null default 0,updated_at timestamptz not null default now(),primary key(product_id,location_key));
       insert into inventory_levels(product_id,location_key,on_hand,available,reserved) values('p1','staten-island-2',12,10,2),('p1','datawarehouse',99,99,0);`);
     await store.init(); await store.legacyAccess(staff,null);
@@ -410,7 +421,7 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal((await store.vendorAccounts(owner,newScope)).length,0);
     const newCompanyCatalog=(await store.catalog(owner,newScope)).rows[0];
     assert.equal(newCompanyCatalog.source_sku,'SKU1');
-    assert.equal(newCompanyCatalog.shared_inventory_enabled,false,'New companies do not inherit the shared warehouse pool');
+    assert.equal(newCompanyCatalog.shared_inventory_enabled,true,'Companies in the organization inherit the shared physical warehouse pool');
     assert.equal((await store.catalog(owner,newScope,'',1,true)).rows.length,0);
     assert.equal((await store.directory(staff)).companies.length,1);
     await assert.rejects(store.createCompany(owner,tenantId,{name:'new company'}),/already exists/);
@@ -578,9 +589,9 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal((await op('/api/state')).data.connections.length,0);
     assert.equal((await op('/api/orders')).data.orders.length,0);
     const companyInventory=(await op('/api/inventory?q=SKU1')).data.inventory[0];
-    assert.equal(companyInventory.price,13.97);
-    assert.equal(companyInventory.cost,7.25);
-    assert.equal(companyInventory.supplier,'Supplier');
+    assert.equal(companyInventory.price,12.75);
+    assert.equal(companyInventory.cost,8.5);
+    assert.equal(companyInventory.supplier,'Global');
     assert.equal(companyInventory.mapPrice,null);
     assert.equal(companyInventory.qty,12);
     assert.equal(companyInventory.available,10);
@@ -590,8 +601,10 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     const companyProduct=(await op('/api/inventory/BUY1')).data.item;
     assert.equal(companyProduct.companyCatalogView,true);
     assert.equal(companyProduct.sourceSku,'SKU1');
-    assert.equal(companyProduct.price,13.97);
-    assert.equal(companyProduct.cost,7.25);
+    assert.equal(companyProduct.price,12.75);
+    assert.equal(companyProduct.cost,8.5);
+    assert.equal(companyProduct.companySellPrice,13.97);
+    assert.equal(companyProduct.companyLowestCost,7.25);
     assert.equal(companyProduct.companyInventoryConnected,true);
     assert.equal(companyProduct.companyCosts[0].supplierName,'Supplier');
     assert.equal(companyProduct.qty,12);

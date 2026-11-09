@@ -101,6 +101,7 @@ const companyOperationsHandler = createCompanyOperationsHandler({
   competitorProducts,
   competitorInspectOptions: async () => ({ scrapeGraph: getScrapeGraphRuntimeConfig(await readRuntimeSystemSettings(dbCache.data?.systemSettings || {})) }),
   createCompetitorDraftProduct: createQuoteCompetitorDraftProduct,
+  readSharedCatalogProduct: readSharedCompanyCatalogProduct,
   attachmentRoot: () => path.join(DATA_DIR, "company-order-attachments")
 });
 const { importProgress } = require("./lib/import-progress");
@@ -28121,6 +28122,23 @@ function publicInventoryItem(item = {}, context = {}) {
     productCatalogSku: item.productCatalogSku || "",
     productCatalogStatus: item.productCatalogStatus || ""
   };
+}
+
+async function readSharedCompanyCatalogProduct(key) {
+  if (!postgres.isPostgresEnabled()) return null;
+  const product = await postgres.readProductByKey(String(key || ""));
+  if (!product) return null;
+  const [pricingDb, sourceFallbackMap] = await Promise.all([
+    postgres.readStateFields(["connections", "brands", "vendors", "systemSettings", "warehouses"], { fallbackToLegacy: false }),
+    sourceCatalogExportFallbackMap([product])
+  ]);
+  const resolved = withResolvedInventoryWarehouses(product, pricingDb.warehouses || []);
+  return publicInventoryItem(resolved, {
+    db: pricingDb,
+    sourceFallbackMap,
+    shopifyStatusMap: readShopifyStatusMapSync(),
+    sourceEnrichmentMap: readProductSourceEnrichmentSync()
+  });
 }
 
 function ebayCategoryText(value = "") {
