@@ -238,9 +238,11 @@ async function loadWorkspace() {
 async function findExistingRfqQuote(rfq) {
   const reference = String(rfq?.externalId || '').trim();
   if (!reference) return null;
-  const query = new URLSearchParams({ source: 'BuySupply DW RFQ', reference });
-  const payload = await api(`/api/order-drafts/import-match?${query.toString()}`);
-  return payload?.draft || null;
+  const payload = await api('/api/order-drafts/import-matches', {
+    method: 'POST',
+    body: { source: 'BuySupply DW RFQ', references: [reference] }
+  });
+  return payload?.matches?.[0]?.draft || null;
 }
 
 function normalizedIdentifier(value) {

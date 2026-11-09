@@ -6,7 +6,11 @@
     const documentRef = root?.document;
     const locationRef = root?.location;
     let statusRequestPending = false;
+    let statusRefreshQueued = false;
+    let lastRfqReference = '';
+    let detailMutationTimer = null;
     let indexStatusRequestPending = false;
+    let indexStatusRefreshQueued = false;
     let lastIndexReferencesKey = '';
     let indexMutationTimer = null;
 
@@ -273,7 +277,11 @@
     }
 
     async function refreshRfqIndexStatus(force = false) {
-      if (!isRfqIndexPage() || indexStatusRequestPending) return;
+      if (!isRfqIndexPage()) return;
+      if (indexStatusRequestPending) {
+        if (force) indexStatusRefreshQueued = true;
+        return;
+      }
       const entries = rfqIndexEntries();
       if (!entries.length) return;
       ensureRfqIndexColumns(entries);
@@ -308,6 +316,10 @@
         for (const entry of entries) renderRfqIndexCell(entry, { tone: 'error', label: 'Check failed', meta: error.message || 'Try again' });
       } finally {
         indexStatusRequestPending = false;
+        if (indexStatusRefreshQueued) {
+          indexStatusRefreshQueued = false;
+          scheduleRfqIndexStatus(true);
+        }
       }
     }
 
@@ -319,11 +331,16 @@
       }, 120);
     }
 
-    async function refreshRfqStatus() {
-      if (!isRfqPage() || statusRequestPending) return;
-      statusRequestPending = true;
+    async function refreshRfqStatus(force = false) {
+      if (!isRfqPage()) return;
       const rfq = api.extractRfq(documentRef, locationRef);
       const reference = String(rfq.externalId || '').trim();
+      if (!force && reference && reference.toLowerCase() === lastRfqReference.toLowerCase()) return;
+      if (statusRequestPending) {
+        statusRefreshQueued = true;
+        return;
+      }
+      statusRequestPending = true;
       renderRfqStatus({ label: 'Checking DataPlus...', detail: `Looking for ${reference || 'this RFQ'} in the quote pipeline.` }, reference);
       try {
         const result = await runtimeMessage({ type: 'dataplus:rfq-status', reference });
@@ -340,7 +357,20 @@
         renderRfqStatus({ tone: 'error', label: 'DataPlus check failed', detail: error.message || 'Refresh the page to try again.' }, reference);
       } finally {
         statusRequestPending = false;
+        lastRfqReference = reference;
+        if (statusRefreshQueued) {
+          statusRefreshQueued = false;
+          root.setTimeout(() => refreshRfqStatus(true), 0);
+        }
       }
+    }
+
+    function scheduleRfqStatusRefresh(force = false) {
+      if (detailMutationTimer) root.clearTimeout(detailMutationTimer);
+      detailMutationTimer = root.setTimeout(() => {
+        detailMutationTimer = null;
+        refreshRfqStatus(force).catch(() => {});
+      }, 180);
     }
 
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -350,16 +380,19 @@
         return false;
       }
       if (message?.type === 'dataplus:refresh-rfq-status') {
-        Promise.all([refreshRfqStatus(), refreshRfqIndexStatus(true)]).then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: error.message }));
+        Promise.all([refreshRfqStatus(true), refreshRfqIndexStatus(true)]).then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: error.message }));
         return true;
       }
       return false;
     });
 
     if (isRfqPage()) {
-      root.setTimeout(() => refreshRfqStatus(), 0);
-      root.addEventListener('focus', () => refreshRfqStatus());
-      documentRef.addEventListener('visibilitychange', () => { if (documentRef.visibilityState === 'visible') refreshRfqStatus(); });
+      root.setTimeout(() => refreshRfqStatus(true), 0);
+      root.addEventListener('focus', () => refreshRfqStatus(true));
+      documentRef.addEventListener('visibilitychange', () => { if (documentRef.visibilityState === 'visible') refreshRfqStatus(true); });
+      if (documentRef.body && typeof MutationObserver !== 'undefined') {
+        new MutationObserver(() => scheduleRfqStatusRefresh()).observe(documentRef.body, { childList: true, subtree: true, characterData: true });
+      }
     }
     if (isRfqIndexPage()) {
       scheduleRfqIndexStatus(true);
@@ -523,7 +556,9 @@
 
   function extractRfq(doc, locationLike) {
     const titleText = clean(doc.querySelector('h1,h2,h3')?.textContent || doc.title, 300);
-    const externalId = /RFQ\s*["']?([^"']+?)["']?(?:\s|$)/i.exec(titleText)?.[1]?.trim() || /Q-[A-Z0-9-]+/i.exec(doc.body?.innerText || '')?.[0] || '';
+    const pageText = String(doc.body?.innerText || '');
+    const canonicalReference = /\bQ-[A-Z0-9]+(?:-[A-Z0-9]+)+\b/i.exec(`${titleText}\n${pageText}`)?.[0] || '';
+    const externalId = canonicalReference || /RFQ\s*[:#-]?\s*["']?([^"'\s]+)["']?/i.exec(titleText)?.[1]?.trim() || '';
     const shippingCard = Array.from(doc.querySelectorAll('.card-body')).find((card) => /Shipping Address/i.test(card.innerText || ''));
     const shippingText = clean(shippingCard?.querySelector('.text-muted')?.textContent || '', 2000);
     const shippingAddress = parseShippingSummary(shippingText);

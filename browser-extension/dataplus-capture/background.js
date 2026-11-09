@@ -100,6 +100,7 @@ async function apiRequest(path, options = {}) {
   if (!current.extensionToken) throw new Error('Connect the extension to DataPlus first.');
   const response = await fetch(`${current.baseUrl}${path}`, {
     method: options.method || 'GET',
+    cache: 'no-store',
     headers: {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -165,9 +166,11 @@ async function rfqStatus(reference) {
   if (!current.extensionToken) return { connected: false, baseUrl: current.baseUrl, exists: false, draft: null, quoteUrl: '' };
   const status = await connectionStatus();
   if (!status.connected) return { connected: false, baseUrl: current.baseUrl, exists: false, draft: null, quoteUrl: '' };
-  const query = new URLSearchParams({ source: 'BuySupply DW RFQ', reference: normalizedReference });
-  const payload = await apiRequest(`/api/order-drafts/import-match?${query.toString()}`);
-  const draft = payload?.draft || null;
+  const payload = await apiRequest('/api/order-drafts/import-matches', {
+    method: 'POST',
+    body: { source: 'BuySupply DW RFQ', references: [normalizedReference] }
+  });
+  const draft = payload?.matches?.[0]?.draft || null;
   const quoteUrl = draft?.id ? `${current.baseUrl}/drafts/${encodeURIComponent(String(draft.id))}` : '';
   return {
     connected: true,

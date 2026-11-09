@@ -15,7 +15,7 @@ const background = fs.readFileSync(path.join(extensionRoot, 'background.js'), 'u
 const content = fs.readFileSync(path.join(extensionRoot, 'content.js'), 'utf8');
 
 assert.equal(manifest.manifest_version, 3);
-assert.equal(manifest.version, '0.2.2');
+assert.equal(manifest.version, '0.2.3');
 assert.equal(manifest.side_panel.default_path, 'sidepanel.html');
 assert.ok(manifest.permissions.includes('cookies'));
 assert.ok(manifest.permissions.includes('scripting'));
@@ -41,6 +41,17 @@ assert.deepEqual(extractor.parseShippingSummary('1870 bath ave • br • NY 112
   raw: '1870 bath ave • br • NY 11204'
 });
 assert.equal(extractor.numberValue('$1,249.95'), 1249.95);
+
+const rfqDocument = {
+  title: 'BuySupply RFQ',
+  body: { innerText: 'Website RFQ: Q-261109-AB12\nRFQ status: Open' },
+  querySelector(selector) {
+    if (selector === 'h1,h2,h3') return { textContent: 'RFQ: Q-261109-AB12 for Acme' };
+    return null;
+  },
+  querySelectorAll() { return []; }
+};
+assert.equal(extractor.extractRfq(rfqDocument, { href: 'https://dw.buysupply.com/baskets/view/999', hostname: 'dw.buysupply.com' }).externalId, 'Q-261109-AB12');
 
 assert.match(server, /\/api\/auth\/extension\/connect/);
 assert.match(server, /sessionType: "browser_extension"/);
@@ -69,11 +80,15 @@ assert.match(sidepanel, /requestPageExtraction\(tab\.id, template\)/);
 assert.match(sidepanel, /quote-url-link/);
 assert.match(background, /dataplus:rfq-status/);
 assert.match(background, /dataplus:rfq-statuses/);
+assert.match(background, /cache:\s*'no-store'/);
+assert.match(background, /references:\s*\[normalizedReference\]/);
 assert.match(background, /dataplus:open-sidepanel/);
 assert.match(background, /dataplus:set-competitor-context/);
 assert.match(background, /competitorResearchContext/);
 assert.match(content, /dataplus-rfq-status-card/);
 assert.match(content, /data-dataplus-rfq-cell/);
+assert.match(content, /statusRefreshQueued/);
+assert.match(content, /MutationObserver\(\(\) => scheduleRfqStatusRefresh/);
 assert.match(content, /Open quote in DataPlus/);
 assert.match(content, /dataplus:competitor-search/);
 assert.match(content, /DataPlus competitor research/);
