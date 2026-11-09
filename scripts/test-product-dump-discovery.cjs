@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { createBoundedIdentitySet, createDiscovery } = require("../lib/product-dump-discovery");
+const { createBoundedIdentitySet, createDiscovery, createSkuCreationScanner } = require("../lib/product-dump-discovery");
 
 async function main() {
   const bounded = createBoundedIdentitySet(2);
@@ -84,6 +84,23 @@ async function main() {
   assert.deepEqual(lookupSaved.map((row) => row.sku), ["DATABASE-BARCODE", "DATABASE-IDENTIFIER", "DATABASE-VENDOR-SKU", "LOOKUP-NEW"]);
   assert.equal(lookupRun.counts.existing, 2);
   assert.equal(lookupRun.counts.needsReview, 3);
+  const skuLookups = [];
+  const fastSaved = [];
+  const fastRun = createSkuCreationScanner({
+    lookup: async (skus) => { skuLookups.push(skus); return ["existing-fast"]; },
+    normalize: (row) => ({ sku: row.sku.toUpperCase() }),
+    save: async (rows) => { fastSaved.push(...rows); return { products: rows.length }; },
+    report: async () => {}
+  });
+  await fastRun.batch([
+    { sku: "EXISTING-FAST" },
+    { sku: "NEW-FAST" },
+    { sku: "new-fast" },
+    { sku: "" }
+  ]);
+  assert.deepEqual(skuLookups, [["existing-fast", "new-fast"]]);
+  assert.deepEqual(fastSaved.map((row) => row.sku), ["NEW-FAST"]);
+  assert.deepEqual(fastRun.counts, { scanned: 4, existing: 2, added: 1, needsReview: 0, excluded: 1 });
   console.log("Discovery: all-supplier independent SKU creation, source persistence, inactive/discontinued retention, identifier review signals, duplicate batches, disabled creation and retry checks passed.");
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

@@ -14255,6 +14255,22 @@ async function readProductDiscoveryMatches(items = []) {
   return { products: [...products.values()], aliases, identifiers };
 }
 
+async function readExistingProductSkus(skus = []) {
+  const client = getPool();
+  if (!client) throw new Error("Product SKU lookup requires PostgreSQL.");
+  await initRelationalSchema();
+  const keys = [...new Set((Array.isArray(skus) ? skus : [])
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean))];
+  if (!keys.length) return [];
+  const result = await client.query(`
+    select lower(sku) as sku
+    from products
+    where lower(sku) = any($1::text[])
+  `, [keys]);
+  return result.rows.map((row) => row.sku);
+}
+
 async function upsertProductsFromState(items = [], options = {}) {
   const pool = getPool();
   if (!pool) return { enabled: false, products: 0, vendors: 0, identifiers: 0, offers: 0 };
@@ -20726,6 +20742,7 @@ module.exports = {
   registerDatadumpSuppliers,
   readProductDiscoveryKeys,
   readProductDiscoveryMatches,
+  readExistingProductSkus,
   readOrderDataReviewBatch,
   readOrderCostBackfillBatch,
   listOpenMarketplaceOrderStatusCandidates,

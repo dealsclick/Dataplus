@@ -24,6 +24,7 @@ async function main() {
     { sku: "DISCOVERY-CANDIDATE", barcode: "123456789012" }
   ]);
   assert(matches.products.some((row) => row.sku === "DISCOVERY-NEW"));
+  assert.deepEqual(await db.readExistingProductSkus(["discovery-new", "missing", "DISCOVERY-NEW"]), ["discovery-new"]);
   console.log("PostgreSQL discovery insert, retry, SKU conflict and listing preservation passed.");
 }
 main().catch((error) => { console.error(error.message); process.exitCode = 1; }).finally(() => db.closePool());

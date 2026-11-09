@@ -1574,6 +1574,83 @@ async function discoverCatalogProducts(dumpPath, options) {
   console.log(`Discovery complete: ${discovery.counts.added} catalog additions, ${discovery.counts.needsReview} identifier candidates, ${read} records scanned in ${Date.now() - started} ms.`);
 }
 
+async function discoverCatalogSkusFast(dumpPath, options) {
+  const postgres = require("../db");
+  const { createSkuCreationScanner } = require("../lib/product-dump-discovery");
+  const systemSettings = await postgres.readStateField("systemSettings");
+  const settings = systemSettings && typeof systemSettings === "object" ? systemSettings : {};
+  const started = Date.now();
+  const discoveryRunId = crypto.randomUUID();
+  if (!options.dryRun) await createVendorFeedRun({ id: discoveryRunId, jobId: options.jobId, sourceFile: path.basename(dumpPath), status: "running", startedAt: new Date().toISOString() });
+  const reportPath = path.join(IMPORT_JOB_FILE_DIR, options.jobId, "discovery.ndjson");
+  ensureParentDir(reportPath);
+  const writer = fs.createWriteStream(reportPath);
+  const done = finished(writer);
+  const normalize = (entry) => {
+    const row = buildProduct(entry.source);
+    if (!row) return null;
+    const now = new Date().toISOString();
+    return upsertDataWarehouseStock({
+      id: crypto.randomUUID(),
+      ...row,
+      qty: Number(row.stockQty ?? row.qty ?? 0),
+      reserved: 0,
+      reorderPoint: Number(row.reorderPoint || 0),
+      shadowSkus: [],
+      serialUnits: [],
+      warehouseStock: [],
+      sources: { ...(row.sources || {}), catalog: row.sku },
+      createdAt: now,
+      createdBy: "DataPlus",
+      createdMethod: "Datadump SKU creation",
+      createdSource: "Internal universal datadump",
+      createdSourceDetail: `Job ${options.jobId}`,
+      updatedAt: now
+    }, row.stockQty ?? row.qty ?? 0, row.productDumpUpdatedAt || row.updatedAt);
+  };
+  const scanner = createSkuCreationScanner({
+    enabled: settings.catalogImportNewSkusEnabled !== false,
+    lookup: (skus) => postgres.readExistingProductSkus(skus),
+    normalize,
+    save: async (rows) => options.dryRun
+      ? { products: rows.length }
+      : postgres.upsertProductsFromState(rows, { insertOnly: true, batchSize: 2000 }),
+    report: (row) => writeLine(writer, JSON.stringify(row) + "\n")
+  });
+  const batch = [];
+  const requestedBatchSize = Math.max(1, Number(options.batchSize || 1000) || 1000);
+  const lookupBatchSize = Math.max(1000, Math.min(10000, requestedBatchSize * 5));
+  let read = 0;
+  let lastAdded = 0;
+  const flush = async () => {
+    if (batch.length) await scanner.batch(batch.splice(0));
+    if (read % 10000 === 0 || scanner.counts.added !== lastAdded) {
+      process.stderr.write(`DISCOVERY ${JSON.stringify({ ...scanner.counts, elapsedMs: Date.now() - started, dryRun: options.dryRun })}\n`);
+      lastAdded = scanner.counts.added;
+    }
+  };
+  try {
+    await forEachDumpRecord(dumpPath, { limit: options.limit }, async (record) => {
+      read += 1;
+      batch.push({
+        sku: scalarValue(record._id || record.sku || record.SKU || record.id),
+        source: record
+      });
+      if (batch.length >= lookupBatchSize || read % 10000 === 0) await flush();
+    });
+    await flush();
+    if (!options.dryRun) await finishVendorFeedRun(discoveryRunId, { status: "success", totalRows: read, processedRows: read, changedRows: scanner.counts.added });
+  } catch (error) {
+    if (!options.dryRun) await finishVendorFeedRun(discoveryRunId, { status: "failed", totalRows: read, processedRows: read, changedRows: scanner.counts.added, error: error.message });
+    throw error;
+  } finally {
+    writer.end();
+    await done;
+  }
+  process.stderr.write(`DISCOVERY ${JSON.stringify({ ...scanner.counts, elapsedMs: Date.now() - started, dryRun: options.dryRun })}\n`);
+  console.log(`SKU creation check complete: ${scanner.counts.added} added, ${scanner.counts.existing} existing, ${scanner.counts.excluded} excluded, ${read} records scanned in ${Date.now() - started} ms.`);
+}
+
 async function main() {
   loadEnv();
   const options = parseArgs(process.argv.slice(2));
@@ -1649,6 +1726,10 @@ async function main() {
   if (options.inventory) {
     await importInventoryState(dumpPath, options);
   } else {
+    if (options.discoveryOnly && options.postgresOnly) {
+      await discoverCatalogSkusFast(dumpPath, options);
+      return;
+    }
     if (options.discoverFirst && options.postgresOnly) await discoverCatalogProducts(dumpPath, options);
     if (options.discoveryOnly) return;
     await importCatalogStore(dumpPath, options);
