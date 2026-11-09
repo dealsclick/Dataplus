@@ -63,11 +63,13 @@ import {
   Info,
   Link2,
   Loader2,
+  MapPin,
   Mail,
   MessageSquare,
   MoreHorizontal,
   PackageCheck,
   Pencil,
+  Phone,
   Plus,
   Printer,
   RefreshCw,
@@ -253,6 +255,26 @@ function quoteRecommendedPrice(cost: number | null, mapPrice: string | number | 
   const map = Math.max(0, Number(mapPrice || 0))
   if (map > 0) return map
   return cost === null ? 0 : Math.round((cost * 1.3 + Number.EPSILON) * 100) / 100
+}
+
+function quoteAddressLines(value: unknown, fallbackName = "") {
+  const address = value && typeof value === "object" ? value as Record<string, unknown> : {}
+  const locality = [address.city || address.town, address.state || address.province, address.postalCode || address.zip || address.postcode]
+    .map((part) => String(part || "").trim())
+    .filter(Boolean)
+    .join(", ")
+  return [
+    address.name || fallbackName,
+    address.company,
+    address.line1 || address.address1,
+    address.line2 || address.address2,
+    locality,
+    address.country || address.countryCode,
+  ].map((part) => String(part || "").trim()).filter(Boolean)
+}
+
+function quoteAddressFingerprint(value: unknown, fallbackName = "") {
+  return quoteAddressLines(value, fallbackName).map((part) => part.toLowerCase().replace(/[^a-z0-9]/g, "")).join("|")
 }
 
 function QuoteSupplierPicker({ line, options, loading, onSelect }: { line: QuoteLineForm; options: QuoteSupplierOption[]; loading: boolean; onSelect: (option: QuoteSupplierOption) => void }) {
@@ -727,6 +749,14 @@ export function DraftQuoteFieldDetailPage() {
   const selectedTermIds = Array.isArray(draft?.selectedTermIds) ? draft.selectedTermIds.map(String) : []
   const selectedTermSnapshot = Array.isArray(draft?.selectedTermsSnapshot) ? draft.selectedTermsSnapshot as QuoteTermDefinition[] : []
   const selectedTerms = selectedTermIds.map((id) => selectedTermSnapshot.find((term) => term.id === id) || quoteTermOptions.find((term) => term.id === id)).filter((term): term is QuoteTermDefinition => Boolean(term))
+  const customerName = String(draft?.buyer || "Not assigned")
+  const customerEmail = String(draft?.buyerEmail || "").trim()
+  const customerPhone = String(draft?.phone || "").trim()
+  const shippingAddress = draft?.shippingAddress && typeof draft.shippingAddress === "object" ? draft.shippingAddress : {}
+  const billingAddress = draft?.billingAddress && typeof draft.billingAddress === "object" ? draft.billingAddress : shippingAddress
+  const shippingAddressLines = quoteAddressLines(shippingAddress, customerName)
+  const billingAddressLines = quoteAddressLines(billingAddress, customerName)
+  const billingMatchesShipping = Boolean(shippingAddressLines.length && quoteAddressFingerprint(shippingAddress, customerName) === quoteAddressFingerprint(billingAddress, customerName))
   const editableQuoteTerms = quoteTermOptions.filter((term) => term.active || form.selectedTermIds.includes(term.id))
   const quoteTermGroups = [...new Set(editableQuoteTerms.map((term) => term.group))]
   const expirationDate = form.expiresAt ? new Date(`${form.expiresAt}T12:00:00`) : undefined
@@ -774,19 +804,17 @@ export function DraftQuoteFieldDetailPage() {
     </div>} />
 
     {loading ? <div className="grid gap-3"><Skeleton className="h-36" /><Skeleton className="h-72" /></div> : !draft ? <Card><CardContent className="p-8 text-center text-muted-foreground">This draft quote was not found.</CardContent></Card> : <>
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-8">
-        <Detail label="Customer" value={String(draft.buyer || "Not assigned")} />
-        <Detail label="Status" value={String(draft.status || "draft")} />
-        <Detail label="Sales owner" value={String(draft.salesOwner || "Unassigned")} />
-        <Detail label="Quote total" value={moneyLabel(total)} />
-        <Detail label="Gross margin" value={grossMargin === null ? `${numberLabel(lines.length - costedLines.length)} line cost${lines.length - costedLines.length === 1 ? "" : "s"} needed` : `${grossMargin.toFixed(1)}% · ${moneyLabel(grossProfit)}`} />
-        <Detail label="Next follow-up" value={nextFollowUpAt ? `${dateLabel(nextFollowUpAt)}${followUpDue ? " (due)" : ""}` : "Not scheduled"} />
-        <Detail label="Valid until" value={expiresAt ? `${dateLabel(`${expiresAt}T12:00:00`)}${expired ? " (expired)" : ""}` : "Not set"} />
-        <Detail label="Source" value={String(draft.source || "Manual")} />
-      </div>
       {expired && !["accepted", "lost"].includes(String(draft.status || "")) ? <Alert variant="destructive"><Clock3 className="size-4" /><AlertTitle>Quote expired</AlertTitle><AlertDescription>Extend the validity date before sending or accepting this quote.</AlertDescription></Alert> : null}
       {followUpDue ? <Alert><Clock3 className="size-4" /><AlertTitle>Follow-up is due</AlertTitle><AlertDescription>{String(draft.nextAction || "Contact the customer and record the next action.")}</AlertDescription></Alert> : null}
-      <Card><CardHeader><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">Quote items</CardTitle><CardDescription>MSRP, MAP, selling price, supplier cost, and gross margin by line.</CardDescription></div><div className="flex flex-wrap gap-2">{hasCompleteMsrp ? <Badge variant="outline">{moneyLabel(savings)} customer savings</Badge> : <Badge variant="outline">{lines.length ? `MSRP missing on ${numberLabel(missingMsrpCount)} line${missingMsrpCount === 1 ? "" : "s"}` : "No quote lines"}</Badge>}{costsComplete ? <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">{grossMargin?.toFixed(1)}% total margin</Badge> : <Badge variant="outline" className="border-amber-500/40 text-amber-700 dark:text-amber-300">Cost needed on {numberLabel(lines.length - costedLines.length)} line{lines.length - costedLines.length === 1 ? "" : "s"}</Badge>}</div></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table className="min-w-[1380px]"><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Item</TableHead><TableHead>Supplier</TableHead><TableHead>Qty</TableHead><TableHead>MSRP</TableHead><TableHead>MAP</TableHead><TableHead>Price</TableHead><TableHead>Cost</TableHead><TableHead>Savings</TableHead><TableHead>Margin</TableHead><TableHead>Total</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
+      <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_340px] 2xl:grid-cols-[minmax(0,1fr)_380px]">
+        <main className="order-2 grid min-w-0 content-start gap-4 xl:order-1">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <Detail label="Status" value={String(draft.status || "draft")} />
+            <Detail label="Quote total" value={moneyLabel(total)} />
+            <Detail label="Gross margin" value={grossMargin === null ? `${numberLabel(lines.length - costedLines.length)} line cost${lines.length - costedLines.length === 1 ? "" : "s"} needed` : `${grossMargin.toFixed(1)}% · ${moneyLabel(grossProfit)}`} />
+            <Detail label="Valid until" value={expiresAt ? `${dateLabel(`${expiresAt}T12:00:00`)}${expired ? " (expired)" : ""}` : "Not set"} />
+          </div>
+      <Card><CardHeader><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">Quote items</CardTitle><CardDescription>MSRP, MAP, selling price, supplier cost, and gross margin by line.</CardDescription></div><div className="flex flex-wrap gap-2">{hasCompleteMsrp ? <Badge variant="outline">{moneyLabel(savings)} customer savings</Badge> : <Badge variant="outline">{lines.length ? `MSRP missing on ${numberLabel(missingMsrpCount)} line${missingMsrpCount === 1 ? "" : "s"}` : "No quote lines"}</Badge>}{costsComplete ? <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">{grossMargin?.toFixed(1)}% total margin</Badge> : <Badge variant="outline" className="border-amber-500/40 text-amber-700 dark:text-amber-300">Cost needed on {numberLabel(lines.length - costedLines.length)} line{lines.length - costedLines.length === 1 ? "" : "s"}</Badge>}</div></div></CardHeader><CardContent className="p-0"><div className="overflow-x-auto"><Table className="min-w-[1120px]"><TableHeader><TableRow><TableHead>Product</TableHead><TableHead>Supplier</TableHead><TableHead>Qty</TableHead><TableHead>MSRP</TableHead><TableHead>MAP</TableHead><TableHead>Price</TableHead><TableHead>Cost</TableHead><TableHead>Margin</TableHead><TableHead>Total</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
         {lines.map((line, index) => {
           const lineSavings = Math.max(0, Number(line.msrp || 0) - Number(line.price || 0)) * Number(line.qty || 0)
           const lineCost = quoteLineCost(line)
@@ -797,15 +825,41 @@ export function DraftQuoteFieldDetailPage() {
           const productTitle = String(line.title || line.sku || "-")
           const productImage = String(line.image || line.defaultImage || "")
           const catalogSku = String(line.catalogMatchedSku || line.sku || "")
-          return <TableRow key={`${String(line.sku)}-${index}`}><TableCell className="font-mono text-xs">{line.catalogProductId ? <a className="font-semibold text-primary hover:underline" href={`/products/${encodeURIComponent(catalogSku)}`}>{String(line.sku || "-")}</a> : String(line.sku || "-")}</TableCell><TableCell><div className="flex min-w-80 items-center gap-3"><CatalogImage src={productImage || undefined} alt={productTitle} className="size-12 shrink-0" imageClassName="p-1" /><div className="min-w-0"><p className="whitespace-normal font-medium leading-5">{productTitle}</p><div className="mt-1 flex flex-wrap items-center gap-1.5">{line.catalogProductId ? <Badge variant="outline" className={line.catalogMatchReviewRequired ? "border-amber-500/40 text-amber-700 dark:text-amber-300" : "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"}>{line.catalogMatchReviewRequired ? "Catalog candidate" : "Catalog matched"}</Badge> : <Badge variant="outline" className="border-red-500/40 text-red-700 dark:text-red-300">Not in catalog</Badge>}{line.catalogMatchBasis ? <span className="text-xs text-muted-foreground">{String(line.catalogMatchBasis)}</span> : null}</div></div></div></TableCell><TableCell><p className="font-medium">{String(line.selectedSupplierName || "Cost not selected")}</p><p className="font-mono text-xs text-muted-foreground">{String(line.selectedSupplierSku || "-")}</p></TableCell><TableCell>{numberLabel(Number(line.qty || 0))}</TableCell><TableCell>{Number(line.msrp || 0) > 0 ? moneyLabel(Number(line.msrp)) : "Not set"}</TableCell><TableCell>{lineMap > 0 ? moneyLabel(lineMap) : "Not set"}</TableCell><TableCell><p className={cn("font-medium", lineMap > 0 && Number(line.price || 0) < lineMap ? "text-destructive" : "")}>{moneyLabel(Number(line.price || 0))}</p>{lineMap > 0 && Number(line.price || 0) < lineMap ? <p className="text-xs text-destructive">Below MAP</p> : null}</TableCell><TableCell className="font-semibold tabular-nums">{lineCost === null ? "Not set" : moneyLabel(lineCost)}</TableCell><TableCell className={lineSavings > 0 ? "font-medium text-emerald-600" : "text-muted-foreground"}>{lineSavings > 0 ? moneyLabel(lineSavings) : "-"}</TableCell><TableCell className={cn("font-medium", lineProfit !== null && lineProfit < 0 ? "text-destructive" : lineProfit !== null ? "text-emerald-600" : "text-muted-foreground")}>{lineMargin === null ? "Cost needed" : `${lineMargin.toFixed(1)}% · ${moneyLabel(lineProfit)}`}</TableCell><TableCell className="font-medium">{moneyLabel(lineRevenue)}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" onClick={() => void findSimilar(line, index)}><Search className="size-4" /> Find similar</Button></TableCell></TableRow>
+          return <TableRow key={`${String(line.sku)}-${index}`}><TableCell><div className="flex min-w-72 items-center gap-3"><CatalogImage src={productImage || undefined} alt={productTitle} className="size-12 shrink-0" imageClassName="p-1" /><div className="min-w-0">{line.catalogProductId ? <a className="font-mono text-xs font-semibold text-primary hover:underline" href={`/products/${encodeURIComponent(catalogSku)}`}>{String(line.sku || "-")}</a> : <p className="font-mono text-xs">{String(line.sku || "-")}</p>}<p className="mt-0.5 whitespace-normal font-medium leading-5">{productTitle}</p><div className="mt-1 flex flex-wrap items-center gap-1.5">{line.catalogProductId ? <Badge variant="outline" className={line.catalogMatchReviewRequired ? "border-amber-500/40 text-amber-700 dark:text-amber-300" : "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"}>{line.catalogMatchReviewRequired ? "Catalog candidate" : "Catalog matched"}</Badge> : <Badge variant="outline" className="border-red-500/40 text-red-700 dark:text-red-300">Not in catalog</Badge>}{line.catalogMatchBasis ? <span className="text-xs text-muted-foreground">{String(line.catalogMatchBasis)}</span> : null}</div></div></div></TableCell><TableCell><p className="font-medium">{String(line.selectedSupplierName || "Cost not selected")}</p><p className="font-mono text-xs text-muted-foreground">{String(line.selectedSupplierSku || "-")}</p></TableCell><TableCell>{numberLabel(Number(line.qty || 0))}</TableCell><TableCell>{Number(line.msrp || 0) > 0 ? moneyLabel(Number(line.msrp)) : "Not set"}</TableCell><TableCell>{lineMap > 0 ? moneyLabel(lineMap) : "Not set"}</TableCell><TableCell><p className={cn("font-medium", lineMap > 0 && Number(line.price || 0) < lineMap ? "text-destructive" : "")}>{moneyLabel(Number(line.price || 0))}</p>{lineMap > 0 && Number(line.price || 0) < lineMap ? <p className="text-xs text-destructive">Below MAP</p> : lineSavings > 0 ? <p className="text-xs text-emerald-600">{moneyLabel(lineSavings)} saved</p> : null}</TableCell><TableCell className="font-semibold tabular-nums">{lineCost === null ? "Not set" : moneyLabel(lineCost)}</TableCell><TableCell className={cn("font-medium", lineProfit !== null && lineProfit < 0 ? "text-destructive" : lineProfit !== null ? "text-emerald-600" : "text-muted-foreground")}>{lineMargin === null ? "Cost needed" : `${lineMargin.toFixed(1)}% · ${moneyLabel(lineProfit)}`}</TableCell><TableCell className="font-medium">{moneyLabel(lineRevenue)}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" onClick={() => void findSimilar(line, index)}><Search className="size-4" /> Find similar</Button></TableCell></TableRow>
         })}
       </TableBody></Table></div></CardContent></Card>
       {enabledQuoteCarriers.length ? <Card><CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Shipping estimate</CardTitle><CardDescription>Compare the shared {enabledQuoteCarrierLabel} accounts for an accurate customer quote.</CardDescription></div><Button size="sm" variant={savedShippingEstimate ? "outline" : "default"} onClick={openShippingRates}><Truck className="size-4" /> {savedShippingEstimate ? "Refresh carrier rates" : "Get carrier rates"}</Button></div></CardHeader><CardContent className="grid gap-3">{savedShippingEstimate ? <><div className="grid gap-3 text-sm sm:grid-cols-5"><Detail label="Carrier / service" value={`${String(savedShippingEstimate.carrier || "Carrier")} ${String(savedShippingEstimate.service || "")}`} /><Detail label="Shipping" value={moneyLabel(shippingAmount)} /><Detail label="Package" value={`${String((savedShippingEstimate.package as Record<string, unknown>)?.weight || "-")} lb / ${String((savedShippingEstimate.package as Record<string, unknown>)?.length || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.width || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.height || "-")} in`} /><Detail label="Rate valid until" value={savedRateExpired ? "Expired - refresh required" : dateLabel(String(savedShippingEstimate.expiresAt || ""))} /><Detail label="Estimated quote total" value={moneyLabel(total)} /></div>{savedRateExpired ? <Alert variant="destructive"><Clock3 className="size-4" /><AlertTitle>Shipping rate expired</AlertTitle><AlertDescription>Refresh carrier rates before accepting or converting this quote.</AlertDescription></Alert> : null}</> : <p className="text-sm text-muted-foreground">No shipping rate has been added. Product subtotal is {moneyLabel(subtotal)}.</p>}</CardContent></Card> : null}
-      <div className="grid gap-4 lg:grid-cols-4">
-        <Card><CardHeader className="pb-3"><CardTitle className="text-sm">Internal notes</CardTitle><CardDescription>Visible only to DataPlus staff.</CardDescription></CardHeader><CardContent className="whitespace-pre-wrap text-sm text-muted-foreground">{String(draft.note || "No internal notes.")}</CardContent></Card>
-        <Card><CardHeader className="pb-3"><CardTitle className="text-sm">Customer message</CardTitle><CardDescription>Included on every customer quote version.</CardDescription></CardHeader><CardContent className="whitespace-pre-wrap text-sm text-muted-foreground">{String(draft.customerNote || "No customer message.")}</CardContent></Card>
-        <Card><CardHeader className="pb-3"><CardTitle className="text-sm">Quote terms</CardTitle><CardDescription>Only checked terms appear on customer PDFs.</CardDescription></CardHeader><CardContent className="grid gap-2 text-sm text-muted-foreground">{selectedTerms.map((term) => <div key={term.id} className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-600" /><span>{term.label}</span></div>)}{draft.customTerms ? <div className="whitespace-pre-wrap border-t pt-2">{String(draft.customTerms)}</div> : null}{!selectedTerms.length && !draft.customTerms ? "No terms selected." : null}</CardContent></Card>
-        <Card><CardHeader className="pb-3"><CardTitle className="text-sm">Pipeline activity</CardTitle><CardDescription>Recent stage changes and ownership.</CardDescription></CardHeader><CardContent className="grid gap-3 text-sm">{draft.nextAction ? <div><p className="font-medium">Next action</p><p className="text-muted-foreground">{String(draft.nextAction)}</p></div> : null}{quoteActivity.slice(0, 4).map((event) => <div key={String(event.id || event.createdAt)} className="border-l-2 pl-3"><p className="font-medium capitalize">{String(event.toStatus || event.type || "Updated").replaceAll("_", " ")}</p><p className="text-xs text-muted-foreground">{String(event.user || "DataPlus user")} · {dateLabel(String(event.createdAt || ""))}</p></div>)}{!draft.nextAction && !quoteActivity.length ? <p className="text-muted-foreground">No pipeline activity yet.</p> : null}</CardContent></Card>
+          <Card>
+            <CardHeader className="pb-3"><CardTitle className="text-sm">Quote details</CardTitle><CardDescription>Notes, customer-facing terms, and recent pipeline activity.</CardDescription></CardHeader>
+            <CardContent>
+              <Tabs defaultValue="notes">
+                <TabsList className="w-full justify-start overflow-x-auto"><TabsTrigger value="notes">Notes</TabsTrigger><TabsTrigger value="terms">Terms</TabsTrigger><TabsTrigger value="activity">Activity</TabsTrigger></TabsList>
+                <TabsContent value="notes" className="mt-4 grid gap-5 md:grid-cols-2">
+                  <section><h3 className="text-sm font-semibold">Internal notes</h3><p className="mt-1 text-xs text-muted-foreground">Visible only to DataPlus staff.</p><div className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{String(draft.note || "No internal notes.")}</div></section>
+                  <section className="border-t pt-4 md:border-l md:border-t-0 md:pl-5 md:pt-0"><h3 className="text-sm font-semibold">Customer message</h3><p className="mt-1 text-xs text-muted-foreground">Included on every customer quote version.</p><div className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">{String(draft.customerNote || "No customer message.")}</div></section>
+                </TabsContent>
+                <TabsContent value="terms" className="mt-4 grid gap-2 text-sm text-muted-foreground">{selectedTerms.map((term) => <div key={term.id} className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-600" /><span>{term.label}</span></div>)}{draft.customTerms ? <div className="mt-2 whitespace-pre-wrap border-t pt-3">{String(draft.customTerms)}</div> : null}{!selectedTerms.length && !draft.customTerms ? "No terms selected." : null}</TabsContent>
+                <TabsContent value="activity" className="mt-4 grid gap-3 text-sm">{draft.nextAction ? <div><p className="font-medium">Next action</p><p className="text-muted-foreground">{String(draft.nextAction)}</p></div> : null}{quoteActivity.slice(0, 8).map((event) => <div key={String(event.id || event.createdAt)} className="border-l-2 pl-3"><p className="font-medium capitalize">{String(event.toStatus || event.type || "Updated").replaceAll("_", " ")}</p><p className="text-xs text-muted-foreground">{String(event.user || "DataPlus user")} · {dateLabel(String(event.createdAt || ""))}</p></div>)}{!draft.nextAction && !quoteActivity.length ? <p className="text-muted-foreground">No pipeline activity yet.</p> : null}</TabsContent>
+              </Tabs>
+            </CardContent>
+          </Card>
+        </main>
+
+        <aside className="order-1 grid content-start gap-4 xl:order-2 xl:sticky xl:top-20 xl:self-start">
+          <Card className="overflow-hidden">
+            <CardHeader className="border-b pb-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><CardDescription>Customer</CardDescription><CardTitle className="mt-1 truncate text-lg">{customerName}</CardTitle></div><div className="grid size-9 shrink-0 place-items-center rounded-md bg-primary/10 text-primary"><Users className="size-4" /></div></div></CardHeader>
+            <CardContent className="grid gap-5 pt-5">
+              <section className="grid gap-2.5 text-sm">
+                <h3 className="font-semibold">Contact</h3>
+                {customerEmail ? <a className="flex min-w-0 items-center gap-2 text-primary hover:underline" href={`mailto:${customerEmail}`}><Mail className="size-4 shrink-0" /><span className="truncate">{customerEmail}</span></a> : <p className="flex items-center gap-2 text-muted-foreground"><Mail className="size-4 shrink-0" /> No email provided</p>}
+                {customerPhone ? <a className="flex items-center gap-2 text-primary hover:underline" href={`tel:${customerPhone}`}><Phone className="size-4 shrink-0" />{customerPhone}</a> : <p className="flex items-center gap-2 text-muted-foreground"><Phone className="size-4 shrink-0" /> No phone provided</p>}
+              </section>
+              <section className="border-t pt-4"><div className="flex items-center gap-2"><MapPin className="size-4 text-muted-foreground" /><h3 className="text-sm font-semibold">Shipping address</h3></div><address className="mt-2 not-italic text-sm leading-6 text-muted-foreground">{shippingAddressLines.length ? shippingAddressLines.map((line, index) => <span key={`${line}-${index}`} className="block break-words">{line}</span>) : "No shipping address provided."}</address></section>
+              <section className="border-t pt-4"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex items-center gap-2"><MapPin className="size-4 text-muted-foreground" /><h3 className="text-sm font-semibold">Billing address</h3></div>{billingMatchesShipping ? <Badge variant="outline">Same as shipping</Badge> : null}</div><address className="mt-2 not-italic text-sm leading-6 text-muted-foreground">{billingAddressLines.length ? billingAddressLines.map((line, index) => <span key={`${line}-${index}`} className="block break-words">{line}</span>) : "No billing address provided."}</address></section>
+            </CardContent>
+          </Card>
+          <Card><CardHeader className="pb-3"><CardTitle className="text-sm">Quote ownership</CardTitle></CardHeader><CardContent className="grid gap-3 text-sm"><div className="flex items-start justify-between gap-3"><span className="text-muted-foreground">Sales owner</span><span className="text-right font-medium">{String(draft.salesOwner || "Unassigned")}</span></div><div className="flex items-start justify-between gap-3"><span className="text-muted-foreground">Source</span><span className="text-right font-medium">{String(draft.source || "Manual")}</span></div><div className="flex items-start justify-between gap-3"><span className="text-muted-foreground">Next follow-up</span><span className={cn("text-right font-medium", followUpDue && "text-amber-600")}>{nextFollowUpAt ? dateLabel(nextFollowUpAt) : "Not scheduled"}</span></div><div className="flex items-start justify-between gap-3"><span className="text-muted-foreground">Quote lines</span><span className="text-right font-medium">{numberLabel(lines.length)}</span></div></CardContent></Card>
+        </aside>
       </div>
     </>}
 
