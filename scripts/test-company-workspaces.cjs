@@ -300,6 +300,35 @@ test('company membership routes require user permission management before readin
   }
 });
 
+test('company product detail reads stay scoped to shared identity and company-owned commercial data',async()=>{
+  const {createCompanyOperationsHandler}=require('../lib/company-operations-http');
+  const scope={tenantId:'tenant-1',companyId:'buy'},user={id:'user-1'};
+  const store={
+    authorize:async()=>({id:'buy',name:'BuySupply'}),
+    catalogProduct:async(_user,_scope,key)=>key==='BUSB1441513GEC'?{
+      product_id:'product-1',source_sku:'BUSB1441513GEC',company_sku:'BUY-PAINT',title:'Touch Up Paint',brand:'Paint Brand',manufacturer:'Paint Brand',
+      mfr_part_number:'B1441513GEC',barcode:'012345678905',main_category:'Paint',default_image:'https://example.com/paint.jpg',uom:'Each',
+      company_status:'active',sell_price:'79.93',selected:true
+    }:null,
+    costs:async()=>[{vendor_account_id:'vendor-1',supplier_name:'BuySupply vendor',unit_cost:'51.25',uom:'Each',updated_at:'2026-11-09T12:00:00.000Z'}]
+  };
+  let response;
+  const handler=createCompanyOperationsHandler({store,selection:()=>scope,sendJson:(_res,status,data)=>{response={status,data};},sendHtml:()=>{},parseBody:async()=>({})});
+  const get=async(path)=>{await handler({method:'GET'},{},new URL(path,'http://localhost'),user);return response;};
+  const detail=await get('/api/inventory/BUSB1441513GEC');
+  assert.equal(detail.status,200);
+  assert.equal(detail.data.item.sku,'BUY-PAINT');
+  assert.equal(detail.data.item.sourceSku,'BUSB1441513GEC');
+  assert.equal(detail.data.item.cost,51.25);
+  assert.equal(detail.data.item.price,79.93);
+  assert.equal(detail.data.item.companyInventoryConnected,false);
+  assert.equal(detail.data.item.qty,undefined);
+  assert.equal((await get('/api/inventory/BUSB1441513GEC/operations')).data.inventoryConnected,false);
+  assert.equal((await get('/api/inventory/BUSB1441513GEC/channel-availability')).data.availability.length,0);
+  assert.equal((await get('/api/inventory/BUSB1441513GEC/suppliers')).data.matches[0].supplier,'BuySupply vendor');
+  assert.equal((await get('/api/inventory/MISSING')).status,404);
+});
+
 test('manual order parsing preserves identifiers, dates, unknown cost and rejects ambiguous line keys',()=>{
   const input={filename:'orders.csv',content:Buffer.from('so,order_date,sku,qty,ext_price,ext_cost,difference\n0001,09/01/2026,00123,2,20,12,-999\n0002,2026-09-02,00124,1,10,,10').toString('base64')};
   const parsed=parseFile(input),result=normalize(parsed,parsed.suggested);
@@ -542,6 +571,18 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(companyInventory.price,13.97);
     assert.equal(companyInventory.cost,null);
     assert.equal(companyInventory.status,'active');
+    const companyProduct=(await op('/api/inventory/BUY1')).data.item;
+    assert.equal(companyProduct.companyCatalogView,true);
+    assert.equal(companyProduct.sourceSku,'SKU1');
+    assert.equal(companyProduct.price,13.97);
+    assert.equal(companyProduct.cost,7.25);
+    assert.equal(companyProduct.companyInventoryConnected,false);
+    assert.equal(companyProduct.companyCosts[0].supplierName,'Buy Supplier');
+    assert.equal(companyProduct.qty,undefined);
+    assert.equal((await op('/api/inventory/BUY1/operations')).data.inventoryConnected,false);
+    assert.equal((await op('/api/inventory/BUY1/channel-availability')).data.availability.length,0);
+    assert.equal((await op('/api/inventory/BUY1/suppliers')).data.matches[0].cost,7.25);
+    assert.equal((await op('/api/inventory/DOES-NOT-EXIST')).status,404);
     const draft=(await op('/api/order-drafts','POST',{buyer:'Buyer',items:[{sku:'ABC',qty:2,price:10}],id:'injected',tenantId:'other'})).data.draft;
     assert.notEqual(draft.id,'injected');
     assert.equal(draft.tenantId,buy.tenantId);
