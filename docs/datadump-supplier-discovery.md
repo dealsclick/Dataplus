@@ -1,8 +1,8 @@
 # Datadump supplier discovery
 
-PostgreSQL datadump jobs with discovery enabled observe supplier names and feed codes before checking product eligibility. At the end of the discovery scan, missing supplier profiles are registered with catalog participation disabled. Existing profiles, inactive/retired status, catalog settings and operational records are preserved. A supplier profile is not evidence that its products were imported.
+PostgreSQL datadump jobs with discovery enabled create every valid source SKU as an independent managed product, regardless of whether its supplier profile is enabled, disabled, inactive, or newly discovered. At the end of the scan, missing supplier profiles are registered with catalog participation disabled. Existing profiles, inactive/retired status, catalog settings and operational records are preserved.
 
-The job's `discovery.ndjson` includes supplier row counts, example SKUs and newly registered profiles. Dry runs report profiles that would be registered without saving them. After an operator reviews a supplier in Vendors and enables catalog participation, the next discovery run can insert eligible new SKUs. Identifier candidates still require review. This does not publish marketplace listings.
+The job's `discovery.ndjson` includes supplier row counts, example SKUs and newly registered profiles. Dry runs report profiles that would be registered without saving them. Supplier participation still controls sourcing and marketplace workflows, but it does not control product identity creation. Similar UPC, MPN, or vendor identifiers add an attention flag while retaining each source SKU independently. This does not publish marketplace listings.
 
 To investigate a missing supplier, audit the exact file used by the relevant job. A MongoDB document does not prove that the downloaded export contains that document.
 

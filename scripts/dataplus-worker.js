@@ -2133,7 +2133,8 @@ async function runProductDumpImportJob(job) {
     // normalized BSON record in every snapshot only duplicates large payloads
     // and can exhaust V8 during a multi-million-row full import.
     args.push("--lean-raw");
-    if (payload.discoverFirst !== false) args.push("--discover-first");
+    if (payload.discoveryOnly === true) args.push("--discovery-only");
+    else if (payload.discoverFirst !== false) args.push("--discover-first");
   }
   if (Number(payload.limit || 0) > 0) args.push("--limit", String(Number(payload.limit || 0)));
   args.push("--batch-size", String(dumpBatchSize));

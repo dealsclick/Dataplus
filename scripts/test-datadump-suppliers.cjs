@@ -27,13 +27,10 @@ async function main() {
   const product = buildProduct(source);
   assert.equal(product.sku, source._id);
   assert.equal(product.supplierCode, "DH");
-  const excluded = createDiscovery(options);
-  await excluded.batch([product]);
-  assert.equal(excluded.counts.excluded, 1);
-  additions[0].catalogSettings.enabled = true;
-  const enabled = createDiscovery(options);
-  await enabled.batch([product]);
-  assert.equal(saved.length, 1, "Approved D&H SKU is discoverable even with zero stock");
+  const discovery = createDiscovery(options);
+  await discovery.batch([product]);
+  assert.equal(discovery.counts.excluded, 0);
+  assert.equal(saved.length, 1, "A disabled supplier's SKU is still created with zero stock");
   const fs = require("node:fs"), path = require("node:path"), os = require("node:os");
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "datadump-supplier-test-"));
   try {
@@ -47,6 +44,6 @@ async function main() {
     assert.equal(audit.suppliers[0].name, "D&H");
     assert.equal(audit.size, fs.statSync(input).size);
   } finally { fs.rmSync(temp, { recursive: true, force: true }); }
-  console.log("Datadump supplier observation, alias deduplication, disabled registration and D&H SKU discovery passed.");
+  console.log("Datadump supplier observation, alias deduplication, disabled registration and unconditional D&H SKU discovery passed.");
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

@@ -52,6 +52,16 @@ trap deployment_failed ERR
 echo "Building DataPlus application images..."
 docker compose build
 
+PRESERVE_BACKGROUND_WORKER=false
+if [[ "$(docker inspect -f '{{.State.Running}}' dataplus-worker-background 2>/dev/null || true)" == "true" ]]; then
+  ACTIVE_PRODUCT_DUMP="$(docker exec dataplus-postgres psql -U postgres -d dataplus -Atqc \
+    "select 1 from operations_jobs where lower(status)='running' and coalesce(raw->>'workerTask','')='product-dump-import' and coalesce(raw->>'workerLane','')='background' limit 1" 2>/dev/null || true)"
+  if [[ "$ACTIVE_PRODUCT_DUMP" == "1" ]]; then
+    PRESERVE_BACKGROUND_WORKER=true
+    echo "An active product datadump owns worker-background; preserving that container until the import finishes."
+  fi
+fi
+
 echo "Stopping paused TikTok and retired Walmart worker lanes..."
 docker compose stop worker-orders-tiktok worker-walmart || true
 docker compose rm -f worker-orders-tiktok worker-walmart || true
@@ -80,7 +90,11 @@ docker compose run --rm --no-deps \
   dataplus node scripts/prune-redundant-routing-jobs.cjs
 
 echo "Starting production services and waiting for health checks..."
-docker compose up -d --build --remove-orphans --wait --wait-timeout 180
+DEPLOY_SERVICES=(redis postgres dataplus worker worker-orders-shopify worker-carrier worker-orders-ebay worker-orders-temu)
+if [[ "$PRESERVE_BACKGROUND_WORKER" != "true" ]]; then
+  DEPLOY_SERVICES+=(worker-background)
+fi
+docker compose up -d --build --remove-orphans --wait --wait-timeout 180 "${DEPLOY_SERVICES[@]}"
 docker compose ps
 curl --fail --silent --show-error http://127.0.0.1:4173/ > /dev/null
 record_deployment_status healthy

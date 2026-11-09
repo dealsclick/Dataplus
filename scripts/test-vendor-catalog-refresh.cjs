@@ -24,24 +24,26 @@ async function main() {
     }, save: async batch => { saved.push(...batch); return { products: batch.length }; },
     report: async row => reports.push(row), progress: async counts => progress.push(counts) };
   const counts = await refreshStoredSupplier(options);
-  assert.deepEqual(saved.map(row => row.sku), ['NEW', 'UNKNOWN', 'INACTIVE', 'DISCONTINUED']);
+  assert.deepEqual(saved.map(row => row.sku), ['NEW', 'UNKNOWN', 'INACTIVE', 'DISCONTINUED', 'MATCH', 'DUP']);
   assert.equal(saved.find(row => row.sku === 'UNKNOWN').active, false);
   assert.equal(saved.find(row => row.sku === 'INACTIVE').active, false);
   assert.equal(saved.find(row => row.sku === 'DISCONTINUED').toBeDiscontinued, true);
-  assert.deepEqual(counts, { scanned: 8, existing: 1, added: 4, needsReview: 3, excluded: 1 });
+  assert.deepEqual(counts, { scanned: 8, existing: 1, added: 6, needsReview: 3, excluded: 1 });
   assert(reports.some(row => row.sku === 'UNKNOWN' && row.reason.includes('status')));
   assert.equal(progress.length, 3);
   let checks = 0;
   await assert.rejects(refreshStoredSupplier({ ...options, check: async () => { if (++checks === 2) throw Error('stopped'); } }), /stopped/);
-  assert.equal(saved.length, 4, 'Cancellation before saving must not create rows');
+  assert.equal(saved.length, 6, 'Cancellation before saving must not create rows');
   const again = await refreshStoredSupplier({ ...options, identities: { products: [
     { sku: 'EXISTING', barcode: '123' },
     { sku: 'NEW', barcode: 'NEW-UPC' },
     { sku: 'UNKNOWN' },
     { sku: 'INACTIVE' },
-    { sku: 'DISCONTINUED' }
+    { sku: 'DISCONTINUED' },
+    { sku: 'MATCH' },
+    { sku: 'DUP' }
   ], aliases: [] } });
   assert.equal(again.added, 0);
-  console.log('Stored supplier refresh: scope, status gates, keyset batches, matches, cancellation and retry passed.');
+  console.log('Stored supplier refresh: scope, status gates, independent matches, keyset batches, cancellation and retry passed.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

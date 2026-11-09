@@ -1558,9 +1558,9 @@ async function discoverCatalogProducts(dumpPath, options) {
       await writeLine(writer, JSON.stringify({ status: "supplier_observed", ...supplier }) + "\n");
     }
     for (const vendor of registered) {
-      await writeLine(writer, JSON.stringify({ status: options.dryRun ? "supplier_would_register" : "supplier_registered", supplier: vendor.name, supplierCode: vendor.code, reason: "Catalog participation disabled until reviewed" }) + "\n");
+      await writeLine(writer, JSON.stringify({ status: options.dryRun ? "supplier_would_register" : "supplier_registered", supplier: vendor.name, supplierCode: vendor.code, reason: "Supplier profile registered disabled; its product identities are still imported" }) + "\n");
     }
-    console.log(`Supplier discovery: ${supplierRows.length} source identities; ${registered.length} ${options.dryRun ? "would be registered" : "registered"} for catalog participation review.`);
+    console.log(`Supplier discovery: ${supplierRows.length} source identities; ${registered.length} ${options.dryRun ? "would be registered" : "registered"}. Product creation is independent of supplier participation status.`);
     if (!options.dryRun) await finishVendorFeedRun(discoveryRunId, { status: "success", totalRows: read, processedRows: read, changedRows: discovery.counts.added });
   } catch (error) {
     if (!options.dryRun) await finishVendorFeedRun(discoveryRunId, { status: "failed", totalRows: read, processedRows: read, changedRows: discovery.counts.added, error: error.message });

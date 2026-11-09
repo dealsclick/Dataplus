@@ -19919,6 +19919,75 @@ async function findActiveImportJobByWorkerTask(db = {}, workerTask = "") {
   }) || null;
 }
 
+async function queueProductDumpImportJob(db = {}, body = {}, options = {}) {
+  if (!postgres.isPostgresEnabled()) throw new Error("Product datadump imports require PostgreSQL.");
+  const existing = options.force === true ? null : await findActiveImportJobByWorkerTask(db, "product-dump-import");
+  if (existing) return { duplicate: true, job: existing };
+
+  const settings = readSystemSettingsStore(db.systemSettings || {});
+  const dataSourceFeed = resolvedDataSourceFeeds(settings).find((feed) => String(feed.id || "") === "product-datadump");
+  const dumpPath = String(body.path || body.filePath || process.env.DATAPLUS_PRODUCT_DUMP_PATH || "").trim();
+  const limit = Math.max(0, Number(body.limit || 0) || 0);
+  const requestedMode = String(body.syncMode || body.mode || settings.sourceCatalogDefaultImportMode || "split").toLowerCase();
+  const syncMode = ["full", "split", "catalog", "reconciliation"].includes(requestedMode)
+    ? requestedMode
+    : requestedMode === "update-existing" ? "reconciliation" : requestedMode === "new-only" ? "catalog" : "split";
+  const postImportInventoryMode = ["disabled", "dry-run", "apply"].includes(String(body.postImportInventoryMode || "").toLowerCase())
+    ? String(body.postImportInventoryMode).toLowerCase()
+    : String(dataSourceFeed?.postImportInventoryMode || "dry-run").toLowerCase();
+  const postImportPriceMode = ["disabled", "dry-run", "apply"].includes(String(body.postImportPriceMode || "").toLowerCase())
+    ? String(body.postImportPriceMode).toLowerCase()
+    : String(dataSourceFeed?.postImportPriceMode || "dry-run").toLowerCase();
+  const downloadFtp = body.downloadFtp === true;
+  if (downloadFtp && (!dataSourceFeed?.ftpHost || !dataSourceFeed?.ftpUsername || !dataSourceFeed?.ftpPassword || !dataSourceFeed?.ftpRemotePath)) {
+    throw new Error("Complete the Product datadump FTP connection before downloading the current dump.");
+  }
+
+  const operation = String(options.operation || body.operation || "Product dump import").trim() || "Product dump import";
+  const job = createImportJob(db, {
+    section: "Source Catalog",
+    category: "Product datadump",
+    operation,
+    direction: "import",
+    status: "queued",
+    fileName: dumpPath ? path.basename(dumpPath) : path.basename(dataSourceFeed?.ftpRemotePath || "vendor product dump"),
+    totalRows: 0,
+    processedRows: 0,
+    progressPercent: 0,
+    phase: "queued",
+    workerTask: "product-dump-import",
+    workerPayload: {
+      path: dumpPath,
+      postgresOnly: true,
+      batchSize: Math.max(25, Math.min(1000, Number(body.batchSize || 100) || 100)),
+      limit,
+      syncMode,
+      discoveryOnly: body.discoveryOnly === true,
+      discoverFirst: body.discoverFirst !== false,
+      downloadFtp,
+      ...(downloadFtp ? {
+        ftpHost: dataSourceFeed.ftpHost,
+        ftpPort: dataSourceFeed.ftpPort,
+        ftpUsername: dataSourceFeed.ftpUsername,
+        ftpPassword: dataSourceFeed.ftpPassword,
+        ftpRemotePath: dataSourceFeed.ftpRemotePath
+      } : {}),
+      postImportInventoryMode,
+      postImportPriceMode,
+      feedId: dataSourceFeed?.id || "product-datadump",
+      requestedBy: String(options.requestedBy || body.requestedBy || "DataPlus").trim() || "DataPlus"
+    },
+    message: body.discoveryOnly === true
+      ? "Product datadump catch-up queued. Every valid missing SKU will be created independently regardless of supplier participation."
+      : limit
+        ? `Product dump ${syncMode} import queued for ${limit.toLocaleString()} rows. PostgreSQL change detection and saved post-import modes will be applied.`
+        : `Product dump ${syncMode} import queued. PostgreSQL change detection and saved post-import modes will be applied.`
+  });
+  await postgres.upsertOperationJob(job);
+  upsertImportJobStore(job);
+  return { duplicate: false, job };
+}
+
 async function queueSourceCatalogFacetsRefreshJob(db = {}, options = {}) {
   if (!postgres.isPostgresEnabled()) return null;
   const vendorName = String(options.vendorName || "").trim();
@@ -70251,38 +70320,8 @@ async function handleApi(req, res) {
   if (req.method === "POST" && url.pathname === "/api/source-catalog/product-dump/import" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = normalizeDb(await readDbFast({ skipInventory: true }));
-    const settings = readSystemSettingsStore(db.systemSettings || {});
-    const dataSourceFeed = resolvedDataSourceFeeds(settings).find((feed) => String(feed.id || "") === "product-datadump");
-    const dumpPath = String(body.path || body.filePath || process.env.DATAPLUS_PRODUCT_DUMP_PATH || "").trim();
-    const limit = Math.max(0, Number(body.limit || 0) || 0);
-    const requestedMode = String(body.syncMode || body.mode || settings.sourceCatalogDefaultImportMode || "split").toLowerCase();
-    const syncMode = ["full", "split", "catalog", "reconciliation"].includes(requestedMode)
-      ? requestedMode
-      : requestedMode === "update-existing" ? "reconciliation" : requestedMode === "new-only" ? "catalog" : "split";
-    const postImportInventoryMode = ["disabled", "dry-run", "apply"].includes(String(body.postImportInventoryMode || "").toLowerCase())
-      ? String(body.postImportInventoryMode).toLowerCase()
-      : String(dataSourceFeed?.postImportInventoryMode || "dry-run").toLowerCase();
-    const postImportPriceMode = ["disabled", "dry-run", "apply"].includes(String(body.postImportPriceMode || "").toLowerCase())
-      ? String(body.postImportPriceMode).toLowerCase()
-      : String(dataSourceFeed?.postImportPriceMode || "dry-run").toLowerCase();
-    const job = createImportJob(db, {
-      section: "Source Catalog",
-      operation: "Product dump import",
-      direction: "import",
-      status: "queued",
-      fileName: dumpPath ? path.basename(dumpPath) : "vendor product dump",
-      totalRows: 0,
-      processedRows: 0,
-      progressPercent: 0,
-      phase: "queued",
-      workerTask: "product-dump-import",
-      workerPayload: { path: dumpPath, postgresOnly: true, batchSize: 100, limit, syncMode, postImportInventoryMode, postImportPriceMode, feedId: dataSourceFeed?.id || "product-datadump" },
-      message: limit
-        ? `Product dump ${syncMode} import queued for ${limit.toLocaleString()} rows. PostgreSQL change detection and saved post-import modes will be applied.`
-        : `Product dump ${syncMode} import queued. PostgreSQL change detection and saved post-import modes will be applied.`
-    });
-    upsertImportJobStore(job);
-    return sendJson(res, 202, { queued: true, job: normalizeImportJob(job), state: publicState({ ...db, inventory: [] }, { lite: true }), message: job.message });
+    const result = await queueProductDumpImportJob(db, body);
+    return sendJson(res, result.duplicate ? 200 : 202, { queued: true, duplicate: result.duplicate, job: normalizeImportJob(result.job), state: publicState({ ...db, inventory: [] }, { lite: true }), message: result.duplicate ? "A Product datadump import is already queued or running." : result.job.message });
   }
 
   if (req.method === "POST" && url.pathname === "/api/source-catalog/pricing-inventory/refresh" && postgres.isPostgresEnabled()) {
@@ -78440,6 +78479,7 @@ module.exports = {
   queueEbayCategoryAutoMapJob,
   queueEbayTaxonomySyncJob,
   queueAiCategoryReviewJob,
+  queueProductDumpImportJob,
   readDbFast,
   readExportMappingsApiStore,
   readSystemSettingsStore,
