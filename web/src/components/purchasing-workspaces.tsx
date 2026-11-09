@@ -168,6 +168,17 @@ type QuoteSupplierOption = {
   isPrimary?: boolean
 }
 type QuoteCatalogPricing = { mapPrice: number | null; listPrice: number | null }
+type QuoteCatalogProduct = {
+  id: string
+  sku: string
+  sourceSku?: string
+  title: string
+  image?: string
+  manufacturerPartNumber?: string
+  barcode?: string
+  matchBasis?: string
+  reviewRequired?: boolean
+}
 type CompetitorProductFacts = {
   title: string
   brand: string
@@ -204,6 +215,14 @@ type CompetitorInspection = {
 type QuoteLineForm = {
   sku: string
   title: string
+  image: string
+  sourcePageSku: string
+  catalogProductId: string
+  catalogMatchedSku: string
+  catalogMatchBasis: string
+  catalogMatchReviewRequired: boolean
+  manufacturerPartNumber: string
+  barcode: string
   qty: string
   msrp: string
   mapPrice: string
@@ -243,13 +262,16 @@ function QuoteSupplierPicker({ line, options, loading, onSelect }: { line: Quote
   const lowest = knownOptions.reduce<QuoteSupplierOption | null>((best, option) => !best || Number(option.cost) < Number(best.cost) ? option : best, null)
   const cheaper = selectedCost !== null && lowest && lowest.cost !== null && Number(lowest.cost) < selectedCost ? lowest : null
   const supplierName = selected?.supplierName || line.selectedSupplierName
+  const catalogMatched = Boolean(line.catalogProductId)
+  const emptyLabel = catalogMatched ? (line.catalogMatchReviewRequired ? "Catalog candidate" : "Catalog matched") : "No catalog match"
+  const emptyDetail = catalogMatched ? "Add BuySupply supplier cost" : "Product was not found"
   return <div className="grid min-w-52 gap-1.5">
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button type="button" variant="outline" className="h-auto min-h-10 w-full justify-between px-3 py-2 text-left" disabled={loading && !options.length}>
           <span className="min-w-0">
-            <span className="block truncate text-sm font-medium">{loading ? "Loading suppliers..." : supplierName || (options.length ? "Choose supplier" : "No supplier costs")}</span>
-            <span className="block truncate text-xs text-muted-foreground">{options.length ? `${options.length} supplier option${options.length === 1 ? "" : "s"}` : "Cost is unknown"}{selectedCost !== null ? ` · ${moneyLabel(selectedCost)}` : ""}</span>
+            <span className="block truncate text-sm font-medium">{loading ? "Loading suppliers..." : supplierName || (options.length ? "Choose supplier" : emptyLabel)}</span>
+            <span className="block truncate text-xs text-muted-foreground">{options.length ? `${options.length} supplier option${options.length === 1 ? "" : "s"}` : emptyDetail}{selectedCost !== null ? ` · ${moneyLabel(selectedCost)}` : ""}</span>
           </span>
           {loading ? <Loader2 className="size-4 shrink-0 animate-spin" /> : <Users className="size-4 shrink-0 text-muted-foreground" />}
         </Button>
@@ -367,11 +389,11 @@ export function DraftQuoteFieldDetailPage() {
       setSupplierOptionsLoading(new Set(skus))
       Promise.all(skus.map(async (sku) => {
         try {
-          const result = await api<{ options?: QuoteSupplierOption[]; mapPrice?: number | null; listPrice?: number | null }>(`/api/order-drafts/${encodeURIComponent(draftId)}/supplier-options?sku=${encodeURIComponent(sku)}`, { signal: controller.signal })
-          return [sku, { options: result.options || [], mapPrice: result.mapPrice ?? null, listPrice: result.listPrice ?? null }] as const
+          const result = await api<{ product?: QuoteCatalogProduct | null; options?: QuoteSupplierOption[]; mapPrice?: number | null; listPrice?: number | null }>(`/api/order-drafts/${encodeURIComponent(draftId)}/supplier-options?sku=${encodeURIComponent(sku)}`, { signal: controller.signal })
+          return [sku, { product: result.product || null, options: result.options || [], mapPrice: result.mapPrice ?? null, listPrice: result.listPrice ?? null }] as const
         } catch (error) {
           if (!(error instanceof DOMException && error.name === "AbortError")) toast.error(error instanceof Error ? error.message : `Unable to load suppliers for ${sku}.`)
-          return [sku, { options: [] as QuoteSupplierOption[], mapPrice: null, listPrice: null }] as const
+          return [sku, { product: null as QuoteCatalogProduct | null, options: [] as QuoteSupplierOption[], mapPrice: null, listPrice: null }] as const
         }
       })).then((entries) => {
         if (controller.signal.aborted) return
@@ -384,9 +406,23 @@ export function DraftQuoteFieldDetailPage() {
             const key = line.sku.trim().toLowerCase()
             const options = loaded[key] || []
             const productPricing = pricing[key]
+            const product = entries.find(([sku]) => sku === key)?.[1].product
             const mapPrice = Number(line.mapPrice || 0) > 0 ? line.mapPrice : productPricing?.mapPrice ? String(productPricing.mapPrice) : line.mapPrice
             const msrp = Number(line.msrp || 0) > 0 ? line.msrp : productPricing?.listPrice ? String(productPricing.listPrice) : line.msrp
-            const pricedLine = { ...line, mapPrice, msrp, price: line.autoPrice ? String(quoteRecommendedPrice(quoteLineCost(line), mapPrice)) : line.price }
+            const pricedLine = {
+              ...line,
+              title: product?.title || line.title,
+              image: product?.image || line.image,
+              catalogProductId: product?.id || line.catalogProductId,
+              catalogMatchedSku: product?.sku || line.catalogMatchedSku,
+              catalogMatchBasis: product?.matchBasis || line.catalogMatchBasis,
+              catalogMatchReviewRequired: product?.reviewRequired ?? line.catalogMatchReviewRequired,
+              manufacturerPartNumber: product?.manufacturerPartNumber || line.manufacturerPartNumber,
+              barcode: product?.barcode || line.barcode,
+              mapPrice,
+              msrp,
+              price: line.autoPrice ? String(quoteRecommendedPrice(quoteLineCost(line), mapPrice)) : line.price,
+            }
             if (!options.length || line.selectedSupplierKey) return pricedLine
             const matchingName = options.find((option) => option.selectable !== false && option.supplierName.toLowerCase() === line.selectedSupplierName.toLowerCase())
             const preferred = matchingName || options.find((option) => option.selectable !== false && option.isPrimary) || options.find((option) => option.selectable !== false && !option.requiresReview && option.cost !== null)
@@ -433,6 +469,9 @@ export function DraftQuoteFieldDetailPage() {
         const legacyMatchesDefault = (recommended > 0 && Math.abs(price - recommended) < 0.005) || (previousDefault > 0 && Math.abs(price - previousDefault) < 0.005)
         return {
           sku: String(item.sku || ""), title: String(item.title || ""), qty: String(item.qty || 1), msrp: String(item.msrp || 0), price: String(price),
+          image: String(item.image || item.defaultImage || ""), sourcePageSku: String(item.sourcePageSku || ""), catalogProductId: String(item.catalogProductId || ""),
+          catalogMatchedSku: String(item.catalogMatchedSku || ""), catalogMatchBasis: String(item.catalogMatchBasis || ""), catalogMatchReviewRequired: item.catalogMatchReviewRequired === true,
+          manufacturerPartNumber: String(item.manufacturerPartNumber || item.mfrPartNumber || ""), barcode: String(item.barcode || ""),
           mapPrice, autoPrice: item.priceOverridden === false || (item.priceOverridden !== true && legacyMatchesDefault),
           cost: item.cost === null || item.cost === undefined ? "" : String(item.cost),
           selectedSupplierKey: String(item.selectedSupplierKey || ""), selectedSupplierId: String(item.selectedSupplierId || ""),
@@ -446,7 +485,7 @@ export function DraftQuoteFieldDetailPage() {
     setCatalogResults([])
     setSupplierOptionsBySku({})
     setSupplierOptionsLoading(new Set())
-    setEditorSection("items")
+    setEditorSection("customer")
     setEditorOpen(true)
   }
 
@@ -470,6 +509,9 @@ export function DraftQuoteFieldDetailPage() {
       if (existing >= 0) return { ...current, items: current.items.map((line, index) => index === existing ? { ...line, qty: String(Math.max(1, Number(line.qty || 0)) + 1) } : line) }
       return { ...current, items: [...current.items, {
         sku, title: String(item.title || item.marketplaceTitle || sku), qty: "1", msrp: String(item.listPrice ?? item.msrp ?? 0), mapPrice: String(initialMap),
+        image: String(item.defaultImage || ""), sourcePageSku: String(item.sourceSku || sku), catalogProductId: String(item.id || item.productCatalogId || ""),
+        catalogMatchedSku: sku, catalogMatchBasis: "Catalog selection", catalogMatchReviewRequired: false,
+        manufacturerPartNumber: String(item.mfrPartNumber || ""), barcode: String(item.barcode || ""),
         price: String(quoteRecommendedPrice(initialCost, initialMap)), cost: initialCost === null ? "" : String(initialCost), autoPrice: true,
         selectedSupplierKey: "", selectedSupplierId: "", selectedSupplierName: String(item.supplier || item.vendor || ""), selectedSupplierCode: String(item.supplierCode || ""),
         selectedSupplierSku: String(item.vendorSku || item.sourceSku || ""), selectedSupplierProductId: String(item.id || item.productCatalogId || ""), selectedSupplierUom: String(item.uom || ""),
@@ -541,12 +583,18 @@ export function DraftQuoteFieldDetailPage() {
       ...current,
       items: (current.items.length ? current.items : lines.map((line) => ({
         sku: String(line.sku || ""), title: String(line.title || ""), qty: String(line.qty || 1), msrp: String(line.msrp || 0), price: String(line.price || 0),
+        image: String(line.image || line.defaultImage || ""), sourcePageSku: String(line.sourcePageSku || ""), catalogProductId: String(line.catalogProductId || ""),
+        catalogMatchedSku: String(line.catalogMatchedSku || ""), catalogMatchBasis: String(line.catalogMatchBasis || ""), catalogMatchReviewRequired: line.catalogMatchReviewRequired === true,
+        manufacturerPartNumber: String(line.manufacturerPartNumber || line.mfrPartNumber || ""), barcode: String(line.barcode || ""),
         mapPrice: String(line.mapPrice || 0), autoPrice: false,
         cost: line.cost === null || line.cost === undefined ? "" : String(line.cost), selectedSupplierKey: String(line.selectedSupplierKey || ""),
         selectedSupplierId: String(line.selectedSupplierId || ""), selectedSupplierName: String(line.selectedSupplierName || ""), selectedSupplierCode: String(line.selectedSupplierCode || ""),
         selectedSupplierSku: String(line.selectedSupplierSku || ""), selectedSupplierProductId: String(line.selectedSupplierProductId || ""), selectedSupplierUom: String(line.selectedSupplierUom || ""),
       }))).map((line, index) => index === similarLineIndex ? {
         ...line, sku: String(item.sku || ""), title: String(item.title || item.sku || ""), msrp: String(item.listPrice || item.msrp || line.msrp || 0), mapPrice: String(item.mapPrice || 0),
+        image: String(item.image || item.defaultImage || ""), sourcePageSku: String(item.sourceSku || item.sku || ""), catalogProductId: String(item.id || item.productCatalogId || ""),
+        catalogMatchedSku: String(item.sku || ""), catalogMatchBasis: "Catalog alternative", catalogMatchReviewRequired: false,
+        manufacturerPartNumber: String(item.manufacturerPartNumber || item.mfrPartNumber || ""), barcode: String(item.barcode || ""),
         price: String(quoteRecommendedPrice(item.cost === null || item.cost === undefined ? null : Number(item.cost), Number(item.mapPrice || 0))), autoPrice: true,
         cost: item.cost === null || item.cost === undefined ? "" : String(item.cost), selectedSupplierKey: "", selectedSupplierId: "", selectedSupplierName: "", selectedSupplierCode: "", selectedSupplierSku: "", selectedSupplierProductId: "", selectedSupplierUom: "",
       } : line),
@@ -567,6 +615,9 @@ export function DraftQuoteFieldDetailPage() {
       cost: quoteLineCost(item), selectedSupplierKey: item.selectedSupplierKey, selectedSupplierId: item.selectedSupplierId,
       selectedSupplierName: item.selectedSupplierName, selectedSupplierCode: item.selectedSupplierCode, selectedSupplierSku: item.selectedSupplierSku,
       selectedSupplierProductId: item.selectedSupplierProductId, selectedSupplierUom: item.selectedSupplierUom,
+      image: item.image, sourcePageSku: item.sourcePageSku, catalogProductId: item.catalogProductId, catalogMatchedSku: item.catalogMatchedSku,
+      catalogMatchBasis: item.catalogMatchBasis, catalogMatchReviewRequired: item.catalogMatchReviewRequired,
+      manufacturerPartNumber: item.manufacturerPartNumber, barcode: item.barcode,
     })).filter((item) => item.sku && item.qty > 0)
     setBusy(true)
     try {
@@ -687,7 +738,7 @@ export function DraftQuoteFieldDetailPage() {
   const formGrossProfit = formCostsComplete ? formSubtotal - formProductCost : null
   const formGrossMargin = formGrossProfit === null ? null : quoteMarginPercent(formSubtotal, formProductCost)
   const formEstimatedTotal = formSubtotal + shippingAmount
-  const editorSections = ["items", "customer", "delivery", "terms", "notes"] as const
+  const editorSections = ["customer", "items", "delivery", "terms", "notes"] as const
   const editorSectionIndex = editorSections.indexOf(editorSection)
   const editorCompletion = {
     items: form.items.some((line) => line.sku.trim() && Number(line.qty || 0) > 0),
@@ -697,8 +748,8 @@ export function DraftQuoteFieldDetailPage() {
     notes: Boolean(form.note.trim() || form.customerNote.trim()),
   }
   const editorSectionMeta = [
-    { id: "items" as const, label: "Items", icon: PackageCheck },
     { id: "customer" as const, label: "Customer", icon: Users },
+    { id: "items" as const, label: "Items", icon: PackageCheck },
     { id: "delivery" as const, label: "Delivery", icon: Truck },
     { id: "terms" as const, label: "Validity & terms", icon: FileText },
     { id: "notes" as const, label: "Notes", icon: MessageSquare },
@@ -741,7 +792,10 @@ export function DraftQuoteFieldDetailPage() {
           const lineRevenue = Number(line.price || 0) * Number(line.qty || 0)
           const lineProfit = lineCost === null ? null : lineRevenue - lineCost * Number(line.qty || 0)
           const lineMargin = lineCost === null ? null : quoteMarginPercent(Number(line.price || 0), lineCost)
-          return <TableRow key={`${String(line.sku)}-${index}`}><TableCell className="font-mono text-xs">{String(line.sku || "-")}</TableCell><TableCell>{String(line.title || line.sku || "-")}</TableCell><TableCell><p className="font-medium">{String(line.selectedSupplierName || "Cost not selected")}</p><p className="font-mono text-xs text-muted-foreground">{String(line.selectedSupplierSku || "-")}</p></TableCell><TableCell>{numberLabel(Number(line.qty || 0))}</TableCell><TableCell>{Number(line.msrp || 0) > 0 ? moneyLabel(Number(line.msrp)) : "Not set"}</TableCell><TableCell>{lineMap > 0 ? moneyLabel(lineMap) : "Not set"}</TableCell><TableCell><p className={cn("font-medium", lineMap > 0 && Number(line.price || 0) < lineMap ? "text-destructive" : "")}>{moneyLabel(Number(line.price || 0))}</p>{lineMap > 0 && Number(line.price || 0) < lineMap ? <p className="text-xs text-destructive">Below MAP</p> : null}</TableCell><TableCell className="font-semibold tabular-nums">{lineCost === null ? "Not set" : moneyLabel(lineCost)}</TableCell><TableCell className={lineSavings > 0 ? "font-medium text-emerald-600" : "text-muted-foreground"}>{lineSavings > 0 ? moneyLabel(lineSavings) : "-"}</TableCell><TableCell className={cn("font-medium", lineProfit !== null && lineProfit < 0 ? "text-destructive" : lineProfit !== null ? "text-emerald-600" : "text-muted-foreground")}>{lineMargin === null ? "Cost needed" : `${lineMargin.toFixed(1)}% · ${moneyLabel(lineProfit)}`}</TableCell><TableCell className="font-medium">{moneyLabel(lineRevenue)}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" onClick={() => void findSimilar(line, index)}><Search className="size-4" /> Find similar</Button></TableCell></TableRow>
+          const productTitle = String(line.title || line.sku || "-")
+          const productImage = String(line.image || line.defaultImage || "")
+          const catalogSku = String(line.catalogMatchedSku || line.sku || "")
+          return <TableRow key={`${String(line.sku)}-${index}`}><TableCell className="font-mono text-xs">{line.catalogProductId ? <a className="font-semibold text-primary hover:underline" href={`/products/${encodeURIComponent(catalogSku)}`}>{String(line.sku || "-")}</a> : String(line.sku || "-")}</TableCell><TableCell><div className="flex min-w-80 items-center gap-3"><CatalogImage src={productImage || undefined} alt={productTitle} className="size-12 shrink-0" imageClassName="p-1" /><div className="min-w-0"><p className="whitespace-normal font-medium leading-5">{productTitle}</p><div className="mt-1 flex flex-wrap items-center gap-1.5">{line.catalogProductId ? <Badge variant="outline" className={line.catalogMatchReviewRequired ? "border-amber-500/40 text-amber-700 dark:text-amber-300" : "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"}>{line.catalogMatchReviewRequired ? "Catalog candidate" : "Catalog matched"}</Badge> : <Badge variant="outline" className="border-red-500/40 text-red-700 dark:text-red-300">Not in catalog</Badge>}{line.catalogMatchBasis ? <span className="text-xs text-muted-foreground">{String(line.catalogMatchBasis)}</span> : null}</div></div></div></TableCell><TableCell><p className="font-medium">{String(line.selectedSupplierName || "Cost not selected")}</p><p className="font-mono text-xs text-muted-foreground">{String(line.selectedSupplierSku || "-")}</p></TableCell><TableCell>{numberLabel(Number(line.qty || 0))}</TableCell><TableCell>{Number(line.msrp || 0) > 0 ? moneyLabel(Number(line.msrp)) : "Not set"}</TableCell><TableCell>{lineMap > 0 ? moneyLabel(lineMap) : "Not set"}</TableCell><TableCell><p className={cn("font-medium", lineMap > 0 && Number(line.price || 0) < lineMap ? "text-destructive" : "")}>{moneyLabel(Number(line.price || 0))}</p>{lineMap > 0 && Number(line.price || 0) < lineMap ? <p className="text-xs text-destructive">Below MAP</p> : null}</TableCell><TableCell className="font-semibold tabular-nums">{lineCost === null ? "Not set" : moneyLabel(lineCost)}</TableCell><TableCell className={lineSavings > 0 ? "font-medium text-emerald-600" : "text-muted-foreground"}>{lineSavings > 0 ? moneyLabel(lineSavings) : "-"}</TableCell><TableCell className={cn("font-medium", lineProfit !== null && lineProfit < 0 ? "text-destructive" : lineProfit !== null ? "text-emerald-600" : "text-muted-foreground")}>{lineMargin === null ? "Cost needed" : `${lineMargin.toFixed(1)}% · ${moneyLabel(lineProfit)}`}</TableCell><TableCell className="font-medium">{moneyLabel(lineRevenue)}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" onClick={() => void findSimilar(line, index)}><Search className="size-4" /> Find similar</Button></TableCell></TableRow>
         })}
       </TableBody></Table></div></CardContent></Card>
       {enabledQuoteCarriers.length ? <Card><CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Shipping estimate</CardTitle><CardDescription>Compare the shared {enabledQuoteCarrierLabel} accounts for an accurate customer quote.</CardDescription></div><Button size="sm" variant={savedShippingEstimate ? "outline" : "default"} onClick={openShippingRates}><Truck className="size-4" /> {savedShippingEstimate ? "Refresh carrier rates" : "Get carrier rates"}</Button></div></CardHeader><CardContent className="grid gap-3">{savedShippingEstimate ? <><div className="grid gap-3 text-sm sm:grid-cols-5"><Detail label="Carrier / service" value={`${String(savedShippingEstimate.carrier || "Carrier")} ${String(savedShippingEstimate.service || "")}`} /><Detail label="Shipping" value={moneyLabel(shippingAmount)} /><Detail label="Package" value={`${String((savedShippingEstimate.package as Record<string, unknown>)?.weight || "-")} lb / ${String((savedShippingEstimate.package as Record<string, unknown>)?.length || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.width || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.height || "-")} in`} /><Detail label="Rate valid until" value={savedRateExpired ? "Expired - refresh required" : dateLabel(String(savedShippingEstimate.expiresAt || ""))} /><Detail label="Estimated quote total" value={moneyLabel(total)} /></div>{savedRateExpired ? <Alert variant="destructive"><Clock3 className="size-4" /><AlertTitle>Shipping rate expired</AlertTitle><AlertDescription>Refresh carrier rates before accepting or converting this quote.</AlertDescription></Alert> : null}</> : <p className="text-sm text-muted-foreground">No shipping rate has been added. Product subtotal is {moneyLabel(subtotal)}.</p>}</CardContent></Card> : null}
@@ -846,21 +900,22 @@ export function DraftQuoteFieldDetailPage() {
           </div>
         </DialogHeader>
 
-        <Tabs value={editorSection} onValueChange={(value) => setEditorSection(value as typeof editorSection)} className="min-h-0 flex-1 gap-0 lg:grid lg:grid-cols-[210px_minmax(0,1fr)_290px]">
-          <div className="shrink-0 border-b bg-muted/20 lg:border-r lg:border-b-0">
-            <TabsList variant="line" className="h-auto w-full justify-start overflow-x-auto rounded-none border-0 bg-transparent p-2 lg:flex-col lg:items-stretch lg:gap-1 lg:overflow-visible lg:p-3">
+        <Tabs value={editorSection} onValueChange={(value) => setEditorSection(value as typeof editorSection)} className="min-h-0 flex flex-1 flex-col gap-0">
+          <div className="shrink-0 overflow-x-auto border-b bg-muted/20 px-2 sm:px-4">
+            <TabsList variant="line" className="h-auto min-w-max justify-start overflow-x-auto rounded-none border-0 bg-transparent p-0 md:grid md:w-full md:min-w-0 md:grid-cols-5">
               {editorSectionMeta.map((section) => {
                 const Icon = section.icon
-                return <TabsTrigger key={section.id} value={section.id} className="h-10 shrink-0 justify-start lg:w-full">
+                return <TabsTrigger key={section.id} value={section.id} className="h-11 shrink-0 justify-center px-4 md:w-full">
                   <Icon className="size-4" />
                   {section.label}
-                  {editorCompletion[section.id] ? <CheckCircle2 className="ml-auto size-3.5 text-emerald-500" /> : null}
+                  {editorCompletion[section.id] ? <CheckCircle2 className="size-3.5 text-emerald-500" /> : null}
                 </TabsTrigger>
               })}
             </TabsList>
           </div>
 
-          <ScrollArea className="h-full min-h-0 flex-1">
+          <div className="grid min-h-0 flex-1 lg:grid-cols-[minmax(0,1fr)_290px]">
+          <ScrollArea className="h-full min-h-0">
             <div className="p-4 sm:p-6 lg:p-8">
               <TabsContent value="items" className="m-0 grid gap-6">
                 <div>
@@ -878,7 +933,8 @@ export function DraftQuoteFieldDetailPage() {
                     {catalogQuery.trim().length >= 2 ? <CommandList className="border-t">
                       {catalogSearching ? <div className="flex items-center gap-2 p-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Searching catalog...</div> : null}
                       {!catalogSearching && catalogResults.length ? <CommandGroup heading="Catalog results">
-                        {catalogResults.map((item) => <CommandItem key={item.id || item.sku} value={String(item.sku || item.id)} onSelect={() => addCatalogItem(item)} className="grid grid-cols-[minmax(90px,0.3fr)_minmax(0,1fr)_auto] gap-3 py-3">
+                        {catalogResults.map((item) => <CommandItem key={item.id || item.sku} value={String(item.sku || item.id)} onSelect={() => addCatalogItem(item)} className="grid grid-cols-[44px_minmax(90px,0.3fr)_minmax(0,1fr)_auto] gap-3 py-3">
+                          <CatalogImage src={item.defaultImage} alt={String(item.title || item.sku || "Catalog product")} className="size-11" imageClassName="p-1" />
                           <span className="truncate font-mono text-xs font-medium">{item.sku}</span>
                           <span className="truncate">{item.title || item.marketplaceTitle || item.sku}</span>
                           <span className="font-semibold">{moneyLabel(Number(item.websitePrice ?? item.price ?? 0))}</span>
@@ -896,6 +952,7 @@ export function DraftQuoteFieldDetailPage() {
                   </div>
                   <Button type="button" size="sm" variant="outline" onClick={() => setForm((current) => ({ ...current, items: [...current.items, {
                     sku: "", title: "", qty: "1", msrp: "0", mapPrice: "0", price: "0", cost: "", autoPrice: true, selectedSupplierKey: "", selectedSupplierId: "", selectedSupplierName: "", selectedSupplierCode: "", selectedSupplierSku: "", selectedSupplierProductId: "", selectedSupplierUom: "",
+                    image: "", sourcePageSku: "", catalogProductId: "", catalogMatchedSku: "", catalogMatchBasis: "", catalogMatchReviewRequired: false, manufacturerPartNumber: "", barcode: "",
                   }] }))}><Plus className="size-4" /> Add manual line</Button>
                 </div>
 
@@ -913,8 +970,8 @@ export function DraftQuoteFieldDetailPage() {
                       const recommendationLabel = lineMap > 0 ? "MAP default" : "Cost +30%"
                       const skuKey = line.sku.trim().toLowerCase()
                       return <TableRow key={`${line.sku}-${index}`}>
-                        <TableCell><Input value={line.sku} onChange={(event) => updateLine(index, { sku: event.target.value, cost: "", msrp: "0", mapPrice: "0", price: "0", autoPrice: true, selectedSupplierKey: "", selectedSupplierId: "", selectedSupplierName: "", selectedSupplierCode: "", selectedSupplierSku: "", selectedSupplierProductId: "", selectedSupplierUom: "" })} placeholder="SKU" /></TableCell>
-                        <TableCell><Input className="min-w-56" value={line.title} onChange={(event) => updateLine(index, { title: event.target.value })} placeholder="Product title" /></TableCell>
+                        <TableCell><Input value={line.sku} onChange={(event) => updateLine(index, { sku: event.target.value, cost: "", msrp: "0", mapPrice: "0", price: "0", autoPrice: true, image: "", sourcePageSku: "", catalogProductId: "", catalogMatchedSku: "", catalogMatchBasis: "", catalogMatchReviewRequired: false, manufacturerPartNumber: "", barcode: "", selectedSupplierKey: "", selectedSupplierId: "", selectedSupplierName: "", selectedSupplierCode: "", selectedSupplierSku: "", selectedSupplierProductId: "", selectedSupplierUom: "" })} placeholder="SKU" /></TableCell>
+                        <TableCell><div className="flex min-w-96 items-center gap-3"><CatalogImage src={line.image || undefined} alt={line.title || line.sku || "Quote product"} className="size-12 shrink-0" imageClassName="p-1" /><div className="min-w-0 flex-1"><Input value={line.title} onChange={(event) => updateLine(index, { title: event.target.value })} placeholder="Product title" />{line.catalogProductId ? <p className={cn("mt-1 text-xs font-medium", line.catalogMatchReviewRequired ? "text-amber-600" : "text-emerald-600")}>{line.catalogMatchReviewRequired ? "Catalog candidate - review match" : "Matched to DataPlus catalog"}{line.catalogMatchBasis ? ` · ${line.catalogMatchBasis}` : ""}</p> : <p className="mt-1 text-xs text-destructive">No DataPlus catalog match</p>}</div></div></TableCell>
                         <TableCell><QuoteSupplierPicker line={line} options={supplierOptionsBySku[skuKey] || []} loading={supplierOptionsLoading.has(skuKey)} onSelect={(option) => updateLine(index, {
                           cost: option.cost === null ? "" : String(option.cost), selectedSupplierKey: option.key, selectedSupplierId: option.vendorId || "", selectedSupplierName: option.supplierName,
                           selectedSupplierCode: option.supplierCode || "", selectedSupplierSku: option.supplierSku || option.sourceSku || option.vendorSku || "", selectedSupplierProductId: option.productId || "", selectedSupplierUom: option.uom || "",
@@ -1023,6 +1080,7 @@ export function DraftQuoteFieldDetailPage() {
               </div>
             </ScrollArea>
           </aside>
+          </div>
         </Tabs>
 
         <DialogFooter className="!m-0 !flex-row shrink-0 flex-wrap items-center justify-between rounded-none border-t bg-background px-4 py-3 sm:px-6 sm:!justify-between">

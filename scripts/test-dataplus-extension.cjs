@@ -52,6 +52,8 @@ assert.match(companyOperations, /importSource==='buysupply dw rfq'/);
 assert.match(companyOperations, /parts\[2\]==='import-match'/);
 assert.match(companyOperations, /parts\[2\]==='import-matches'/);
 assert.match(sidepanel, /findExistingRfqQuote/);
+assert.match(sidepanel, /sourcePageSku:\s*item\.sourceSku/);
+assert.match(sidepanel, /catalogMatchedSku:\s*item\.matchedSku/);
 assert.match(sidepanel, /requireConnectedSession/);
 assert.match(sidepanel, /autoScanRfqPage/);
 assert.match(sidepanel, /chrome\.tabs\.onActivated/);

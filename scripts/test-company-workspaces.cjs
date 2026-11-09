@@ -105,8 +105,9 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
     operationalState:async()=>state,
     updateOperationalState:async(_user,_scope,_action,work)=>work(state),
     catalog:async()=>({rows:[
-      {product_id:'current',source_sku:'ABC',title:'Current item',cost:999,raw:{secret:true}},
+      {product_id:'current',source_sku:'ABC',title:'Current item',default_image:'/current.jpg',cost:999,raw:{secret:true}},
       {product_id:'alternate',source_sku:'ALT-1',title:'Alternative item',brand:'Brand',manufacturer:'Maker',mfr_part_number:'MPN-1',barcode:'0123',default_image:'/image.jpg',uom:'Each',sell_price:'25.50',cost:888,raw:{secret:true}},
+      {product_id:'rfq-product',source_sku:'4510-01-521-9866',title:'PURELL-SKILCRAFT Wall Dispenser',brand:'AbilityOne',manufacturer:'AbilityOne',mfr_part_number:'4510-01-521-9866',default_image:'/rfq-product.jpg',uom:'Each'},
     ]}),
     costs:async(_user,_scope,productId)=>productId==='current' ? [
       {vendor_account_id:'vendor-standard',unit_cost:'6.00',uom:'Each',supplier_name:'Standard Supply'},
@@ -176,9 +177,22 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   assert.equal(created.selectedTermsSnapshot.find(term=>term.id==='taxes').text,'Company-specific tax wording.');
   assert.equal(created.items[0].msrp,15);
   assert.equal(created.items[0].cost,null,'Company quote input cannot persist a LINQ or caller-provided cost');
+  assert.equal(created.items[0].catalogProductId,'current');
+  assert.equal(created.items[0].catalogMatchedSku,'ABC');
+  assert.equal(created.items[0].catalogMatchBasis,'Catalog SKU');
+  assert.equal(created.items[0].image,'/current.jpg');
   assert.equal(created.salesOwner,'Owner');
   assert.equal(created.statusChangedBy,'Owner');
   assert.equal(created.quoteActivity[0].type,'created');
+  const importedRfq=(await op('/api/order-drafts','POST',{
+    source:'BuySupply DW RFQ',buyer:'Buyer',marketplaceOrderNumber:'Q-IMAGE-MATCH',
+    items:[{sku:'4510015219866',sourcePageSku:'4510-01-521-9866',title:'Imported description',qty:1,price:25}],
+  })).response.data.draft;
+  assert.equal(importedRfq.items[0].catalogProductId,'rfq-product');
+  assert.equal(importedRfq.items[0].catalogMatchedSku,'4510-01-521-9866');
+  assert.equal(importedRfq.items[0].title,'PURELL-SKILCRAFT Wall Dispenser');
+  assert.equal(importedRfq.items[0].image,'/rfq-product.jpg');
+  assert.equal(importedRfq.items[0].catalogMatchReviewRequired,false,'An exact source SKU remains a confirmed match even when the RFQ used a normalized form');
   const pipelineUpdate=(await op(`/api/order-drafts/${created.id}`,'PATCH',{status:'reviewing',salesOwner:'Salesperson A',nextAction:'Call purchasing manager',nextFollowUpAt:'2026-11-10T15:30:00.000Z'})).response.data.draft;
   assert.equal(pipelineUpdate.status,'reviewing');
   assert.equal(pipelineUpdate.salesOwner,'Salesperson A');
@@ -199,6 +213,7 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   assert.equal(supplierOptions.length,2);
   assert.equal(supplierOptions[0].supplierName,'Lowest Cost Supply');
   assert.equal(supplierOptions[0].cost,4);
+  assert.equal((await op(`/api/order-drafts/${created.id}/supplier-options?sku=ABC`)).response.data.product.image,'/current.jpg');
   const withSupplier=(await op(`/api/order-drafts/${created.id}`,'PATCH',{items:[{
     sku:'ABC',title:'Current item',qty:2,price:10,priceOverridden:true,listPrice:15,mapPrice:8,selectedSupplierKey:'vendor:vendor-low'
   }]})).response.data.draft;

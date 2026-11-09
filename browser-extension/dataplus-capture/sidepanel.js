@@ -406,6 +406,9 @@ async function importRfq(rfq) {
         billingAddress: {},
         items: rfq.items.map((item) => ({
           sku: item.sku,
+          sourcePageSku: item.sourceSku || item.sku,
+          catalogMatchedSku: item.matchedSku || '',
+          catalogMatchBasis: item.matchedSku ? 'BuySupply DW processed SKU' : '',
           title: item.title,
           qty: item.qty,
           price: item.price,
