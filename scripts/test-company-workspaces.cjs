@@ -300,7 +300,7 @@ test('company membership routes require user permission management before readin
   }
 });
 
-test('company product detail reads stay scoped to shared identity and company-owned commercial data',async()=>{
+test('company product detail shares physical inventory while commercial data stays company-owned',async()=>{
   const {createCompanyOperationsHandler}=require('../lib/company-operations-http');
   const scope={tenantId:'tenant-1',companyId:'buy'},user={id:'user-1'};
   const store={
@@ -308,7 +308,8 @@ test('company product detail reads stay scoped to shared identity and company-ow
     catalogProduct:async(_user,_scope,key)=>key==='BUSB1441513GEC'?{
       product_id:'product-1',source_sku:'BUSB1441513GEC',company_sku:'BUY-PAINT',title:'Touch Up Paint',brand:'Paint Brand',manufacturer:'Paint Brand',
       mfr_part_number:'B1441513GEC',barcode:'012345678905',main_category:'Paint',default_image:'https://example.com/paint.jpg',uom:'Each',
-      company_status:'active',sell_price:'79.93',selected:true
+      company_status:'active',sell_price:'79.93',selected:true,shared_inventory_enabled:true,shared_qty:'14',shared_reserved:'2',shared_available:'12',
+      shared_warehouse_stock:[{warehouseId:'staten-island-2',warehouseName:'Staten Island 2',qty:14,reserved:2,available:12,committed:0,incoming:0}]
     }:null,
     costs:async()=>[{vendor_account_id:'vendor-1',supplier_name:'BuySupply vendor',unit_cost:'51.25',uom:'Each',updated_at:'2026-11-09T12:00:00.000Z'}]
   };
@@ -321,9 +322,13 @@ test('company product detail reads stay scoped to shared identity and company-ow
   assert.equal(detail.data.item.sourceSku,'BUSB1441513GEC');
   assert.equal(detail.data.item.cost,51.25);
   assert.equal(detail.data.item.price,79.93);
-  assert.equal(detail.data.item.companyInventoryConnected,false);
-  assert.equal(detail.data.item.qty,undefined);
-  assert.equal((await get('/api/inventory/BUSB1441513GEC/operations')).data.inventoryConnected,false);
+  assert.equal(detail.data.item.companyInventoryConnected,true);
+  assert.equal(detail.data.item.inventorySharedAcrossCompanies,true);
+  assert.equal(detail.data.item.qty,14);
+  assert.equal(detail.data.item.available,12);
+  const operations=await get('/api/inventory/BUSB1441513GEC/operations');
+  assert.equal(operations.data.inventoryConnected,true);
+  assert.equal(operations.data.warehouses[0].name,'Staten Island 2');
   assert.equal((await get('/api/inventory/BUSB1441513GEC/channel-availability')).data.availability.length,0);
   assert.equal((await get('/api/inventory/BUSB1441513GEC/suppliers')).data.matches[0].supplier,'BuySupply vendor');
   assert.equal((await get('/api/inventory/MISSING')).status,404);
@@ -356,7 +361,9 @@ test('company isolation, catalog projection, access changes, persistence and HTT
   const store=createCompanyStore(()=>pool,{credentialEnv});
   try {
     await pool.query(`create table products(product_id text primary key,sku text,title text,brand text,manufacturer text,mfr_part_number text,barcode text,main_category text,default_image text,uom text,cost numeric,raw jsonb);
-      insert into products values('p1','SKU1','Test product','Brand','Manufacturer','MPN','012345','Category',null,'Each',888,'{"secret":"LINQ-private","price":999}');`);
+      insert into products values('p1','SKU1','Test product','Brand','Manufacturer','MPN','012345','Category',null,'Each',888,'{"secret":"LINQ-private","price":999}');
+      create table inventory_levels(product_id text not null references products(product_id) on delete cascade,location_key text not null,on_hand numeric not null default 0,available numeric not null default 0,reserved numeric not null default 0,committed numeric not null default 0,incoming numeric not null default 0,updated_at timestamptz not null default now(),primary key(product_id,location_key));
+      insert into inventory_levels(product_id,location_key,on_hand,available,reserved) values('p1','staten-island-2',12,10,2),('p1','datawarehouse',99,99,0);`);
     await store.init(); await store.legacyAccess(staff,null);
     await assert.rejects(store.bootstrap(staff,[owner,staff]),/master administrator/);
     const results=await Promise.all([store.bootstrap(owner,[owner,staff]),store.bootstrap(owner,[owner,staff])]);
@@ -401,7 +408,9 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     await assert.rejects(store.saveCarrierAccess(staff,tenantId,'ups',{companyIds:['buysupply']}),/access/);
     assert.deepEqual(await store.operationalState(owner,newScope),{});
     assert.equal((await store.vendorAccounts(owner,newScope)).length,0);
-    assert.equal((await store.catalog(owner,newScope)).rows[0].source_sku,'SKU1');
+    const newCompanyCatalog=(await store.catalog(owner,newScope)).rows[0];
+    assert.equal(newCompanyCatalog.source_sku,'SKU1');
+    assert.equal(newCompanyCatalog.shared_inventory_enabled,false,'New companies do not inherit the shared warehouse pool');
     assert.equal((await store.catalog(owner,newScope,'',1,true)).rows.length,0);
     assert.equal((await store.directory(staff)).companies.length,1);
     await assert.rejects(store.createCompany(owner,tenantId,{name:'new company'}),/already exists/);
@@ -412,6 +421,7 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     await store.legacyAccess(staff,null);
     const initial=(await store.catalog(owner,buy)).rows[0];
     assert.equal(initial.selected,false);
+    assert.equal(initial.shared_inventory_enabled,true,'BuySupply is explicitly connected to LINQ physical warehouses');
     for(const forbidden of ['raw','cost','price','qty','supplier']) assert.ok(!(forbidden in initial));
     await store.selectProduct(owner,buy,{productId:'p1',sku:'BUY1'});
     assert.equal((await store.catalog(owner,linq,'',1,true)).rows.length,0);
@@ -572,18 +582,23 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(companyInventory.cost,7.25);
     assert.equal(companyInventory.supplier,'Supplier');
     assert.equal(companyInventory.mapPrice,null);
-    assert.equal(companyInventory.available,null);
-    assert.equal(companyInventory.inventoryConnected,false);
+    assert.equal(companyInventory.qty,12);
+    assert.equal(companyInventory.available,10);
+    assert.equal(companyInventory.inventoryConnected,true);
+    assert.equal(companyInventory.inventorySharedAcrossCompanies,true);
     assert.equal(companyInventory.status,'active');
     const companyProduct=(await op('/api/inventory/BUY1')).data.item;
     assert.equal(companyProduct.companyCatalogView,true);
     assert.equal(companyProduct.sourceSku,'SKU1');
     assert.equal(companyProduct.price,13.97);
     assert.equal(companyProduct.cost,7.25);
-    assert.equal(companyProduct.companyInventoryConnected,false);
+    assert.equal(companyProduct.companyInventoryConnected,true);
     assert.equal(companyProduct.companyCosts[0].supplierName,'Supplier');
-    assert.equal(companyProduct.qty,undefined);
-    assert.equal((await op('/api/inventory/BUY1/operations')).data.inventoryConnected,false);
+    assert.equal(companyProduct.qty,12);
+    assert.equal(companyProduct.available,10);
+    const companyOperations=(await op('/api/inventory/BUY1/operations')).data;
+    assert.equal(companyOperations.inventoryConnected,true);
+    assert.equal(companyOperations.warehouses.length,1,'Supplier-feed inventory is not shared as physical stock');
     assert.equal((await op('/api/inventory/BUY1/channel-availability')).data.availability.length,0);
     assert.equal((await op('/api/inventory/BUY1/suppliers')).data.matches[0].cost,7.25);
     const competitorResearch=(await op('/api/inventory/BUY1/competitors')).data;
