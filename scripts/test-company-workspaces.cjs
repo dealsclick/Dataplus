@@ -645,6 +645,11 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     const applied=await Promise.all([1,2].map(()=>store.importer.apply(owner,buy,{batchId:upload.id,confirm:true,previewToken:preview.previewToken})));
     assert.equal(applied[0].summary.insertedLines,2);
     assert.equal((await store.importer.report(owner,buy,new URLSearchParams())).summary.orders,2);
+    const reportingOrders=await store.importer.listOrders(owner,buy,new URLSearchParams({sort:'created-desc'}));
+    assert.equal(reportingOrders.total,2);assert.equal(reportingOrders.orders[0].orderNumber,'0002');assert.equal(reportingOrders.orders[0].reportingOnly,true);assert.equal(reportingOrders.orders[0].inventoryAllocation,false);assert.equal(reportingOrders.orders[0].fulfillmentStatus,'Reporting only');
+    const reportingSearch=await store.importer.listOrders(owner,buy,new URLSearchParams({q:'ABC'}));
+    assert.equal(reportingSearch.total,1);assert.equal(reportingSearch.orders[0].orderNumber,'0001');assert.equal(reportingSearch.orders[0].items[0].qty,2);assert.equal(reportingSearch.orders[0].total,20);assert.equal(reportingSearch.orders[0].estimatedProfit,8);
+    assert.equal((await store.importer.listOrders(owner,buy,new URLSearchParams({payment:'paid'}))).total,0,'Operational filters do not reinterpret reporting rows');
     assert.equal((await store.importer.report(owner,linq,new URLSearchParams())).summary.orders,0);
     const duplicate=await store.importer.upload(owner,buy,input),dp=await store.importer.preview(owner,buy,{batchId:duplicate.id,mapping:duplicate.mapping});
     assert.equal(dp.summary.duplicateLines,2);
@@ -679,6 +684,8 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     const op=async(path,method='GET',body={},user=owner)=>{await operations({method,body},{},new URL(path,'http://localhost'),user);return operationalResponse;};
     assert.equal((await op('/api/state')).data.connections.length,0);
     assert.equal((await op('/api/orders')).data.orders.length,0);
+    const reportingOrderPage=(await op('/api/orders?includeReporting=1&recordType=reporting&page=1&pageSize=1&allDates=1')).data;
+    assert.equal(reportingOrderPage.total,2);assert.equal(reportingOrderPage.orders.length,1);assert.equal(reportingOrderPage.totalPages,2);assert.equal(reportingOrderPage.orders[0].reportingOnly,true);
     const companyInventory=(await op('/api/inventory?q=SKU1')).data.inventory[0];
     assert.equal(companyInventory.price,12.75);
     assert.equal(companyInventory.cost,8.5);
@@ -736,6 +743,8 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     const converted=await Promise.all([op(`/api/order-drafts/${draft.id}/convert`,'POST'),op(`/api/order-drafts/${draft.id}/convert`,'POST')]);
     assert.equal(converted[0].data.order.id,converted[1].data.order.id);
     assert.equal((await op('/api/orders')).data.orders.length,1);
+    const combinedOrders=(await op('/api/orders?includeReporting=1&page=1&pageSize=100&allDates=1')).data;
+    assert.equal(combinedOrders.total,3);assert.equal(combinedOrders.orders.filter(order=>order.reportingOnly).length,2);assert.equal(combinedOrders.orders.filter(order=>!order.reportingOnly).length,1);
     assert.equal((await op('/api/orders')).data.orders[0].productCost,null);
     const packingSlip=await op(`/api/orders/${converted[0].data.order.id}/packing-slip`);
     assert.equal(packingSlip.status,200);
