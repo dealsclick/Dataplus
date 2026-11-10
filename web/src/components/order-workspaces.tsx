@@ -1723,6 +1723,8 @@ export function orderListSearchText(row: Record<string, unknown>) {
   const shipments = Array.isArray(row.shipments) ? row.shipments as Array<Record<string, unknown>> : []
   return [
     row.orderNumber,
+    row.salesOrderNumber,
+    row.ctechSalesOrderNumber,
     row.draftNumber,
     row.reference,
     row.returnNumber,

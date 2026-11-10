@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { AlertCircle, AlertTriangle, Ban, Boxes, CheckCircle2, ExternalLink, FileText, Loader2, Mail, Pencil, RefreshCw, RotateCcw, Search, Truck } from "lucide-react"
+import { AlertCircle, AlertTriangle, Ban, Boxes, CheckCircle2, ExternalLink, FileText, History, Loader2, Mail, Pencil, RefreshCw, RotateCcw, Search, Truck } from "lucide-react"
 import { toast } from "sonner"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -162,6 +162,36 @@ function RmaDetailPage() {
       <TabsContent value="transactions" className="pt-4"><Card><CardContent className="p-4"><OrderReturnDetails record={record} trackingUrl={trackingUrlForShipment} defaultTab="transactions" /></CardContent></Card></TabsContent>
       <TabsContent value="activity" className="grid gap-3 pt-4">{activity.map((entry, index) => <Card key={String(entry.id || index)}><CardContent className="flex flex-wrap items-start justify-between gap-3 p-4 text-sm"><div><p className="font-medium">{String(entry.title)}</p><p className="mt-1 text-muted-foreground">{String(entry.message || "")}</p>{Boolean(entry.user) && <p className="mt-1 text-xs text-muted-foreground">By {String(entry.user)}</p>}</div><span className="text-xs text-muted-foreground">{dateLabel(String(entry.createdAt || ""))}</span></CardContent></Card>)}{!activity.length && <Card><CardContent className="p-5 text-sm text-muted-foreground">No RMA activity has been recorded.</CardContent></Card>}</TabsContent>
     </Tabs>
+  </div>
+}
+
+function ReportingOrderDetail({ order, onRefresh, loading }: { order: Record<string, unknown>; onRefresh: () => Promise<void>; loading: boolean }) {
+  const items = Array.isArray(order.items) ? order.items as Array<Record<string, unknown>> : []
+  const salesOrder = String(order.salesOrderNumber || order.ctechSalesOrderNumber || order.orderNumber || order.id || "-")
+  const productCostKnown = order.productCost !== null && order.productCost !== undefined
+  return <div className="grid gap-5">
+    <PageHeader eyebrow="Orders / Reporting history" title={`SO ${salesOrder}`} description="Historical CTech sales order imported for BuySupply reporting." action={<div className="flex flex-wrap gap-2"><HistoryBackButton fallback="/orders/all" label="Back to orders" /><Button size="sm" variant="outline" disabled={loading} onClick={() => void onRefresh()}><RefreshCw className={`size-4 ${loading ? "animate-spin" : ""}`} /> Refresh</Button></div>} />
+    <Alert><History className="size-4" /><AlertTitle>Reporting-only order</AlertTitle><AlertDescription>This record is read-only. It does not reserve inventory, create fulfillment work, or send marketplace updates.</AlertDescription></Alert>
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <Detail label="CTech Sales Order" value={salesOrder} />
+      <Detail label="Order date" value={dateLabel(String(order.orderDate || order.createdAt || ""))} />
+      <Detail label="Customer" value={String(order.customerName || order.buyer || "Not provided")} />
+      <Detail label="Channel" value={String(order.salesChannel || order.channelSource || "Unclassified")} />
+      <Detail label="Source status" value={String(order.status || "Unspecified")} />
+    </div>
+    <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_20rem]">
+      <Card className="min-w-0"><CardHeader><CardTitle className="text-base">Order lines</CardTitle><CardDescription>Imported quantities, sales, historical cost, and supplier data from CTech.</CardDescription></CardHeader><CardContent className="overflow-x-auto p-0"><Table className="min-w-[850px]"><TableHeader><TableRow><TableHead>SKU</TableHead><TableHead>Product</TableHead><TableHead>Supplier</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">Unit price</TableHead><TableHead className="text-right">Line total</TableHead><TableHead className="text-right">Unit cost</TableHead><TableHead className="text-right">Extended cost</TableHead></TableRow></TableHeader><TableBody>{items.map((item, index) => {
+        const qty = Number(item.qty ?? item.quantity ?? 0)
+        const unitCost = item.unitCost ?? item.cost
+        const extendedCost = item.extendedCost ?? (unitCost === null || unitCost === undefined ? null : Number(unitCost) * qty)
+        const lineTotal = Number(item.lineTotal ?? item.extendedPrice ?? (Number(item.price || 0) * qty))
+        return <TableRow key={String(item.lineId || `${item.sku || "line"}-${index}`)}><TableCell className="font-medium">{String(item.sku || "-")}</TableCell><TableCell className="max-w-md"><p className="whitespace-normal font-medium">{String(item.title || item.description || item.sku || "Untitled item")}</p><p className="text-xs text-muted-foreground">{String(item.uom || "EA")}</p></TableCell><TableCell>{String(item.supplier || item.vendor || "Not provided")}</TableCell><TableCell className="text-right tabular-nums">{numberLabel(qty)}</TableCell><TableCell className="text-right tabular-nums">{moneyLabel(Number(item.price || 0))}</TableCell><TableCell className="text-right font-medium tabular-nums">{moneyLabel(lineTotal)}</TableCell><TableCell className="text-right tabular-nums">{unitCost === null || unitCost === undefined ? "Not available" : moneyLabel(Number(unitCost))}</TableCell><TableCell className="text-right tabular-nums">{extendedCost === null ? "Not available" : moneyLabel(Number(extendedCost))}</TableCell></TableRow>
+      })}{!items.length && <TableRow><TableCell colSpan={8} className="h-28 text-center text-muted-foreground">No imported line items were found for this Sales Order.</TableCell></TableRow>}</TableBody></Table></CardContent></Card>
+      <div className="grid content-start gap-4">
+        <Card><CardHeader><CardTitle className="text-base">Order totals</CardTitle><CardDescription>Historical amounts from the source export.</CardDescription></CardHeader><CardContent className="grid gap-3 text-sm"><div className="flex justify-between gap-3"><span className="text-muted-foreground">Product sales</span><span className="font-medium tabular-nums">{moneyLabel(Number(order.subtotal || 0))}</span></div><div className="flex justify-between gap-3"><span className="text-muted-foreground">Customer shipping</span><span className="font-medium tabular-nums">{moneyLabel(Number(order.shippingCollected || order.shippingPaid || 0))}</span></div><div className="flex justify-between gap-3 border-t pt-3"><span className="font-medium">Total sales</span><span className="font-semibold tabular-nums">{moneyLabel(Number(order.total || 0))}</span></div><div className="flex justify-between gap-3"><span className="text-muted-foreground">Product cost</span><span className="font-medium tabular-nums">{productCostKnown ? moneyLabel(Number(order.productCost)) : "Needs cost review"}</span></div><div className="flex justify-between gap-3"><span className="text-muted-foreground">Estimated profit</span><span className="font-medium tabular-nums">{order.estimatedProfit === null || order.estimatedProfit === undefined ? "Needs cost review" : moneyLabel(Number(order.estimatedProfit))}</span></div></CardContent></Card>
+        <Card><CardHeader><CardTitle className="text-base">Import record</CardTitle><CardDescription>Source identity and operating safeguards.</CardDescription></CardHeader><CardContent className="grid gap-3 text-sm"><div><p className="text-muted-foreground">Import source</p><p className="font-medium">{String(order.importSource || order.source || "CTech orders")}</p></div><div><p className="text-muted-foreground">Imported</p><p className="font-medium">{dateLabel(String(order.updatedAt || ""))}</p></div><div className="flex flex-wrap gap-2"><Badge variant="secondary">Historical</Badge><Badge variant="outline">No allocation</Badge><Badge variant="outline">Read only</Badge></div></CardContent></Card>
+      </div>
+    </div>
   </div>
 }
 
@@ -656,6 +686,7 @@ function OrderDetailWorkspace() {
   }
   if (loading) return <div className="grid gap-4"><Skeleton className="h-24" /><Skeleton className="h-44" /><Skeleton className="h-72" /></div>
   if (!order) return <Card><CardContent className="p-8 text-center text-muted-foreground">This order was not found.</CardContent></Card>
+  if (order.reportingOnly === true) return <ReportingOrderDetail order={order} onRefresh={load} loading={loading} />
   const routingState = getOrderRoutingState(order)
   const attentionItems = orderAttentionItems(order)
   const operationalState = String(order.operationalStatus || order.workflowStatus || "").trim()

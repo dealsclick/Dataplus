@@ -661,7 +661,11 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(applied[0].summary.insertedLines,2);
     assert.equal((await store.importer.report(owner,buy,new URLSearchParams())).summary.orders,2);
     const reportingOrders=await store.importer.listOrders(owner,buy,new URLSearchParams({sort:'created-desc'}));
-    assert.equal(reportingOrders.total,2);assert.equal(reportingOrders.orders[0].orderNumber,'0002');assert.equal(reportingOrders.orders[0].reportingOnly,true);assert.equal(reportingOrders.orders[0].inventoryAllocation,false);assert.equal(reportingOrders.orders[0].fulfillmentStatus,'Reporting only');
+    assert.equal(reportingOrders.total,2);assert.equal(reportingOrders.orders[0].orderNumber,'0002');assert.equal(reportingOrders.orders[0].salesOrderNumber,'0002');assert.equal(reportingOrders.orders[0].reportingOnly,true);assert.equal(reportingOrders.orders[0].inventoryAllocation,false);assert.equal(reportingOrders.orders[0].fulfillmentStatus,'Reporting only');assert.match(reportingOrders.orders[0].id,/^reporting:/);
+    const salesOrderSearch=await store.importer.listOrders(owner,buy,new URLSearchParams({q:'0001'}));
+    assert.equal(salesOrderSearch.total,1);assert.equal(salesOrderSearch.orders[0].salesOrderNumber,'0001');
+    const reportingDetail=await store.importer.orderDetail(owner,buy,salesOrderSearch.orders[0].id);
+    assert.equal(reportingDetail.reportingOnly,true);assert.equal(reportingDetail.salesOrderNumber,'0001');assert.equal(reportingDetail.items[0].lineTotal,20);assert.equal(reportingDetail.items[0].extendedCost,12);
     const reportingSearch=await store.importer.listOrders(owner,buy,new URLSearchParams({q:'ABC'}));
     assert.equal(reportingSearch.total,1);assert.equal(reportingSearch.orders[0].orderNumber,'0001');assert.equal(reportingSearch.orders[0].items[0].qty,2);assert.equal(reportingSearch.orders[0].total,20);assert.equal(reportingSearch.orders[0].estimatedProfit,8);
     const salesReport=await store.importer.salesReport(owner,buy,new URLSearchParams({from:'2026-09-01',to:'2026-09-30'}));
@@ -727,6 +731,8 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal((await op('/api/orders')).data.orders.length,0);
     const reportingOrderPage=(await op('/api/orders?includeReporting=1&recordType=reporting&page=1&pageSize=1&allDates=1')).data;
     assert.equal(reportingOrderPage.total,2);assert.equal(reportingOrderPage.orders.length,1);assert.equal(reportingOrderPage.totalPages,2);assert.equal(reportingOrderPage.orders[0].reportingOnly,true);
+    const reportingOrderDetail=(await op(`/api/orders/${encodeURIComponent(reportingOrderPage.orders[0].id)}`)).data;
+    assert.equal(reportingOrderDetail.order.reportingOnly,true);assert.equal(reportingOrderDetail.order.salesOrderNumber,reportingOrderPage.orders[0].salesOrderNumber);assert.equal(reportingOrderDetail.warehouses.length,0);assert.equal(reportingOrderDetail.reportingOnly,true);
     const companySalesReport=(await op('/api/reports/sales?from=2026-09-01&to=2026-09-30')).data;
     assert.equal(Number(companySalesReport.summary.order_count),2);assert.equal(companySalesReport.scope,'company');assert.equal(companySalesReport.reportingOnly,true);
     const companySalesOrders=(await op('/api/reports/sales/orders?from=2026-09-01&to=2026-09-30&page=1')).data;
