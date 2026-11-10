@@ -588,6 +588,12 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal((await store.manualChannels(outsider,other)).length,0);
     assert.equal((await store.manualChannels(owner,linq)).length,1);
     const input={filename:'orders.csv',channelId:manual.id,content:Buffer.from(csv).toString('base64')};
+    const chunkedContent=Buffer.from(csv),chunked=await store.importer.startUpload(owner,buy,{filename:'chunked-orders.csv',channelId:zoro.id,totalBytes:chunkedContent.length,chunkCount:2});
+    await store.importer.uploadChunk(owner,buy,{uploadId:chunked.uploadId,chunkIndex:0,content:chunkedContent.subarray(0,30).toString('base64')});
+    await assert.rejects(store.importer.completeUpload(owner,buy,{uploadId:chunked.uploadId}),/missing/);
+    await store.importer.uploadChunk(owner,buy,{uploadId:chunked.uploadId,chunkIndex:1,content:chunkedContent.subarray(30).toString('base64')});
+    const chunkedBatch=await store.importer.completeUpload(owner,buy,{uploadId:chunked.uploadId});
+    assert.equal(chunkedBatch.filename,'chunked-orders.csv');assert.equal((await store.importer.completeUpload(owner,buy,{uploadId:chunked.uploadId})).id,chunkedBatch.id);
     await assert.rejects(store.importer.upload(owner,buy,{...input,channelId:linqManual.id}),/belonging/);
     await assert.rejects(store.importer.upload(owner,buy,{...input,channelId:undefined,source:'Zoro'}),/Select a manual channel/);
     const zoroBatch=await store.importer.upload(owner,buy,{...input,channelId:zoro.id,source:'spoofed'});

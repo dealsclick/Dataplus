@@ -14,27 +14,37 @@ type Preview = { id: string; status: string; previewToken?: string; channelId: s
 type Batch = { id: string; source: string; filename: string; status: string; summary: Summary; created_at: string }
 type Report = { summary: { lines: number; orders: number; sales_minor: string; known_cost_minor: string; missing_cost_lines: number; known_profit_minor: string }; rows: { source: string; order_id: string; date: string; customer: string; status: string; lines: number; sales_minor: string; cost_minor: string | null }[]; hasMore: boolean }
 const labels: Record<string,string> = { orderId:'Source order number *',lineId:'Source line ID (required for repeated SKUs)',date:'Order date *',sku:'SKU *',quantity:'Quantity *',unitPrice:'Unit selling price',sales:'Extended sales',unitCost:'Historical unit cost',cost:'Historical extended cost',customer:'Customer',reference:'External reference',status:'Source status',description:'Description',vendor:'Supplier',uom:'Unit / pack',reportedProfit:'Source profit (audit only)' }
-async function api<T>(url:string,method='GET',body?:unknown):Promise<T>{const response=await fetch(url,{method,headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});const data=await response.json();if(!response.ok)throw new Error(data.error || 'Request failed.');return data}
+async function api<T>(url:string,method='GET',body?:unknown):Promise<T>{const response=await fetch(url,{method,headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});const text=await response.text();let data:Record<string,unknown>;try{data=text?JSON.parse(text):{}}catch{throw new Error(response.status===413?'The upload was too large for the gateway. DataPlus will send large files in smaller parts.':'The server returned an invalid response. Retry the request.')}if(!response.ok)throw new Error(String(data.error || 'Request failed.'));return data as T}
 const money=(minor: string | number | null | undefined,currency:string)=>minor===null || minor===undefined?'Unknown':new Intl.NumberFormat('en-US',{style:'currency',currency}).format(Number(minor)/100)
 const sourceNumber=(value:unknown)=>new Intl.NumberFormat('en-US',{maximumFractionDigits:6}).format(Number(value))
 const sourceMoney=(value:unknown,currency:string)=>new Intl.NumberFormat('en-US',{style:'currency',currency,minimumFractionDigits:2,maximumFractionDigits:2}).format(Number(value))
+const UPLOAD_CHUNK_BYTES=3*1024*1024
+const readBase64=(blob:Blob)=>new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(new Error('Unable to read file.'));reader.readAsDataURL(blob)})
 
 export function ManualOrderImporter({base,companyName,currency,owner}:{base:string;companyName:string;currency:string;owner?:boolean}) {
   const [templates,setTemplates]=useState<SavedOrderTemplate[]>([]),[templateId,setTemplateId]=useState(''),[saveTemplate,setSaveTemplate]=useState(false)
   const [tab,setTab]=useState('import'),[batches,setBatches]=useState<Batch[]>([]),[report,setReport]=useState<Report|null>(null)
   const [source,setSource]=useState(''),[file,setFile]=useState<File|null>(null),[preview,setPreview]=useState<Preview|null>(null),[mapping,setMapping]=useState<Record<string,string>>({})
-  const [busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[revision,setRevision]=useState(0),[page,setPage]=useState(1)
+  const [busy,setBusy]=useState(false),[busyMessage,setBusyMessage]=useState(''),[error,setError]=useState(''),[notice,setNotice]=useState(''),[revision,setRevision]=useState(0),[page,setPage]=useState(1)
   const [filters,setFilters]=useState({from:'',to:'',status:'',source:''}),[applied,setApplied]=useState(filters)
   const [confirm,setConfirm]=useState<{kind:'apply'|'rollback';id:string}|null>(null)
   const [orderDetail,setOrderDetail]=useState<{orderId:string;rows:{batch_id:string;data:{lineId:string;sku:string;description:string;quantity:number;uom:string;salesMinor:number;costMinor:number|null;vendor:string;status:string}}[]}|null>(null)
   useEffect(()=>{let cancelled=false;setError('');Promise.all([api<{rows:Batch[]}>(`${base}/order-imports`),api<Report>(`${base}/imported-orders?${new URLSearchParams({...applied,page:String(page)})}`)]).then(([history,data])=>{if(!cancelled){setBatches(history.rows);setReport(data)}}).catch(e=>{if(!cancelled)setError(e.message)});return()=>{cancelled=true}},[base,revision,page,applied])
   useEffect(()=>{let cancelled=false;templateRequest<{rows:SavedOrderTemplate[]}>(`${base}/order-import-templates`).then(data=>{if(!cancelled)setTemplates(data.rows)}).catch(e=>{if(!cancelled)setError(e.message)});return()=>{cancelled=true}},[base,revision])
-  async function run(work:()=>Promise<void>){setBusy(true);setError('');setNotice('');try{await work()}catch(e){setError(e instanceof Error?e.message:'Unable to complete request.')}finally{setBusy(false)}}
+  async function run(work:()=>Promise<void>){setBusy(true);setBusyMessage('Processing…');setError('');setNotice('');try{await work()}catch(e){setError(e instanceof Error?e.message:'Unable to complete request.')}finally{setBusy(false);setBusyMessage('')}}
   async function upload(){
     if(!file)return
     if(file.size>25*1024*1024)throw new Error('File exceeds 25 MB. Split the export before importing.')
-    const content=await new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(new Error('Unable to read file.'));reader.readAsDataURL(file)})
-    const next=await api<Preview>(`${base}/order-imports`,'POST',{channelId:source,templateId:templateId||undefined,filename:file.name,content})
+    const chunkCount=Math.ceil(file.size/UPLOAD_CHUNK_BYTES)
+    setBusyMessage(`Starting ${chunkCount}-part upload…`)
+    const started=await api<{uploadId:string}>(`${base}/order-import-upload-start`,'POST',{channelId:source,templateId:templateId||undefined,filename:file.name,totalBytes:file.size,chunkCount})
+    for(let chunkIndex=0;chunkIndex<chunkCount;chunkIndex++){
+      setBusyMessage(`Uploading part ${chunkIndex+1} of ${chunkCount}…`)
+      const content=await readBase64(file.slice(chunkIndex*UPLOAD_CHUNK_BYTES,Math.min(file.size,(chunkIndex+1)*UPLOAD_CHUNK_BYTES)))
+      await api(`${base}/order-import-upload-chunk`,'POST',{uploadId:started.uploadId,chunkIndex,content})
+    }
+    setBusyMessage('Assembling and reading the workbook…')
+    const next=await api<Preview>(`${base}/order-import-upload-complete`,'POST',{uploadId:started.uploadId})
     setPreview(next);setMapping(next.mapping);setRevision(n=>n+1)
   }
   async function openBatch(batch:Batch){const next=await api<Preview>(`${base}/order-import-detail?batchId=${batch.id}`);setPreview(next);setMapping(next.mapping);setTab('import')}
@@ -42,7 +52,7 @@ export function ManualOrderImporter({base,companyName,currency,owner}:{base:stri
   return <section className="min-w-0 space-y-4">
     <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><h3 className="text-lg font-semibold">Manual order importer</h3><p className="break-words text-sm text-muted-foreground">{companyName} · Reporting-only orders · {currency}</p></div><DropdownMenu><DropdownMenuTrigger asChild><Button disabled={busy}>Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end">{owner && <DropdownMenuItem onClick={()=>{setPreview(null);setFile(null);setTab('import')}}>New import</DropdownMenuItem>}<DropdownMenuItem onClick={()=>setRevision(n=>n+1)}>Refresh</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>
     <p className="text-sm text-muted-foreground">Imported orders retain their source status and historical costs. They do not reserve stock, create purchase orders, post accounting entries, or send marketplace updates. These totals cover manual imports only.</p>
-    {error && <p role="alert" className="rounded-md border border-destructive p-3 text-sm text-destructive">{error}</p>}{notice && <p role="status" className="text-sm">{notice}</p>}{busy && <p role="status" className="text-sm">Processing…</p>}
+    {error && <p role="alert" className="rounded-md border border-destructive p-3 text-sm text-destructive">{error}</p>}{notice && <p role="status" className="text-sm">{notice}</p>}{busy && <p role="status" className="text-sm">{busyMessage || 'Processing…'}</p>}
     <Tabs value={tab} onValueChange={setTab}><TabsList className="grid w-full grid-cols-1 gap-1 group-data-horizontal/tabs:h-auto sm:w-fit sm:grid-cols-3"><TabsTrigger value="orders">Imported orders</TabsTrigger><TabsTrigger value="import">Upload & mapping</TabsTrigger><TabsTrigger value="history">Import history</TabsTrigger></TabsList>
       <TabsContent value="orders" className="space-y-4">
         <form className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5" onSubmit={e=>{e.preventDefault();setPage(1);setApplied({...filters})}}>
