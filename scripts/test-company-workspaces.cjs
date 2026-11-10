@@ -4,6 +4,7 @@ const { Pool } = require('pg');
 const { createCompanyStore, LEGACY_TENANT: tenantId, LEGACY_COMPANY, LEGACY_COMPANY_NUMBER, BUYSUPPLY_PUBLIC_PROFILE, money } = require('../lib/company-workspaces');
 const { createCompanyHandler } = require('../lib/company-http');
 const {parseFile,normalize}=require('../lib/manual-order-import');
+const {canonicalCtechCustomer,ctechOrderMetadata}=require('../lib/ctech-orders');
 const { PDFDocument } = require('pdf-lib');
 const quoteDocuments=require('../lib/quote-documents');
 const serverSource=require('node:fs').readFileSync(require.resolve('../server'),'utf8');
@@ -444,6 +445,16 @@ test('cost validation retains unknown and zero without coercing invalid input', 
   for(const value of [undefined, false, -1, 'NaN', '1e4', '1.1234567', {}, ' ']) assert.throws(()=>money(value));
 });
 
+test('CTech customer aliases remain deduplicated and channels stay explicit',()=>{
+  for(const value of ['MARSHALL RETAIL GROUP','MARSHALL RETAIL GROUP CORP','901 - MARSHALL RETAIL GROUP CORP','The Marshall Retail Group, LLC - Manual'])assert.equal(canonicalCtechCustomer(value),'Marshall');
+  for(const value of ['Veyer, LLC or an Affiliate','Veyer or an Affiliate Manual','ODP Business Sourcing, LLC / áVeyer','ODP Business Sourcing, LLC / �Veyer'])assert.equal(canonicalCtechCustomer(value),'Veyer');
+  for(const value of ['SKOOKUM','Skookum Contract Services','SKOOKUM PCARD'])assert.equal(canonicalCtechCustomer(value),'Skookum');
+  assert.deepEqual(ctechOrderMetadata('ZORO'),{rawCustomer:'ZORO',canonicalCustomer:'Zoro',reportChannel:'Zoro',customerType:'channel'});
+  assert.equal(ctechOrderMetadata('VOOMI SUPPLY INC').reportChannel,'VOOMI');
+  assert.equal(ctechOrderMetadata('SouthernCarlson Inc').canonicalCustomer,'Southern Carlson');
+  assert.equal(ctechOrderMetadata('A Team Sales').reportChannel,'BuySupply B2B');
+});
+
 const connectionString=process.env.COMPANY_TEST_DATABASE_URL;
 test('company isolation, catalog projection, access changes, persistence and HTTP boundaries', { skip: !connectionString }, async () => {
   const url=new URL(connectionString);
@@ -579,10 +590,13 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal((await invoke(`/api/organization/tenants/${tenantId}/companies/buysupply/profile`,'PATCH',owner,{...publicProfile,website:'not-a-url'})).status,400);
     assert.equal((await invoke(`/api/organization/tenants/${tenantId}/companies/buysupply/costs`,'PUT',owner,{productId:'p1',vendorAccountId:'wrong',unitCost:'2',uom:'Each'})).status,400);
     assert.equal((await invoke('/api/organization/unknown','GET',owner)).status,404);
-    const csv='so,order_date,sku,qty,ext_price,ext_cost,status\n0001,2026-09-01,ABC,2,20,12,SHIPPED\n0002,2026-09-02,DEF,1,10,,UNPROCESSED';
+    const csv='so,order_date,sku,qty,ext_price,ext_cost,status,name\n0001,2026-09-01,ABC,2,20,12,SHIPPED,MARSHALL RETAIL GROUP\n0002,2026-09-02,DEF,1,10,,UNPROCESSED,Veyer LLC or an Affiliate';
     const manual=await store.createManualChannel(owner,buy,{name:'External ERP'});
     const linqManual=await store.createManualChannel(owner,linq,{name:'External ERP'});
     const zoro=await store.createManualChannel(owner,buy,{name:'Zoro'});
+    await createCompanyStore(()=>pool).init();
+    const migratedCtech=(await store.manualChannels(owner,buy)).find(channel=>channel.id===zoro.id);
+    assert.equal(migratedCtech.name,'CTech Orders');assert.equal(migratedCtech.source_key,'zoro');
     await assert.rejects(store.createManualChannel(owner,buy,{name:' zoro '}),error=>error.code==='23505');
     await assert.rejects(store.createManualChannel(staff,buy,{name:'Forbidden'}),/access/);
     assert.equal((await store.manualChannels(outsider,other)).length,0);
@@ -671,6 +685,18 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     await store.updateManualChannel(owner,buy,{id:zoro.id,enabled:true});
     await store.importer.apply(owner,buy,{batchId:zoroBatch.id,confirm:true,previewToken:zoroPreview.previewToken});
     assert.equal((await store.importer.report(owner,buy,new URLSearchParams())).summary.orders,4,'Same order references remain distinct between channels');
+    const ctechCsv='so,order_date,sku,qty,ext_price,ext_cost,status,name\nCT-1,2026-09-03,A,1,10,6,SHIPPED,ZORO\nCT-2,2026-09-03,B,1,20,12,SHIPPED,VOOMI SUPPLY INC\nCT-3,2026-09-03,C,1,30,18,SHIPPED,MARSHALL RETAIL GROUP\nCT-4,2026-09-03,D,1,40,24,SHIPPED,MARSHALL RETAIL GROUP CORP\nCT-5,2026-09-03,E,1,50,30,SHIPPED,ODP Business Sourcing LLC / áVeyer';
+    const ctechUpload=await store.importer.upload(owner,buy,{filename:'ctech-orders.csv',channelId:zoro.id,content:Buffer.from(ctechCsv).toString('base64')});
+    const ctechPreview=await store.importer.preview(owner,buy,{batchId:ctechUpload.id,mapping:ctechUpload.mapping});
+    await store.importer.apply(owner,buy,{batchId:ctechUpload.id,confirm:true,previewToken:ctechPreview.previewToken});
+    const ctechSales=await store.importer.salesReport(owner,buy,new URLSearchParams({from:'2026-09-03',to:'2026-09-03'}));
+    assert.deepEqual(ctechSales.channels.map(row=>row.channel).sort(),['BuySupply B2B','VOOMI','Zoro']);
+    assert.equal(ctechSales.customers.filter(row=>row.customer==='Marshall').length,1);
+    assert.equal(ctechSales.customers.find(row=>row.customer==='Marshall').order_count,2);
+    assert.equal((await store.importer.customers(owner,buy)).find(row=>row.customer==='Marshall').orderCount,3);
+    assert.equal((await store.importer.listOrders(owner,buy,new URLSearchParams({source:'Zoro',from:'2026-09-03',to:'2026-09-03'}))).total,1);
+    assert.equal((await store.importer.listOrders(owner,buy,new URLSearchParams({source:'BuySupply B2B',q:'Veyer',from:'2026-09-03',to:'2026-09-03'}))).total,1);
+    await store.importer.rollback(owner,buy,{batchId:ctechUpload.id,confirm:true});
     await store.updateManualChannel(owner,buy,{id:zoro.id,enabled:false});
     await store.importer.rollback(owner,buy,{batchId:zoroBatch.id,confirm:true});
     assert.equal((await store.importer.report(owner,buy,new URLSearchParams())).summary.orders,2);
