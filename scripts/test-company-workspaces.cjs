@@ -649,6 +649,14 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(reportingOrders.total,2);assert.equal(reportingOrders.orders[0].orderNumber,'0002');assert.equal(reportingOrders.orders[0].reportingOnly,true);assert.equal(reportingOrders.orders[0].inventoryAllocation,false);assert.equal(reportingOrders.orders[0].fulfillmentStatus,'Reporting only');
     const reportingSearch=await store.importer.listOrders(owner,buy,new URLSearchParams({q:'ABC'}));
     assert.equal(reportingSearch.total,1);assert.equal(reportingSearch.orders[0].orderNumber,'0001');assert.equal(reportingSearch.orders[0].items[0].qty,2);assert.equal(reportingSearch.orders[0].total,20);assert.equal(reportingSearch.orders[0].estimatedProfit,8);
+    const salesReport=await store.importer.salesReport(owner,buy,new URLSearchParams({from:'2026-09-01',to:'2026-09-30'}));
+    assert.equal(Number(salesReport.summary.order_count),2);assert.equal(Number(salesReport.summary.net_sales),30);assert.equal(Number(salesReport.summary.product_cost),12);assert.equal(Number(salesReport.summary.estimated_profit),18);
+    assert.equal(Number(salesReport.summary.missing_cost_order_count),1);assert.equal(salesReport.summary.cost_coverage,0.5);assert.equal(salesReport.daily.length,2);assert.equal(salesReport.monthly.length,1);
+    assert.equal(salesReport.channels[0].channel,'external erp');assert.equal(salesReport.products.find(row=>row.sku==='ABC').product_sales,20);assert.equal(salesReport.paymentStatuses[0].payment_status,'Historical import');
+    assert.equal(Number((await store.importer.salesReport(owner,buy,new URLSearchParams({costScope:'complete'}))).summary.order_count),1);
+    assert.equal(Number((await store.importer.salesReport(owner,buy,new URLSearchParams({costScope:'missing'}))).summary.net_sales),10);
+    const salesOrders=await store.importer.salesReportOrders(owner,buy,new URLSearchParams({page:'1'}));
+    assert.equal(salesOrders.total,2);assert.equal(salesOrders.rows[0].reporting_only,true);assert.equal(salesOrders.rows.find(row=>row.order_number==='0002').cost_status,'missing_product_cost');
     assert.equal((await store.importer.listOrders(owner,buy,new URLSearchParams({payment:'paid'}))).total,0,'Operational filters do not reinterpret reporting rows');
     assert.equal((await store.importer.report(owner,linq,new URLSearchParams())).summary.orders,0);
     const duplicate=await store.importer.upload(owner,buy,input),dp=await store.importer.preview(owner,buy,{batchId:duplicate.id,mapping:duplicate.mapping});
@@ -686,6 +694,10 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal((await op('/api/orders')).data.orders.length,0);
     const reportingOrderPage=(await op('/api/orders?includeReporting=1&recordType=reporting&page=1&pageSize=1&allDates=1')).data;
     assert.equal(reportingOrderPage.total,2);assert.equal(reportingOrderPage.orders.length,1);assert.equal(reportingOrderPage.totalPages,2);assert.equal(reportingOrderPage.orders[0].reportingOnly,true);
+    const companySalesReport=(await op('/api/reports/sales?from=2026-09-01&to=2026-09-30')).data;
+    assert.equal(Number(companySalesReport.summary.order_count),2);assert.equal(companySalesReport.scope,'company');assert.equal(companySalesReport.reportingOnly,true);
+    const companySalesOrders=(await op('/api/reports/sales/orders?from=2026-09-01&to=2026-09-30&page=1')).data;
+    assert.equal(companySalesOrders.total,2);assert.equal(companySalesOrders.rows[0].reporting_only,true);
     const companyInventory=(await op('/api/inventory?q=SKU1')).data.inventory[0];
     assert.equal(companyInventory.price,12.75);
     assert.equal(companyInventory.cost,8.5);
