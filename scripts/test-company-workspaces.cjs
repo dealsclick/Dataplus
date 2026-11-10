@@ -425,13 +425,18 @@ test('company product detail shares the complete normalized catalog while preser
   assert.equal((await get('/api/inventory/MISSING')).status,404);
 });
 
-test('manual order parsing preserves identifiers, dates, unknown cost and rejects ambiguous line keys',()=>{
+test('manual order parsing preserves identifiers, dates, unknown cost and creates stable repeated-SKU line keys',()=>{
   const input={filename:'orders.csv',content:Buffer.from('so,order_date,sku,qty,ext_price,ext_cost,difference\n0001,09/01/2026,00123,2,20,12,-999\n0002,2026-09-02,00124,1,10,,10').toString('base64')};
   const parsed=parseFile(input),result=normalize(parsed,parsed.suggested);
   assert.equal(result.summary.errors,0);assert.equal(result.lines[0].orderId,'0001');assert.equal(result.lines[0].sku,'00123');assert.equal(result.lines[0].date,'2026-09-01');
   assert.equal(result.lines[0].salesMinor,2000);assert.equal(result.lines[0].costMinor,1200);assert.equal(result.lines[1].costMinor,null);assert.equal(result.summary.warnings,2);
-  parsed.rows.push({...parsed.rows[0]});assert.equal(normalize(parsed,parsed.suggested).summary.errors,1);
+  parsed.rows.push({...parsed.rows[0]});const repeated=normalize(parsed,parsed.suggested);assert.equal(repeated.summary.errors,0);assert.equal(repeated.lines[0].lineId,'00123#1');assert.equal(repeated.lines[2].lineId,'00123#2');
   parsed.rows[0].order_date='2026-02-30';assert.ok(normalize(parsed,parsed.suggested).issues.some(i=>/order date/.test(i.message)));
+  const formatted=parseFile({filename:'zoro.csv',content:Buffer.from('SO,ORDER_DATE,ITEM__,QTY,UNIT_PRICE,UNIT_COST,EXT_PRICE,EXT_COST\n183241,2025-01-01,BSC4-0678AQU,1.000000,0.00000,173.270000,0.00,173.270000').toString('base64')});
+  const normalized=normalize(formatted,formatted.suggested);
+  assert.equal(normalized.lines[0].quantity,1);assert.equal(normalized.lines[0].unitPrice,0);assert.equal(normalized.lines[0].salesMinor,0);assert.equal(normalized.lines[0].costMinor,17327);
+  const rows=Array.from({length:10001},(_,index)=>`${index+1},2026-01-01,SKU-${index+1},1,1,1`).join('\n');
+  assert.equal(parseFile({filename:'large.csv',content:Buffer.from(`so,order_date,sku,qty,ext_price,ext_cost\n${rows}`).toString('base64')}).rows.length,10001);
 });
 
 test('cost validation retains unknown and zero without coercing invalid input', () => {
