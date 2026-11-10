@@ -1914,6 +1914,47 @@ function supplierReportCsvValue(value) {
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
+async function queueSupplierCoverageRefreshJob(sourceJob = {}) {
+  const recentJobs = await postgres.readOperationJobs(5000);
+  const active = recentJobs.find((job) => String(job.workerTask || "") === "supplier-coverage-refresh"
+    && ["queued", "running"].includes(String(job.status || "").toLowerCase()));
+  if (active) {
+    return { job: active, duplicate: true };
+  }
+  const status = await postgres.readSupplierIndexStatus();
+  const now = new Date().toISOString();
+  const job = {
+    id: crypto.randomUUID(),
+    section: "Catalog",
+    category: "Catalog",
+    operation: "Rebuild supplier matching index",
+    direction: "maintenance",
+    type: "maintenance",
+    source: "supplier-matching-index",
+    status: "queued",
+    phase: "queued",
+    message: "Supplier matching index rebuild queued after the product datadump refresh.",
+    details: "Builds exact UPC and SKU coverage in bounded batches, then stores MPN similarities for review.",
+    fileName: "supplier-matching-report.csv",
+    totalRows: Number(status.totalProducts || 0),
+    processedRows: 0,
+    progressPercent: 0,
+    workerTask: "supplier-coverage-refresh",
+    workerPayload: {
+      background: true,
+      scheduled: true,
+      sourceJobId: String(sourceJob.id || ""),
+      trigger: "product-dump-import"
+    },
+    background: true,
+    scheduled: true,
+    createdAt: now,
+    updatedAt: now
+  };
+  await postgres.upsertOperationJob(job);
+  return { job, duplicate: false };
+}
+
 async function runSupplierCoverageRefreshJob(job) {
   let current = await persistJob(job, {
     status: "running",
@@ -1939,7 +1980,9 @@ async function runSupplierCoverageRefreshJob(job) {
     });
     await Promise.all([
       redisCache.deleteByPrefix("dataplus:audit-supplier-options:"),
-      redisCache.deleteByPrefix("dataplus:supplier-coverage:")
+      redisCache.deleteByPrefix("dataplus:supplier-coverage:"),
+      redisCache.deleteByPrefix("dataplus:products:"),
+      redisCache.deleteByPrefix("dataplus:product-detail:")
     ]);
     const status = await postgres.readSupplierIndexStatus();
     const labels = {
@@ -1959,11 +2002,14 @@ async function runSupplierCoverageRefreshJob(job) {
     ];
     const target = workerExportPath(current, "supplier-matching-report.csv");
     fs.writeFileSync(target.filePath, reportRows.map((row) => row.map(supplierReportCsvValue).join(",")).join("\n"), "utf8");
+    const coverageWarnings = Array.isArray(result.warnings) ? result.warnings.filter(Boolean) : [];
     current = await persistJob(current, {
-      status: "success",
-      phase: "complete",
-      message: `Supplier index rebuilt for ${Number(status.linkedProducts || 0).toLocaleString()} linked products.`,
-      details: `${Number(status.totalLinks || 0).toLocaleString()} supplier links; ${Number(status.multiSupplierProducts || 0).toLocaleString()} multi-supplier products; ${Number(status.pendingReviews || 0).toLocaleString()} pending reviews.`,
+      status: coverageWarnings.length ? "warning" : "success",
+      phase: coverageWarnings.length ? "completed_with_warning" : "complete",
+      message: coverageWarnings.length
+        ? `Supplier index rebuilt for ${Number(status.linkedProducts || 0).toLocaleString()} linked products; review suggestions were deferred.`
+        : `Supplier index rebuilt for ${Number(status.linkedProducts || 0).toLocaleString()} linked products.`,
+      details: [`${Number(status.totalLinks || 0).toLocaleString()} supplier links; ${Number(status.multiSupplierProducts || 0).toLocaleString()} multi-supplier products; ${Number(status.pendingReviews || 0).toLocaleString()} pending reviews.`, ...coverageWarnings].join(" "),
       totalRows: Number(result.totalRows || status.totalProducts || current.totalRows || 0),
       processedRows: Number(result.processedRows || result.totalRows || status.totalProducts || 0),
       changed: Number(status.totalLinks || 0),
@@ -2347,7 +2393,7 @@ async function runProductDumpImportJob(job) {
     });
   }
   let analyzeResult = { tables: [] };
-  let supplierCoverageResult = null;
+  let supplierCoverageJob = null;
   let supplierCoverageError = "";
   const shouldRefreshSupplierCoverage = importType !== "sku-creation"
     && (payload.refreshSupplierCoverage === true || syncMode !== "reconciliation");
@@ -2369,29 +2415,13 @@ async function runProductDumpImportJob(job) {
       if (shouldRefreshSupplierCoverage) {
         current = await persistJob(current, {
           status: "running",
-          phase: "rebuilding_supplier_coverage",
-          message: "Matching supplier coverage and storing indexed catalog statuses..."
+          phase: "queueing_supplier_coverage",
+          message: "Queueing the independent supplier coverage rebuild..."
         });
         try {
-          supplierCoverageResult = await postgres.refreshVendorSupplierCoverage({
-            onProgress: (patch = {}) => {
-              current = normalizeJobPatch(current, {
-                ...patch,
-                status: "running",
-                phase: "rebuilding_supplier_coverage",
-                message: patch.message || current.message
-              });
-              postgres.upsertOperationJob(current).catch((error) => console.error("Unable to persist supplier coverage progress:", error.message || error));
-            }
-          });
-          await Promise.all([
-            redisCache.deleteByPrefix("dataplus:audit-supplier-options:"),
-            redisCache.deleteByPrefix("dataplus:supplier-coverage:"),
-            redisCache.deleteByPrefix("dataplus:products:"),
-            redisCache.deleteByPrefix("dataplus:product-detail:")
-          ]);
+          supplierCoverageJob = await queueSupplierCoverageRefreshJob(current);
         } catch (error) {
-          supplierCoverageError = error.message || "Supplier coverage status rebuild failed.";
+          supplierCoverageError = error.message || "Supplier coverage job could not be queued.";
         }
       }
     } finally {
@@ -2471,7 +2501,7 @@ async function runProductDumpImportJob(job) {
       : importType === "sku-creation"
         ? `Datadump SKU creation finished: ${Number(finalProcessedRows || 0).toLocaleString()} checked and ${Number(finalChanged || 0).toLocaleString()} missing SKUs created.`
         : "Product dump price and inventory refresh finished.",
-    details: [outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "), analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : "", supplierCoverageResult ? `Stored ${Number(supplierCoverageResult.supplierLinks || 0).toLocaleString()} product-to-supplier links and refreshed coverage for ${Number(supplierCoverageResult.productsUpdated || 0).toLocaleString()} approved products and ${Number(supplierCoverageResult.vendorItemsUpdated || 0).toLocaleString()} source records from ${Number(supplierCoverageResult.keys || 0).toLocaleString()} matched identities.` : "", !shouldRefreshSupplierCoverage ? importType === "sku-creation" ? "Commercial updates and supplier coverage are handled by the separate refresh stage." : "Supplier coverage was unchanged and skipped for this reconciliation-only refresh." : "", supplierCoverageError ? `Supplier coverage rebuild failed: ${supplierCoverageError}` : "", ...followOn].filter(Boolean).join(" "),
+    details: [outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "), analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : "", supplierCoverageJob ? supplierCoverageJob.duplicate ? `Supplier coverage is already queued or running as Job ${supplierCoverageJob.job?.jobNumber || supplierCoverageJob.job?.id}.` : `Supplier coverage queued independently as Job ${supplierCoverageJob.job?.jobNumber || supplierCoverageJob.job?.id}.` : "", !shouldRefreshSupplierCoverage ? importType === "sku-creation" ? "Commercial updates and supplier coverage are handled by the separate refresh stage." : "Supplier coverage was unchanged and skipped for this reconciliation-only refresh." : "", supplierCoverageError ? `Supplier coverage rebuild could not be queued: ${supplierCoverageError}` : "", ...followOn].filter(Boolean).join(" "),
     totalRows: finalProcessedRows || current.totalRows || 0,
     processedRows: finalProcessedRows || current.processedRows || 0,
     changed: finalChanged || current.changed || 0,

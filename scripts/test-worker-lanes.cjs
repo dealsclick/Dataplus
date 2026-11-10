@@ -25,6 +25,7 @@ assert.equal(supportsTask('carrier', 'fulfillment-label-purchase'), true);
 assert.equal(supportsTask('carrier', 'fulfillment-tracking-refresh'), false);
 assert.deepEqual(CARRIER_TASKS, ['fulfillment-rate-refresh', 'fulfillment-label-purchase']);
 assert.ok(HEAVY_RESOURCE_TASKS.includes('product-dump-import'));
+assert.ok(HEAVY_RESOURCE_TASKS.includes('supplier-coverage-refresh'));
 assert.ok(HEAVY_RESOURCE_TASKS.includes('walmart-bulk-launch'));
 assert.ok(HEAVY_RESOURCE_TASKS.includes('shipping-report-export'));
 assert.ok(HEAVY_RESOURCE_TASKS.includes('order-export'));
