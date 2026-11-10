@@ -70,7 +70,7 @@ assert.match(fulfillmentSource, /<SelectItem value="ebay_live">eBay Live orders<
 assert.match(fulfillmentSource, /params\.set\("salesType", salesTypeFilter\)/);
 assert.match(fulfillmentSource, /matchesFulfillmentSalesType\(row, salesTypeFilter\)/);
 assert.match(serverSource, /salesType: url\.searchParams\.get\("salesType"\) \|\| "all"/);
-assert.match(serverSource, /FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 7/);
+assert.match(serverSource, /FULFILLMENT_CONSOLE_SNAPSHOT_VERSION = 8/);
 assert.match(dbSource, /options\.salesType === "ebay_live" \? ebayLiveExpression/);
 
 console.log("eBay Live order tests passed.");

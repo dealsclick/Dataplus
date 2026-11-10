@@ -38069,6 +38069,13 @@ function warehouseReservationExpiryAt(settings = {}) {
   return new Date(Date.now() + Number(settings.inventoryReservationExpiryHours || 48) * 60 * 60 * 1000).toISOString();
 }
 
+function fulfillmentRouteReservationExpired(route = {}, now = Date.now()) {
+  const rawExpiration = String(route.reservationExpiresAt || "").trim();
+  if (!rawExpiration) return false;
+  const expiresAt = Date.parse(rawExpiration);
+  return Number.isFinite(expiresAt) && expiresAt <= Number(now);
+}
+
 async function releaseExpiredWarehouseReservations(db, order, options = {}) {
   if (orderRuntimeSettings(db).inventoryReservationExpiryEnabled !== true) return { released: 0, touchedProducts: [] };
   const nowMs = Number(options.now || Date.now());
@@ -38078,11 +38085,9 @@ async function releaseExpiredWarehouseReservations(db, order, options = {}) {
   db.inventoryLedger = Array.isArray(db.inventoryLedger) ? db.inventoryLedger : [];
   for (const route of order.fulfillmentRoutes || []) {
     const status = String(route.status || "").toLowerCase();
-    const expiresAt = new Date(route.reservationExpiresAt || 0).getTime();
     if (route.type !== "warehouse"
       || ["fulfilled", "shipped", "delivered", "canceled", "cancelled", "closed", "expired"].includes(status)
-      || !Number.isFinite(expiresAt)
-      || expiresAt > nowMs) continue;
+      || !fulfillmentRouteReservationExpired(route, nowMs)) continue;
     const productKey = String(route.productId || route.sku || "").trim();
     const product = touched.get(productKey) || await postgres.readProductByKey(productKey);
     const stock = (product?.warehouseStock || []).find((row) => String(row.warehouseId || "") === String(route.warehouseId || ""));
@@ -40267,11 +40272,9 @@ function orderNeedsAutomaticRouting(order = {}, now = Date.now(), systemSettings
   if (order.routingLastResult === "needs_review" && (order.workflowExceptions || []).some((exception) => String(exception.status || "open").toLowerCase() !== "resolved" && exception.severity === "blocking")) return false;
   const hasExpiredReservation = (order.fulfillmentRoutes || []).some((route) => {
     const status = String(route.status || "").toLowerCase();
-    const expiresAt = new Date(route.reservationExpiresAt || 0).getTime();
     return route.type === "warehouse"
       && !["fulfilled", "shipped", "delivered", "canceled", "cancelled", "closed", "expired"].includes(status)
-      && Number.isFinite(expiresAt)
-      && expiresAt <= now;
+      && fulfillmentRouteReservationExpired(route, now);
   });
   if (hasExpiredReservation) return true;
   const lastAttempt = new Date(order.routingLastAttemptAt || 0).getTime();
@@ -78563,6 +78566,7 @@ async function runSupplierRetirementWorkerJob(job) {
 }
 
 module.exports = {
+  fulfillmentRouteReservationExpired,
   reconcilePrintedShipmentFulfillment,
   refreshFulfillmentConsoleSnapshot,
   drainFulfillmentConsoleProjectionPatches,

@@ -1,5 +1,5 @@
 const postgres = require("../db");
-const { readOrderRoutingContext, routeOrderForFulfillment } = require("../server");
+const { readOrderRoutingContext, refreshFulfillmentConsoleSnapshot, routeOrderForFulfillment } = require("../server");
 const { ebayLiveOrderUsesCommittedStock } = require("../lib/ebay-live-order");
 
 function text(value) {
@@ -30,10 +30,17 @@ async function candidateOrderIds() {
         or coalesce(raw -> 'external' ->> 'isEbayLive', 'false') = 'true'
         or lower(coalesce(raw ->> 'salesOrigin', raw -> 'external' ->> 'salesOrigin', '')) = 'ebay_live'
       )
-      and exists (
-        select 1 from jsonb_array_elements(coalesce(raw -> 'workflowExceptions', '[]'::jsonb)) exception
-        where exception ->> 'type' = 'supplier_assignment_required'
-          and coalesce(exception ->> 'status', 'open') <> 'resolved'
+      and (
+        coalesce(paid_amount, 0) >= coalesce(total, 0)
+        or lower(coalesce(raw ->> 'financialStatus', raw ->> 'paymentStatus', '')) = 'paid'
+      )
+      and (
+        jsonb_array_length(coalesce(raw -> 'fulfillmentRoutes', '[]'::jsonb)) = 0
+        or exists (
+          select 1 from jsonb_array_elements(coalesce(raw -> 'workflowExceptions', '[]'::jsonb)) exception
+          where exception ->> 'type' = 'supplier_assignment_required'
+            and coalesce(exception ->> 'status', 'open') <> 'resolved'
+        )
       )
     order by nullif(regexp_replace(order_number, '[^0-9]', '', 'g'), '')::bigint nulls last, order_number
   `);
@@ -51,15 +58,16 @@ async function main() {
   for (const order of orders) {
     const lines = Array.isArray(order.items) ? order.items : [];
     const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [];
+    const missingRoutes = routes.length === 0;
     const committedPurchaseRoute = routes.find((route) => text(route.purchaseOrderId || route.purchaseOrderNumber));
     const reviewRoutes = (order.fulfillmentRoutes || []).filter(openSupplierReviewRoute);
     const unsafeRoute = reviewRoutes.find((route) => !ebayLiveOrderUsesCommittedStock(order, lines[Number(route.lineIndex)] || {}));
-    if (terminalOrder(order) || committedPurchaseRoute || !reviewRoutes.length || unsafeRoute) {
+    if (terminalOrder(order) || committedPurchaseRoute || (!missingRoutes && !reviewRoutes.length) || unsafeRoute) {
       const reason = terminalOrder(order)
         ? "Order is already terminal"
         : committedPurchaseRoute
           ? "Order already has committed purchase-order routing"
-          : !reviewRoutes.length
+          : !missingRoutes && !reviewRoutes.length
             ? "No uncommitted supplier-review route"
             : "Contains a non-Live supplier-review line";
       skipped.push({ orderNumber: order.orderNumber || order.id, reason });
@@ -76,6 +84,7 @@ async function main() {
       orderId: order.id,
       orderNumber: order.orderNumber || order.id,
       skus: (order.items || []).map((line) => line.sku).filter(Boolean),
+      reason: (order.fulfillmentRoutes || []).length ? "replace supplier-review route" : "create missing fulfillment route",
       routes: (order.fulfillmentRoutes || []).filter(openSupplierReviewRoute).map((route) => ({ id: route.id, type: route.type, status: route.status }))
     })),
     skipped
@@ -109,6 +118,7 @@ async function main() {
     });
   }
   await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+  await refreshFulfillmentConsoleSnapshot();
   console.log(JSON.stringify({ ...preview, applied: true, repairedCount: repaired.length, repaired }, null, 2));
 }
 
