@@ -15,6 +15,15 @@ assert(
   "supplier coverage uses a configurable bounded batch size"
 );
 assert(
+  implementation.includes("SUPPLIER_COVERAGE_MAX_IDENTITY_MATCHES")
+    && implementation.includes("coverage.identity_count <= $2"),
+  "high-frequency placeholder identifiers cannot create unbounded supplier joins"
+);
+assert(
+  implementation.includes("validVendorBarcodeSql") && implementation.includes("validProductBarcodeSql"),
+  "obvious placeholder UPC values are excluded from automatic matching"
+);
+assert(
   implementation.includes("order by product_id") && implementation.includes("limit $2"),
   "product matching and summaries use keyset batches"
 );

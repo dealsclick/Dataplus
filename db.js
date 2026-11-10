@@ -6819,8 +6819,11 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
   await initRelationalSchema();
   const client = await catalogPool.connect();
   const batchSize = Math.max(1000, Math.min(100000, Number(process.env.SUPPLIER_COVERAGE_BATCH_SIZE) || 25000));
+  const maxIdentityMatches = Math.max(10, Math.min(10000, Number(process.env.SUPPLIER_COVERAGE_MAX_IDENTITY_MATCHES) || 250));
   const vendorBarcodeValueSql = "coalesce(nullif(trim(item.barcode), ''), nullif(trim(item.raw ->> 'upc'), ''), nullif(trim(item.raw ->> 'gtin'), ''), nullif(trim(item.raw ->> 'upcCode'), ''), '')";
   const productBarcodeValueSql = "coalesce(nullif(trim(product.barcode), ''), nullif(trim(product.raw ->> 'upc'), ''), nullif(trim(product.raw ->> 'gtin'), ''), nullif(trim(product.raw ->> 'upcCode'), ''), '')";
+  const validVendorBarcodeSql = `lower(trim(${vendorBarcodeValueSql})) not in ('0', '0.0', 'n', 'na', 'n/a', 'none', 'null', 'unknown') and ${canonicalSupplierBarcodeSql(vendorBarcodeValueSql)} !~ '^0+$'`;
+  const validProductBarcodeSql = `lower(trim(${productBarcodeValueSql})) not in ('0', '0.0', 'n', 'na', 'n/a', 'none', 'null', 'unknown') and ${canonicalSupplierBarcodeSql(productBarcodeValueSql)} !~ '^0+$'`;
   const throwIfCanceled = () => {
     if (typeof isCanceled === "function" && isCanceled()) throw new Error("Supplier coverage refresh canceled.");
   };
@@ -6915,7 +6918,7 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
         cross join lateral (values
           (
             case
-              when ${vendorBarcodeValueSql} <> ''
+              when ${vendorBarcodeValueSql} <> '' and ${validVendorBarcodeSql}
                 then 'barcode:' || ${canonicalSupplierBarcodeSql(vendorBarcodeValueSql)}
               else null
             end,
@@ -6964,6 +6967,16 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
     await client.query("create index vendor_supplier_identity_next_item_idx on vendor_supplier_identity_next (vendor_id, source_sku)");
     await client.query("create index vendor_mpn_identity_next_mpn_idx on vendor_mpn_identity_next (mfr_part_number)");
     await client.query("create index vendor_mpn_identity_next_item_idx on vendor_mpn_identity_next (vendor_id, source_sku)");
+    await client.query(`
+      create temporary table vendor_supplier_coverage_next on commit preserve rows as
+      select
+        identity.match_key,
+        count(distinct identity.vendor_id)::integer as supplier_count,
+        count(*)::integer as identity_count
+      from vendor_supplier_identity_next identity
+      group by identity.match_key
+    `);
+    await client.query("create unique index vendor_supplier_coverage_next_key_idx on vendor_supplier_coverage_next (match_key)");
     await client.query("set statement_timeout to '10min'");
 
     let lastProductId = "";
@@ -6993,7 +7006,7 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
         cross join lateral (values
           (
             case
-              when ${productBarcodeValueSql} <> ''
+              when ${productBarcodeValueSql} <> '' and ${validProductBarcodeSql}
                 then 'barcode:' || ${canonicalSupplierBarcodeSql(productBarcodeValueSql)}
               else null
             end,
@@ -7015,6 +7028,9 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
           product_identity.match_key,
           supplier.match_type
         from product_identities product_identity
+        join vendor_supplier_coverage_next coverage
+          on coverage.match_key = product_identity.match_key
+         and coverage.identity_count <= $2
         join vendor_supplier_identity_next supplier on supplier.match_key = product_identity.match_key
         where not (
           supplier.match_type = 'upc'
@@ -7025,7 +7041,7 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
             where lower(trim(source_product.sku)) = lower(trim(supplier.source_sku))
           )
         )
-      `, [productIds]);
+      `, [productIds, maxIdentityMatches]);
       lastProductId = batchResult.rows[batchResult.rows.length - 1].product_id;
       processedWorkRows += batchResult.rowCount;
       reportProgress({
@@ -7054,13 +7070,6 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
     await client.query("set statement_timeout to 0");
     await client.query("create index product_supplier_links_next_product_idx on product_supplier_links_next (product_id)");
     await client.query("create index product_mpn_identity_next_mpn_idx on product_mpn_identity_next (mfr_part_number)");
-    await client.query(`
-      create temporary table vendor_supplier_coverage_next on commit preserve rows as
-      select identity.match_key, count(distinct identity.vendor_id)::integer as supplier_count
-      from vendor_supplier_identity_next identity
-      group by identity.match_key
-    `);
-    await client.query("create unique index vendor_supplier_coverage_next_key_idx on vendor_supplier_coverage_next (match_key)");
     await client.query("set statement_timeout to '10min'");
     throwIfCanceled();
     await client.query("begin read write");
@@ -7219,6 +7228,7 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
               join vendor_supplier_coverage_next seed_coverage
                 on seed_coverage.match_key = seed_identity.match_key
                and seed_coverage.supplier_count <= 25
+               and seed_coverage.identity_count <= $2
               join vendor_supplier_identity_next identity
                 on identity.match_key = seed_identity.match_key
               join vendor_catalog_items related
@@ -7245,6 +7255,7 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
               join vendor_supplier_coverage_next first_coverage
                 on first_coverage.match_key = first_identity.match_key
                and first_coverage.supplier_count <= 25
+               and first_coverage.identity_count <= $2
               join vendor_supplier_identity_next related_identity
                 on related_identity.match_key = first_identity.match_key
               join vendor_catalog_items related
@@ -7290,7 +7301,7 @@ async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
               details = excluded.details,
               updated_at = now(),
               last_seen_at = now()
-          `, [productIds]);
+          `, [productIds, maxIdentityMatches]);
           linkedSkuCandidates += linkedSkuCandidatesResult.rowCount || 0;
         } catch (error) {
           candidatesEnabled = false;
