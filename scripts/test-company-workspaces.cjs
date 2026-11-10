@@ -666,6 +666,7 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(reportingSearch.total,1);assert.equal(reportingSearch.orders[0].orderNumber,'0001');assert.equal(reportingSearch.orders[0].items[0].qty,2);assert.equal(reportingSearch.orders[0].total,20);assert.equal(reportingSearch.orders[0].estimatedProfit,8);
     const salesReport=await store.importer.salesReport(owner,buy,new URLSearchParams({from:'2026-09-01',to:'2026-09-30'}));
     assert.equal(Number(salesReport.summary.order_count),2);assert.equal(Number(salesReport.summary.net_sales),30);assert.equal(Number(salesReport.summary.product_cost),12);assert.equal(Number(salesReport.summary.estimated_profit),18);
+    assert.equal(salesReport.summary.period_day_count,30);assert.equal(salesReport.summary.average_daily_orders,2/30);assert.equal(salesReport.summary.average_daily_net_sales,1);assert.equal(salesReport.summary.average_daily_units,3/30);assert.equal(salesReport.summary.average_daily_profit,0.6);
     assert.equal(Number(salesReport.summary.missing_cost_order_count),1);assert.equal(salesReport.summary.cost_coverage,0.5);assert.equal(salesReport.daily.length,2);assert.equal(salesReport.monthly.length,1);
     assert.equal(salesReport.channels[0].channel,'external erp');assert.equal(salesReport.products.find(row=>row.sku==='ABC').product_sales,20);assert.equal(salesReport.paymentStatuses[0].payment_status,'Historical import');
     assert.equal(Number((await store.importer.salesReport(owner,buy,new URLSearchParams({costScope:'complete'}))).summary.order_count),1);
@@ -693,6 +694,7 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     const ctechSales=await store.importer.salesReport(owner,buy,new URLSearchParams({from:'2026-09-03',to:'2026-09-03'}));
     assert.deepEqual(ctechSales.channels.map(row=>row.channel).sort(),['BuySupply B2B','VOOMI','Zoro']);
     assert.equal(Number(ctechSales.summary.customer_shipping_collected),53.65);
+    assert.equal(ctechSales.summary.period_day_count,1);assert.equal(ctechSales.summary.average_daily_orders,5);
     assert.equal(ctechSales.customers.filter(row=>row.customer==='Marshall').length,1);
     assert.equal(ctechSales.customers.find(row=>row.customer==='Marshall').order_count,2);
     assert.equal((await store.importer.customers(owner,buy)).find(row=>row.customer==='Marshall').orderCount,3);

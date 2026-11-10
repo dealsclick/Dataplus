@@ -2453,6 +2453,16 @@ let catalogFacetCache = null;
 let categoryResponseCache = new Map();
 const salesReportResponseCache = new Map();
 const salesReportInFlight = new Map();
+function salesReportPeriodDays(from, to, daily = []) {
+  const day = (value) => {
+    const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return match ? Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])) / 86400000 : null;
+  };
+  const dates = daily.map((row) => day(row?.date)).filter(Number.isFinite);
+  const start = day(from) ?? (dates.length ? Math.min(...dates) : null);
+  const end = day(to) ?? (dates.length ? Math.max(...dates) : null);
+  return start !== null && end !== null && end >= start ? end - start + 1 : 0;
+}
 const SHIPPING_REPORT_TABLE_PREFERENCE_ID = "shipping-carrier-audit";
 const SHIPPING_REPORT_PREFERENCE_VERSION = 3;
 const SHIPPING_REPORT_DEFAULT_VISIBLE_COLUMNS = [
@@ -59479,7 +59489,7 @@ async function handleApi(req, res) {
     if (!pending) {
       pending = (async () => {
         const report = await postgres.salesReportingSummary({ from, to, channel, costScope });
-        const numberFields = new Set(["order_count", "gross_sales", "refunds", "net_sales", "customer_shipping_collected", "product_cost", "shipping_cost", "shipping_cost_adjustments", "marketplace_fees", "estimated_costs", "estimated_profit", "units", "refunded_order_count", "cost_covered_order_count", "missing_cost_order_count", "missing_product_cost_order_count", "missing_label_cost_order_count", "product_sales", "estimated_product_cost", "estimated_product_profit", "average_order_value"]);
+        const numberFields = new Set(["order_count", "gross_sales", "refunds", "net_sales", "customer_shipping_collected", "product_cost", "shipping_cost", "shipping_cost_adjustments", "marketplace_fees", "estimated_costs", "estimated_profit", "units", "refunded_order_count", "cost_covered_order_count", "missing_cost_order_count", "missing_product_cost_order_count", "missing_label_cost_order_count", "product_sales", "estimated_product_cost", "estimated_product_profit", "average_order_value", "period_day_count", "average_daily_orders", "average_daily_net_sales", "average_daily_units", "average_daily_profit"]);
         const reportingDate = (value) => {
           if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
           const text = String(value || "").trim();
@@ -59487,18 +59497,27 @@ async function handleApi(req, res) {
         };
         const normalizeRows = (rows = []) => rows.map((row) => Object.fromEntries(Object.entries(row || {}).map(([key, value]) => [key, numberFields.has(key) ? Number(value || 0) : (key === "date" || key === "month" ? reportingDate(value) : value)])));
         const summary = Object.fromEntries(Object.entries(report.summary || {}).map(([key, value]) => [key, numberFields.has(key) ? Number(value || 0) : value]));
+        const daily = normalizeRows(report.daily);
         const estimatedProfit = Number(summary.estimated_profit || 0);
         const netSales = Number(summary.net_sales || 0);
+        const orderCount = Number(summary.order_count || 0);
+        const units = Number(summary.units || 0);
+        const periodDays = salesReportPeriodDays(from, to, daily);
         const payload = {
           generatedAt: new Date().toISOString(),
           range: { from, to, channel: channel || "all", costScope },
           summary: {
             ...summary,
-            average_order_value: Number(summary.order_count || 0) > 0 ? netSales / Number(summary.order_count) : 0,
+            period_day_count: periodDays,
+            average_order_value: orderCount > 0 ? netSales / orderCount : 0,
+            average_daily_orders: periodDays ? orderCount / periodDays : 0,
+            average_daily_net_sales: periodDays ? netSales / periodDays : 0,
+            average_daily_units: periodDays ? units / periodDays : 0,
+            average_daily_profit: periodDays ? estimatedProfit / periodDays : 0,
             estimated_margin: netSales !== 0 ? estimatedProfit / netSales : 0,
-            cost_coverage: Number(summary.order_count || 0) > 0 ? Number(summary.cost_covered_order_count || 0) / Number(summary.order_count) : 0
+            cost_coverage: orderCount > 0 ? Number(summary.cost_covered_order_count || 0) / orderCount : 0
           },
-          daily: normalizeRows(report.daily),
+          daily,
           monthly: normalizeRows(report.monthly),
           channels: normalizeRows(report.channels),
           brands: normalizeRows(report.brands),
