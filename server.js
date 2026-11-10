@@ -29,6 +29,7 @@ const { evaluateFulfillmentIntervention } = require("./lib/fulfillment-intervent
 const { splitFulfillmentRoutes } = require("./lib/fulfillment-package-split");
 const { fulfillmentRowVisibleInAllShipments, orderVisibleInAllShipments } = require("./lib/fulfillment-shipment-visibility");
 const { QUOTE_EXPORT_VARIANTS, QUOTE_TERM_OPTIONS, buildQuotePdf, defaultQuoteExpiration, defaultQuoteTermIds, normalizeQuoteExpiration, normalizeQuoteTermIds, normalizeQuoteTermLibrary, normalizeQuoteTermSnapshot, quoteTermSnapshot, quoteTerms } = require("./lib/quote-documents");
+const { isVoidedQuote, quotePipelineMetrics, visibleQuoteDrafts } = require("./lib/quote-pipeline");
 const { buildInvoicePdf, buildOutlookDraft, invoiceEmailContent, orderCompanyProfile, quoteEmailContent, safeFileName } = require("./lib/customer-documents");
 const { createStoredZip } = require("./lib/zip-archive");
 const competitorProducts = require("./lib/competitor-products");
@@ -18467,14 +18468,14 @@ function quoteTermSelection(library, requestedIds, previousSnapshot = [], useDef
 
 function normalizeQuotePipelineStatus(value, fallback = "draft") {
   const normalized = String(value || "").trim().toLowerCase();
-  return ["draft", "reviewing", "quoted", "sent", "accepted", "lost", "converted"].includes(normalized)
+  return ["draft", "reviewing", "quoted", "sent", "accepted", "lost", "converted", "voided"].includes(normalized)
     ? normalized
     : fallback;
 }
 
 function quotePipelineInputStatus(value) {
   const normalized = String(value || "").trim().toLowerCase();
-  if (!["draft", "reviewing", "quoted", "sent", "accepted", "lost"].includes(normalized)) {
+  if (!["draft", "reviewing", "quoted", "sent", "accepted", "lost", "voided"].includes(normalized)) {
     throw Object.assign(new Error("Select a valid quote status."), { statusCode: 400 });
   }
   return normalized;
@@ -18541,6 +18542,9 @@ function normalizeOrderDraft(db, draft = {}) {
     statusChangedAt: Number.isFinite(Date.parse(String(draft.statusChangedAt || ""))) ? new Date(draft.statusChangedAt).toISOString() : createdAt,
     statusChangedBy: String(draft.statusChangedBy || salesOwner || "DataPlus user").trim().slice(0, 160),
     quoteActivity: normalizeQuoteActivity(draft.quoteActivity),
+    voidedAt: Number.isFinite(Date.parse(String(draft.voidedAt || ""))) ? new Date(draft.voidedAt).toISOString() : "",
+    voidedBy: String(draft.voidedBy || "").trim().slice(0, 160),
+    voidReason: String(draft.voidReason || "").trim().slice(0, 1000),
     buyer: String(draft.buyer || draft.customerName || "").trim(),
     buyerEmail: String(draft.buyerEmail || "").trim(),
     phone: String(draft.phone || "").trim(),
@@ -55204,7 +55208,7 @@ async function handleApi(req, res) {
     const query = String(url.searchParams.get("q") || "").trim();
     const limit = Math.max(1, Math.min(12, Number(url.searchParams.get("limit") || 6) || 6));
     if (query.length < 2) return sendJson(res, 200, { results: [] });
-    const cacheKey = `dataplus:universal-search:v4:${crypto.createHash("sha1").update(`${query.toLowerCase()}:${limit}`).digest("hex")}`;
+    const cacheKey = `dataplus:universal-search:v5:${crypto.createHash("sha1").update(`${query.toLowerCase()}:${limit}`).digest("hex")}`;
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
 
@@ -55231,7 +55235,7 @@ async function handleApi(req, res) {
       vendors = db.vendors || [];
       returns = db.returns || [];
     }
-    const draftRows = (Array.isArray(drafts) ? drafts : []).filter((draft) => (
+    const draftRows = visibleQuoteDrafts(drafts).filter((draft) => (
       [draft.draftNumber, draft.buyer, draft.buyerEmail, draft.phone, draft.id].some(includes)
       || (Array.isArray(draft.items) && draft.items.some((item) => [item.sku, item.title].some(includes)))
     )).slice(0, limit);
@@ -60780,7 +60784,7 @@ async function handleApi(req, res) {
       const listFilters = orderListOptionsFromInput(url.searchParams);
       const scope = q ? "search" : openWorkOnly ? "open-work" : summary && dateFrom ? `recent-${recentDays}-days-plus-open-work` : "requested";
       const cacheSignature = crypto.createHash("sha1").update(JSON.stringify({ summary, limit, paginated, page, pageSize, dateFrom, dateTo, openWorkOnly, includeOpenWork, allDates, ...listFilters })).digest("hex");
-      const cacheKey = `dataplus:orders:v12:${cacheSignature}`;
+      const cacheKey = `dataplus:orders:v13:${cacheSignature}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       let pending = pendingOrderApiLoads.get(cacheKey);
@@ -60803,7 +60807,7 @@ async function handleApi(req, res) {
               pageSize: paginated ? Number(orderResult?.pageSize || pageSize) : orders.length,
               totalPages: paginated ? Number(orderResult?.totalPages || 1) : 1,
               metrics: metrics || {},
-              orderDrafts: orderDrafts || [],
+              orderDrafts: visibleQuoteDrafts(orderDrafts),
               returns: returnsWithPublicSlugs(returns || []),
               customers: customers || [],
               ordersLoaded: true,
@@ -60833,7 +60837,7 @@ async function handleApi(req, res) {
     const db = await readDbFast();
     return sendJson(res, 200, {
       orders: db.orders || [],
-      orderDrafts: db.orderDrafts || [],
+      orderDrafts: visibleQuoteDrafts(db.orderDrafts),
       returns: returnsWithPublicSlugs(db.returns || []),
       customers: db.customers || [],
       ordersLoaded: true
@@ -71233,8 +71237,9 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts.length === 2 && postgres.isPostgresEnabled()) {
     const drafts = await postgres.readStateField("orderDrafts").catch(() => []);
-    const orderDrafts = Array.isArray(drafts) ? drafts.sort((left, right) => new Date(right.updatedAt || right.createdAt || 0).getTime() - new Date(left.updatedAt || left.createdAt || 0).getTime()) : [];
-    return sendJson(res, 200, { orderDrafts, draftsLoaded: true, storage: "postgres" });
+    const visibility = String(url.searchParams.get("visibility") || "active").trim().toLowerCase();
+    const orderDrafts = visibleQuoteDrafts(drafts, visibility).sort((left, right) => new Date(right.updatedAt || right.createdAt || 0).getTime() - new Date(left.updatedAt || left.createdAt || 0).getTime());
+    return sendJson(res, 200, { orderDrafts, quoteMetrics: quotePipelineMetrics(drafts), visibility: visibility === "voided" ? "voided" : "active", draftsLoaded: true, storage: "postgres" });
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "order-drafts" && parts[2] === "import-match" && parts.length === 3 && postgres.isPostgresEnabled()) {
@@ -71453,6 +71458,9 @@ async function handleApi(req, res) {
       nextFollowUpAt: "",
       statusChangedAt: duplicatedAt,
       statusChangedBy: actor,
+      voidedAt: "",
+      voidedBy: "",
+      voidReason: "",
       quoteActivity: [quotePipelineActivityEvent("", "draft", actor, duplicatedAt, "revision_created")],
       createdAt: duplicatedAt,
       updatedAt: duplicatedAt
@@ -71472,8 +71480,10 @@ async function handleApi(req, res) {
     const updatedAt = new Date().toISOString();
     const actor = String(authUser?.name || authUser?.username || authUser?.id || "DataPlus user").trim();
     const statusChanged = nextStatus !== normalizeQuotePipelineStatus(current.status, "draft");
+    const voidReason = String(body.voidReason || "").trim();
+    if (statusChanged && nextStatus === "voided" && !voidReason) return sendJson(res, 400, { error: "Enter a reason for voiding this quote." });
     const quoteActivity = normalizeQuoteActivity(current.quoteActivity);
-    if (statusChanged) quoteActivity.push(quotePipelineActivityEvent(current.status, nextStatus, actor, updatedAt));
+    if (statusChanged) quoteActivity.push(quotePipelineActivityEvent(current.status, nextStatus, actor, updatedAt, nextStatus === "voided" ? "voided" : "status_changed"));
     await hydrateDraftLineCosts(db, body.items ? body : current);
     const termSelection = body.selectedTermIds === undefined
       ? { selectedTermIds: current.selectedTermIds, selectedTermsSnapshot: current.selectedTermsSnapshot }
@@ -71500,10 +71510,13 @@ async function handleApi(req, res) {
       items: body.items ?? current.items,
       status: nextStatus,
       salesOwner: body.salesOwner ?? current.salesOwner,
-      nextAction: body.nextAction ?? current.nextAction,
-      nextFollowUpAt: body.nextFollowUpAt ?? current.nextFollowUpAt,
+      nextAction: nextStatus === "voided" ? "" : body.nextAction ?? current.nextAction,
+      nextFollowUpAt: nextStatus === "voided" ? "" : body.nextFollowUpAt ?? current.nextFollowUpAt,
       statusChangedAt: statusChanged ? updatedAt : current.statusChangedAt,
       statusChangedBy: statusChanged ? actor : current.statusChangedBy,
+      voidedAt: nextStatus === "voided" ? current.voidedAt || updatedAt : "",
+      voidedBy: nextStatus === "voided" ? current.voidedBy || actor : "",
+      voidReason: nextStatus === "voided" ? voidReason || current.voidReason : "",
       quoteActivity,
       updatedAt
     });
@@ -71518,6 +71531,7 @@ async function handleApi(req, res) {
     const index = (db.orderDrafts || []).findIndex((row) => row.id === parts[2]);
     if (index < 0) return notFound(res);
     const draft = db.orderDrafts[index];
+    if (isVoidedQuote(draft)) return sendJson(res, 409, { error: "Voided quotes cannot be converted. Duplicate it to create a new active quote." });
     if (!draft.items?.length) return sendJson(res, 400, { error: "Draft has no line items." });
     await hydrateDraftLineCosts(db, draft);
     const order = buildOrderFromDraft(db, draft, body.user || "Luis");
@@ -75635,6 +75649,9 @@ async function handleApi(req, res) {
       nextFollowUpAt: "",
       statusChangedAt: duplicatedAt,
       statusChangedBy: actor,
+      voidedAt: "",
+      voidedBy: "",
+      voidReason: "",
       quoteActivity: [quotePipelineActivityEvent("", "draft", actor, duplicatedAt, "revision_created")],
       createdAt: duplicatedAt,
       updatedAt: duplicatedAt
@@ -75654,8 +75671,10 @@ async function handleApi(req, res) {
     const updatedAt = new Date().toISOString();
     const actor = String(authUser?.name || authUser?.username || authUser?.id || "DataPlus user").trim();
     const statusChanged = nextStatus !== normalizeQuotePipelineStatus(current.status, "draft");
+    const voidReason = String(body.voidReason || "").trim();
+    if (statusChanged && nextStatus === "voided" && !voidReason) return sendJson(res, 400, { error: "Enter a reason for voiding this quote." });
     const quoteActivity = normalizeQuoteActivity(current.quoteActivity);
-    if (statusChanged) quoteActivity.push(quotePipelineActivityEvent(current.status, nextStatus, actor, updatedAt));
+    if (statusChanged) quoteActivity.push(quotePipelineActivityEvent(current.status, nextStatus, actor, updatedAt, nextStatus === "voided" ? "voided" : "status_changed"));
     const termSelection = body.selectedTermIds === undefined
       ? { selectedTermIds: current.selectedTermIds, selectedTermsSnapshot: current.selectedTermsSnapshot }
       : quoteTermSelection(db.systemSettings?.quoteTerms, body.selectedTermIds, current.selectedTermsSnapshot);
@@ -75681,10 +75700,13 @@ async function handleApi(req, res) {
       items: body.items ?? current.items,
       status: nextStatus,
       salesOwner: body.salesOwner ?? current.salesOwner,
-      nextAction: body.nextAction ?? current.nextAction,
-      nextFollowUpAt: body.nextFollowUpAt ?? current.nextFollowUpAt,
+      nextAction: nextStatus === "voided" ? "" : body.nextAction ?? current.nextAction,
+      nextFollowUpAt: nextStatus === "voided" ? "" : body.nextFollowUpAt ?? current.nextFollowUpAt,
       statusChangedAt: statusChanged ? updatedAt : current.statusChangedAt,
       statusChangedBy: statusChanged ? actor : current.statusChangedBy,
+      voidedAt: nextStatus === "voided" ? current.voidedAt || updatedAt : "",
+      voidedBy: nextStatus === "voided" ? current.voidedBy || actor : "",
+      voidReason: nextStatus === "voided" ? voidReason || current.voidReason : "",
       quoteActivity,
       updatedAt
     });
@@ -75698,6 +75720,7 @@ async function handleApi(req, res) {
     const index = (db.orderDrafts || []).findIndex((row) => row.id === parts[2]);
     if (index < 0) return notFound(res);
     const draft = db.orderDrafts[index];
+    if (isVoidedQuote(draft)) return sendJson(res, 409, { error: "Voided quotes cannot be converted. Duplicate it to create a new active quote." });
     if (!draft.items?.length) return sendJson(res, 400, { error: "Draft has no line items." });
     const order = buildOrderFromDraft(db, draft, body.user || "Luis");
     db.orders.unshift(order);
@@ -78567,6 +78590,7 @@ async function runSupplierRetirementWorkerJob(job) {
 
 module.exports = {
   fulfillmentRouteReservationExpired,
+  orderNeedsAutomaticRouting,
   reconcilePrintedShipmentFulfillment,
   refreshFulfillmentConsoleSnapshot,
   drainFulfillmentConsoleProjectionPatches,

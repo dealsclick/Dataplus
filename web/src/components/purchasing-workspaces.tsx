@@ -352,6 +352,8 @@ export function DraftQuoteFieldDetailPage() {
   const [editorSection, setEditorSection] = useState<"items" | "customer" | "delivery" | "terms" | "notes">("items")
   const [exportOpen, setExportOpen] = useState(false)
   const [exportVariant, setExportVariant] = useState<"standard" | "savings" | "summary">("standard")
+  const [voidOpen, setVoidOpen] = useState(false)
+  const [voidReason, setVoidReason] = useState("")
   const [expirationCalendarOpen, setExpirationCalendarOpen] = useState(false)
   const [catalogQuery, setCatalogQuery] = useState("")
   const [catalogResults, setCatalogResults] = useState<ProductItem[]>([])
@@ -516,6 +518,7 @@ export function DraftQuoteFieldDetailPage() {
 
   const openEditor = () => {
     if (!draft) return
+    if (["void", "voided"].includes(String(draft.status || "").toLowerCase())) { toast.error("Duplicate this quote to create a new active revision."); return }
     const address = (draft.shippingAddress || {}) as Record<string, unknown>
     const items = Array.isArray(draft.items) ? draft.items as Array<Record<string, unknown>> : []
     setForm({
@@ -710,6 +713,19 @@ export function DraftQuoteFieldDetailPage() {
     catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update quote status.") }
     finally { setBusy(false) }
   }
+  const voidQuote = async () => {
+    const reason = voidReason.trim()
+    if (!reason) { toast.error("Enter a reason for voiding this quote."); return }
+    setBusy(true)
+    try {
+      await api(`/api/order-drafts/${encodeURIComponent(draftId)}`, { method: "PATCH", body: JSON.stringify({ status: "voided", voidReason: reason }) })
+      setVoidOpen(false)
+      setVoidReason("")
+      await load()
+      toast.success("Quote voided and removed from the active pipeline.")
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to void quote.") }
+    finally { setBusy(false) }
+  }
   const duplicate = async () => {
     setBusy(true)
     try { const result = await api<{ draft?: Record<string, unknown> }>(`/api/order-drafts/${encodeURIComponent(draftId)}/duplicate`, { method: "POST" }); toast.success("Quote duplicated with a new 30-day validity period."); const nextId = String(result.draft?.id || ""); if (nextId) window.location.href = `/drafts/${encodeURIComponent(nextId)}` }
@@ -717,6 +733,7 @@ export function DraftQuoteFieldDetailPage() {
     finally { setBusy(false) }
   }
   const convert = async () => {
+    if (isVoided) { toast.error("Duplicate this quote to create a new active revision."); return }
     setBusy(true)
     try { const result = await api<{ order?: Record<string, unknown> }>(`/api/order-drafts/${encodeURIComponent(draftId)}/convert`, { method: "POST", body: JSON.stringify({ user: "Luis" }) }); toast.success("Quote converted to an order."); if (result.order) window.location.href = orderHref(result.order) }
     catch (error) { toast.error(error instanceof Error ? error.message : "Unable to convert quote.") }
@@ -724,6 +741,7 @@ export function DraftQuoteFieldDetailPage() {
   }
 
   const openShippingRates = () => {
+    if (isVoided) { toast.error("Voided quotes cannot request new carrier rates."); return }
     const estimate = draft?.shippingEstimate as Record<string, unknown> | undefined
     const packageInfo = estimate?.package as Record<string, unknown> | undefined
     setShippingPackage({
@@ -801,8 +819,9 @@ export function DraftQuoteFieldDetailPage() {
   const hasCompleteMsrp = lines.length > 0 && missingMsrpCount === 0
   const expiresAt = String(draft?.expiresAt || "")
   const expired = Boolean(expiresAt && expiresAt < quoteDateKey(new Date()))
+  const isVoided = ["void", "voided"].includes(String(draft?.status || "").toLowerCase())
   const nextFollowUpAt = String(draft?.nextFollowUpAt || "")
-  const followUpDue = Boolean(nextFollowUpAt && Date.parse(nextFollowUpAt) <= Date.now() && !["accepted", "lost"].includes(String(draft?.status || "")))
+  const followUpDue = Boolean(nextFollowUpAt && Date.parse(nextFollowUpAt) <= Date.now() && !["accepted", "lost", "void", "voided"].includes(String(draft?.status || "").toLowerCase()))
   const quoteActivity = Array.isArray(draft?.quoteActivity) ? [...draft.quoteActivity as Array<Record<string, unknown>>].reverse() : []
   const selectedTermIds = Array.isArray(draft?.selectedTermIds) ? draft.selectedTermIds.map(String) : []
   const selectedTermSnapshot = Array.isArray(draft?.selectedTermsSnapshot) ? draft.selectedTermsSnapshot as QuoteTermDefinition[] : []
@@ -849,16 +868,19 @@ export function DraftQuoteFieldDetailPage() {
   ]
 
   return <div className="grid gap-5">
+    <Dialog open={voidOpen} onOpenChange={(open) => { if (!busy) { setVoidOpen(open); if (!open) setVoidReason("") } }}><DialogContent><DialogHeader><DialogTitle>Void {String(draft?.draftNumber || "quote")}</DialogTitle><DialogDescription>The quote remains in audit history but will disappear from active search, the pipeline, and sales analytics.</DialogDescription></DialogHeader><Field label="Reason"><Textarea autoFocus value={voidReason} onChange={(event) => setVoidReason(event.target.value)} placeholder="Why is this quote being voided?" /></Field><DialogFooter><Button variant="outline" disabled={busy} onClick={() => setVoidOpen(false)}>Cancel</Button><Button variant="destructive" disabled={busy || !voidReason.trim()} onClick={() => void voidQuote()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Ban className="size-4" />} Void quote</Button></DialogFooter></DialogContent></Dialog>
     <PageHeader eyebrow="Operations / Draft quote" title={String(draft?.draftNumber || draftId || "Quote")} description="A customer proposal that remains editable until accepted and converted into an order." action={<div className="flex flex-wrap gap-2">
       <Button size="sm" variant="outline" asChild><a href="/drafts">Back to drafts</a></Button>
-      <Button size="sm" disabled={busy || !draft} onClick={openEditor}><Pencil className="size-4" /> Edit quote</Button>
-      <Button size="sm" variant="outline" disabled={busy || !draft} asChild><a href={`/api/order-drafts/${encodeURIComponent(draftId)}/export/email.eml?variant=standard`} target="_blank" rel="noreferrer" onClick={() => toast.success("Outlook quote draft generated with the PDF attached.")}><Mail className="size-4" /> Email quote</a></Button>
+      <Button size="sm" disabled={busy || !draft || isVoided} onClick={openEditor}><Pencil className="size-4" /> Edit quote</Button>
+      <Button size="sm" variant="outline" disabled={busy || !draft || isVoided} asChild><a href={`/api/order-drafts/${encodeURIComponent(draftId)}/export/email.eml?variant=standard`} target="_blank" rel="noreferrer" onClick={() => toast.success("Outlook quote draft generated with the PDF attached.")}><Mail className="size-4" /> Email quote</a></Button>
       <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" disabled={busy || !draft}><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end">
-        <DropdownMenuLabel>Quote status</DropdownMenuLabel>
-        {["draft", "reviewing", "quoted", "sent", "accepted", "lost"].map((status) => <DropdownMenuItem key={status} onSelect={() => void updateStatus(status)}>{status.replace(/_/g, " ")}</DropdownMenuItem>)}
+        {!isVoided && <><DropdownMenuLabel>Quote status</DropdownMenuLabel>
+        {["draft", "reviewing", "quoted", "sent", "accepted", "lost"].map((status) => <DropdownMenuItem key={status} onSelect={() => void updateStatus(status)}>{status === "accepted" ? "Approved" : status === "lost" ? "Rejected" : status.replace(/_/g, " ")}</DropdownMenuItem>)}
         <DropdownMenuSeparator />
+        </>}
         <DropdownMenuItem onSelect={() => void duplicate()}><Copy className="size-4" /> Duplicate quote</DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => void convert()}><ArrowRight className="size-4" /> Convert to order</DropdownMenuItem>
+        {!isVoided && <DropdownMenuItem onSelect={() => void convert()}><ArrowRight className="size-4" /> Convert to order</DropdownMenuItem>}
+        {!isVoided && <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => { setVoidReason(""); setVoidOpen(true) }}><Ban className="size-4" /> Void quote</DropdownMenuItem>}
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => { setExportVariant("standard"); setExportOpen(true) }}><Printer className="size-4" /> Print / save PDF</DropdownMenuItem>
         <DropdownMenuItem asChild><a href={`/api/order-drafts/${encodeURIComponent(draftId)}/export/csv`} target="_blank" rel="noreferrer"><FileDown className="size-4" /> Download CSV</a></DropdownMenuItem>
@@ -866,12 +888,13 @@ export function DraftQuoteFieldDetailPage() {
     </div>} />
 
     {loading ? <div className="grid gap-3"><Skeleton className="h-36" /><Skeleton className="h-72" /></div> : !draft ? <Card><CardContent className="p-8 text-center text-muted-foreground">This draft quote was not found.</CardContent></Card> : <>
-      {expired && !["accepted", "lost"].includes(String(draft.status || "")) ? <Alert variant="destructive"><Clock3 className="size-4" /><AlertTitle>Quote expired</AlertTitle><AlertDescription>Extend the validity date before sending or accepting this quote.</AlertDescription></Alert> : null}
+      {isVoided ? <Alert><Ban className="size-4" /><AlertTitle>Quote voided</AlertTitle><AlertDescription>{String(draft.voidReason || "No reason recorded.")} {draft.voidedBy ? `Voided by ${String(draft.voidedBy)}${draft.voidedAt ? ` on ${dateLabel(String(draft.voidedAt))}` : ""}.` : ""} This quote is excluded from active search and analytics. Duplicate it to create a new active revision.</AlertDescription></Alert> : null}
+      {expired && !["accepted", "lost", "void", "voided"].includes(String(draft.status || "").toLowerCase()) ? <Alert variant="destructive"><Clock3 className="size-4" /><AlertTitle>Quote expired</AlertTitle><AlertDescription>Extend the validity date before sending or accepting this quote.</AlertDescription></Alert> : null}
       {followUpDue ? <Alert><Clock3 className="size-4" /><AlertTitle>Follow-up is due</AlertTitle><AlertDescription>{String(draft.nextAction || "Contact the customer and record the next action.")}</AlertDescription></Alert> : null}
       <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_340px] 2xl:grid-cols-[minmax(0,1fr)_380px]">
         <main className="order-2 grid min-w-0 content-start gap-4 xl:order-1">
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-            <Detail label="Status" value={String(draft.status || "draft")} />
+            <Detail label="Status" value={String(draft.status || "draft").toLowerCase() === "accepted" ? "Approved" : String(draft.status || "draft").toLowerCase() === "lost" ? "Rejected" : String(draft.status || "draft").replace(/_/g, " ")} />
             <Detail label="Quote total" value={moneyLabel(total)} />
             <Detail label="Sales tax" value={taxExempt ? "Tax exempt" : `${moneyLabel(taxAmount)}${taxRate > 0 ? ` · ${taxRate}%` : ""}`} />
             <Detail label="Gross margin" value={grossMargin === null ? `${numberLabel(lines.length - costedLines.length)} line cost${lines.length - costedLines.length === 1 ? "" : "s"} needed` : `${grossMargin.toFixed(1)}% · ${moneyLabel(grossProfit)}`} />

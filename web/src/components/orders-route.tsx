@@ -1,5 +1,5 @@
 import { lazy, useEffect, useMemo, useRef, useState } from "react"
-import { AlertCircle, AlertTriangle, Archive, ArrowUpDown, Boxes, CalendarDays, CheckCircle2, ChevronDown, CircleDollarSign, Columns3, FileDown, FileText, History, List, ListChecks, Loader2, MoreHorizontal, Play, RefreshCw, RotateCcw, Search, ShieldCheck, ShoppingBag, SlidersHorizontal, Store, TrendingUp, Truck, UserRound, X } from "lucide-react"
+import { AlertCircle, AlertTriangle, Archive, ArrowUpDown, Ban, Boxes, CalendarDays, CheckCircle2, ChevronDown, CircleDollarSign, Columns3, FileDown, FileText, History, List, ListChecks, Loader2, MoreHorizontal, Play, RefreshCw, RotateCcw, Search, ShieldCheck, ShoppingBag, SlidersHorizontal, Store, TrendingUp, Truck, UserRound, X } from "lucide-react"
 import { toast } from "sonner"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -100,33 +100,41 @@ function OrderMultiSelect({ value, onValueChange, options, placeholder, searchPl
   </Popover>
 }
 
+type QuotePipelineMetrics = {
+  totalCount: number; openCount: number; potentialSales: number; approvedCount: number; approvedValue: number
+  rejectedCount: number; rejectedValue: number; followUpsDue: number; winRate: number | null
+  byOwner: Array<{ owner: string; openCount: number; potentialSales: number; approvedCount: number; approvedValue: number; rejectedCount: number; rejectedValue: number; winRate: number | null }>
+}
+
 const quotePipelineStages = [
   { id: "draft", label: "Draft", description: "Building the proposal" },
   { id: "reviewing", label: "Reviewing", description: "Internal pricing review" },
   { id: "quoted", label: "Quoted", description: "Ready for the customer" },
   { id: "sent", label: "Sent", description: "Awaiting a decision" },
-  { id: "accepted", label: "Accepted", description: "Won business" },
-  { id: "lost", label: "Lost", description: "Closed without an order" },
+  { id: "accepted", label: "Approved", description: "Won business" },
+  { id: "lost", label: "Rejected", description: "Closed without an order" },
 ] as const
+const voidedQuoteStage = { id: "voided", label: "Voided", description: "Removed from the active pipeline" } as const
 
 function quotePipelineStatus(value: unknown) {
   const normalized = String(value || "draft").trim().toLowerCase()
+  if (normalized === "void" || normalized === "voided") return "voided"
   return quotePipelineStages.some((stage) => stage.id === normalized) ? normalized : "draft"
 }
 
 function quotePipelineTotal(draft: Record<string, unknown>) {
   if (draft.total !== null && draft.total !== undefined && draft.total !== "" && Number.isFinite(Number(draft.total))) return Number(draft.total)
-  return (Array.isArray(draft.items) ? draft.items as Array<Record<string, unknown>> : []).reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0) + Number((draft.shippingEstimate as Record<string, unknown> | undefined)?.amount || 0)
+  return (Array.isArray(draft.items) ? draft.items as Array<Record<string, unknown>> : []).reduce((sum, item) => sum + Number(item.price || 0) * Number(item.qty || 0), 0) + Number((draft.shippingEstimate as Record<string, unknown> | undefined)?.amount || 0) + Number(draft.taxAmount || 0)
 }
 
-function QuotePipelineCard({ draft, updating, onStageChange }: { draft: Record<string, unknown>; updating: boolean; onStageChange: (draft: Record<string, unknown>, status: string) => void }) {
+function QuotePipelineCard({ draft, updating, onStageChange, onDuplicate, onConvert, onVoid }: { draft: Record<string, unknown>; updating: boolean; onStageChange: (draft: Record<string, unknown>, status: string) => void; onDuplicate: (draft: Record<string, unknown>) => void; onConvert: (draft: Record<string, unknown>) => void; onVoid: (draft: Record<string, unknown>) => void }) {
   const id = String(draft.id || draft.draftNumber || "")
   const status = quotePipelineStatus(draft.status)
   const items = Array.isArray(draft.items) ? draft.items as Array<Record<string, unknown>> : []
   const expiresAt = String(draft.expiresAt || "")
   const expirationMs = expiresAt ? Date.parse(`${expiresAt}T23:59:59`) : Number.NaN
   const daysToExpiration = Number.isFinite(expirationMs) ? Math.ceil((expirationMs - Date.now()) / 86_400_000) : null
-  const terminal = status === "accepted" || status === "lost"
+  const terminal = status === "accepted" || status === "lost" || status === "voided"
   const expired = !terminal && daysToExpiration !== null && daysToExpiration < 0
   const expiring = !terminal && daysToExpiration !== null && daysToExpiration >= 0 && daysToExpiration <= 7
   const followUpAt = String(draft.nextFollowUpAt || "")
@@ -149,8 +157,20 @@ function QuotePipelineCard({ draft, updating, onStageChange }: { draft: Record<s
       <p className="flex items-center gap-1.5"><CalendarDays className="size-3.5" /><span>{followUpAt ? `Follow up ${dateLabel(followUpAt)}` : expiresAt ? `Valid until ${dateLabel(`${expiresAt}T12:00:00`)}` : "No follow-up scheduled"}</span></p>
       {Boolean(draft.nextAction) && <p className="line-clamp-2 text-foreground">{String(draft.nextAction)}</p>}
     </div>
-    <Select value={status} disabled={updating} onValueChange={(nextStatus) => onStageChange(draft, nextStatus)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent>{quotePipelineStages.map((stage) => <SelectItem key={stage.id} value={stage.id}>{stage.label}</SelectItem>)}</SelectContent></Select>
+    <div className="flex items-center gap-2"><QuoteStageControl draft={draft} updating={updating} onStageChange={(nextStatus) => onStageChange(draft, nextStatus)} /><QuoteRowActions draft={draft} onDuplicate={() => onDuplicate(draft)} onConvert={() => onConvert(draft)} onVoid={() => onVoid(draft)} /></div>
   </article>
+}
+
+function QuoteStageControl({ draft, updating, onStageChange }: { draft: Record<string, unknown>; updating: boolean; onStageChange: (status: string) => void }) {
+  const status = quotePipelineStatus(draft.status)
+  if (status === "voided") return <Badge variant="secondary">Voided</Badge>
+  return <Select value={status} disabled={updating} onValueChange={onStageChange}><SelectTrigger className="h-8 w-32 text-xs"><SelectValue /></SelectTrigger><SelectContent>{quotePipelineStages.map((stage) => <SelectItem key={stage.id} value={stage.id}>{stage.label}</SelectItem>)}</SelectContent></Select>
+}
+
+function QuoteRowActions({ draft, onDuplicate, onConvert, onVoid }: { draft: Record<string, unknown>; onDuplicate: () => void; onConvert: () => void; onVoid: () => void }) {
+  const id = String(draft.id || "")
+  const voided = quotePipelineStatus(draft.status) === "voided"
+  return <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" title="Quote actions"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem asChild><a href={`/drafts/${encodeURIComponent(id || String(draft.draftNumber || ""))}`}>Open quote</a></DropdownMenuItem><DropdownMenuItem onSelect={onDuplicate}>Duplicate quote</DropdownMenuItem>{!voided && <><DropdownMenuItem onSelect={onConvert}>Convert to order</DropdownMenuItem><DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={onVoid}><Ban className="mr-2 size-4" /> Void quote</DropdownMenuItem></>}<DropdownMenuSeparator /><DropdownMenuItem asChild><a href={`/api/order-drafts/${encodeURIComponent(id)}/export/pdf`} target="_blank" rel="noreferrer">Download standard PDF</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
 }
 
 export function OperationsPage({ mobileReturns = false }: { mobileReturns?: boolean } = {}) {
@@ -161,7 +181,7 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
   const initial = mobileReturns || window.location.pathname.startsWith("/returns") ? "returns" : window.location.pathname.startsWith("/drafts") ? "drafts" : "orders"
   const orderWorkspace = window.location.pathname === "/orders/all" ? "all" : "open"
   const [tab, setTab] = useState(initial)
-  const [data, setData] = useState<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; metrics?: Record<string, unknown>; scope?: string; dateFrom?: string; limit?: number; total?: number; page?: number; pageSize?: number; totalPages?: number }>({})
+  const [data, setData] = useState<{ orders?: Array<Record<string, unknown>>; orderDrafts?: Array<Record<string, unknown>>; returns?: Array<Record<string, unknown>>; metrics?: Record<string, unknown>; quoteMetrics?: QuotePipelineMetrics; scope?: string; dateFrom?: string; limit?: number; total?: number; page?: number; pageSize?: number; totalPages?: number }>({})
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [query, setQuery] = useState("")
@@ -217,9 +237,12 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
   const [warehouses, setWarehouses] = useState<Array<Record<string, unknown>>>([])
   const [quoteOpen, setQuoteOpen] = useState(false)
   const [quoteView, setQuoteView] = useState<"pipeline" | "table">(() => window.localStorage.getItem("dataplus:quote-view") === "table" ? "table" : "pipeline")
+  const [quoteVisibility, setQuoteVisibility] = useState<"active" | "voided">("active")
   const [quoteOwnerFilter, setQuoteOwnerFilter] = useState("all")
   const [quoteAttentionFilter, setQuoteAttentionFilter] = useState("all")
   const [quoteUpdatingId, setQuoteUpdatingId] = useState("")
+  const [quoteVoidTarget, setQuoteVoidTarget] = useState<Record<string, unknown> | null>(null)
+  const [quoteVoidReason, setQuoteVoidReason] = useState("")
   const [returnOpen, setReturnOpen] = useState(false)
   const [returnTotal, setReturnTotal] = useState(0)
   const [returnsRefreshKey, setReturnsRefreshKey] = useState(0)
@@ -292,13 +315,13 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
         return
       }
       if (tab === "drafts") {
-        const cacheKey = "orders:drafts"
+        const cacheKey = `orders:drafts:${quoteVisibility}`
         const cached = readWorkspaceCache<typeof data>(cacheKey)
         if (cached) setData(cached)
         setLoading(!cached)
-        const drafts = await api<{ orderDrafts?: Array<Record<string, unknown>> }>("/api/order-drafts")
+        const drafts = await api<{ orderDrafts?: Array<Record<string, unknown>>; quoteMetrics?: QuotePipelineMetrics }>(`/api/order-drafts?visibility=${quoteVisibility}`)
         if (requestId !== orderRequestRef.current) return
-        const nextData = { orderDrafts: drafts.orderDrafts || [] }
+        const nextData = { orderDrafts: drafts.orderDrafts || [], quoteMetrics: drafts.quoteMetrics }
         setData(nextData)
         writeWorkspaceCache(cacheKey, nextData)
         return
@@ -339,7 +362,7 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
     catch (error) { if (requestId === orderRequestRef.current) toast.error(error instanceof Error ? error.message : "Unable to load operations data.") }
     finally { if (requestId === orderRequestRef.current) setLoading(false) }
   }
-  useEffect(() => { void load() }, [tab, appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo, orderWorkspace, page, sort, status, source, paymentFilter, shippingFilter, fulfillmentFilter, deliveryFilter, poFilter, supplierFilter, brandFilter, carrierFilter, countryFilter, stateFilter, warehouseFilter, labelFilter, returnFilter, exceptionFilter, outcomeFilter, totalMinFilter, totalMaxFilter])
+  useEffect(() => { void load() }, [tab, appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo, orderWorkspace, page, sort, status, source, paymentFilter, shippingFilter, fulfillmentFilter, deliveryFilter, poFilter, supplierFilter, brandFilter, carrierFilter, countryFilter, stateFilter, warehouseFilter, labelFilter, returnFilter, exceptionFilter, outcomeFilter, totalMinFilter, totalMaxFilter, quoteVisibility])
   useEffect(() => {
     if (!returnOpen || returnOrderDetail || returnOrderSearch.trim().length < 2) {
       if (!returnOrderDetail) setReturnOrderResults([])
@@ -378,7 +401,7 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
       .catch(() => { if (active) setSharedOrderViews([]) })
     return () => { active = false }
   }, [tab, orderWorkspace])
-  useEffect(() => { setPage(1); setSelectedIds(new Set()) }, [tab, queue, status, source, appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo, query, sort, paymentFilter, shippingFilter, fulfillmentFilter, deliveryFilter, poFilter, supplierFilter, brandFilter, carrierFilter, countryFilter, stateFilter, warehouseFilter, labelFilter, returnFilter, exceptionFilter, outcomeFilter, totalMinFilter, totalMaxFilter])
+  useEffect(() => { setPage(1); setSelectedIds(new Set()) }, [tab, queue, status, source, appliedOrderDateRange, appliedOrderDate, appliedOrderDateTo, query, sort, paymentFilter, shippingFilter, fulfillmentFilter, deliveryFilter, poFilter, supplierFilter, brandFilter, carrierFilter, countryFilter, stateFilter, warehouseFilter, labelFilter, returnFilter, exceptionFilter, outcomeFilter, totalMinFilter, totalMaxFilter, quoteVisibility])
   useEffect(() => {
     window.localStorage.setItem("dataplus:all-orders-columns", JSON.stringify([...visibleAllColumns]))
   }, [visibleAllColumns])
@@ -589,11 +612,26 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
       const saved = result.draft || { ...draft, status: nextStatus, updatedAt: new Date().toISOString() }
       setData((current) => {
         const next = { ...current, orderDrafts: (current.orderDrafts || []).map((row) => String(row.id || "") === id ? saved : row) }
-        writeWorkspaceCache("orders:drafts", next)
+        writeWorkspaceCache(`orders:drafts:${quoteVisibility}`, next)
         return next
       })
       toast.success(`${String(draft.draftNumber || "Quote")} moved to ${nextStatus.replaceAll("_", " ")}.`)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update the quote stage.") }
+    finally { setQuoteUpdatingId("") }
+  }
+  async function voidDraft() {
+    const draft = quoteVoidTarget
+    const id = String(draft?.id || "")
+    const reason = quoteVoidReason.trim()
+    if (!id || !reason) { toast.error("Enter a reason for voiding this quote."); return }
+    setQuoteUpdatingId(id)
+    try {
+      await api(`/api/order-drafts/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ status: "voided", voidReason: reason }) })
+      setQuoteVoidTarget(null)
+      setQuoteVoidReason("")
+      toast.success(`${String(draft?.draftNumber || "Quote")} voided and removed from the active pipeline.`)
+      await load()
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to void this quote.") }
     finally { setQuoteUpdatingId("") }
   }
   async function duplicateDraft(draft: Record<string, unknown>) {
@@ -603,6 +641,7 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
     finally { setBusy(false) }
   }
   async function convertDraft(draft: Record<string, unknown>) {
+    if (quotePipelineStatus(draft.status) === "voided") { toast.error("Duplicate this quote to create a new active revision."); return }
     setBusy(true)
     try { const result = await api<{ order?: Record<string, unknown> }>(`/api/order-drafts/${encodeURIComponent(String(draft.id || ""))}/convert`, { method: "POST", body: JSON.stringify({ user: "Luis" }) }); toast.success("Quote converted to an order."); await load(); if (result.order) window.location.href = orderHref(result.order) }
     catch (error) { toast.error(error instanceof Error ? error.message : "Unable to convert quote.") }
@@ -904,15 +943,23 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
       return sort.endsWith("asc") ? result : -result
     }), [rows, searchTerm, tab, queue, status, source, activeDateRange.from, activeDateRange.to, sort, orderWorkspace, paymentFilter, shippingFilter, fulfillmentFilter, deliveryFilter, labelFilter, returnFilter, outcomeFilter, exceptionFilter, poFilter, supplierFilter, brandFilter, carrierFilter, countryFilter, stateFilter, warehouseFilter, totalMinFilter, totalMaxFilter, quoteOwnerFilter, quoteAttentionFilter])
   const filteredQuoteRows = tab === "drafts" ? filtered : []
-  const openQuoteRows = filteredQuoteRows.filter((draft) => !["accepted", "lost"].includes(quotePipelineStatus(draft.status)))
-  const acceptedQuoteCount = filteredQuoteRows.filter((draft) => quotePipelineStatus(draft.status) === "accepted").length
-  const lostQuoteCount = filteredQuoteRows.filter((draft) => quotePipelineStatus(draft.status) === "lost").length
-  const closedQuoteCount = acceptedQuoteCount + lostQuoteCount
-  const quotePipelineValue = openQuoteRows.reduce((sum, draft) => sum + quotePipelineTotal(draft), 0)
-  const dueQuoteCount = openQuoteRows.filter((draft) => {
-    const followUpMs = Date.parse(String(draft.nextFollowUpAt || ""))
-    return Number.isFinite(followUpMs) && followUpMs <= Date.now()
-  }).length
+  const quoteMetricRows = quoteVisibility === "active" ? data.orderDrafts || [] : []
+  const fallbackApproved = quoteMetricRows.filter((draft) => quotePipelineStatus(draft.status) === "accepted")
+  const fallbackRejected = quoteMetricRows.filter((draft) => quotePipelineStatus(draft.status) === "lost")
+  const fallbackOpen = quoteMetricRows.filter((draft) => !["accepted", "lost", "voided"].includes(quotePipelineStatus(draft.status)))
+  const quoteMetrics: QuotePipelineMetrics = data.quoteMetrics || {
+    totalCount: quoteMetricRows.length,
+    openCount: fallbackOpen.length,
+    potentialSales: fallbackOpen.reduce((sum, draft) => sum + quotePipelineTotal(draft), 0),
+    approvedCount: fallbackApproved.length,
+    approvedValue: fallbackApproved.reduce((sum, draft) => sum + quotePipelineTotal(draft), 0),
+    rejectedCount: fallbackRejected.length,
+    rejectedValue: fallbackRejected.reduce((sum, draft) => sum + quotePipelineTotal(draft), 0),
+    followUpsDue: fallbackOpen.filter((draft) => { const when = Date.parse(String(draft.nextFollowUpAt || "")); return Number.isFinite(when) && when <= Date.now() }).length,
+    winRate: fallbackApproved.length + fallbackRejected.length ? fallbackApproved.length / (fallbackApproved.length + fallbackRejected.length) : null,
+    byOwner: [],
+  }
+  const displayedQuoteStages = quoteVisibility === "voided" ? [voidedQuoteStage] : quotePipelineStages
   const pageSize = 100
   const filteredTotal = orderWorkspace === "all" ? Number(data.total ?? filtered.length) : filtered.length
   const pageCount = orderWorkspace === "all" ? Math.max(1, Number(data.totalPages || Math.ceil(filteredTotal / pageSize))) : Math.max(1, Math.ceil(filtered.length / pageSize))
@@ -924,6 +971,7 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
   const currentPayments = Array.isArray(current.payments) ? current.payments as Array<Record<string, unknown>> : []
 
   return <div className="grid gap-5">
+    <Dialog open={Boolean(quoteVoidTarget)} onOpenChange={(open) => { if (!open) { setQuoteVoidTarget(null); setQuoteVoidReason("") } }}><DialogContent><DialogHeader><DialogTitle>Void {String(quoteVoidTarget?.draftNumber || "quote")}</DialogTitle><DialogDescription>This keeps the quote for audit history but removes it from active search, the pipeline, and all sales analytics.</DialogDescription></DialogHeader><Field label="Reason"><Textarea autoFocus value={quoteVoidReason} onChange={(event) => setQuoteVoidReason(event.target.value)} placeholder="Why is this quote being voided?" /></Field><DialogFooter><Button variant="outline" onClick={() => { setQuoteVoidTarget(null); setQuoteVoidReason("") }}>Cancel</Button><Button variant="destructive" disabled={!quoteVoidReason.trim() || Boolean(quoteUpdatingId)} onClick={() => void voidDraft()}>{quoteUpdatingId ? <Loader2 className="size-4 animate-spin" /> : <Ban className="size-4" />} Void quote</Button></DialogFooter></DialogContent></Dialog>
     <PageHeader
       eyebrow="Operations"
       title={tab === "orders" ? orderWorkspace === "open" ? "Open Orders" : "All Orders" : tab === "drafts" ? "Quote Pipeline" : "Returns"}
@@ -941,7 +989,7 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
     <div className="flex flex-wrap gap-1 rounded-md border bg-card p-1">
       <Button size="sm" variant={tab === "orders" && orderWorkspace === "open" ? "secondary" : "ghost"} asChild><a href="/orders">Open Orders <Badge variant="outline" className="ml-1.5">{numberLabel(actionRequiredCount)}</Badge></a></Button>
       <Button size="sm" variant={tab === "orders" && orderWorkspace === "all" ? "secondary" : "ghost"} asChild><a href="/orders/all">All Orders <Badge variant="outline" className="ml-1.5">{numberLabel(Number(orderMetrics.ytdCount || 0))}</Badge></a></Button>
-      <Button size="sm" variant={tab === "drafts" ? "secondary" : "ghost"} asChild><a href="/drafts">Quotes <Badge variant="outline" className="ml-1.5">{numberLabel(data.orderDrafts?.length)}</Badge></a></Button>
+      <Button size="sm" variant={tab === "drafts" ? "secondary" : "ghost"} asChild><a href="/drafts">Quotes <Badge variant="outline" className="ml-1.5">{numberLabel(quoteMetrics.totalCount)}</Badge></a></Button>
       <Button size="sm" variant={tab === "returns" ? "secondary" : "ghost"} asChild><a href="/returns">Returns <Badge variant="outline" className="ml-1.5">{numberLabel(returnTotal)}</Badge></a></Button>
     </div>
     {tab === "orders" && <a className="text-sm text-primary underline" href="/orders/data-review">Data Review</a>}
@@ -953,13 +1001,18 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
       <MetricCard label={orderWorkspace === "open" ? "Waiting for PO" : "YTD orders"} value={numberLabel(orderWorkspace === "open" ? counts["waiting-po"] : Number(orderMetrics.ytdCount || 0))} icon={Archive} />
       <MetricCard label={orderWorkspace === "open" ? "Needs attention" : "Rows on this page"} value={numberLabel(orderWorkspace === "open" ? counts.exceptions + counts.review : orderRows.length)} icon={orderWorkspace === "open" ? AlertCircle : ListChecks} />
     </div>}
-    {tab === "drafts" && <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-      <MetricCard label="Open quotes" value={numberLabel(openQuoteRows.length)} icon={FileText} />
-      <MetricCard label="Pipeline value" value={moneyLabel(quotePipelineValue)} icon={CircleDollarSign} />
-      <MetricCard label="Follow-ups due" value={numberLabel(dueQuoteCount)} icon={CalendarDays} />
-      <MetricCard label="Accepted" value={numberLabel(acceptedQuoteCount)} icon={CheckCircle2} />
-      <MetricCard label="Win rate" value={closedQuoteCount ? `${Math.round(acceptedQuoteCount / closedQuoteCount * 100)}%` : "-"} icon={TrendingUp} />
-    </div>}
+    {tab === "drafts" && <>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+        <MetricCard label="Potential sales" value={moneyLabel(quoteMetrics.potentialSales)} icon={CircleDollarSign} />
+        <MetricCard label="Open quotes" value={numberLabel(quoteMetrics.openCount)} icon={FileText} />
+        <MetricCard label="Approved" value={`${numberLabel(quoteMetrics.approvedCount)} / ${moneyLabel(quoteMetrics.approvedValue)}`} icon={CheckCircle2} />
+        <MetricCard label="Rejected" value={`${numberLabel(quoteMetrics.rejectedCount)} / ${moneyLabel(quoteMetrics.rejectedValue)}`} icon={Ban} />
+        <MetricCard label="Win rate" value={quoteMetrics.winRate === null ? "-" : `${Math.round(quoteMetrics.winRate * 100)}%`} icon={TrendingUp} />
+        <MetricCard label="Follow-ups due" value={numberLabel(quoteMetrics.followUpsDue)} icon={CalendarDays} />
+      </div>
+      {quoteMetrics.byOwner.length > 0 && <Card><CardHeader className="pb-3"><div className="flex items-center justify-between gap-3"><div><h2 className="font-semibold">Salesperson performance</h2><CardDescription>Active, approved, and rejected quote results. Voided quotes are excluded.</CardDescription></div><Badge variant="outline">Active analytics</Badge></div></CardHeader><CardContent className="overflow-x-auto p-0"><Table><TableHeader><TableRow><TableHead>Salesperson</TableHead><TableHead>Open</TableHead><TableHead>Potential sales</TableHead><TableHead>Approved</TableHead><TableHead>Rejected</TableHead><TableHead>Win rate</TableHead></TableRow></TableHeader><TableBody>{quoteMetrics.byOwner.map((owner) => <TableRow key={owner.owner}><TableCell className="font-medium">{owner.owner}</TableCell><TableCell>{numberLabel(owner.openCount)}</TableCell><TableCell>{moneyLabel(owner.potentialSales)}</TableCell><TableCell>{numberLabel(owner.approvedCount)} / {moneyLabel(owner.approvedValue)}</TableCell><TableCell>{numberLabel(owner.rejectedCount)} / {moneyLabel(owner.rejectedValue)}</TableCell><TableCell>{owner.winRate === null ? "-" : `${Math.round(owner.winRate * 100)}%`}</TableCell></TableRow>)}</TableBody></Table></CardContent></Card>}
+      {quoteVisibility === "voided" && <Alert><Ban className="size-4" /><AlertTitle>Voided quotes</AlertTitle><AlertDescription>These records are retained for audit history but are hidden from the active pipeline, global search, and all quote analytics.</AlertDescription></Alert>}
+    </>}
     {tab === "orders" && orderWorkspace === "open" && <div className="flex gap-1 overflow-x-auto rounded-md border bg-card p-1">{visibleQueueDefinitions.map(([id, label, description]) => <Button key={id} size="sm" variant={queue === id ? "secondary" : "ghost"} className="shrink-0" title={description} onClick={() => setQueue(id)}>{id === "all" ? "All open" : label}<Badge variant="outline" className="ml-1.5">{numberLabel(id === "all" ? actionRequiredCount : counts[id])}</Badge></Button>)}</div>}
     {tab !== "returns" && <Card>
       <CardHeader className="gap-3 border-b">
@@ -1005,7 +1058,8 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
               <ToggleGroupItem value="table" aria-label="Table view"><List className="size-4" /> Table</ToggleGroupItem>
             </ToggleGroup>
           </div>
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-6">
+            <Select value={quoteVisibility} onValueChange={(value) => { setQuoteVisibility(value === "voided" ? "voided" : "active"); setStatus("all"); setQuoteAttentionFilter("all") }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active quotes</SelectItem><SelectItem value="voided">Voided quotes</SelectItem></SelectContent></Select>
             <OrderMultiSelect value={status} onValueChange={setStatus} options={statusFilterOptions} placeholder="All stages" searchPlaceholder="Search quote stages" />
             <OrderMultiSelect value={source} onValueChange={setSource} options={sourceFilterOptions} placeholder="All sources" searchPlaceholder="Search quote sources" />
             <Select value={quoteOwnerFilter} onValueChange={setQuoteOwnerFilter}><SelectTrigger><SelectValue placeholder="All owners" /></SelectTrigger><SelectContent><SelectItem value="all">All owners</SelectItem>{quoteOwnerValues.map((owner) => <SelectItem key={owner} value={owner}>{owner}</SelectItem>)}</SelectContent></Select>
@@ -1023,12 +1077,12 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
       {selectedVisible.length > 0 && <div className="flex flex-wrap items-center gap-2 border-b bg-muted/30 px-4 py-2"><span className="text-sm font-medium">{selectedVisible.length} selected</span><Button size="sm" disabled={busy} onClick={() => void createSupplierPos(selectedVisible.map((row) => String(row.id)))}>Create supplier POs</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "approve")}>Approve</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "hold")}>Put on hold</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => void runAction(selectedVisible.map((row) => String(row.id)), "done")}>Mark done</Button><Button size="sm" variant="outline" disabled={busy} onClick={() => setSelectedIds(new Set())}>Clear</Button></div>}
       <CardContent className="p-0">
         {tab === "drafts" && loading && <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div>}
-        {tab === "drafts" && !loading && quoteView === "pipeline" && <div className="overflow-x-auto p-4"><div className="grid min-w-[1740px] grid-cols-6 gap-3">{quotePipelineStages.map((stage) => {
+        {tab === "drafts" && !loading && quoteView === "pipeline" && <div className="overflow-x-auto p-4"><div className={`grid gap-3 ${quoteVisibility === "voided" ? "grid-cols-1" : "min-w-[1740px] grid-cols-6"}`}>{displayedQuoteStages.map((stage) => {
           const stageRows = filteredQuoteRows.filter((draft) => quotePipelineStatus(draft.status) === stage.id)
           const stageValue = stageRows.reduce((sum, draft) => sum + quotePipelineTotal(draft), 0)
           return <section key={stage.id} className="min-w-0 rounded-md border bg-muted/20">
             <header className="border-b px-3 py-3"><div className="flex items-center justify-between gap-2"><div><h3 className="font-semibold">{stage.label}</h3><p className="text-xs text-muted-foreground">{stage.description}</p></div><Badge variant="secondary">{numberLabel(stageRows.length)}</Badge></div><p className="mt-2 text-sm font-semibold tabular-nums">{moneyLabel(stageValue)}</p></header>
-            <div className="grid max-h-[66vh] content-start gap-2 overflow-y-auto p-2">{stageRows.map((draft) => <QuotePipelineCard key={String(draft.id || draft.draftNumber)} draft={draft} updating={quoteUpdatingId === String(draft.id || "")} onStageChange={(row, nextStatus) => void updateQuoteStage(row, nextStatus)} />)}{!stageRows.length && <p className="px-2 py-8 text-center text-xs text-muted-foreground">No matching quotes</p>}</div>
+            <div className="grid max-h-[66vh] content-start gap-2 overflow-y-auto p-2">{stageRows.map((draft) => <QuotePipelineCard key={String(draft.id || draft.draftNumber)} draft={draft} updating={quoteUpdatingId === String(draft.id || "")} onStageChange={(row, nextStatus) => void updateQuoteStage(row, nextStatus)} onDuplicate={(row) => void duplicateDraft(row)} onConvert={(row) => void convertDraft(row)} onVoid={(row) => { setQuoteVoidTarget(row); setQuoteVoidReason("") }} />)}{!stageRows.length && <p className="px-2 py-8 text-center text-xs text-muted-foreground">No matching quotes</p>}</div>
           </section>
         })}</div></div>}
         {tab === "drafts" && !loading && quoteView === "table" && <div className="overflow-x-auto"><Table className="min-w-[1280px]"><TableHeader><TableRow><TableHead>Quote</TableHead><TableHead>Customer</TableHead><TableHead>Owner</TableHead><TableHead>Items</TableHead><TableHead>Total</TableHead><TableHead>Stage</TableHead><TableHead>Follow-up</TableHead><TableHead>Valid until</TableHead><TableHead>Next action</TableHead><TableHead>Updated</TableHead><TableHead /></TableRow></TableHeader><TableBody>{filteredQuoteRows.map((draft, index) => { const id = String(draft.id || ""); const items = Array.isArray(draft.items) ? draft.items as Array<Record<string, unknown>> : []; const expiresAt = String(draft.expiresAt || ""); const expired = Boolean(expiresAt && expiresAt < localDateKey(new Date())); const followUpAt = String(draft.nextFollowUpAt || ""); const followUpDue = Boolean(followUpAt && Date.parse(followUpAt) <= Date.now() && !["accepted", "lost"].includes(quotePipelineStatus(draft.status))); return <TableRow key={`${id}-${index}`}><TableCell><a href={`/drafts/${encodeURIComponent(id || String(draft.draftNumber || ""))}`} className="font-medium hover:underline">{String(draft.draftNumber || id)}</a><p className="text-xs text-muted-foreground">Rev {numberLabel(Number(draft.revisionNumber || 1))}</p></TableCell><TableCell><div>{String(draft.buyer || "-")}</div><p className="text-xs text-muted-foreground">{String(draft.buyerEmail || "")}</p></TableCell><TableCell>{String(draft.salesOwner || "Unassigned")}</TableCell><TableCell>{numberLabel(items.reduce((sum, item) => sum + Number(item.qty || 0), 0))}</TableCell><TableCell className="font-medium">{moneyLabel(quotePipelineTotal(draft))}</TableCell><TableCell><Select value={quotePipelineStatus(draft.status)} disabled={quoteUpdatingId === id} onValueChange={(nextStatus) => void updateQuoteStage(draft, nextStatus)}><SelectTrigger className="h-8 w-32 text-xs"><SelectValue /></SelectTrigger><SelectContent>{quotePipelineStages.map((stage) => <SelectItem key={stage.id} value={stage.id}>{stage.label}</SelectItem>)}</SelectContent></Select></TableCell><TableCell>{followUpAt ? <Badge variant={followUpDue ? "destructive" : "outline"}>{dateLabel(followUpAt)}</Badge> : "Not scheduled"}</TableCell><TableCell>{expiresAt ? <Badge variant={expired ? "destructive" : "outline"}>{dateLabel(`${expiresAt}T12:00:00`)}</Badge> : "Not set"}</TableCell><TableCell className="max-w-64 truncate" title={String(draft.nextAction || "")}>{String(draft.nextAction || "Not set")}</TableCell><TableCell>{dateLabel(String(draft.updatedAt || draft.createdAt || ""))}</TableCell><TableCell><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" title="Quote actions"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem asChild><a href={`/drafts/${encodeURIComponent(id || String(draft.draftNumber || ""))}`}>Open quote</a></DropdownMenuItem><DropdownMenuItem onSelect={() => void duplicateDraft(draft)}>Duplicate quote</DropdownMenuItem><DropdownMenuItem onSelect={() => void convertDraft(draft)}>Convert to order</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem asChild><a href={`/api/order-drafts/${encodeURIComponent(id)}/export/pdf`} target="_blank" rel="noreferrer">Download standard PDF</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell></TableRow> })}{!filteredQuoteRows.length && <TableRow><TableCell colSpan={11} className="h-28 text-center text-muted-foreground">No quotes match the current filters.</TableCell></TableRow>}</TableBody></Table></div>}
