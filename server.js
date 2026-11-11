@@ -51792,6 +51792,8 @@ async function syncShopifyShipment(order = {}, shipment = {}) {
 async function syncEbayShipmentTracking(db, order, shipment) {
   const orderId = String(order.ebayOrderId || order.marketplaceOrderId || order.marketplaceOrderNumber || "");
   if (!orderId || !shipment.trackingNumber) throw new Error("eBay order reference and tracking number are required.");
+  const existingEvidence = ebayShipmentTrackingEvidence(await ebayShippingFulfillments(db, orderId), shipment.trackingNumber);
+  if (existingEvidence) return existingEvidence;
   const builder = new XMLBuilder({ ignoreAttributes: false });
   const request = (name, content) => builder.build({ [`${name}Request`]: { "@_xmlns": "urn:ebay:apis:eBLBaseComponents", ...content } });
   const result = await ebayTradingRequest(db, "GetOrders", request("GetOrders", { OrderIDArray: { OrderID: orderId }, DetailLevel: "ReturnAll" }));

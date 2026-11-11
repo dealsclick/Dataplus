@@ -209,6 +209,7 @@ test("eBay correction retains other package tracking and escapes XML", async () 
   const writes = [];
   const sync = loadServerFunction("syncEbayShipmentTracking", {
     XMLBuilder, shipmentLineAssociationPlan, canonicalCarrierName, normalizeTrackingNumber, orderLineItems: (order) => order.items,
+    ebayShippingFulfillments: async () => [], ebayShipmentTrackingEvidence: () => null,
     verifyEbayShipmentTracking: async () => ({ fulfillmentId: "fulfillment-1", verifiedAt: "2026-11-02T20:00:00.000Z" }),
     ebayTradingText: (value) => String(value ?? ""), ebayTradingArray: (value) => Array.isArray(value) ? value : value ? [value] : [],
     ebayTradingRequest: async (_db, name, payload) => {
@@ -228,6 +229,7 @@ test("eBay Live tracking matches the marketplace line or legacy item when the li
   const writes = [];
   const sync = loadServerFunction("syncEbayShipmentTracking", {
     XMLBuilder, shipmentLineAssociationPlan, canonicalCarrierName, normalizeTrackingNumber, orderLineItems: (order) => order.items,
+    ebayShippingFulfillments: async () => [], ebayShipmentTrackingEvidence: () => null,
     verifyEbayShipmentTracking: async () => ({ fulfillmentId: "fulfillment-live", verifiedAt: "2026-11-02T20:00:00.000Z" }),
     ebayTradingText: (value) => String(value ?? ""), ebayTradingArray: (value) => Array.isArray(value) ? value : value ? [value] : [],
     ebayTradingRequest: async (_db, name, payload) => {
@@ -245,6 +247,7 @@ test("eBay Live tracking matches the marketplace line or legacy item when the li
 test("eBay tracking is not confirmed when fulfillment readback does not contain it", async () => {
   const sync = loadServerFunction("syncEbayShipmentTracking", {
     XMLBuilder, shipmentLineAssociationPlan, canonicalCarrierName, normalizeTrackingNumber, orderLineItems: (order) => order.items,
+    ebayShippingFulfillments: async () => [], ebayShipmentTrackingEvidence: () => null,
     verifyEbayShipmentTracking: async () => { throw new Error("fulfillment readback did not include 1Z999"); },
     ebayTradingText: (value) => String(value ?? ""), ebayTradingArray: (value) => Array.isArray(value) ? value : value ? [value] : [],
     ebayTradingRequest: async (_db, name) => name === "GetOrders"
@@ -255,6 +258,18 @@ test("eBay tracking is not confirmed when fulfillment readback does not contain 
     sync({}, { marketplaceOrderId: "source", items: [{ lineId: "line", sku: "A", qty: 1 }] }, { trackingNumber: "1Z999", carrierName: "UPS", lines: [{ sku: "A", lineIndex: 0, qty: 1 }] }),
     /fulfillment readback did not include/
   );
+});
+
+test("eBay tracking sync accepts existing fulfillment readback without another write", async () => {
+  let writes = 0;
+  const evidence = { fulfillmentId: "existing", trackingNumber: "1Z999", verifiedAt: "2026-11-11T19:00:00.000Z" };
+  const sync = loadServerFunction("syncEbayShipmentTracking", {
+    ebayShippingFulfillments: async () => [{ shipmentTrackingNumber: "1Z999" }],
+    ebayShipmentTrackingEvidence: () => evidence,
+    ebayTradingRequest: async () => { writes += 1; throw new Error("must not write"); }
+  });
+  assert.deepEqual(await sync({}, { marketplaceOrderId: "source" }, { trackingNumber: "1Z999" }), evidence);
+  assert.equal(writes, 0);
 });
 
 test("unship endpoint preserves a second shipped line, cost and actual operator", async () => {
