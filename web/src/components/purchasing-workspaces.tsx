@@ -1968,6 +1968,10 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
   const [receiptCorrectionOpen, setReceiptCorrectionOpen] = useState(false)
   const [deletePoOpen, setDeletePoOpen] = useState(false)
   const [deletePoReason, setDeletePoReason] = useState("")
+  const [linkOrdersOpen, setLinkOrdersOpen] = useState(false)
+  const [linkOrderReferences, setLinkOrderReferences] = useState("")
+  const [linkOrderPreview, setLinkOrderPreview] = useState<{ results?: Array<Record<string, unknown>>; missingReferences?: string[]; linkedOrderCount?: number; message?: string } | null>(null)
+  const [linkOrderBusy, setLinkOrderBusy] = useState(false)
   const [editingOpen, setEditingOpen] = useState(false)
   const [financialOpen, setFinancialOpen] = useState(false)
   const [acknowledgementOpen, setAcknowledgementOpen] = useState(false)
@@ -2193,6 +2197,28 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to delete this PO.") }
     finally { setSaving(false) }
   }
+  const previewCustomerOrderLinks = async () => {
+    if (!linkOrderReferences.trim() || linkOrderBusy) return
+    setLinkOrderBusy(true)
+    try {
+      const result = await api<{ results?: Array<Record<string, unknown>>; missingReferences?: string[]; linkedOrderCount?: number; message?: string }>(`/api/purchase-orders/${encodeURIComponent(id)}/link-orders`, { method: "POST", body: JSON.stringify({ orderReferences: linkOrderReferences, preview: true, user: operatorName }) })
+      setLinkOrderPreview(result)
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to review the selected orders.") }
+    finally { setLinkOrderBusy(false) }
+  }
+  const saveCustomerOrderLinks = async () => {
+    if (!linkOrderReferences.trim() || linkOrderBusy) return
+    setLinkOrderBusy(true)
+    try {
+      const result = await api<{ linkedOrderCount?: number; message?: string }>(`/api/purchase-orders/${encodeURIComponent(id)}/link-orders`, { method: "POST", body: JSON.stringify({ orderReferences: linkOrderReferences, user: operatorName }) })
+      toast.success(result.message || "Customer orders linked to the purchase order.")
+      setLinkOrdersOpen(false)
+      setLinkOrderReferences("")
+      setLinkOrderPreview(null)
+      await load()
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to link the selected orders.") }
+    finally { setLinkOrderBusy(false) }
+  }
   const openEditor = () => { void loadReferenceData(); setEditDraft({ vendorId: String(po.vendorId || ""), ...(isDropship ? {} : { warehouseId: String(po.warehouseId || "") }), notes: String(po.notes || ""), expectedAt: String(po.expectedAt || ""), amendmentReason: "", items: lines.map((line) => ({ id: String(line.id || ""), sku: String(line.sku || ""), title: String(line.title || ""), qty: Number(line.qty || 0), estimatedUnitCost: Number(line.estimatedUnitCost ?? line.unitCost ?? line.cost ?? 0), receivedQty: Number(line.receivedQty || 0), source: String(line.source || "manual_line"), catalogProduct: line.catalogProduct === true })) }); setEditingOpen(true) }
   const saveEdit = async () => {
     setSaving(true)
@@ -2358,7 +2384,23 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
       </AlertDialogContent>
     </AlertDialog>
   )
-  if (mobile && !loading) return <div className="grid gap-4"><h1 className="text-xl font-semibold">{String(po.poNumber || id)}</h1><p>{String(po.supplier || "")} · {String(po.warehouseName || "")}</p>{!po.id ? <Alert variant="destructive"><AlertTitle>PO unavailable</AlertTitle><AlertDescription>Check your access or retry.<Button variant="outline" onClick={() => void load()}>Retry</Button></AlertDescription></Alert> : <>{activeReceivingNotice}{receivedByNotice}<p className="text-sm text-muted-foreground">{String(po.status || "").replaceAll("_", " ")} · {lines.reduce((total, line) => total + purchaseOrderLineRemaining(line), 0)} units remaining</p><div className="flex flex-wrap gap-2"><Button disabled={saving || ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(po.status).toLowerCase())} onClick={openReceiving}>Scan / receive items</Button>{lines.some((line) => Number(line.receivedQty || 0) > 0) ? <Button variant="outline" onClick={openReceiptCorrection}>Correct receipt</Button> : null}{!purchaseOrderHasSubmission(po) && String(po.status || "").toLowerCase() !== "deleted" ? <Button variant="destructive" onClick={() => { setDeletePoReason(""); setDeletePoOpen(true) }}><Trash2 className="size-4" /> Delete test PO</Button> : null}</div>{lines.map((line, index) => { const lineReceivers = purchaseOrderLineReceiverNames(line, receipts); return <Card key={purchaseOrderLineKey(line, index)}><CardContent className="grid gap-2 p-4"><strong>{String(line.sku)}</strong><p className="text-sm" title={String(line.title || "")}>{compactPurchaseItemTitle(line.title)}</p><p>{purchaseOrderLineRemaining(line)} remaining</p>{lineReceivers.length ? <p className="text-xs text-muted-foreground">Received by {lineReceivers.join(", ")}</p> : null}</CardContent></Card> })}{receivingDialog}{receiptCorrectionDialog}{deletePoDialog}</>}</div>
+  const linkOrdersDialog = (
+    <Dialog open={linkOrdersOpen} onOpenChange={(open) => { if (!linkOrderBusy) { setLinkOrdersOpen(open); if (!open) setLinkOrderPreview(null) } }}>
+      <DialogContent className="max-h-[90dvh] w-[calc(100%-2rem)] overflow-y-auto sm:max-w-3xl">
+        <DialogHeader><DialogTitle>Link customer orders to {String(po.poNumber || "this PO")}</DialogTitle><DialogDescription>Paste internal order numbers separated by commas, spaces, or new lines. DataPlus matches open demand to quantities already on this PO; ordered quantities and supplier submission history are not changed.</DialogDescription></DialogHeader>
+        <div className="grid gap-4">
+          <Field label="Customer order numbers"><Textarea className="min-h-32 font-mono" value={linkOrderReferences} onChange={(event) => { setLinkOrderReferences(event.target.value); setLinkOrderPreview(null) }} placeholder={"89468\n89469\n89356"} /></Field>
+          {linkOrderPreview ? <div className="grid gap-3">
+            <Alert><Link2 className="size-4" /><AlertTitle>{String(linkOrderPreview.message || "Link review complete")}</AlertTitle><AlertDescription>Orders already allocated from warehouse stock or linked to another active PO stay unchanged and show their reason below.</AlertDescription></Alert>
+            {Array.isArray(linkOrderPreview.missingReferences) && linkOrderPreview.missingReferences.length ? <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Orders not found</AlertTitle><AlertDescription>{linkOrderPreview.missingReferences.join(", ")}</AlertDescription></Alert> : null}
+            <div className="overflow-hidden rounded-md border"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Status</TableHead><TableHead>Matched demand</TableHead><TableHead>Review</TableHead></TableRow></TableHeader><TableBody>{(linkOrderPreview.results || []).map((row) => { const linkedLines = Array.isArray(row.linkedLines) ? row.linkedLines as Array<Record<string, unknown>> : []; const skippedLines = Array.isArray(row.skippedLines) ? row.skippedLines as Array<Record<string, unknown>> : []; const status = String(row.status || "skipped"); return <TableRow key={String(row.orderId || row.orderNumber)}><TableCell><a className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(String(row.orderId || ""))}`}>{String(row.orderNumber || row.orderId || "Order")}</a></TableCell><TableCell><Badge variant={status === "linked" ? "success" : status === "partial" ? "warning" : "secondary"}>{status}</Badge></TableCell><TableCell>{linkedLines.length ? linkedLines.map((line) => `${String(line.sku || "SKU")} x ${numberLabel(Number(line.qty || 0))}`).join(", ") : "-"}</TableCell><TableCell className="max-w-80 text-sm text-muted-foreground">{skippedLines.length ? skippedLines.map((line) => String(line.reason || "Needs review")).join(" ") : "Ready"}</TableCell></TableRow> })}</TableBody></Table></div>
+          </div> : <Alert><Info className="size-4" /><AlertTitle>Review before linking</AlertTitle><AlertDescription>The preview identifies missing orders, warehouse allocations, existing PO links, SKU mismatches, and quantities that exceed this PO.</AlertDescription></Alert>}
+        </div>
+        <DialogFooter><Button variant="outline" disabled={linkOrderBusy} onClick={() => setLinkOrdersOpen(false)}>Cancel</Button><Button variant="outline" disabled={linkOrderBusy || !linkOrderReferences.trim()} onClick={() => void previewCustomerOrderLinks()}>{linkOrderBusy ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Review matches</Button><Button disabled={linkOrderBusy || !linkOrderPreview || Number(linkOrderPreview.linkedOrderCount || 0) < 1} onClick={() => void saveCustomerOrderLinks()}><Link2 className="size-4" /> Link ready orders</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+  if (mobile && !loading) return <div className="grid gap-4"><h1 className="text-xl font-semibold">{String(po.poNumber || id)}</h1><p>{String(po.supplier || "")} · {String(po.warehouseName || "")}</p>{!po.id ? <Alert variant="destructive"><AlertTitle>PO unavailable</AlertTitle><AlertDescription>Check your access or retry.<Button variant="outline" onClick={() => void load()}>Retry</Button></AlertDescription></Alert> : <>{activeReceivingNotice}{receivedByNotice}<p className="text-sm text-muted-foreground">{String(po.status || "").replaceAll("_", " ")} · {lines.reduce((total, line) => total + purchaseOrderLineRemaining(line), 0)} units remaining</p><div className="flex flex-wrap gap-2"><Button disabled={saving || ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(po.status).toLowerCase())} onClick={openReceiving}>Scan / receive items</Button><Button variant="outline" disabled={["received", "closed", "completed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => { setLinkOrderReferences(""); setLinkOrderPreview(null); setLinkOrdersOpen(true) }}><Link2 className="size-4" /> Link orders</Button>{lines.some((line) => Number(line.receivedQty || 0) > 0) ? <Button variant="outline" onClick={openReceiptCorrection}>Correct receipt</Button> : null}{!purchaseOrderHasSubmission(po) && String(po.status || "").toLowerCase() !== "deleted" ? <Button variant="destructive" onClick={() => { setDeletePoReason(""); setDeletePoOpen(true) }}><Trash2 className="size-4" /> Delete test PO</Button> : null}</div>{lines.map((line, index) => { const lineReceivers = purchaseOrderLineReceiverNames(line, receipts); return <Card key={purchaseOrderLineKey(line, index)}><CardContent className="grid gap-2 p-4"><strong>{String(line.sku)}</strong><p className="text-sm" title={String(line.title || "")}>{compactPurchaseItemTitle(line.title)}</p><p>{purchaseOrderLineRemaining(line)} remaining</p>{lineReceivers.length ? <p className="text-xs text-muted-foreground">Received by {lineReceivers.join(", ")}</p> : null}</CardContent></Card> })}{receivingDialog}{receiptCorrectionDialog}{deletePoDialog}{linkOrdersDialog}</>}</div>
   if (loading) return <div className="grid gap-3"><Skeleton className="h-28" /><Skeleton className="h-64" /></div>
   const history = Array.isArray(po.timeline) ? po.timeline as Array<Record<string, unknown>> : []
   const documents = Array.isArray(po.documents) ? po.documents as Array<Record<string, unknown>> : []
@@ -2441,6 +2483,7 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
       <DropdownMenuItem onClick={openDocument}><Link2 className="size-4" /> Link supplier document</DropdownMenuItem>
       <DropdownMenuSeparator />
       <DropdownMenuLabel>Fulfillment</DropdownMenuLabel>
+      <DropdownMenuItem disabled={["received", "closed", "completed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => { setLinkOrderReferences(""); setLinkOrderPreview(null); setLinkOrdersOpen(true) }}><Link2 className="size-4" /> Link customer orders</DropdownMenuItem>
       {canReturnToDropships ? <DropdownMenuItem onClick={() => { setReturnReasonCode("wrong_vendor"); setReturnReasonNote(""); setReturnToDropshipsOpen(true) }}><RotateCcw className="size-4" /> Return to Dropships</DropdownMenuItem> : null}
       <DropdownMenuItem disabled={reSourceLoading || ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => void openReSource()}>{reSourceLoading ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />} Re-source open quantities</DropdownMenuItem>
       <DropdownMenuItem disabled={!canSplitToDropship} onClick={() => { setSplitReasonCode("supplier_direct_only"); setSplitReasonNote(""); poMutationRequestIdsRef.current.set("split-dropship", crypto.randomUUID()); setSplitDropshipOpen(true) }}><Truck className="size-4" /> Split into dropship POs</DropdownMenuItem>
@@ -2464,6 +2507,7 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
     <PurchaseOrderRejectionDialog decision={rejectionDecision} busy={saving} onClose={() => setRejectionDecision(null)} onConfirm={rejectPurchaseOrder} />
     {receiptCorrectionDialog}
     {deletePoDialog}
+    {linkOrdersDialog}
     <PurchaseOrderProgress po={po} />
     {draftMissingFields.length > 0 ? <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Draft saved, details still needed</AlertTitle><AlertDescription className="flex flex-wrap items-start justify-between gap-3"><span>{draftMissingFields.join(" ")} You can keep editing this draft, but it cannot be approved or sent yet.</span><Button size="sm" variant="outline" onClick={openEditor}><Pencil className="size-4" /> Continue draft</Button></AlertDescription></Alert> : null}
     <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-5"><Detail label="Status" value={String(po.status || "draft").replace(/_/g, " ")} /><Detail label="Supplier" value={String(po.supplier || "Unassigned")} />{ctechId ? <Detail label="CTech PO #" value={ctechId} /> : null}{po.placedFromExternalSource === true ? <Detail label={`${String(po.externalSourceSystem || "External source")} PO #`} value={String(po.externalPoNumber || "Not recorded")} /> : null}<Detail label="Destination" value={String(po.warehouseName || "-")} /><Detail label="Units" value={numberLabel(Number(po.totalUnits || lines.reduce((sum, line) => sum + Number(line.qty || 0), 0)))} /><Detail label="Created by" value={String(po.creationActor || po.createdBy || "System")} /><Detail label="Creation path" value={String(po.creationOperation || po.source || "manual").replace(/_/g, " ")} /><Detail label="Merchandise cost" value={moneyLabel(Number(po.merchandiseCost ?? po.estimatedCost ?? 0))} /><Detail label="Dropship fee" value={moneyLabel(Number(po.dropShipFee || 0))} /><Detail label="Total PO cost" value={moneyLabel(Number(po.estimatedTotalCost ?? po.estimatedCost ?? 0))} /><Detail label="Expected delivery" value={purchaseScheduleDateLabel(po.expectedDeliveryDate || po.expectedAt)} /></div>

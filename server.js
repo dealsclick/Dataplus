@@ -13656,6 +13656,119 @@ function purchaseOrderCanReleaseWaitingDemand(po = {}) {
     && String(po.approval?.status || "").toLowerCase() !== "rejected";
 }
 
+const TERMINAL_PURCHASE_DEMAND_PO_STATUSES = new Set([
+  "received", "completed", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"
+]);
+
+function repairStalePurchaseDemandLinks(db, orders = [], options = {}) {
+  db.purchaseRequirements = Array.isArray(db.purchaseRequirements) ? db.purchaseRequirements : [];
+  const purchaseOrdersById = new Map((db.purchaseOrders || []).map((po) => [String(po.id || ""), po]));
+  const purchaseOrdersByNumber = new Map((db.purchaseOrders || []).map((po) => [String(po.poNumber || "").trim().toLowerCase(), po]));
+  const requirementByRouteId = new Map(db.purchaseRequirements.map((requirement) => [String(requirement.routeId || ""), requirement]));
+  const repairedOrders = [];
+  const repairedRequirements = [];
+  const now = new Date().toISOString();
+  const actor = String(options.user || "System");
+
+  for (const order of orders || []) {
+    const stalePoIds = new Set();
+    const stalePoNumbers = new Set();
+    let repairedRouteCount = 0;
+    let restoredRouteCount = 0;
+    for (const route of order.fulfillmentRoutes || []) {
+      if (!["purchase", "drop_ship"].includes(String(route.type || "").toLowerCase())) continue;
+      const requirement = requirementByRouteId.get(String(route.id || ""));
+      const routePoId = String(route.purchaseOrderId || "").trim();
+      const routePoNumber = String(route.purchaseOrderNumber || "").trim();
+      const requirementPoId = String(requirement?.purchaseOrderId || "").trim();
+      const requirementPoNumber = String(requirement?.purchaseOrderNumber || "").trim();
+      const linkedPo = purchaseOrdersById.get(routePoId || requirementPoId)
+        || purchaseOrdersByNumber.get(String(routePoNumber || requirementPoNumber).toLowerCase());
+      const routeLinkWasCleared = Boolean((requirementPoId || requirementPoNumber) && !routePoId && !routePoNumber);
+      const linkedPoIsTerminal = Boolean(linkedPo && TERMINAL_PURCHASE_DEMAND_PO_STATUSES.has(String(linkedPo.status || "").toLowerCase()));
+      if (routeLinkWasCleared && linkedPo && !linkedPoIsTerminal) {
+        route.purchaseOrderId = linkedPo.id;
+        route.purchaseOrderNumber = linkedPo.poNumber;
+        route.purchaseGroupId = linkedPo.purchaseGroupId || route.purchaseGroupId || "";
+        route.status = purchaseOrderHasSubmissionRecord(linkedPo) ? String(linkedPo.status || "submitted").toLowerCase() : "waiting_for_po";
+        route.reviewReason = "";
+        route.updatedAt = now;
+        order.purchaseOrderIds = [...new Set([...(order.purchaseOrderIds || []), linkedPo.id])];
+        order.purchaseOrderNumbers = [...new Set([...(order.purchaseOrderNumbers || []), linkedPo.poNumber])];
+        restoredRouteCount += 1;
+        continue;
+      }
+      if (!routeLinkWasCleared && !linkedPoIsTerminal) continue;
+
+      if (routePoId || requirementPoId) stalePoIds.add(routePoId || requirementPoId);
+      if (routePoNumber || requirementPoNumber) stalePoNumbers.add(routePoNumber || requirementPoNumber);
+      delete route.purchaseOrderId;
+      delete route.purchaseOrderNumber;
+      delete route.purchaseGroupId;
+      route.status = route.vendorId || route.vendorName ? "pooled" : "buyer_review";
+      route.reviewReason = linkedPoIsTerminal
+        ? `${linkedPo?.poNumber || requirementPoNumber || "The previous PO"} is no longer active. This demand is ready to be purchased again.`
+        : "The previous purchase-order link was cleared. This demand is ready to be purchased again.";
+      route.updatedAt = now;
+      repairedRouteCount += 1;
+
+      if (requirement) {
+        requirement.status = route.status;
+        delete requirement.purchaseOrderId;
+        delete requirement.purchaseOrderNumber;
+        delete requirement.convertedAt;
+        requirement.reviewReason = route.reviewReason;
+        requirement.reopenedAt = now;
+        requirement.reopenedBy = actor;
+        requirement.updatedAt = now;
+        repairedRequirements.push(requirement);
+      }
+    }
+    if (!repairedRouteCount && !restoredRouteCount) continue;
+    order.purchaseOrderIds = (order.purchaseOrderIds || []).filter((value) => !stalePoIds.has(String(value || "")));
+    order.purchaseOrderNumbers = (order.purchaseOrderNumbers || []).filter((value) => !stalePoNumbers.has(String(value || "")));
+    recalculateOrderOperationalStatus(order);
+    if (repairedRouteCount) addOrderWorkflowEvent(order, {
+      step: "purchase_demand_reopened",
+      title: "Purchase demand reopened",
+      message: `${repairedRouteCount} supplier route${repairedRouteCount === 1 ? " was" : "s were"} released from an inactive purchase order and can be combined again.`,
+      user: actor
+    });
+    if (restoredRouteCount) addOrderWorkflowEvent(order, {
+      step: "purchase_order_link_restored",
+      title: "Purchase order link restored",
+      message: `${restoredRouteCount} supplier route${restoredRouteCount === 1 ? " was" : "s were"} reconnected to its active purchase order.`,
+      user: actor
+    });
+    order.updatedAt = now;
+    repairedOrders.push(order);
+  }
+  return { orders: repairedOrders, requirements: repairedRequirements };
+}
+
+function reopenPurchaseRequirementsForPurchaseOrder(db, po, options = {}) {
+  db.purchaseRequirements = Array.isArray(db.purchaseRequirements) ? db.purchaseRequirements : [];
+  const now = String(options.now || new Date().toISOString());
+  const actor = String(options.user || "Buyer");
+  const reason = String(options.reason || "Purchase order deleted").trim();
+  let reopenedCount = 0;
+  for (const requirement of db.purchaseRequirements) {
+    const matchesPurchaseOrder = String(requirement.purchaseOrderId || "") === String(po.id || "")
+      || (po.poNumber && String(requirement.purchaseOrderNumber || "").trim().toLowerCase() === String(po.poNumber).trim().toLowerCase());
+    if (!matchesPurchaseOrder) continue;
+    requirement.status = "buyer_review";
+    requirement.reviewReason = `${po.poNumber || "Purchase order"} was deleted: ${reason}`;
+    delete requirement.purchaseOrderId;
+    delete requirement.purchaseOrderNumber;
+    delete requirement.convertedAt;
+    requirement.reopenedAt = now;
+    requirement.reopenedBy = actor;
+    requirement.updatedAt = now;
+    reopenedCount += 1;
+  }
+  return reopenedCount;
+}
+
 function purchaseOrderMatchesWaitingGroup(po, vendor, warehouse) {
   if (!purchaseOrderAcceptsWaitingDemand(po)) return false;
   if (String(po.fulfillmentMode || "pooled").toLowerCase() === "dropship_per_order") return false;
@@ -14465,6 +14578,7 @@ function recalculateWaitingPurchaseOrder(db, po, vendor) {
 function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
   const orders = (orderIds || []).map((id) => (db.orders || []).find((order) => order.id === id)).filter((order) => order && !orderIsReportingOnly(order) && !isTerminalCustomerDemand(order));
   if (!orders.length) throw new Error("No matching orders found for purchase order.");
+  const staleLinkRepair = repairStalePurchaseDemandLinks(db, orders, { user: options.user || "Buyer" });
   ensurePurchaseRequirementsForOrders(db, orders, options);
   const requestedExistingPo = options.existingPurchaseOrderId
     ? (db.purchaseOrders || []).find((po) => String(po.id || "") === String(options.existingPurchaseOrderId)
@@ -14520,8 +14634,35 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
       group.routes.push({ ...route, order }); if (!group.orders.includes(order)) group.orders.push(order); groups.set(key, group);
     }
   }
-  if (!groups.size && unassignedRouteCount) throw new Error("Assign a supplier to the unresolved purchase requirements before creating a PO.");
-  if (!groups.size) throw new Error("No unassigned purchase requirements are available for PO creation.");
+  const groupedOrderIds = new Set([...groups.values()].flatMap((group) => group.routes.map((route) => String(route.order?.id || ""))).filter(Boolean));
+  const skippedOrders = orders.filter((order) => !groupedOrderIds.has(String(order.id || ""))).map((order) => {
+    const activeRoutes = (order.fulfillmentRoutes || []).filter((route) => !["canceled", "cancelled", "closed", "received", "shipped", "delivered"].includes(String(route.status || "").toLowerCase()));
+    const linkedRoute = activeRoutes.find((route) => route.purchaseOrderId || route.purchaseOrderNumber);
+    const warehouseRoute = activeRoutes.find((route) => String(route.type || "").toLowerCase() === "warehouse");
+    const unresolvedPurchaseRoute = activeRoutes.find((route) => ["purchase", "drop_ship"].includes(String(route.type || "").toLowerCase()) && !route.vendorId && !route.vendorName);
+    const reason = linkedRoute
+      ? `Already linked to ${linkedRoute.purchaseOrderNumber || "another purchase order"}.`
+      : warehouseRoute
+        ? `Already allocated from ${warehouseRoute.warehouseName || "warehouse inventory"}; no duplicate purchasing demand was created.`
+        : unresolvedPurchaseRoute
+          ? "A supplier must be assigned before this order can be added to a PO."
+          : "No open supplier purchase demand remains on this order.";
+    return { orderId: order.id, orderNumber: order.orderNumber || order.id, reason };
+  });
+  if (!groups.size) {
+    return {
+      purchaseGroupId: options.purchaseGroupId || "",
+      purchaseOrders: [],
+      orders,
+      createdCount: 0,
+      updatedCount: 0,
+      selectedOrderCount: orders.length,
+      linkedOrderCount: 0,
+      repairedOrderCount: staleLinkRepair.orders.length,
+      unassignedRouteCount,
+      skippedOrders
+    };
+  }
   db.purchaseOrders = Array.isArray(db.purchaseOrders) ? db.purchaseOrders : [];
   const affected = [];
   let createdCount = 0;
@@ -14663,8 +14804,179 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
     purchaseOrders: affected,
     orders,
     createdCount,
-    updatedCount
+    updatedCount,
+    selectedOrderCount: orders.length,
+    linkedOrderCount: groupedOrderIds.size,
+    repairedOrderCount: staleLinkRepair.orders.length,
+    skippedOrders
   };
+}
+
+function supplierPoCreationMessage(result = {}) {
+  const purchaseOrderCount = Number(result.purchaseOrders?.length || 0);
+  const linkedOrderCount = Number(result.linkedOrderCount || 0);
+  const skippedOrderCount = Number(result.skippedOrders?.length || 0);
+  const action = purchaseOrderCount === 0
+    ? "No supplier purchase order was created"
+    : Number(result.createdCount || 0) > 0
+    ? `${purchaseOrderCount} supplier purchase order${purchaseOrderCount === 1 ? "" : "s"} created or updated`
+    : `${purchaseOrderCount} existing supplier purchase order${purchaseOrderCount === 1 ? "" : "s"} updated`;
+  return `${action}; ${linkedOrderCount} selected order${linkedOrderCount === 1 ? "" : "s"} linked${skippedOrderCount ? ` and ${skippedOrderCount} skipped with a reason` : ""}.`;
+}
+
+function purchaseDemandIdentityValues(...records) {
+  const fields = ["sku", "vendorSku", "sourceSku", "originalSku", "mappedFromSku", "shadowSku", "mfrPartNumber", "manufacturerPartNumber", "mpn", "vendorPartNumber", "sourceItemNumber"];
+  return [...new Set(records.flatMap((record) => fields.map((field) => String(record?.[field] || "").trim()).filter(Boolean)))];
+}
+
+function normalizedPurchaseDemandIdentity(value) {
+  return String(value || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function purchaseDemandIdentityMatches(leftValues = [], rightValues = []) {
+  const left = leftValues.map((value) => ({ value, normalized: normalizedPurchaseDemandIdentity(value) })).filter((entry) => entry.normalized.length >= 4);
+  const right = rightValues.map((value) => ({ value, normalized: normalizedPurchaseDemandIdentity(value) })).filter((entry) => entry.normalized.length >= 4);
+  if (left.some((leftEntry) => right.some((rightEntry) => leftEntry.normalized === rightEntry.normalized))) return true;
+  return left.some((leftEntry) => right.some((rightEntry) => {
+    const leftPack = legacyPackSkuCandidate(leftEntry.value);
+    const rightPack = legacyPackSkuCandidate(rightEntry.value);
+    return Boolean((leftPack && normalizedPurchaseDemandIdentity(leftPack.parentSku) === rightEntry.normalized)
+      || (rightPack && normalizedPurchaseDemandIdentity(rightPack.parentSku) === leftEntry.normalized)
+      || (leftPack && rightPack && normalizedPurchaseDemandIdentity(leftPack.parentSku) === normalizedPurchaseDemandIdentity(rightPack.parentSku)));
+  }));
+}
+
+function linkCustomerOrdersToPurchaseOrder(db, po, orders = [], options = {}) {
+  if (TERMINAL_PURCHASE_DEMAND_PO_STATUSES.has(String(po.status || "").toLowerCase())) {
+    throw new Error("Closed, canceled, received, superseded, or deleted purchase orders cannot accept customer demand.");
+  }
+  db.purchaseRequirements = Array.isArray(db.purchaseRequirements) ? db.purchaseRequirements : [];
+  const actor = String(options.user || "Buyer");
+  const now = new Date().toISOString();
+  const staleLinkRepair = repairStalePurchaseDemandLinks(db, orders, { user: actor });
+  const targetLines = Array.isArray(po.items) ? po.items : [];
+  const results = [];
+  let linkedLineCount = 0;
+  let linkedOrderCount = 0;
+
+  for (const order of orders) {
+    const result = { orderId: order.id, orderNumber: order.orderNumber || order.id, status: "skipped", linkedLines: [], skippedLines: [] };
+    if (orderIsReportingOnly(order) || isTerminalCustomerDemand(order)) {
+      result.skippedLines.push({ reason: "This is not open operational customer demand." });
+      results.push(result);
+      continue;
+    }
+    const orderLines = orderLineItems(order);
+    for (let lineIndex = 0; lineIndex < orderLines.length; lineIndex += 1) {
+      const line = orderLines[lineIndex] || {};
+      const quantity = Math.max(0, Number(line.qty ?? line.quantity ?? 0));
+      if (!quantity) continue;
+      const activeRoutes = (order.fulfillmentRoutes || []).filter((route) => Number(route.lineIndex) === lineIndex
+        && !["canceled", "cancelled", "closed", "received", "shipped", "delivered"].includes(String(route.status || "").toLowerCase()));
+      const warehouseRoute = activeRoutes.find((route) => String(route.type || "").toLowerCase() === "warehouse");
+      if (warehouseRoute) {
+        result.skippedLines.push({ sku: line.sku || "", reason: `Already allocated from ${warehouseRoute.warehouseName || "warehouse inventory"}.` });
+        continue;
+      }
+      let route = activeRoutes.find((candidate) => ["purchase", "drop_ship"].includes(String(candidate.type || "").toLowerCase()));
+      if (route?.purchaseOrderId && String(route.purchaseOrderId) !== String(po.id)) {
+        result.skippedLines.push({ sku: line.sku || route.sku || "", reason: `Already linked to ${route.purchaseOrderNumber || "another purchase order"}.` });
+        continue;
+      }
+      if (route && String(route.purchaseOrderId || "") === String(po.id)) {
+        result.linkedLines.push({ sku: line.sku || route.sku || "", qty: quantity, alreadyLinked: true });
+        continue;
+      }
+
+      const demandIdentities = purchaseDemandIdentityValues(line, route || {});
+      const poLine = targetLines.find((candidate) => {
+        const links = Array.isArray(candidate.purchaseDemandLinks) ? candidate.purchaseDemandLinks : [];
+        const linkedQty = links.reduce((sum, link) => sum + Math.max(0, Number(link.qty || 0)), 0)
+          + (!links.length && candidate.orderId ? Math.max(0, Number(candidate.qty || 0)) : 0);
+        const remainingQty = Math.max(0, Number(candidate.qty ?? candidate.quantity ?? 0) - linkedQty);
+        return remainingQty >= quantity && purchaseDemandIdentityMatches(demandIdentities, purchaseDemandIdentityValues(candidate));
+      });
+      if (!poLine) {
+        result.skippedLines.push({ sku: line.sku || "", reason: "No matching open quantity exists on this PO." });
+        continue;
+      }
+
+      if (!route) {
+        route = createWorkflowRoute(order, {
+          type: "purchase",
+          status: "pooled",
+          lineIndex,
+          sku: line.sku || poLine.sku || "",
+          title: line.title || poLine.title || line.sku || "Untitled item",
+          qty: quantity,
+          vendorId: po.vendorId || "",
+          vendorName: po.supplier || "",
+          vendorSku: poLine.vendorSku || "",
+          unitCost: Number(poLine.unitCost ?? poLine.estimatedUnitCost ?? 0),
+          source: "existing_po_link"
+        });
+      }
+      const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
+      const requirement = ensurePooledPurchaseRequirement(db, order, route, line, options.workflowSettings || defaultOrderWorkflowSettings(), vendor, null, {
+        status: "pooled",
+        vendorSku: poLine.vendorSku,
+        unitCost: poLine.unitCost ?? poLine.estimatedUnitCost
+      });
+      route.warehouseId = po.warehouseId || route.warehouseId || "";
+      route.warehouseName = po.warehouseName || route.warehouseName || "";
+      route.purchaseOrderId = po.id;
+      route.purchaseOrderNumber = po.poNumber;
+      route.purchaseGroupId = po.purchaseGroupId || route.purchaseGroupId || "";
+      route.type = "purchase";
+      route.fulfillmentMode = po.fulfillmentMode || "warehouse_replenishment";
+      route.status = purchaseOrderHasSubmissionRecord(po) ? String(po.status || "submitted").toLowerCase() : "waiting_for_po";
+      route.reviewReason = "";
+      route.updatedAt = now;
+      requirement.status = "converted";
+      requirement.destinationWarehouseId = po.warehouseId || requirement.destinationWarehouseId || "";
+      requirement.destinationWarehouseName = po.warehouseName || requirement.destinationWarehouseName || "";
+      requirement.purchaseOrderId = po.id;
+      requirement.purchaseOrderNumber = po.poNumber;
+      requirement.convertedAt = now;
+      requirement.reviewReason = "";
+      requirement.updatedAt = now;
+      poLine.purchaseDemandLinks = Array.isArray(poLine.purchaseDemandLinks) ? poLine.purchaseDemandLinks : [];
+      poLine.purchaseDemandLinks.push({ orderId: order.id, orderNumber: order.orderNumber || order.id, routeId: route.id, sku: line.sku || route.sku || "", qty: quantity, linkedAt: now, linkedBy: actor });
+      poLine.linkedOrderIds = [...new Set([...(poLine.linkedOrderIds || []), order.id])];
+      poLine.linkedOrderNumbers = [...new Set([...(poLine.linkedOrderNumbers || []), order.orderNumber || order.id])];
+      result.linkedLines.push({ sku: line.sku || route.sku || "", qty: quantity, poSku: poLine.sku || "" });
+      linkedLineCount += 1;
+    }
+    if (result.linkedLines.length) {
+      result.status = result.skippedLines.length ? "partial" : "linked";
+      po.orderIds = [...new Set([...(po.orderIds || []), order.id])];
+      po.orderNumbers = [...new Set([...(po.orderNumbers || []), order.orderNumber || order.id])];
+      order.purchaseOrderIds = [...new Set([...(order.purchaseOrderIds || []), po.id])];
+      order.purchaseOrderNumbers = [...new Set([...(order.purchaseOrderNumbers || []), po.poNumber])];
+      recalculateOrderOperationalStatus(order);
+      addOrderWorkflowEvent(order, {
+        step: "purchase_order_linked",
+        title: "Linked to existing purchase order",
+        message: `${result.linkedLines.length} line${result.linkedLines.length === 1 ? "" : "s"} linked to ${po.poNumber}.`,
+        user: actor
+      });
+      order.updatedAt = now;
+      linkedOrderCount += 1;
+    }
+    results.push(result);
+  }
+  if (linkedLineCount) {
+    po.updatedAt = now;
+    po.customerDemandLinkedAt = now;
+    po.customerDemandLinkedBy = actor;
+    addPoTimeline(po, {
+      type: "customer_demand_linked",
+      title: "Customer orders linked",
+      message: `${linkedLineCount} demand line${linkedLineCount === 1 ? "" : "s"} from ${linkedOrderCount} customer order${linkedOrderCount === 1 ? "" : "s"} linked without changing the PO's ordered quantities.`,
+      user: actor
+    });
+  }
+  return { purchaseOrder: po, orders, results, linkedLineCount, linkedOrderCount, repairedOrderCount: staleLinkRepair.orders.length };
 }
 
 const DROPSHIP_REASON_OPTIONS = Object.freeze({
@@ -62131,7 +62443,7 @@ async function handleApi(req, res) {
     db.purchaseOrders = db.purchaseOrders || [];
     await reservePurchaseOrderNumbers(db, Math.max(1, orderLineItems(order).length));
     const result = createSupplierPurchaseOrdersFromOrders(db, [order.id], { warehouseId: body.warehouseId, supplier: body.supplier, user: body.user || "Luis" });
-    const response = { ...result, message: `${result.purchaseOrders.length} supplier-specific purchase order${result.purchaseOrders.length === 1 ? "" : "s"} created.` };
+    const response = { ...result, message: supplierPoCreationMessage(result) };
     const saved = await saveIdempotentPurchaseOrderMutation(req, body, "order-supplier-pos", actorIdentity, actor, {
       purchaseOrders: result.purchaseOrders,
       orders: result.orders,
@@ -62556,6 +62868,55 @@ async function handleApi(req, res) {
     await postgres.saveOrder(order);
     clearOrderApiCache(order.id);
     return sendJson(res, 201, { order, notification, message: "Customer notification queued." });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "link-orders" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const references = [...new Set((Array.isArray(body.orderReferences) ? body.orderReferences : String(body.orderReferences || "").split(/[\s,;]+/))
+      .map((value) => String(value || "").trim()).filter(Boolean))].slice(0, 100);
+    if (!references.length) return sendJson(res, 400, { error: "Enter at least one customer order number." });
+    const loaded = await Promise.all(references.map((reference) => postgres.readOrderByKey(reference)));
+    const orders = [...new Map(loaded.filter(Boolean).map((order) => [String(order.id || ""), order])).values()];
+    const missingReferences = references.filter((reference, index) => !loaded[index]);
+    const state = await postgres.readStateFields(["vendors", "warehouses", "systemSettings", "purchaseRequirements"], { fallbackToLegacy: false });
+    const relatedPoKeys = [...new Set(orders.flatMap((order) => (order.fulfillmentRoutes || []).flatMap((route) => [route.purchaseOrderId, route.purchaseOrderNumber])).filter(Boolean).map(String))];
+    const relatedPurchaseOrders = (await Promise.all(relatedPoKeys.map((key) => postgres.readPurchaseOrderByKey(key).catch(() => null)))).filter(Boolean);
+    const operationDb = {
+      ...state,
+      orders,
+      purchaseOrders: [...new Map([po, ...relatedPurchaseOrders].map((row) => [String(row.id || ""), row])).values()],
+      purchaseRequirements: Array.isArray(state.purchaseRequirements) ? state.purchaseRequirements : []
+    };
+    const workingDb = body.preview === true ? structuredClone(operationDb) : operationDb;
+    const workingPo = body.preview === true ? workingDb.purchaseOrders.find((row) => String(row.id || "") === String(po.id || "")) : po;
+    try {
+      const result = linkCustomerOrdersToPurchaseOrder(workingDb, workingPo, workingDb.orders, { user: authUser?.name || authUser?.username || body.user || "Buyer" });
+      const response = {
+        purchaseOrder: result.purchaseOrder,
+        results: result.results,
+        linkedLineCount: result.linkedLineCount,
+        linkedOrderCount: result.linkedOrderCount,
+        repairedOrderCount: result.repairedOrderCount,
+        missingReferences,
+        preview: body.preview === true,
+        message: body.preview === true
+          ? `${result.linkedOrderCount} order${result.linkedOrderCount === 1 ? " is" : "s are"} ready to link${missingReferences.length ? `; ${missingReferences.length} could not be found` : ""}.`
+          : `${result.linkedOrderCount} order${result.linkedOrderCount === 1 ? " was" : "s were"} linked to ${po.poNumber}${missingReferences.length ? `; ${missingReferences.length} could not be found` : ""}.`
+      };
+      if (body.preview === true) return sendJson(res, 200, response);
+      await postgres.savePurchaseOrderMutation({
+        purchaseOrders: [result.purchaseOrder],
+        orders: result.orders,
+        state: { purchaseRequirements: operationDb.purchaseRequirements || [] }
+      });
+      for (const order of result.orders) clearOrderApiCache(order.id);
+      await redisCache.deleteByPrefix("dataplus:purchasing:");
+      return sendJson(res, 200, response);
+    } catch (error) {
+      return sendJson(res, Number(error.statusCode || 400), { error: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] === "reconcile-links" && postgres.isPostgresEnabled()) {
@@ -63235,7 +63596,12 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
-    const orders = await readPurchaseOrderLinkedOrders(po);
+    const linkedOrders = await readPurchaseOrderLinkedOrders(po);
+    const requirementOrderKeys = [...new Set((db.purchaseRequirements || []).filter((requirement) => String(requirement.purchaseOrderId || "") === String(po.id || "")
+      || (po.poNumber && String(requirement.purchaseOrderNumber || "").trim().toLowerCase() === String(po.poNumber).trim().toLowerCase()))
+      .flatMap((requirement) => [requirement.orderId, requirement.orderNumber]).filter(Boolean).map(String))];
+    const requirementOrders = (await Promise.all(requirementOrderKeys.map((key) => postgres.readOrderByKey(key).catch(() => null)))).filter(Boolean);
+    const orders = [...new Map([...linkedOrders, ...requirementOrders].map((order) => [String(order.id || ""), order])).values()];
     if (!orders.length) return sendJson(res, 409, { error: "This dropship PO is not linked to a customer order." });
     try {
       const results = orders.map((order) => recordDropshipPurchaseOrderTracking(po, order, body));
@@ -63481,7 +63847,7 @@ async function handleApi(req, res) {
         const maximumNewPurchaseOrders = Math.max(1, selectedOrders.reduce((sum, order) => sum + Math.max(1, (order.fulfillmentRoutes || []).filter((route) => route.type === "purchase").length), 0));
         await reservePurchaseOrderNumbers(db, maximumNewPurchaseOrders);
         const result = createSupplierPurchaseOrdersFromOrders(db, body.orderIds || [], { warehouseId: body.warehouseId, supplier: body.supplier, user: actor });
-        const response = { ...result, message: `${result.purchaseOrders.length} supplier-specific purchase order${result.purchaseOrders.length === 1 ? "" : "s"} created.` };
+        const response = { ...result, message: supplierPoCreationMessage(result) };
         const saved = await saveIdempotentPurchaseOrderMutation(req, body, "supplier-pos", actorIdentity, actor, {
           purchaseOrders: result.purchaseOrders,
           orders: result.orders,
@@ -63840,6 +64206,7 @@ async function handleApi(req, res) {
       await postgres.saveOrder(order);
       clearOrderApiCache(order.id);
     }
+    reopenPurchaseRequirementsForPurchaseOrder(db, po, { reason, user, now });
     po.status = "deleted";
     po.workflowStage = "deleted";
     po.deletedAt = now;
@@ -78747,6 +79114,9 @@ module.exports = {
   shopifyStatusPayloadFromCreatedVariant,
   systemProductVariants,
     createSupplierPurchaseOrdersFromOrders,
+    repairStalePurchaseDemandLinks,
+    reopenPurchaseRequirementsForPurchaseOrder,
+    linkCustomerOrdersToPurchaseOrder,
     activePurchaseDemandDismissal,
     movePurchaseOrderLineToDropship,
   splitPurchaseOrderIntoDropshipPos,

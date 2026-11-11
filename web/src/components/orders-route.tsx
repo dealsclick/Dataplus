@@ -558,10 +558,15 @@ export function OperationsPage({ mobileReturns = false }: { mobileReturns?: bool
     const requestId = poCreationRequestIdsRef.current.get(requestKey) || crypto.randomUUID()
     poCreationRequestIdsRef.current.set(requestKey, requestId)
     try {
-      const result = await api<{ message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ requestId, orderIds, groupBySupplier: true, user: "Luis" }) })
-      toast.success(result.message || "Supplier-specific purchase orders created.")
+      const result = await api<{ message?: string; linkedOrderCount?: number; skippedOrders?: Array<{ orderId?: string; orderNumber?: string; reason?: string }> }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ requestId, orderIds, groupBySupplier: true, user: "Luis" }) })
+      const skippedOrders = Array.isArray(result.skippedOrders) ? result.skippedOrders : []
+      if (Number(result.linkedOrderCount || 0) > 0) toast.success(result.message || "Supplier-specific purchase orders created.")
+      if (skippedOrders.length) {
+        const details = skippedOrders.slice(0, 4).map((entry) => `${entry.orderNumber || entry.orderId || "Order"}: ${entry.reason || "Needs review"}`).join(" ")
+        toast.warning(`${skippedOrders.length.toLocaleString()} selected order${skippedOrders.length === 1 ? " was" : "s were"} not added. ${details}${skippedOrders.length > 4 ? ` ${skippedOrders.length - 4} more remain selected.` : ""}`, { duration: 12000 })
+      }
       poCreationRequestIdsRef.current.delete(requestKey)
-      setSelectedIds(new Set())
+      setSelectedIds(new Set(skippedOrders.map((entry) => String(entry.orderId || "")).filter(Boolean)))
       await load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to create supplier purchase orders.") }
     finally { setBusy(false) }
