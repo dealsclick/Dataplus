@@ -427,10 +427,11 @@ test('company product detail shares the complete normalized catalog while preser
 });
 
 test('manual order parsing preserves identifiers, dates, unknown cost and creates stable repeated-SKU line keys',()=>{
-  const input={filename:'orders.csv',content:Buffer.from('so,order_date,sku,qty,ext_price,ext_cost,difference\n0001,09/01/2026,00123,2,20,12,-999\n0002,2026-09-02,00124,1,10,,10').toString('base64')};
+  const input={filename:'orders.csv',content:Buffer.from('so,order_date,sku,qty,ext_price,ext_cost,difference,margin,order_desk,cust_po,ship_zip\n0001,09/01/2026,00123,2,20,12,-999,0.4,OLIVIA,PO-1,10303\n0002,2026-09-02,00124,1,10,,10,,DAVID,PO-2,10001').toString('base64')};
   const parsed=parseFile(input),result=normalize(parsed,parsed.suggested);
   assert.equal(result.summary.errors,0);assert.equal(result.lines[0].orderId,'0001');assert.equal(result.lines[0].sku,'00123');assert.equal(result.lines[0].date,'2026-09-01');
   assert.equal(result.lines[0].salesMinor,2000);assert.equal(result.lines[0].costMinor,1200);assert.equal(result.lines[1].costMinor,null);assert.equal(result.summary.warnings,2);
+  assert.equal(result.lines[0].sourceMargin,0.4);assert.equal(result.lines[0].orderDesk,'OLIVIA');assert.equal(result.lines[0].customerPo,'PO-1');assert.equal(result.lines[0].shipZip,'10303');
   parsed.rows.push({...parsed.rows[0]});const repeated=normalize(parsed,parsed.suggested);assert.equal(repeated.summary.errors,0);assert.equal(repeated.lines[0].lineId,'00123#1');assert.equal(repeated.lines[2].lineId,'00123#2');
   parsed.rows[0].order_date='2026-02-30';assert.ok(normalize(parsed,parsed.suggested).issues.some(i=>/order date/.test(i.message)));
   const formatted=parseFile({filename:'zoro.csv',content:Buffer.from('SO,ORDER_DATE,ITEM__,QTY,UNIT_PRICE,UNIT_COST,EXT_PRICE,EXT_COST,SHIP_CHARG\n183241,2025-01-01,BSC4-0678AQU,1.000000,0.00000,173.270000,0.00,173.270000,8.31\n183273,2025-01-02,BUY00063822,2.000000,37.86000,28.400000,75.72,56.80,0').toString('base64')});
@@ -705,7 +706,7 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(ctechSales.summary.period_day_count,1);assert.equal(ctechSales.summary.average_daily_orders,5);
     assert.equal(ctechSales.customers.filter(row=>row.customer==='Marshall').length,1);
     assert.equal(ctechSales.customers.find(row=>row.customer==='Marshall').order_count,2);
-    const profitabilityCsv='so,order_date,sku,qty,ext_price,ext_cost,status,name,vendor\nEX-1,2026-09-04,LOSS,1,5,8,SHIPPED,ZORO,Supplier A\nEX-2,2026-09-04,FREE,1,0,4,SHIPPED,ZORO,Supplier A\nEX-3,2026-09-04,ALT,1,12,10,SHIPPED,ZORO,Supplier A\nEX-4,2026-09-04,ALT,2,24,16,SHIPPED,ZORO,Supplier B';
+    const profitabilityCsv='so,order_date,sku,qty,unit_price,unit_cost,ext_price,ext_cost,difference,margin,order_desk,status,name,vendor\nEX-1,2026-09-04,LOSS,1,5,8,5,8,-3,-0.6,OLIVIA,SHIPPED,ZORO,Supplier A\nEX-2,2026-09-04,FREE,1,1,4,0,4,-4,0,DAVID,SHIPPED,ZORO,Supplier A\nEX-3,2026-09-04,ALT,1,12,10,12,10,99,0.1666667,OLIVIA,SHIPPED,ZORO,Supplier A\nEX-4,2026-09-04,ALT,2,12,7,24,16,8,0.5,DAVID,SHIPPED,ZORO,Supplier B';
     const profitabilityUpload=await store.importer.upload(owner,buy,{filename:'ctech-profitability.csv',channelId:zoro.id,content:Buffer.from(profitabilityCsv).toString('base64')});
     const profitabilityPreview=await store.importer.preview(owner,buy,{batchId:profitabilityUpload.id,mapping:profitabilityUpload.mapping});
     await store.importer.apply(owner,buy,{batchId:profitabilityUpload.id,confirm:true,previewToken:profitabilityPreview.previewToken});
@@ -713,6 +714,14 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(profitabilityReport.exceptionSummary.affected_order_count,2);assert.equal(profitabilityReport.exceptionSummary.negative_margin_order_count,2);assert.equal(profitabilityReport.exceptionSummary.zero_price_line_count,1);
     assert.equal(profitabilityReport.exceptions.filter(row=>row.type==='negative_margin').length,2);assert.equal(profitabilityReport.exceptions.filter(row=>row.type==='zero_price').length,1);
     assert.equal(profitabilityReport.supplierSavings.length,1);assert.equal(profitabilityReport.supplierSavings[0].sku,'ALT');assert.equal(Number(profitabilityReport.supplierSavings[0].potential_savings),2);
+    assert.equal(profitabilityReport.reconciliationSummary.audited_line_count,4);assert.equal(profitabilityReport.reconciliationSummary.issue_line_count,3);
+    assert.equal(profitabilityReport.reconciliationSummary.sales_extension_mismatch_count,1);assert.equal(profitabilityReport.reconciliationSummary.cost_extension_mismatch_count,1);
+    assert.equal(profitabilityReport.reconciliationSummary.profit_mismatch_count,1);assert.equal(profitabilityReport.reconciliationSummary.margin_mismatch_count,1);
+    assert.deepEqual(profitabilityReport.reconciliationIssues.map(row=>row.type).sort(),['cost_extension','sales_extension','source_margin','source_profit']);
+    assert.ok(profitabilityReport.reconciliationIssues.every(row=>row.reporting_order_id));
+    assert.equal(profitabilityReport.orderDeskSummary.desk_count,2);assert.equal(profitabilityReport.orderDeskSummary.assigned_order_count,4);
+    assert.equal(profitabilityReport.orderDeskPerformance.find(row=>row.order_desk==='OLIVIA').order_count,2);
+    assert.equal(Number(profitabilityReport.orderDeskPerformance.find(row=>row.order_desk==='DAVID').estimated_profit),4);
     await store.importer.rollback(owner,buy,{batchId:profitabilityUpload.id,confirm:true});
     assert.equal((await store.importer.customers(owner,buy)).find(row=>row.customer==='Marshall').orderCount,3);
     assert.equal((await store.importer.listOrders(owner,buy,new URLSearchParams({source:'Zoro',from:'2026-09-03',to:'2026-09-03'}))).total,1);
@@ -722,7 +731,7 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     await store.importer.rollback(owner,buy,{batchId:zoroBatch.id,confirm:true});
     assert.equal((await store.importer.report(owner,buy,new URLSearchParams())).summary.orders,2);
     await pool.query('update workspace_order_imports set channel_id=null where id=$1',[upload.id]);
-    await pool.query("update workspace_imported_order_lines set data=(data-'fingerprintVersion'-'shippingMinor')||jsonb_build_object('fingerprint','legacy') where batch_id=$1",[upload.id]);
+    await pool.query("update workspace_imported_order_lines set data=(data-'fingerprintVersion'-'shippingMinor'-'customerPo'-'orderDesk'-'shipZip'-'notes'-'additional'-'sourceMargin')||jsonb_build_object('fingerprint','legacy') where batch_id=$1",[upload.id]);
     await createCompanyStore(()=>pool).init();
     assert.equal((await store.importer.detail(owner,buy,upload.id)).channelId,manual.id,'Existing import identity is retained during backfill');
     const migratedDuplicate=await store.importer.upload(owner,buy,input),migratedPreview=await store.importer.preview(owner,buy,{batchId:migratedDuplicate.id,mapping:migratedDuplicate.mapping});

@@ -1904,6 +1904,10 @@ type SalesReportData = {
   exceptionSummary?: SalesReportRow
   exceptions?: SalesReportRow[]
   supplierSavings?: SalesReportRow[]
+  reconciliationSummary?: SalesReportRow
+  reconciliationIssues?: SalesReportRow[]
+  orderDeskSummary?: SalesReportRow
+  orderDeskPerformance?: SalesReportRow[]
   paymentStatuses?: SalesReportRow[]
 }
 type SalesReportOrder = { order_id?: string; order_number?: string; internal_order_number?: string; marketplace_order_id?: string; source?: string; channel_source?: string; buyer?: string; sales_at?: string; status?: string; net_sales?: number; product_cost?: number; shipping_cost?: number; marketplace_fees?: number; estimated_profit?: number; cost_status?: string; missing_product_cost?: boolean; missing_label_cost?: boolean; reporting_only?: boolean; read_only?: boolean }
@@ -2098,6 +2102,8 @@ export function SalesReportsPage() {
   }))
   const selectedChannel = channelChartData.find((row) => row.channel === activeChannel) || channelChartData[0]
   const exceptionSummary = data.exceptionSummary || {}
+  const reconciliationSummary = data.reconciliationSummary || {}
+  const orderDeskSummary = data.orderDeskSummary || {}
   const profitableCustomers = [...(data.customers || [])].sort((left, right) => reportNumber(right, "estimated_profit") - reportNumber(left, "estimated_profit"))
   const supplierSavingsTotal = (data.supplierSavings || []).reduce((total, row) => total + reportNumber(row, "potential_savings"), 0)
   const downloadRows = (name: string, headers: string[], rows: SalesReportRow[]) => {
@@ -2135,7 +2141,7 @@ export function SalesReportsPage() {
         <Detail label="Average profit / day" value={moneyLabel(reportNumber(summary, "average_daily_profit"))} />
       </div>
       <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-md border bg-muted/25 px-3 py-2 text-xs text-muted-foreground"><span>Net sales {compareLabel("net_sales")}</span><span>Orders {compareLabel("order_count")}</span><span>Estimated profit {compareLabel("estimated_profit")}</span><span>Cost data on {(reportNumber(summary, "cost_coverage") * 100).toFixed(1)}% of reportable orders.</span><Button size="sm" variant="outline" className="h-7" onClick={() => { setCostScope("missing"); setTab("orders"); setReportOrderPage(1); void loadReportOrders(1, "missing") }}>{numberLabel(reportNumber(summary, "missing_cost_order_count"))} need cost review</Button></div>
-      <Tabs className="min-w-0" value={tab} onValueChange={setTab}><div className="max-w-full overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="time">Sales over time</TabsTrigger><TabsTrigger value="performance">Channels and brands</TabsTrigger><TabsTrigger value="products">Products and customers</TabsTrigger><TabsTrigger value="profitability">Profitability &amp; exceptions</TabsTrigger><TabsTrigger value="orders">Orders</TabsTrigger><TabsTrigger value="quality">Metric notes</TabsTrigger></TabsList></div>
+      <Tabs className="min-w-0" value={tab} onValueChange={setTab}><div className="max-w-full overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="time">Sales over time</TabsTrigger><TabsTrigger value="performance">Channels and brands</TabsTrigger><TabsTrigger value="products">Products and customers</TabsTrigger><TabsTrigger value="profitability">Profitability &amp; exceptions</TabsTrigger><TabsTrigger value="reconciliation">Margin reconciliation</TabsTrigger><TabsTrigger value="order-desk">Order desk</TabsTrigger><TabsTrigger value="orders">Orders</TabsTrigger><TabsTrigger value="quality">Metric notes</TabsTrigger></TabsList></div>
         <TabsContent value="overview" className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.3fr)_minmax(320px,.7fr)]">
           <Card>
             <CardHeader className="flex-row flex-wrap items-start justify-between gap-3">
@@ -2158,6 +2164,76 @@ export function SalesReportsPage() {
           <Card><CardHeader><CardTitle className="text-base">Product sales by brand</CardTitle><CardDescription>Line-item product sales exclude order-level shipping. Product cost is estimated from the line or current catalog cost.</CardDescription></CardHeader><CardContent className="p-0"><div className="max-h-[520px] overflow-auto"><Table><TableHeader><TableRow><TableHead>Brand</TableHead><TableHead className="text-right">Orders</TableHead><TableHead className="text-right">Units</TableHead><TableHead className="text-right">Product sales</TableHead><TableHead className="text-right">Est. profit</TableHead></TableRow></TableHeader><TableBody>{(data.brands || []).map((row) => <TableRow key={String(row.brand)}><TableCell className="font-medium">{String(row.brand)}</TableCell><TableCell className="text-right">{numberLabel(reportNumber(row, "order_count"))}</TableCell><TableCell className="text-right">{numberLabel(reportNumber(row, "units"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "product_sales"))}</TableCell><TableCell className={reportNumber(row, "estimated_product_profit") < 0 ? "text-right text-destructive" : "text-right"}>{moneyLabel(reportNumber(row, "estimated_product_profit"))}</TableCell></TableRow>)}{!(data.brands || []).length && <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No line-item brand data is available for this range.</TableCell></TableRow>}</TableBody></Table></div></CardContent></Card>
         </TabsContent>
         <TabsContent value="products" className="mt-5 grid gap-5 xl:grid-cols-2"><Card><CardHeader><CardTitle className="text-base">Top products</CardTitle><CardDescription>Line-item revenue by DataPlus mapped SKU when available.</CardDescription></CardHeader><CardContent className="p-0"><div className="max-h-[560px] overflow-auto"><Table><TableHeader><TableRow><TableHead>SKU / product</TableHead><TableHead>Brand</TableHead><TableHead className="text-right">Units</TableHead><TableHead className="text-right">Product sales</TableHead><TableHead className="text-right">Est. profit</TableHead></TableRow></TableHeader><TableBody>{(data.products || []).map((row) => <TableRow key={String(row.sku)}><TableCell className="min-w-60"><a href={`/inventory/${encodeURIComponent(String(row.sku || ""))}`} className="font-medium hover:underline">{String(row.sku)}</a><p className="max-w-64 truncate text-xs text-muted-foreground">{String(row.title || "Untitled product")}</p></TableCell><TableCell>{String(row.brand || "-")}</TableCell><TableCell className="text-right">{numberLabel(reportNumber(row, "units"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "product_sales"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "estimated_product_profit"))}</TableCell></TableRow>)}</TableBody></Table></div></CardContent></Card><Card><CardHeader><CardTitle className="text-base">Top customers</CardTitle><CardDescription>Only the channel-provided buyer or customer ID is used. Marketplace relay identities remain channel-scoped.</CardDescription></CardHeader><CardContent className="p-0"><div className="max-h-[560px] overflow-auto"><Table><TableHeader><TableRow><TableHead>Customer</TableHead><TableHead className="text-right">Orders</TableHead><TableHead className="text-right">Net sales</TableHead><TableHead className="text-right">Average order</TableHead><TableHead>Last order</TableHead></TableRow></TableHeader><TableBody>{(data.customers || []).map((row) => <TableRow key={String(row.customer)}><TableCell className="font-medium">{String(row.customer)}</TableCell><TableCell className="text-right">{numberLabel(reportNumber(row, "order_count"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "net_sales"))}</TableCell><TableCell className="text-right">{moneyLabel(reportNumber(row, "average_order_value"))}</TableCell><TableCell className="whitespace-nowrap text-xs text-muted-foreground">{dateLabel(String(row.last_order_at || ""))}</TableCell></TableRow>)}</TableBody></Table></div></CardContent></Card></TabsContent>
+        <TabsContent value="reconciliation" className="mt-5 grid gap-5">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+            <Detail label="Lines audited" value={numberLabel(reportNumber(reconciliationSummary, "audited_line_count"))} />
+            <Detail label="Lines needing review" value={numberLabel(reportNumber(reconciliationSummary, "issue_line_count"))} />
+            <Detail label="Sales extension mismatches" value={numberLabel(reportNumber(reconciliationSummary, "sales_extension_mismatch_count"))} />
+            <Detail label="Cost extension mismatches" value={numberLabel(reportNumber(reconciliationSummary, "cost_extension_mismatch_count"))} />
+            <Detail label="DIFFERENCE mismatches" value={numberLabel(reportNumber(reconciliationSummary, "profit_mismatch_count"))} />
+            <Detail label="MARGIN mismatches" value={numberLabel(reportNumber(reconciliationSummary, "margin_mismatch_count"))} />
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <Detail label="Sales variance reviewed" value={moneyLabel(reportNumber(reconciliationSummary, "sales_extension_variance"))} />
+            <Detail label="Cost variance reviewed" value={moneyLabel(reportNumber(reconciliationSummary, "cost_extension_variance"))} />
+            <Detail label="Profit variance reviewed" value={moneyLabel(reportNumber(reconciliationSummary, "profit_variance"))} />
+            <Detail label="Orders without order desk" value={numberLabel(reportNumber(reconciliationSummary, "unassigned_order_desk_count"))} />
+          </div>
+          <Card>
+            <CardHeader className="flex-row flex-wrap items-start justify-between gap-3">
+              <div><CardTitle className="text-base">CTech margin reconciliation</CardTitle><CardDescription>Compares imported extended sales, extended cost, DIFFERENCE, and MARGIN with values recalculated from quantity, unit price, and unit cost. Source evidence is preserved.</CardDescription></div>
+              <Button size="sm" variant="outline" onClick={() => downloadRows("margin-reconciliation", ["severity", "type", "order_id", "sales_at", "buyer", "order_desk", "report_channel", "sku", "title", "quantity", "source_value", "calculated_value", "variance", "impact", "issue"], data.reconciliationIssues || [])}><FileDown className="size-4" /> Export</Button>
+            </CardHeader>
+            <CardContent className="p-0"><div className="max-h-[600px] overflow-auto"><Table><TableHeader><TableRow><TableHead>Priority</TableHead><TableHead>Order</TableHead><TableHead>Date</TableHead><TableHead>Order desk</TableHead><TableHead>SKU / product</TableHead><TableHead>Check</TableHead><TableHead className="text-right">Source</TableHead><TableHead className="text-right">DataPlus</TableHead><TableHead className="text-right">Variance</TableHead></TableRow></TableHeader><TableBody>
+              {(data.reconciliationIssues || []).map((row, index) => {
+                const isMargin = row.type === "source_margin"
+                const valueLabel = (value: unknown) => isMargin ? `${(Number(value || 0) * 100).toFixed(2)}%` : moneyLabel(Number(value || 0))
+                return <TableRow key={`${String(row.type)}:${String(row.source)}:${String(row.order_id)}:${String(row.line_id)}:${index}`}>
+                  <TableCell><Badge variant={row.severity === "critical" ? "destructive" : "warning"}>{row.severity === "critical" ? "Critical" : "Review"}</Badge></TableCell>
+                  <TableCell><a className="font-medium text-primary hover:underline" href={`/orders/${encodeURIComponent(String(row.reporting_order_id || ""))}`}>{String(row.order_id || "-")}</a><p className="text-xs text-muted-foreground">{String(row.report_channel || row.source || "")}</p></TableCell>
+                  <TableCell className="whitespace-nowrap">{reportDateLabel(row.sales_at, { month: "short", day: "numeric", year: "numeric" })}</TableCell>
+                  <TableCell>{String(row.order_desk || "Unassigned")}</TableCell>
+                  <TableCell className="min-w-56"><a className="font-medium hover:underline" href={`/inventory/${encodeURIComponent(String(row.sku || ""))}`}>{String(row.sku || "-")}</a><p className="max-w-64 truncate text-xs text-muted-foreground">{String(row.title || "Untitled product")}</p></TableCell>
+                  <TableCell className="min-w-64">{String(row.issue || "Review source values")}</TableCell>
+                  <TableCell className="text-right">{valueLabel(row.source_value)}</TableCell>
+                  <TableCell className="text-right">{valueLabel(row.calculated_value)}</TableCell>
+                  <TableCell className="text-right font-medium text-destructive">{valueLabel(row.variance)}</TableCell>
+                </TableRow>
+              })}
+              {!(data.reconciliationIssues || []).length && <TableRow><TableCell colSpan={9} className="h-28 text-center text-muted-foreground">No margin reconciliation issues were found for this report range.</TableCell></TableRow>}
+            </TableBody></Table></div></CardContent>
+          </Card>
+        </TabsContent>
+        <TabsContent value="order-desk" className="mt-5 grid gap-5">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <Detail label="Configured order desks" value={numberLabel(reportNumber(orderDeskSummary, "desk_count"))} />
+            <Detail label="Assigned orders" value={numberLabel(reportNumber(orderDeskSummary, "assigned_order_count"))} />
+            <Detail label="Unassigned orders" value={numberLabel(reportNumber(orderDeskSummary, "unassigned_order_count"))} />
+            <Detail label="Multiple-desk orders" value={numberLabel(reportNumber(orderDeskSummary, "multiple_desk_order_count"))} />
+          </div>
+          <Card>
+            <CardHeader className="flex-row flex-wrap items-start justify-between gap-3">
+              <div><CardTitle className="text-base">Order desk performance</CardTitle><CardDescription>Sales and estimated profitability grouped by the CTech ORDER_DESK value. Unassigned and mixed-owner orders remain visible for cleanup.</CardDescription></div>
+              <Button size="sm" variant="outline" onClick={() => downloadRows("order-desk-performance", ["order_desk", "order_count", "customer_count", "units", "net_sales", "estimated_cost", "estimated_profit", "estimated_margin", "average_order_value", "negative_margin_order_count", "missing_cost_order_count", "first_order_at", "last_order_at"], data.orderDeskPerformance || [])}><FileDown className="size-4" /> Export</Button>
+            </CardHeader>
+            <CardContent className="p-0"><div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Order desk</TableHead><TableHead className="text-right">Orders</TableHead><TableHead className="text-right">Customers</TableHead><TableHead className="text-right">Units</TableHead><TableHead className="text-right">Net sales</TableHead><TableHead className="text-right">Average order</TableHead><TableHead className="text-right">Est. profit</TableHead><TableHead className="text-right">Margin</TableHead><TableHead className="text-right">Loss orders</TableHead><TableHead className="text-right">Missing cost</TableHead><TableHead>Last order</TableHead></TableRow></TableHeader><TableBody>
+              {(data.orderDeskPerformance || []).map((row) => <TableRow key={String(row.order_desk)}>
+                <TableCell className="font-medium">{row.order_desk === "Unassigned" || row.order_desk === "Multiple desks" ? <Badge variant="warning">{String(row.order_desk)}</Badge> : String(row.order_desk || "Unassigned")}</TableCell>
+                <TableCell className="text-right">{numberLabel(reportNumber(row, "order_count"))}</TableCell>
+                <TableCell className="text-right">{numberLabel(reportNumber(row, "customer_count"))}</TableCell>
+                <TableCell className="text-right">{numberLabel(reportNumber(row, "units"))}</TableCell>
+                <TableCell className="text-right font-medium">{moneyLabel(reportNumber(row, "net_sales"))}</TableCell>
+                <TableCell className="text-right">{moneyLabel(reportNumber(row, "average_order_value"))}</TableCell>
+                <TableCell className={reportNumber(row, "estimated_profit") < 0 ? "text-right font-medium text-destructive" : "text-right font-medium text-emerald-500"}>{moneyLabel(reportNumber(row, "estimated_profit"))}</TableCell>
+                <TableCell className={reportNumber(row, "estimated_margin") < 0 ? "text-right text-destructive" : "text-right"}>{row.estimated_margin === null || row.estimated_margin === undefined ? "-" : `${(reportNumber(row, "estimated_margin") * 100).toFixed(1)}%`}</TableCell>
+                <TableCell className={reportNumber(row, "negative_margin_order_count") > 0 ? "text-right text-destructive" : "text-right"}>{numberLabel(reportNumber(row, "negative_margin_order_count"))}</TableCell>
+                <TableCell className={reportNumber(row, "missing_cost_order_count") > 0 ? "text-right text-amber-500" : "text-right"}>{numberLabel(reportNumber(row, "missing_cost_order_count"))}</TableCell>
+                <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{dateLabel(String(row.last_order_at || ""))}</TableCell>
+              </TableRow>)}
+              {!(data.orderDeskPerformance || []).length && <TableRow><TableCell colSpan={11} className="h-28 text-center text-muted-foreground">No order-desk assignments are available for this report range.</TableCell></TableRow>}
+            </TableBody></Table></div></CardContent>
+          </Card>
+        </TabsContent>
         <TabsContent value="profitability" className="mt-5 grid gap-5">
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
             <Detail label="Affected orders" value={numberLabel(reportNumber(exceptionSummary, "affected_order_count"))} />
