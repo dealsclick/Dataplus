@@ -676,7 +676,7 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(salesReport.exceptionSummary.missing_cost_line_count,1);assert.equal(salesReport.exceptionSummary.affected_order_count,1);
     assert.equal(salesReport.exceptions[0].type,'missing_cost');assert.match(salesReport.exceptions[0].reporting_order_id,/^reporting:/);
     assert.equal(salesReport.profitableProducts.find(row=>row.sku==='ABC').estimated_product_profit,8);
-    assert.equal(salesReport.customers.find(row=>row.customer==='Marshall').estimated_profit,8);
+    assert.equal(salesReport.customers.find(row=>row.customer==='MARSHALL RETAIL GROUP').estimated_profit,8);
     assert.equal(Number((await store.importer.salesReport(owner,buy,new URLSearchParams({costScope:'complete'}))).summary.order_count),1);
     assert.equal(Number((await store.importer.salesReport(owner,buy,new URLSearchParams({costScope:'missing'}))).summary.net_sales),10);
     const salesOrders=await store.importer.salesReportOrders(owner,buy,new URLSearchParams({page:'1'}));
