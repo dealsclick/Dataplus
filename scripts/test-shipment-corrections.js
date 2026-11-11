@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { preserveShipmentCorrections, shipmentReopenPlan } = require("../lib/shipment-corrections");
+const { preserveShipmentCorrections, shipmentLineAssociationPlan, shipmentReopenPlan } = require("../lib/shipment-corrections");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const { XMLBuilder } = require("fast-xml-parser");
@@ -135,6 +135,27 @@ test("aggregate duplicate package rows without reopening other quantities", () =
   assert.deepEqual(shipmentReopenPlan([{ sku: "A", qty: 3 }], { lines: [{ sku: "A", qty: 1 }, { sku: "A", qty: 1 }] }), [{ lineIndex: 0, qty: 2 }]);
 });
 
+test("channel tracking associates duplicate lifecycle rows once without weakening reopen quantities", () => {
+  const lines = [{ sku: "A", qty: 1 }];
+  const shipment = { lines: [{ sku: "A", lineIndex: 0, qty: 1 }, { sku: "A", lineIndex: 0, qty: 1 }] };
+  assert.deepEqual(shipmentLineAssociationPlan(lines, shipment), [{ lineIndex: 0 }]);
+  assert.throws(() => shipmentReopenPlan(lines, shipment), /exceeds/);
+});
+
+test("channel tracking still rejects ambiguous shipment line associations", () => {
+  assert.throws(() => shipmentLineAssociationPlan([{ sku: "A", qty: 1 }, { sku: "A", qty: 1 }], { lines: [{ sku: "A", qty: 1 }] }), /ambiguous/);
+});
+
+test("received purchase routes are replaced by their active warehouse route for shipping", () => {
+  const selectRoutes = loadServerSyncFunction("fulfillmentRoutesForShipment", {});
+  const order = { fulfillmentRoutes: [
+    { id: "purchase", type: "purchase", status: "received", lineIndex: 0, qty: 1 },
+    { id: "warehouse", type: "warehouse", status: "allocated", lineIndex: 0, qty: 1 },
+    { id: "open-purchase", type: "purchase", status: "processing", lineIndex: 1, qty: 1 }
+  ] };
+  assert.deepEqual(Array.from(selectRoutes(order), (route) => route.id), ["warehouse", "open-purchase"]);
+});
+
 test("source refresh retains tracking edits and all history", () => {
   const history = Array.from({ length: 60 }, (_, i) => ({ trackingNumber: String(i) }));
   const existing = { trackingNumber: "corrected", shippingCost: 7, trackingHistory: history, shipments: [{ id: "s", trackingUpdatedAt: "today", trackingHistory: history }] };
@@ -187,7 +208,7 @@ test("Shopify edits update the existing fulfillment and surface userErrors", asy
 test("eBay correction retains other package tracking and escapes XML", async () => {
   const writes = [];
   const sync = loadServerFunction("syncEbayShipmentTracking", {
-    XMLBuilder, shipmentReopenPlan, canonicalCarrierName, normalizeTrackingNumber, orderLineItems: (order) => order.items,
+    XMLBuilder, shipmentLineAssociationPlan, canonicalCarrierName, normalizeTrackingNumber, orderLineItems: (order) => order.items,
     verifyEbayShipmentTracking: async () => ({ fulfillmentId: "fulfillment-1", verifiedAt: "2026-11-02T20:00:00.000Z" }),
     ebayTradingText: (value) => String(value ?? ""), ebayTradingArray: (value) => Array.isArray(value) ? value : value ? [value] : [],
     ebayTradingRequest: async (_db, name, payload) => {
@@ -206,7 +227,7 @@ test("eBay correction retains other package tracking and escapes XML", async () 
 test("eBay Live tracking matches the marketplace line or legacy item when the listing has no seller SKU", async () => {
   const writes = [];
   const sync = loadServerFunction("syncEbayShipmentTracking", {
-    XMLBuilder, shipmentReopenPlan, canonicalCarrierName, normalizeTrackingNumber, orderLineItems: (order) => order.items,
+    XMLBuilder, shipmentLineAssociationPlan, canonicalCarrierName, normalizeTrackingNumber, orderLineItems: (order) => order.items,
     verifyEbayShipmentTracking: async () => ({ fulfillmentId: "fulfillment-live", verifiedAt: "2026-11-02T20:00:00.000Z" }),
     ebayTradingText: (value) => String(value ?? ""), ebayTradingArray: (value) => Array.isArray(value) ? value : value ? [value] : [],
     ebayTradingRequest: async (_db, name, payload) => {
@@ -223,7 +244,7 @@ test("eBay Live tracking matches the marketplace line or legacy item when the li
 
 test("eBay tracking is not confirmed when fulfillment readback does not contain it", async () => {
   const sync = loadServerFunction("syncEbayShipmentTracking", {
-    XMLBuilder, shipmentReopenPlan, canonicalCarrierName, normalizeTrackingNumber, orderLineItems: (order) => order.items,
+    XMLBuilder, shipmentLineAssociationPlan, canonicalCarrierName, normalizeTrackingNumber, orderLineItems: (order) => order.items,
     verifyEbayShipmentTracking: async () => { throw new Error("fulfillment readback did not include 1Z999"); },
     ebayTradingText: (value) => String(value ?? ""), ebayTradingArray: (value) => Array.isArray(value) ? value : value ? [value] : [],
     ebayTradingRequest: async (_db, name) => name === "GetOrders"

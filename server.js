@@ -165,7 +165,7 @@ const { importShopifyReturns } = require("./lib/shopify-return-import");
 const { importTemuReturns, temuReturnRecord, temuReturnResponse } = require("./lib/temu-return-import");
 const { indexSavedTemuReturns, linkSavedTemuReturns } = require("./lib/temu-return-linking");
 const { temuOrderPages } = require("./lib/temu-order-pagination");
-const { preserveShipmentCorrections, shipmentReopenPlan } = require("./lib/shipment-corrections");
+const { preserveShipmentCorrections, shipmentLineAssociationPlan, shipmentReopenPlan } = require("./lib/shipment-corrections");
 const { applyPrintedShipmentFulfillment } = require("./lib/printed-shipment-fulfillment");
 const { mergeImportedShipments } = require("./lib/imported-shipment-merge");
 const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, packageFor: fulfillmentPackageFor, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
@@ -32822,6 +32822,21 @@ function fulfillmentRouteLineState(order = {}, route = {}) {
   return { line, fulfilled, fulfilledQty, remainingQty };
 }
 
+function fulfillmentRoutesForShipment(order = {}, routes = order.fulfillmentRoutes || []) {
+  const allRoutes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [];
+  const activeWarehouseLineIndexes = new Set(allRoutes
+    .filter((route) => String(route.type || "").toLowerCase() === "warehouse")
+    .filter((route) => !["canceled", "cancelled", "closed", "expired", "fulfilled", "shipped", "delivered", "superseded", "rejected", "dismissed", "void", "voided"].includes(String(route.status || "").toLowerCase()))
+    .filter((route) => Number(route.qty ?? route.quantity ?? route.qtyAllocated ?? 0) > 0)
+    .map((route) => Number(route.lineIndex))
+    .filter(Number.isInteger));
+  return routes.filter((route) => {
+    if (String(route.type || "").toLowerCase() !== "purchase") return true;
+    if (!activeWarehouseLineIndexes.has(Number(route.lineIndex))) return true;
+    return !["partially_received", "received"].includes(String(route.status || "").toLowerCase());
+  });
+}
+
 function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseOrders = []) {
   const warehouseId = String(filters.warehouseId || "");
   const status = String(filters.status || "").toLowerCase();
@@ -32838,7 +32853,8 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
     if (orderIsReportingOnly(order)) return [];
     if (!includeTerminal && isTerminalCustomerDemand(order)) return [];
     const routes = order.fulfillmentRoutes || [];
-    const shippingRoutes = routes.filter((entry) => ["warehouse", "purchase"].includes(String(entry.type || "").toLowerCase()))
+    const shipmentRoutes = includeTerminal ? routes : fulfillmentRoutesForShipment(order, routes);
+    const shippingRoutes = shipmentRoutes.filter((entry) => ["warehouse", "purchase"].includes(String(entry.type || "").toLowerCase()))
       .filter((entry) => includeTerminal || !fulfillmentRouteLineState(order, entry).fulfilled)
       .filter((entry) => {
         if (includeTerminal) return true;
@@ -32850,7 +32866,7 @@ function fulfillmentWorkRows(orders = [], filters = {}, products = [], purchaseO
     const hasActiveDropship = routes.some((route) => String(route.type || "").toLowerCase() === "drop_ship"
       && !["canceled", "cancelled", "closed", "fulfilled", "shipped", "delivered"].includes(String(route.status || "").toLowerCase()));
     if (hasActiveDropship) return [];
-    return routes
+    return shipmentRoutes
     .filter((route) => ["warehouse", "purchase"].includes(String(route.type || "").toLowerCase()))
     .filter((route) => includeTerminal || !fulfillmentRouteLineState(order, route).fulfilled)
     .filter((route) => {
@@ -35489,14 +35505,14 @@ async function processFulfillmentBatchRow(row, batch, db, operationsSettings, mo
     return;
   }
   if (mode === "purchase" && marketplaceCanceled && guard.adminPinAuthorized !== true) throw new Error("An administrator PIN is required to buy a label for this canceled marketplace order.");
-  const routes = (order.fulfillmentRoutes || []).filter((entry) => {
+  const routes = fulfillmentRoutesForShipment(order, (order.fulfillmentRoutes || []).filter((entry) => {
     if (!requestedRouteIds.has(String(entry.id))) return false;
     if (fulfillmentRouteLineState(order, entry).fulfilled) return false;
     const routeStatus = String(entry.status || "").toLowerCase();
     if (["canceled", "cancelled", "closed", "expired", "fulfilled", "shipped", "delivered", "superseded", "superseded_by_receipt_stock", "rejected", "dismissed", "void", "voided"].includes(routeStatus)) return false;
     const rawQty = entry.qty ?? entry.quantity ?? entry.qtyAllocated;
     return rawQty === undefined || rawQty === null || Number(rawQty) > 0;
-  });
+  }));
   const route = routes[0] || {};
   if (!route.id) throw new Error("Fulfillment route was not found.");
   let lines = routes.map((entry) => ({ sku: entry.sku || "", lineIndex: Number(entry.lineIndex || 0), qty: Number(entry.qty || 0) }));
@@ -51783,7 +51799,7 @@ async function syncEbayShipmentTracking(db, order, shipment) {
   if (sourceOrders.length !== 1) throw new Error("eBay did not return a unique source order.");
   const transactions = ebayTradingArray(sourceOrders[0].TransactionArray?.Transaction);
   const lines = orderLineItems(order);
-  const plan = shipmentReopenPlan(lines, shipment);
+  const plan = shipmentLineAssociationPlan(lines, shipment);
   // Validate every association before making the first remote change.
   const requests = plan.map(({ lineIndex }) => {
     const line = lines[lineIndex];
