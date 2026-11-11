@@ -673,6 +673,10 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(salesReport.summary.period_day_count,30);assert.equal(salesReport.summary.average_daily_orders,2/30);assert.equal(salesReport.summary.average_daily_net_sales,1);assert.equal(salesReport.summary.average_daily_units,3/30);assert.equal(salesReport.summary.average_daily_profit,0.6);
     assert.equal(Number(salesReport.summary.missing_cost_order_count),1);assert.equal(salesReport.summary.cost_coverage,0.5);assert.equal(salesReport.daily.length,2);assert.equal(salesReport.monthly.length,1);
     assert.equal(salesReport.channels[0].channel,'external erp');assert.equal(salesReport.products.find(row=>row.sku==='ABC').product_sales,20);assert.equal(salesReport.paymentStatuses[0].payment_status,'Historical import');
+    assert.equal(salesReport.exceptionSummary.missing_cost_line_count,1);assert.equal(salesReport.exceptionSummary.affected_order_count,1);
+    assert.equal(salesReport.exceptions[0].type,'missing_cost');assert.match(salesReport.exceptions[0].reporting_order_id,/^reporting:/);
+    assert.equal(salesReport.profitableProducts.find(row=>row.sku==='ABC').estimated_product_profit,8);
+    assert.equal(salesReport.customers.find(row=>row.customer==='Marshall').estimated_profit,8);
     assert.equal(Number((await store.importer.salesReport(owner,buy,new URLSearchParams({costScope:'complete'}))).summary.order_count),1);
     assert.equal(Number((await store.importer.salesReport(owner,buy,new URLSearchParams({costScope:'missing'}))).summary.net_sales),10);
     const salesOrders=await store.importer.salesReportOrders(owner,buy,new URLSearchParams({page:'1'}));
@@ -701,6 +705,15 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(ctechSales.summary.period_day_count,1);assert.equal(ctechSales.summary.average_daily_orders,5);
     assert.equal(ctechSales.customers.filter(row=>row.customer==='Marshall').length,1);
     assert.equal(ctechSales.customers.find(row=>row.customer==='Marshall').order_count,2);
+    const profitabilityCsv='so,order_date,sku,qty,ext_price,ext_cost,status,name,vendor\nEX-1,2026-09-04,LOSS,1,5,8,SHIPPED,ZORO,Supplier A\nEX-2,2026-09-04,FREE,1,0,4,SHIPPED,ZORO,Supplier A\nEX-3,2026-09-04,ALT,1,12,10,SHIPPED,ZORO,Supplier A\nEX-4,2026-09-04,ALT,2,24,16,SHIPPED,ZORO,Supplier B';
+    const profitabilityUpload=await store.importer.upload(owner,buy,{filename:'ctech-profitability.csv',channelId:zoro.id,content:Buffer.from(profitabilityCsv).toString('base64')});
+    const profitabilityPreview=await store.importer.preview(owner,buy,{batchId:profitabilityUpload.id,mapping:profitabilityUpload.mapping});
+    await store.importer.apply(owner,buy,{batchId:profitabilityUpload.id,confirm:true,previewToken:profitabilityPreview.previewToken});
+    const profitabilityReport=await store.importer.salesReport(owner,buy,new URLSearchParams({from:'2026-09-04',to:'2026-09-04'}));
+    assert.equal(profitabilityReport.exceptionSummary.affected_order_count,2);assert.equal(profitabilityReport.exceptionSummary.negative_margin_order_count,2);assert.equal(profitabilityReport.exceptionSummary.zero_price_line_count,1);
+    assert.equal(profitabilityReport.exceptions.filter(row=>row.type==='negative_margin').length,2);assert.equal(profitabilityReport.exceptions.filter(row=>row.type==='zero_price').length,1);
+    assert.equal(profitabilityReport.supplierSavings.length,1);assert.equal(profitabilityReport.supplierSavings[0].sku,'ALT');assert.equal(Number(profitabilityReport.supplierSavings[0].potential_savings),2);
+    await store.importer.rollback(owner,buy,{batchId:profitabilityUpload.id,confirm:true});
     assert.equal((await store.importer.customers(owner,buy)).find(row=>row.customer==='Marshall').orderCount,3);
     assert.equal((await store.importer.listOrders(owner,buy,new URLSearchParams({source:'Zoro',from:'2026-09-03',to:'2026-09-03'}))).total,1);
     assert.equal((await store.importer.listOrders(owner,buy,new URLSearchParams({source:'BuySupply B2B',q:'Veyer',from:'2026-09-03',to:'2026-09-03'}))).total,1);
