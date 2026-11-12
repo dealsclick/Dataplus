@@ -50,6 +50,13 @@ assert.match(dbSource, /unique \(audit_id, tracking_normalized\)/);
 assert.match(dbSource, /live_item_required boolean not null default false/);
 assert.match(dbSource, /live_item_expected_count integer not null default 0/);
 assert.match(dbSource, /live_item_scans jsonb not null default '\[\]'::jsonb/);
+assert.match(dbSource, /async function ensureOutboundAuditSchema\(client\)/);
+assert.match(dbSource, /if \(schemaVersion\.rows\[0\]\?\.current === true\) \{\s+await ensureOutboundAuditSchema\(client\)/);
+const outboundScanCreate = dbSource.match(/create table if not exists outbound_audit_scans \([\s\S]*?\n    \);/)?.[0] || '';
+assert.match(outboundScanCreate, /live_item_required boolean not null default false/);
+assert.match(outboundScanCreate, /live_item_status text not null default 'not_required'/);
+assert.match(outboundScanCreate, /live_item_expected_count integer not null default 0/);
+assert.match(outboundScanCreate, /live_item_scans jsonb not null default '\[\]'::jsonb/);
 
 const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 const routeStart = serverSource.indexOf('if (url.pathname === "/api/fulfillment/outbound-audits"');

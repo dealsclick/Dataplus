@@ -162,6 +162,20 @@ async function ensureProductShadowSkuSchema(client) {
   `);
 }
 
+async function ensureOutboundAuditSchema(client) {
+  await client.query(`
+    alter table if exists outbound_audit_sessions add column if not exists evidence_required boolean not null default true;
+    alter table if exists outbound_audit_sessions add column if not exists evidence_complete_count integer not null default 0;
+    alter table if exists outbound_audit_sessions add column if not exists evidence_override_reason text;
+    alter table if exists outbound_audit_scans add column if not exists evidence_status text not null default 'missing';
+    alter table if exists outbound_audit_scans add column if not exists evidence_count integer not null default 0;
+    alter table if exists outbound_audit_scans add column if not exists live_item_required boolean not null default false;
+    alter table if exists outbound_audit_scans add column if not exists live_item_status text not null default 'not_required';
+    alter table if exists outbound_audit_scans add column if not exists live_item_expected_count integer not null default 0;
+    alter table if exists outbound_audit_scans add column if not exists live_item_scans jsonb not null default '[]'::jsonb;
+  `);
+}
+
 function invalidateReturnsWorkspaceSummary() {
   returnsWorkspaceSummaryCache = null;
 }
@@ -318,6 +332,7 @@ async function initRelationalSchema() {
           [RELATIONAL_SCHEMA_VERSION]
         );
         if (schemaVersion.rows[0]?.current === true) {
+          await ensureOutboundAuditSchema(client);
           await ensureProductShadowSkuSchema(client);
           await ensureReturnWorkspaceSchema(client);
           relationalSchemaReady = true;
@@ -1148,6 +1163,10 @@ async function initRelationalSchema() {
       order_matches jsonb not null default '[]'::jsonb,
       evidence_status text not null default 'missing' check (evidence_status in ('missing', 'uploading', 'complete', 'failed')),
       evidence_count integer not null default 0,
+      live_item_required boolean not null default false,
+      live_item_status text not null default 'not_required',
+      live_item_expected_count integer not null default 0,
+      live_item_scans jsonb not null default '[]'::jsonb,
       scanned_by_id text,
       scanned_by_name text,
       scanned_at timestamptz not null default now(),
