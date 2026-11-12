@@ -14,7 +14,12 @@ function functionBody(name) {
 assert.doesNotMatch(source, /reconcileSupplierDirectoryOnStartup/, 'web startup must not hydrate purchase orders for global supplier reconciliation');
 
 const orderRoutingScan = functionBody('scheduledOrderRoutingCandidateIds');
-assert.match(orderRoutingScan, /listOrders\(\{ limit: 1000, summary: true \}\)/, 'order routing must scan compact summaries');
+assert.match(orderRoutingScan, /paginated: true/, 'order routing must paginate compact summaries');
+assert.match(orderRoutingScan, /summary: true/, 'order routing must scan compact summaries');
+assert.match(orderRoutingScan, /openWorkOnly: true/, 'order routing must exclude historical and terminal orders before pagination');
+assert.match(orderRoutingScan, /sort: "created-asc"/, 'order routing must rescue the oldest open work first');
+assert.match(orderRoutingScan, /page <= totalPages/, 'order routing must continue beyond the first page when necessary');
+assert.doesNotMatch(orderRoutingScan, /limit: 1000/, 'order routing must not strand orders behind a fixed newest-order window');
 const orderRoutingQueue = functionBody('processScheduledOrderRouting');
 assert.match(orderRoutingQueue, /workerTask: "paid-order-routing"/, 'the web scheduler must queue routing on the background worker');
 assert.match(orderRoutingQueue, /candidateFingerprint/, 'the web scheduler must identify repeated candidate sets');
@@ -51,6 +56,9 @@ assert.ok(
 
 const dbSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
 assert.match(dbSource, /jsonb_build_object\(\s*'id', shipment->'id'/, 'summary shipments must use a compact projection');
+assert.match(dbSource, /coalesce\(summary_raw\."routingLastAttemptAt", ''\) as routing_last_attempt_at/, 'order summaries must retain routing retry timestamps');
+assert.match(dbSource, /coalesce\(summary_raw\."routingLastResult", ''\) as routing_last_result/, 'order summaries must retain routing outcomes');
+assert.match(dbSource, /coalesce\(summary_raw\."routingAttemptCount", '0'\) as routing_attempt_count/, 'order summaries must retain routing retry counts');
 assert.match(dbSource, /async function listFulfillmentConsoleRateCandidates/, 'scheduled rate discovery must query a bounded relational projection');
 assert.match(dbSource, /async function listFulfillmentLabelBatchProjectionRows/, 'snapshot rebuilds must project compact label batches in PostgreSQL');
 assert.match(dbSource, /async function pruneRedundantNoopOperationJobs/, 'retention cleanup must compact redundant no-change routing history');

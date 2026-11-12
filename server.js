@@ -79351,6 +79351,7 @@ function escapeHtml(value) {
 let orderRoutingProcessing = false;
 let purchasePoolProcessing = false;
 const SCHEDULED_ORDER_ROUTING_LIMIT = 25;
+const SCHEDULED_ORDER_ROUTING_SCAN_PAGE_SIZE = 250;
 const SCHEDULED_ORDER_ROUTING_NOOP_COOLDOWN_MS = Math.max(
   60_000,
   Number(process.env.SCHEDULED_ORDER_ROUTING_NOOP_COOLDOWN_MS || 15 * 60_000) || 15 * 60_000
@@ -79396,13 +79397,33 @@ async function activeWorkerTask(workerTask = "") {
 }
 
 async function scheduledOrderRoutingCandidateIds(workflowSettings, systemSettings) {
-  const orderSummaries = await postgres.listOrders({ limit: 1000, summary: true }) || [];
-  return orderSummaries.filter((order) => {
-    const holdDecision = orderAutomaticHoldDecision(order, systemSettings);
-    if (holdDecision.hold) return orderNeedsAutomaticRouting(order, Date.now(), systemSettings);
-    return orderRoutingPolicyDecision(order, workflowSettings).allowed
-      && orderNeedsAutomaticRouting(order, Date.now(), systemSettings);
-  }).slice(0, SCHEDULED_ORDER_ROUTING_LIMIT).map((order) => order.id).filter(Boolean);
+  const candidateIds = [];
+  const now = Date.now();
+  let page = 1;
+  let totalPages = 1;
+  do {
+    const result = await postgres.listOrders({
+      limit: SCHEDULED_ORDER_ROUTING_SCAN_PAGE_SIZE,
+      page,
+      paginated: true,
+      summary: true,
+      openWorkOnly: true,
+      sort: "created-asc"
+    });
+    const orderSummaries = Array.isArray(result?.orders) ? result.orders : [];
+    totalPages = Math.max(1, Number(result?.totalPages || 1));
+    for (const order of orderSummaries) {
+      const holdDecision = orderAutomaticHoldDecision(order, systemSettings);
+      const eligible = holdDecision.hold
+        ? orderNeedsAutomaticRouting(order, now, systemSettings)
+        : orderRoutingPolicyDecision(order, workflowSettings).allowed
+          && orderNeedsAutomaticRouting(order, now, systemSettings);
+      if (eligible && order.id) candidateIds.push(order.id);
+      if (candidateIds.length >= SCHEDULED_ORDER_ROUTING_LIMIT) return candidateIds;
+    }
+    page += 1;
+  } while (page <= totalPages);
+  return candidateIds;
 }
 
 async function processScheduledOrderRouting() {
