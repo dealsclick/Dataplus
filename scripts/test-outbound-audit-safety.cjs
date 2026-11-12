@@ -108,6 +108,8 @@ assert.match(serverSource, /Reused today's outbound handoff audit/);
 assert.match(serverSource, /That is the package tracking barcode\. Scan the product UPC, or skip to the package photo/);
 assert.match(serverSource, /isLikelyTrackingNumber\(barcode\)/);
 assert.match(serverSource, /That looks like a new package tracking label\. Record it as the next package/);
+assert.match(serverSource, /catalogBarcodeCandidate/);
+assert.match(serverSource, /is the item barcode for \$\{productSku\}, not package tracking\. Scan the shipping label first/);
 assert.match(serverSource, /outboundAuditStore\.removeLiveItem/);
 assert.match(serverSource, /Removed optional outbound item scan/);
 assert.match(serverSource, /req\.method !== "DELETE"/);

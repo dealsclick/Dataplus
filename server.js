@@ -42823,6 +42823,14 @@ async function resolveOutboundAuditTracking(scannedValue = "") {
   const candidates = trackingLookupCandidates(raw);
   if (!candidates.length) candidates.push(normalized);
   const orderMatches = await postgres.readOrdersByTrackingCandidates(candidates, { limit: 20 });
+  const catalogBarcodeCandidate = barcodeLookupForms(raw)[0] || "";
+  if (!orderMatches.length && /^\d{8,14}$/.test(catalogBarcodeCandidate)) {
+    const catalogLookup = await resolveScannedCatalogBarcode(catalogBarcodeCandidate);
+    if (catalogLookup.product) {
+      const productSku = String(catalogLookup.product.sku || catalogLookup.product.id || "this product");
+      throw Object.assign(new Error(`${catalogBarcodeCandidate} is the item barcode for ${productSku}, not package tracking. Scan the shipping label first.`), { statusCode: 409 });
+    }
+  }
   const groupIds = [...new Set(orderMatches.map(({ order }) => String(order.shipmentGroupId || "").trim()).filter(Boolean))];
   const groupedOrders = (await Promise.all(groupIds.map((groupId) => postgres.readOrdersByShipmentGroupId(groupId)))).flat();
   const trackingByOrderId = new Map(orderMatches.map((entry) => [String(entry.order.id || ""), entry]));
