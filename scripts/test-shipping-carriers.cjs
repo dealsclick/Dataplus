@@ -4,6 +4,7 @@ const {
   carrierTrackingUrl,
   inferCarrierFromTracking,
   isCarrierProviderPlaceholder,
+  isLikelyTrackingNumber,
   normalizeShipmentCarrier,
   normalizeTrackingNumber,
   validateCarrierService,
@@ -20,6 +21,8 @@ assert.equal(inferCarrierFromTracking("12345678901234"), "FedEx");
 assert.equal(inferCarrierFromTracking("JD014600006281234567"), "DHL");
 assert.equal(inferCarrierFromTracking("TBA123456789012"), "Amazon Shipping");
 assert.equal(inferCarrierFromTracking("GF6383377250020"), "GOFO");
+assert.equal(inferCarrierFromTracking("GFUS01083339081733"), "GOFO");
+assert.equal(inferCarrierFromTracking("SWX523010000247149463"), "SwiftX");
 assert.equal(inferCarrierFromTracking("1234567890"), "", "ambiguous numeric tracking is not guessed");
 assert.equal(inferCarrierFromTracking("1234567890", "DHL eCommerce"), "DHL", "saved carrier resolves an ambiguous number");
 assert.equal(inferCarrierFromTracking("LOCAL123", "Veeqo"), "", "a label provider is not treated as a carrier");
@@ -30,6 +33,11 @@ assert.equal(canonicalCarrierName("fed ex"), "FedEx");
 assert.equal(isCarrierProviderPlaceholder("Buy Shipping"), true);
 assert.equal(isCarrierProviderPlaceholder("Marketplace shipping label"), true);
 assert.equal(isCarrierProviderPlaceholder("UPS"), false);
+assert.equal(isLikelyTrackingNumber("SWX523010000247149463"), true);
+assert.equal(isLikelyTrackingNumber("GFUS01083339081733"), true);
+assert.equal(isLikelyTrackingNumber("1Z999AA10123456784"), true);
+assert.equal(isLikelyTrackingNumber("045242551453"), false, "12-digit UPC values remain valid item scans");
+assert.equal(isLikelyTrackingNumber("00012345678905"), false, "GTIN-14 values remain valid item scans");
 assert.equal(normalizeTrackingNumber("1Z 999-AA"), "1Z999AA");
 assert.equal(normalizeTrackingNumber("ab&12"), "AB12");
 assert.deepEqual(normalizeShipmentCarrier({ carrier: "UPS", service: "ups ground", trackingNumber: "1Z999AA10123456784" }), {

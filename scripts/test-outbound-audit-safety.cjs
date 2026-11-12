@@ -106,6 +106,8 @@ assert.match(serverSource, /recorded for this package\. Scan another item or con
 assert.match(serverSource, /Item scanning is optional; scan the items or continue to the package photo/);
 assert.match(serverSource, /Reused today's outbound handoff audit/);
 assert.match(serverSource, /That is the package tracking barcode\. Scan the product UPC, or skip to the package photo/);
+assert.match(serverSource, /isLikelyTrackingNumber\(barcode\)/);
+assert.match(serverSource, /That looks like a new package tracking label\. Record it as the next package/);
 assert.match(serverSource, /outboundAuditStore\.removeLiveItem/);
 assert.match(serverSource, /Removed optional outbound item scan/);
 assert.match(serverSource, /req\.method !== "DELETE"/);
@@ -136,6 +138,9 @@ assert.match(workspaceSource, /Item verification/);
 assert.match(workspaceSource, /Use today&apos;s audit/);
 assert.match(workspaceSource, /isPackageTrackingBarcode/);
 assert.match(workspaceSource, /That is the package tracking label\. Scan the product UPC, or skip to the package photo/);
+assert.match(workspaceSource, /isLikelyPackageTrackingBarcode/);
+assert.match(workspaceSource, /New package tracking label detected\. Starting the next package now/);
+assert.match(workspaceSource, /This Live shipment still needs its item scans/);
 assert.match(workspaceSource, /Undo last item/);
 assert.match(workspaceSource, /Remove \$\{item\.sku\} scan/);
 assert.match(workspaceSource, /removeOptionalItem/);

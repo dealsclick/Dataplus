@@ -186,7 +186,7 @@ const shipmentConsolidation = require("./lib/shipment-consolidation");
 const { normalizeCarrierShippingAddress } = require("./lib/shipping-address");
 const { ebayLiveLineContext, ebayLiveOrderContext, ebayLiveOrderUsesCommittedStock } = require("./lib/ebay-live-order");
 const { packageDimensionsChanged, applyManualPackageDimensions, applyShippingPreferences } = require("./lib/product-dimensions");
-const { canonicalCarrierName, carrierTrackingUrl, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
+const { canonicalCarrierName, carrierTrackingUrl, inferCarrierFromTracking: detectCarrierFromTracking, isLikelyTrackingNumber, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
 const { buildPrintPreview, attachmentFilePath, restorePurchasedLabelReferences, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { buildLabelPacketIsolated } = require("./lib/isolated-fulfillment-print");
 const { createRequestPerformanceContext, enterRequestPerformanceContext } = require("./lib/performance-context");
@@ -43086,6 +43086,9 @@ async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, cl
       .filter(Boolean);
     if (normalizedItemBarcode && packageTrackingValues.includes(normalizedItemBarcode)) {
       throw Object.assign(new Error("That is the package tracking barcode. Scan the product UPC, or skip to the package photo."), { statusCode: 409 });
+    }
+    if (isLikelyTrackingNumber(barcode)) {
+      throw Object.assign(new Error("That looks like a new package tracking label. Record it as the next package, then scan its item UPC."), { statusCode: 409 });
     }
     const state = await postgres.readStateFields(["warehouses"]);
     const warehouse = (state.warehouses || []).find((row) => String(row.id || "") === String(audit.session.warehouseId || ""));

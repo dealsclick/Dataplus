@@ -119,6 +119,12 @@ function isPackageTrackingBarcode(scan: AuditScan, value = "") {
   return Boolean(normalized && [scan.trackingRaw, scan.trackingNumber].some((tracking) => normalizedScanValue(tracking) === normalized))
 }
 
+function isLikelyPackageTrackingBarcode(value = "") {
+  const normalized = normalizedScanValue(value)
+  if (!normalized) return false
+  return /^(?:1Z[0-9A-Z]{16}|T\d{10}|9[23456]\d{18,20}|[A-Z]{2}\d{9}US|(?:GM|JVGL|JJD|JD)[0-9A-Z]{8,24}|C\d{14}|TB[AMCD]\d{8,}|(?:SPX|SPD)\d{8,}|GFUS[0-9A-Z]{12,30}|GF\d{10,}|GOFO[0-9A-Z]{6,}|SWX[0-9A-Z]{12,30}|SWIFTX[0-9A-Z]{6,}|U?US[0-9A-Z]{12,30}|\d{15,34})$/.test(normalized)
+}
+
 function itemProgressLabel(scan: AuditScan) {
   return scan.liveItemExpectedCount > 0
     ? `${scan.liveItemScannedCount}/${scan.liveItemExpectedCount}`
@@ -263,6 +269,18 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
       }
       return
     }
+    if (isLikelyPackageTrackingBarcode(value)) {
+      setManualValue("")
+      if (scan.liveItemRequired && scan.liveItemStatus !== "complete") {
+        toast.warning("This Live shipment still needs its item scans. Finish this package before starting the next tracking label.")
+        if (navigator.vibrate) navigator.vibrate([80, 40, 80])
+        return
+      }
+      toast.info("New package tracking label detected. Starting the next package now.")
+      if (navigator.vibrate) navigator.vibrate([50, 40, 50])
+      await submit(value)
+      return
+    }
     scanBusyRef.current = true
     setBusy(true)
     const clientScanId = existingClientScanId || crypto.randomUUID()
@@ -298,7 +316,7 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
       setBusy(false)
       scanBusyRef.current = false
     }
-  }, [clearPhoto, onItemScan])
+  }, [clearPhoto, onItemScan, submit])
 
   async function quickCreateItem() {
     const scan = activeScanRef.current
