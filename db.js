@@ -13436,6 +13436,10 @@ async function findOpenPurchaseOrdersExpectingSkus(skus = [], options = {}) {
     .map((value) => nullableString(value)?.toLowerCase())
     .filter(Boolean))].slice(0, 250);
   const excludedPurchaseOrderId = nullableString(options.excludePurchaseOrderId);
+  const createdWithinDays = Number.isFinite(Number(options.createdWithinDays))
+    ? Math.max(1, Math.min(90, Math.floor(Number(options.createdWithinDays))))
+    : null;
+  const warehouseReceivingOnly = options.warehouseReceivingOnly === true;
   const client = getPool();
   if (!client || !values.length) return [];
   await initRelationalSchema();
@@ -13448,6 +13452,7 @@ async function findOpenPurchaseOrdersExpectingSkus(skus = [], options = {}) {
       purchase_order.supplier,
       purchase_order.status,
       purchase_order.warehouse_name,
+      coalesce(purchase_order.created_at, purchase_order.updated_at) as created_at,
       coalesce(purchase_order.raw->>'expectedDeliveryDate', purchase_order.raw->>'expectedAt', '') as expected_at,
       greatest(
         0,
@@ -13459,6 +13464,11 @@ async function findOpenPurchaseOrdersExpectingSkus(skus = [], options = {}) {
     join purchase_order_records purchase_order on purchase_order.po_id = line.po_id
     where lower(coalesce(line.sku, '')) = any($1::text[])
       and ($2::text is null or purchase_order.po_id <> $2)
+      and ($3::integer is null or coalesce(purchase_order.created_at, purchase_order.updated_at) >= now() - make_interval(days => $3::integer))
+      and ($4::boolean = false or (
+        lower(coalesce(purchase_order.raw->>'fulfillmentMode', '')) <> 'dropship_per_order'
+        and lower(coalesce(purchase_order.raw->>'directToCustomer', 'false')) not in ('true', '1', 'yes')
+      ))
       and lower(coalesce(purchase_order.status, '')) not in (
         'received', 'closed', 'canceled', 'cancelled', 'rejected', 'superseded', 'deleted'
       )
@@ -13468,8 +13478,8 @@ async function findOpenPurchaseOrdersExpectingSkus(skus = [], options = {}) {
           - case when coalesce(line.raw->>'reSourcedQty', '') ~ '^[0-9]+([.][0-9]+)?$' then (line.raw->>'reSourcedQty')::numeric else 0 end
           - case when coalesce(line.raw->>'canceledQty', '') ~ '^[0-9]+([.][0-9]+)?$' then (line.raw->>'canceledQty')::numeric else 0 end
       ) > 0
-    order by lower(coalesce(line.sku, '')), coalesce(purchase_order.created_at, purchase_order.updated_at), purchase_order.po_id
-  `, [values, excludedPurchaseOrderId]);
+    order by lower(coalesce(line.sku, '')), coalesce(purchase_order.created_at, purchase_order.updated_at) desc, purchase_order.po_id
+  `, [values, excludedPurchaseOrderId, createdWithinDays, warehouseReceivingOnly]);
   return result.rows.map((row) => ({
     sku: row.sku || "",
     lookupSku: row.lookup_sku || "",
@@ -13478,6 +13488,7 @@ async function findOpenPurchaseOrdersExpectingSkus(skus = [], options = {}) {
     supplier: row.supplier || "Unassigned supplier",
     status: row.status || "",
     warehouseName: row.warehouse_name || "",
+    createdAt: row.created_at?.toISOString?.() || row.created_at || "",
     expectedAt: row.expected_at || "",
     remainingQty: Number(row.remaining_qty || 0)
   }));

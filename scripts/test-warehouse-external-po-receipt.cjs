@@ -20,6 +20,10 @@ assert.match(server, /previouslyAllocatedQty/, 'receipt allocation retries subtr
 assert.match(server, /body\.allocateOpenOrders === true/, 'PO receipt allocation runs only when the operator explicitly selects it');
 assert.match(server, /extraItemStatus:\s*extraItem \? "unexpected_on_selected_po"/, 'PO receipts persist unexpected products as extra items');
 assert.match(server, /findOpenPurchaseOrdersExpectingSkus/, 'PO extra-item receipts check whether another open PO expects each SKU');
+assert.match(server, /RECENT_RECEIVING_PO_WINDOW_DAYS = 7/, 'manual and external receiving use a seven-day open-PO window');
+assert.match(server, /withRecentOpenPurchaseOrderMatches/, 'manual and external receiving enrich scanned lines with recent open PO matches');
+assert.match(server, /warehouseReceivingOnly: true/, 'manual receiving excludes direct-to-customer POs from warehouse suggestions');
+assert.match(server, /detectedOpenPurchaseOrders/, 'completed manual receipts retain the open POs detected while receiving');
 assert.match(server, /syncPurchaseOrderReceivingProgress\(audit\)/, 'linked PO scans publish live receiving progress');
 assert.match(server, /activeReceivers/, 'linked PO progress identifies users active in the shared receiving session');
 assert.match(server, /parts\[3\] === "presence"/, 'warehouse receiving maintains lightweight user presence without blocking scans');
@@ -48,6 +52,8 @@ assert.match(warehouseUi, /capture="environment"/, 'mobile receiving offers dire
 assert.match(warehouseUi, /compressEvidenceImage/, 'packing-slip photos are compressed before upload');
 assert.match(warehouseUi, /Packing slip required/, 'the UI explains the packing-slip completion safeguard');
 assert.match(warehouseUi, /Extra item[\s\S]*Expected on another open PO/, 'linked PO receiving flags extra items and shows other open PO expectations');
+assert.match(warehouseUi, /Found in recent PO/, 'manual receiving displays a dedicated recent-PO match column');
+assert.match(warehouseUi, /recentOpenPurchaseOrders[\s\S]*\/purchase-orders\//, 'each detected recent PO opens its purchase-order detail');
 assert.match(warehouseUi, /Ready to post, not received yet/, 'the receipt preview clearly distinguishes saved scans from posted inventory');
 assert.match(warehouseUi, /Post receipt & allocate remaining/, 'linked PO audits offer an explicit receive-and-allocate outcome');
 assert.match(warehouseUi, /allocateOpenOrders: dispositionType === "fulfill_orders"/, 'linked PO audits send the selected allocation outcome to the receipt API');
@@ -67,6 +73,7 @@ assert.match(server, /reason: url\.searchParams\.get\("reason"\)/, 'the paginate
 assert.match(server, /warehouse: url\.searchParams\.get\("warehouse"\)/, 'the paginated audit API accepts server-side warehouse filters');
 assert.match(db, /reason === "po_receipts"[\s\S]*purchase_order_receipt[\s\S]*external_po_receipt/, 'the audit query groups both PO receipt sources');
 assert.match(db, /linkedPurchaseOrderNumber[\s\S]*externalPurchaseOrderNumber/, 'audit summaries return PO references without loading full audit lines');
+assert.match(db, /createdWithinDays[\s\S]*make_interval\(days => \$3::integer\)/, 'open-PO matching limits candidates by PO creation age');
 assert.match(purchasingUi, /Receiving now[\s\S]*Receipt not posted yet/, 'the purchasing queue displays active warehouse receiving work');
 assert.match(purchasingUi, /Active: \$\{activeUsers\.join/, 'the purchasing queue identifies all users active on a PO');
 assert.match(purchaseOrderUi, /PO receiving in progress[\s\S]*activeReceivingAudit\.scannedUnits/, 'the PO detail displays live scan progress');

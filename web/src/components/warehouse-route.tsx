@@ -1507,9 +1507,21 @@ function WarehouseAuditPanel({
     null;
   const applyAuditUpdate = (audit: Record<string, unknown>) => {
     // Keep the scanner responsive even while the audit-register refresh finishes.
+    const previousAudit = (active || resumedAudit || {}) as Record<string, unknown>;
+    const previousLines = new Map((Array.isArray(previousAudit.lines) ? previousAudit.lines : []).map((line) => {
+      const row = line as Record<string, unknown>;
+      return [String(row.id || `${String(row.productId || row.sku || "")}::${String(row.locationBin || "")}`), row];
+    }));
     const snapshot: Record<string, unknown> = {
       ...audit,
-      lines: Array.isArray(audit.lines) ? [...audit.lines] : [],
+      lines: Array.isArray(audit.lines) ? audit.lines.map((line) => {
+        const row = line as Record<string, unknown>;
+        const key = String(row.id || `${String(row.productId || row.sku || "")}::${String(row.locationBin || "")}`);
+        const previous = previousLines.get(key);
+        return Array.isArray(row.recentOpenPurchaseOrders) || !Array.isArray(previous?.recentOpenPurchaseOrders)
+          ? row
+          : { ...row, recentOpenPurchaseOrders: previous.recentOpenPurchaseOrders };
+      }) : [],
       unknownBarcodes: Array.isArray(audit.unknownBarcodes)
         ? [...audit.unknownBarcodes]
         : [],
@@ -2619,6 +2631,9 @@ function WarehouseAuditPanel({
   });
   const expectedOnlyItems = receivingExpectedLines.filter((line) => !matchedReceivingIds.has(String(line.id))).map((line) => ({ ...line, auditItemKind: "po_expected", receivingPoLine: line, receivingMatchBasis: "", barcode: line.upc, selectedVendorSku: line.vendorItemNumber, selectedManufacturerSku: line.manufacturerSku, title: line.description || line.title, countedQty: 0 }));
   const sortedItems = sortWarehouseAuditRows([...receivingAuditItems, ...expectedOnlyItems], itemSort, true);
+  const isManualExternalReceipt = ["external_po_receipt", "receiving_inventory"].includes(String(current?.reason || ""));
+  const recentPoMatchedItems = sortedItems.filter((line) => Array.isArray(line.recentOpenPurchaseOrders) && line.recentOpenPurchaseOrders.length > 0);
+  const recentOpenPurchaseOrders = [...new Map(recentPoMatchedItems.flatMap((line) => line.recentOpenPurchaseOrders as Array<Record<string, unknown>>).map((purchaseOrder) => [String(purchaseOrder.purchaseOrderId || ""), purchaseOrder])).values()];
   const auditStatus = String(current?.status || "");
   const foundStockLines = lines.filter((line) => String(line.source || "").includes("found-stock") || Boolean(line.foundStock));
   const latestFoundStockImport = Array.isArray(current?.foundStockImports) ? current?.foundStockImports[0] as Record<string, unknown> : null;
@@ -3464,6 +3479,7 @@ function WarehouseAuditPanel({
               </div>
             )}
             <div className="flex items-center justify-between gap-2"><p className="text-sm font-medium">Audit items</p><WarehouseAuditSortControl value={itemSort} onChange={setItemSort} items /></div>
+            {isManualExternalReceipt && recentPoMatchedItems.length > 0 && <Alert className="border-blue-400 bg-blue-50/70 dark:border-blue-700 dark:bg-blue-950/30"><FileText className="size-4 text-blue-700 dark:text-blue-300" /><AlertTitle>{numberLabel(recentPoMatchedItems.length)} received item{recentPoMatchedItems.length === 1 ? "" : "s"} found on {numberLabel(recentOpenPurchaseOrders.length)} recent open PO{recentOpenPurchaseOrders.length === 1 ? "" : "s"}</AlertTitle><AlertDescription><div className="mt-2 flex flex-wrap gap-1.5">{recentOpenPurchaseOrders.map((purchaseOrder) => <a key={String(purchaseOrder.purchaseOrderId)} href={`/purchase-orders/${encodeURIComponent(String(purchaseOrder.purchaseOrderId || ""))}`} target="_blank" rel="noreferrer"><Badge variant="secondary" className="hover:bg-muted">{String(purchaseOrder.purchaseOrderNumber || "Open PO")}<ExternalLink className="ml-1 size-3" /></Badge></a>)}</div></AlertDescription></Alert>}
             <div className="overflow-x-auto rounded-md border">
               <Table className="warehouse-audit-table">
                 <TableHeader>
@@ -3477,8 +3493,8 @@ function WarehouseAuditPanel({
                     <TableHead>Manufacturer SKU</TableHead>
                     <TableHead>Cost</TableHead>
                     <TableHead>Bin</TableHead>
-                    <TableHead>On PO</TableHead>
-                    <TableHead>PO</TableHead>
+                    <TableHead>{isLinkedPurchaseOrderReceipt ? "On selected PO" : isManualExternalReceipt ? "Found in recent PO" : "On PO"}</TableHead>
+                    <TableHead>{isManualExternalReceipt ? "PO match" : "PO"}</TableHead>
                     <TableHead className="text-right">Expected</TableHead>
                     <TableHead>Counted</TableHead>
                     <TableHead className="text-right">Status</TableHead>
@@ -3491,7 +3507,9 @@ function WarehouseAuditPanel({
                     const expectedQty = poLine ? Number(poLine.expectedQty ?? poLine.quantity ?? 0) : 0;
                     const rowCountedQty = Number(line.countedQty ?? line.count ?? 0);
                     const itemTitle = String(line.title || poLine?.description || poLine?.title || line.sku || line.barcode || "Product");
-                    const poMatchBadge = poLine ? <Badge className="border-yellow-400 bg-yellow-100 text-yellow-950 dark:border-yellow-600 dark:bg-yellow-400/20 dark:text-yellow-100" variant="outline" title={line.receivingMatchBasis === "vendor_sku" ? "Matched by vendor SKU" : line.receivingMatchBasis === "upc" ? "Matched by UPC" : line.receivingMatchBasis === "sku" ? "Matched by catalog SKU" : "Expected from packing slip"}><CheckCircle2 className="mr-1 size-3" /> Yes</Badge> : isLinkedPurchaseOrderReceipt && rowCountedQty > 0 ? <Badge className="border-amber-400 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline"><AlertTriangle className="mr-1 size-3" /> Extra item</Badge> : <span className="text-xs text-muted-foreground">No</span>;
+                    const recentPoMatches = Array.isArray(line.recentOpenPurchaseOrders) ? line.recentOpenPurchaseOrders as Array<Record<string, unknown>> : [];
+                    const poMatchBadge = poLine ? <Badge className="border-yellow-400 bg-yellow-100 text-yellow-950 dark:border-yellow-600 dark:bg-yellow-400/20 dark:text-yellow-100" variant="outline" title={line.receivingMatchBasis === "vendor_sku" ? "Matched by vendor SKU" : line.receivingMatchBasis === "upc" ? "Matched by UPC" : line.receivingMatchBasis === "sku" ? "Matched by catalog SKU" : "Expected from packing slip"}><CheckCircle2 className="mr-1 size-3" /> Yes</Badge> : isManualExternalReceipt && recentPoMatches.length > 0 ? <Badge className="border-blue-400 bg-blue-50 text-blue-800 dark:border-blue-700 dark:bg-blue-950/40 dark:text-blue-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Found</Badge> : isLinkedPurchaseOrderReceipt && rowCountedQty > 0 ? <Badge className="border-amber-400 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline"><AlertTriangle className="mr-1 size-3" /> Extra item</Badge> : <span className="text-xs text-muted-foreground">No</span>;
+                    const poReference = poLine ? <a className="font-mono text-xs font-medium text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(String(current?.linkedPurchaseOrderId || poLine.purchaseOrderId || ""))}`} target="_blank" rel="noreferrer">{poNumber || "Open PO"}</a> : recentPoMatches.length > 0 ? <div className="flex min-w-40 flex-wrap gap-1">{recentPoMatches.map((purchaseOrder) => <a key={String(purchaseOrder.purchaseOrderId)} href={`/purchase-orders/${encodeURIComponent(String(purchaseOrder.purchaseOrderId || ""))}`} target="_blank" rel="noreferrer" title={`${String(purchaseOrder.supplier || "Supplier")} · ${numberLabel(Number(purchaseOrder.remainingQty || 0))} open`}><Badge variant="secondary" className="hover:bg-muted">{String(purchaseOrder.purchaseOrderNumber || "Open PO")}<ExternalLink className="ml-1 size-3" /></Badge></a>)}</div> : <span className="text-xs text-muted-foreground">-</span>;
                     const poStatusBadge = poLine ? rowCountedQty === expectedQty ? <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Matched</Badge> : <Badge variant="destructive">Variance {rowCountedQty - expectedQty > 0 ? "+" : ""}{numberLabel(rowCountedQty - expectedQty)}</Badge> : isLinkedPurchaseOrderReceipt && rowCountedQty > 0 ? <Badge className="border-amber-400 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Extra item</Badge> : null;
                     if (line.auditItemKind === "po_expected") {
                       return (<TableRow className="bg-yellow-50/50 dark:bg-yellow-400/5" key={`po-expected-${String(line.id)}`}>
@@ -3505,7 +3523,7 @@ function WarehouseAuditPanel({
                         <TableCell className="warehouse-audit-secondary">-</TableCell>
                         <TableCell>-</TableCell>
                         <TableCell>{poMatchBadge}</TableCell>
-                        <TableCell className="font-mono text-xs">{poNumber || "-"}</TableCell>
+                        <TableCell>{poReference}</TableCell>
                         <TableCell className="text-right font-medium">{numberLabel(expectedQty)}</TableCell>
                         <TableCell>0</TableCell>
                         <TableCell className="text-right"><Badge variant="outline">Not counted</Badge></TableCell>
@@ -3526,7 +3544,7 @@ function WarehouseAuditPanel({
                       <TableCell className="warehouse-audit-secondary">-</TableCell>
                       <TableCell>{String(item.locationBin || "-")}</TableCell>
                       <TableCell>{poMatchBadge}</TableCell>
-                      <TableCell className="font-mono text-xs">{poNumber || "-"}</TableCell>
+                      <TableCell>{poReference}</TableCell>
                       <TableCell className="text-right">{poLine ? numberLabel(expectedQty) : "-"}</TableCell>
                       <TableCell>{numberLabel(Number(item.count || 0))}</TableCell>
                       <TableCell className="text-right">
@@ -3566,7 +3584,7 @@ function WarehouseAuditPanel({
                       <TableCell className="warehouse-audit-secondary">{Number(line.selectedSupplierCost || 0) > 0 ? moneyLabel(Number(line.selectedSupplierCost)) : "-"}</TableCell>
                       <TableCell>{String(line.locationBin || "-")}</TableCell>
                       <TableCell>{poMatchBadge}</TableCell>
-                      <TableCell className="font-mono text-xs">{poNumber || "-"}</TableCell>
+                      <TableCell>{poReference}</TableCell>
                       <TableCell className="text-right">{poLine ? numberLabel(expectedQty) : "-"}</TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1.5">

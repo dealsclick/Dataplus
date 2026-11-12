@@ -48568,6 +48568,66 @@ function auditLineKey(line = {}) {
   return String(line.id || `${line.productId || line.sku || ""}::${line.locationBin || ""}`);
 }
 
+const RECENT_RECEIVING_PO_WINDOW_DAYS = 7;
+
+function warehouseAuditOpenPoLookupKeys(line = {}) {
+  return [...new Set([
+    line.sku,
+    line.selectedSupplierSku,
+    line.selectedVendorSku,
+    line.selectedManufacturerSku
+  ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))];
+}
+
+async function withRecentOpenPurchaseOrderMatches(audit = {}) {
+  if (!["external_po_receipt", "receiving_inventory"].includes(String(audit.reason || "").toLowerCase())) return audit;
+  const lines = Array.isArray(audit.lines) ? audit.lines : [];
+  const keysByLine = new Map(lines.map((line) => [auditLineKey(line), warehouseAuditOpenPoLookupKeys(line)]));
+  const lookupKeys = [...new Set([...keysByLine.values()].flat())];
+  const matches = lookupKeys.length
+    ? await postgres.findOpenPurchaseOrdersExpectingSkus(lookupKeys, {
+      createdWithinDays: RECENT_RECEIVING_PO_WINDOW_DAYS,
+      warehouseReceivingOnly: true
+    })
+    : [];
+  const matchesByLookup = new Map();
+  for (const match of matches) {
+    const key = String(match.lookupSku || match.sku || "").trim().toLowerCase();
+    if (!key) continue;
+    if (!matchesByLookup.has(key)) matchesByLookup.set(key, []);
+    matchesByLookup.get(key).push(match);
+  }
+  const purchaseOrdersById = new Map();
+  let matchedLineCount = 0;
+  const matchedLines = lines.map((line) => {
+    const lineMatchesById = new Map();
+    for (const key of keysByLine.get(auditLineKey(line)) || []) {
+      for (const match of matchesByLookup.get(key) || []) {
+        const purchaseOrderId = String(match.purchaseOrderId || "").trim();
+        if (!purchaseOrderId || lineMatchesById.has(purchaseOrderId)) continue;
+        const candidate = { ...match, matchedIdentifier: key };
+        lineMatchesById.set(purchaseOrderId, candidate);
+        purchaseOrdersById.set(purchaseOrderId, candidate);
+      }
+    }
+    const recentOpenPurchaseOrders = [...lineMatchesById.values()].sort((left, right) =>
+      Date.parse(String(right.createdAt || "")) - Date.parse(String(left.createdAt || ""))
+    );
+    if (recentOpenPurchaseOrders.length) matchedLineCount += 1;
+    return { ...line, recentOpenPurchaseOrders };
+  });
+  return {
+    ...audit,
+    lines: matchedLines,
+    recentOpenPurchaseOrderWindowDays: RECENT_RECEIVING_PO_WINDOW_DAYS,
+    recentOpenPurchaseOrderMatchedLineCount: matchedLineCount,
+    recentOpenPurchaseOrders: [...purchaseOrdersById.values()].sort((left, right) =>
+      Date.parse(String(right.createdAt || "")) - Date.parse(String(left.createdAt || ""))
+    ),
+    recentOpenPurchaseOrdersCheckedAt: new Date().toISOString()
+  };
+}
+
 function selectableAuditSupplierMatch(row = {}) {
   return !["rejected"].includes(String(row.matchStatus || "").trim().toLowerCase());
 }
@@ -58459,7 +58519,10 @@ async function handleApi(req, res) {
         })
       };
     });
-    return sendJson(res, 200, requestedAuditId ? { audit: hydratedAudits[0] } : { audits: hydratedAudits });
+    if (requestedAuditId) {
+      return sendJson(res, 200, { audit: await withRecentOpenPurchaseOrderMatches(hydratedAudits[0]) });
+    }
+    return sendJson(res, 200, { audits: hydratedAudits });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && !parts[3] && postgres.isPostgresEnabled()) {
@@ -59203,8 +59266,9 @@ async function handleApi(req, res) {
       if (!savedLine) return sendJson(res, 500, { error: "The scanned item could not be saved." });
       const savedAudit = await postgres.readWarehouseAudit(audit.id) || audit;
       await syncPurchaseOrderReceivingProgress(savedAudit);
+      const auditWithRecentPurchaseOrders = await withRecentOpenPurchaseOrderMatches(savedAudit);
       return sendJson(res, 200, {
-        audit: savedAudit,
+        audit: auditWithRecentPurchaseOrders,
         product: { ...product, uom: scannedUomInfo.code, uomName: scannedUomInfo.name, uomQty: scannedUomInfo.qty, casePack: scannedUomInfo.qty, uomDisplay: scannedUomInfo.display },
         matched: true,
         message: `${product.sku} counted: ${quantity}.`
@@ -59222,7 +59286,7 @@ async function handleApi(req, res) {
     if (!unknownResult) return sendJson(res, 500, { error: "The unknown barcode could not be saved." });
     const savedAudit = await postgres.readWarehouseAudit(audit.id) || audit;
     await syncPurchaseOrderReceivingProgress(savedAudit);
-    return sendJson(res, 200, { audit: savedAudit, matched: false, barcode, sourceItem: lookup.sourceItem, message: lookup.sourceItem ? `${barcode} was found in the source catalog as ${lookup.sourceItem.sku || lookup.sourceItem.vendorSku || "a source SKU"}, but is not yet an approved catalog SKU.` : `${barcode} saved as an unknown UPC.` });
+    return sendJson(res, 200, { audit: await withRecentOpenPurchaseOrderMatches(savedAudit), matched: false, barcode, sourceItem: lookup.sourceItem, message: lookup.sourceItem ? `${barcode} was found in the source catalog as ${lookup.sourceItem.sku || lookup.sourceItem.vendorSku || "a source SKU"}, but is not yet an approved catalog SKU.` : `${barcode} saved as an unknown UPC.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "research-upc" && postgres.isPostgresEnabled()) {
@@ -59640,6 +59704,14 @@ async function handleApi(req, res) {
     if (!["fulfill_orders", "stock_here", "transfer", "return_to_supplier"].includes(dispositionType)) return sendJson(res, 400, { error: "Choose whether to use the stock for open orders, stock it, transfer it, or return it." });
     if (receivingAudit && !["fulfill_orders", "stock_here"].includes(dispositionType)) return sendJson(res, 400, { error: "Inbound receipts can be stocked here or used for open orders after receipt." });
     if (String(audit.reason || "") === "ebay_one_time_listing" && dispositionType !== "stock_here") return sendJson(res, 400, { error: "One-time marketplace inventory must remain stocked in its audited warehouse." });
+    if (receivingAudit) {
+      const receivingAuditWithPurchaseOrders = await withRecentOpenPurchaseOrderMatches(audit);
+      audit.lines = receivingAuditWithPurchaseOrders.lines;
+      audit.recentOpenPurchaseOrderWindowDays = receivingAuditWithPurchaseOrders.recentOpenPurchaseOrderWindowDays;
+      audit.recentOpenPurchaseOrderMatchedLineCount = receivingAuditWithPurchaseOrders.recentOpenPurchaseOrderMatchedLineCount;
+      audit.recentOpenPurchaseOrders = receivingAuditWithPurchaseOrders.recentOpenPurchaseOrders;
+      audit.recentOpenPurchaseOrdersCheckedAt = receivingAuditWithPurchaseOrders.recentOpenPurchaseOrdersCheckedAt;
+    }
     const actionPreview = await buildWarehouseAuditActionPreview(audit);
     if (dispositionType === "return_to_supplier" && actionPreview.totalUsableQty > 0 && body.returnDespiteDemand !== true) {
       return sendJson(res, 409, { error: `${actionPreview.totalUsableQty} counted unit${actionPreview.totalUsableQty === 1 ? "" : "s"} can serve ${actionPreview.affectedOrderCount} open order${actionPreview.affectedOrderCount === 1 ? "" : "s"}. Review that demand and confirm the supplier return before continuing.`, preview: actionPreview });
@@ -59735,7 +59807,7 @@ async function handleApi(req, res) {
       }
       productByAuditLineKey.set(auditLineKey(line), product);
       if (dispositionType !== "return_to_supplier" || countedQty > 0) {
-        dispositionLines.push({ sku: product.sku || line.sku, productId: product.id || line.productId || "", title: product.title || line.title || "", quantity: countedQty, qtyReceived: countedQty, qtyBefore, qtyAfter: Number(stockRow?.qty ?? product.qty ?? 0), locationBin: line.locationBin || stockRow?.locationBin || "", supplierId: lineSupplier?.vendorId || audit.supplierId || "", supplierName: lineSupplier?.supplierName || audit.supplierName || "", supplierCode: lineSupplier?.supplierCode || "", vendorSku: lineSupplier?.vendorSku || "", unitCost: Number(lineSupplier?.cost || 0), supplierMatchType: lineSupplier?.matchType || "" });
+        dispositionLines.push({ sku: product.sku || line.sku, productId: product.id || line.productId || "", title: product.title || line.title || "", quantity: countedQty, qtyReceived: countedQty, qtyBefore, qtyAfter: Number(stockRow?.qty ?? product.qty ?? 0), locationBin: line.locationBin || stockRow?.locationBin || "", supplierId: lineSupplier?.vendorId || audit.supplierId || "", supplierName: lineSupplier?.supplierName || audit.supplierName || "", supplierCode: lineSupplier?.supplierCode || "", vendorSku: lineSupplier?.vendorSku || "", unitCost: Number(lineSupplier?.cost || 0), supplierMatchType: lineSupplier?.matchType || "", recentOpenPurchaseOrders: Array.isArray(line.recentOpenPurchaseOrders) ? line.recentOpenPurchaseOrders : [] });
       }
       products.push(product);
     }
@@ -59913,6 +59985,7 @@ async function handleApi(req, res) {
         note: String(body.dispositionNote || "").trim(),
         attachments: (audit.receivingDocuments || []).map((document) => ({ id: document.id, name: document.name, mimeType: document.mimeType, size: document.size, documentType: document.documentType, url: document.url, sourceAuditId: audit.id })),
         packingSlipReview: audit.packingSlipReview || null,
+        detectedOpenPurchaseOrders: Array.isArray(audit.recentOpenPurchaseOrders) ? audit.recentOpenPurchaseOrders : [],
         items: dispositionLines
       };
       manualWarehouseReceipts.unshift(inboundReceipt);
@@ -60035,7 +60108,7 @@ async function handleApi(req, res) {
     const priorLine = (audit.lines || []).find((line) => String(line.quickCreateClientId || "") === clientActionId);
     if (priorLine) {
       const priorProduct = await postgres.readProductByKey(priorLine.productId || priorLine.sku);
-      return sendJson(res, 200, { audit, product: priorProduct || { id: priorLine.productId, sku: priorLine.sku }, duplicate: true, message: `${priorLine.sku} was already created from this scan.` });
+      return sendJson(res, 200, { audit: await withRecentOpenPurchaseOrderMatches(audit), product: priorProduct || { id: priorLine.productId, sku: priorLine.sku }, duplicate: true, message: `${priorLine.sku} was already created from this scan.` });
     }
     const newlyMatched = await resolveScannedCatalogBarcode(barcode);
     if (newlyMatched.product) return sendJson(res, 409, { error: `${newlyMatched.product.sku} now matches this barcode. Skip quick create and scan it again.` });
@@ -60086,7 +60159,7 @@ async function handleApi(req, res) {
     await postgres.saveWarehouseAuditMetadata(audit);
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
-    return sendJson(res, 201, { audit, product, message: `${sku} was quick-created as a draft. Add its product details later from Catalog.` });
+    return sendJson(res, 201, { audit: await withRecentOpenPurchaseOrderMatches(audit), product, message: `${sku} was quick-created as a draft. Add its product details later from Catalog.` });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "manual-item" && postgres.isPostgresEnabled()) {
@@ -60159,7 +60232,7 @@ async function handleApi(req, res) {
     await postgres.saveWarehouseAudit(audit);
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
-    return sendJson(res, 201, { audit, product, message: `${product.sku} was created as a draft catalog SKU.` });
+    return sendJson(res, 201, { audit: await withRecentOpenPurchaseOrderMatches(audit), product, message: `${product.sku} was created as a draft catalog SKU.` });
   }
 
   if (req.method === "GET" && url.pathname === "/api/warehouse-receipts" && postgres.isPostgresEnabled()) {
