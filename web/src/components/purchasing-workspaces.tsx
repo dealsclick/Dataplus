@@ -45,6 +45,7 @@ import { Tabs,TabsContent,TabsList,TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip,TooltipContent,TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
+import { purchaseOrderUrl } from "../lib/purchase-order-url"
 import {
   AlertTriangle,
   Archive,
@@ -1967,7 +1968,8 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
   const scanRef = useRef<HTMLInputElement>(null)
   const openedMobileReceipt = useRef(false)
   const detailSyncBusyRef = useRef(false)
-  const id = mobileId || decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
+  const purchaseOrderKeyFromLocation = () => mobileId || decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
+  const [id, setId] = useState(purchaseOrderKeyFromLocation)
   const [data, setData] = useState<{ purchaseOrder?: Record<string, unknown>; linkedOrders?: Array<Record<string, unknown>>; dropshipShipFromWarehouse?: Record<string, unknown> | null; shipFromWarehouses?: Array<Record<string, unknown>>; fulfillmentSettings?: Record<string, unknown>; supplierSubmission?: SupplierSubmissionCapability }>({})
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
@@ -2051,7 +2053,15 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
   const load = async (initial = false, silent = false) => {
     if (initial) setLoading(true)
     else if (!silent) setRefreshing(true)
-    try { setData(await api(`/api/purchase-orders/${encodeURIComponent(id)}`)) }
+    try {
+      const result = await api<{ purchaseOrder?: Record<string, unknown>; linkedOrders?: Array<Record<string, unknown>>; dropshipShipFromWarehouse?: Record<string, unknown> | null; shipFromWarehouses?: Array<Record<string, unknown>>; fulfillmentSettings?: Record<string, unknown>; supplierSubmission?: SupplierSubmissionCapability }>(`/api/purchase-orders/${encodeURIComponent(id)}`)
+      const loadedPo = result.purchaseOrder
+      if (!mobile && loadedPo) {
+        const canonicalPath = purchaseOrderUrl(loadedPo.poNumber, loadedPo.id)
+        if (window.location.pathname !== canonicalPath) window.history.replaceState(window.history.state, "", `${canonicalPath}${window.location.search}${window.location.hash}`)
+      }
+      setData(result)
+    }
     catch (error) { if (!silent) toast.error(error instanceof Error ? error.message : "Unable to load purchase order.") }
     finally { setLoading(false); if (!silent) setRefreshing(false) }
   }
@@ -2060,6 +2070,12 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
     try { setReferenceData(await api<{ vendors?: Array<Record<string, unknown>>; warehouses?: Array<Record<string, unknown>> }>("/api/purchase-orders/reference-data")) }
     catch { toast.error("Unable to load supplier and warehouse choices.") }
   }
+  useEffect(() => {
+    if (mobileId) { setId(mobileId); return }
+    const syncPurchaseOrderKey = () => setId(purchaseOrderKeyFromLocation())
+    window.addEventListener("popstate", syncPurchaseOrderKey)
+    return () => window.removeEventListener("popstate", syncPurchaseOrderKey)
+  }, [mobileId])
   useEffect(() => { void load(true) }, [id])
   useEffect(() => {
     const sync = async () => {
@@ -2359,7 +2375,7 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
       poMutationRequestIdsRef.current.delete("re-source")
       setReSourceOpen(false)
       const replacementId = String(result.replacementPurchaseOrder?.id || "")
-      if (replacementId) { window.history.pushState({}, "", `/purchase-orders/${encodeURIComponent(replacementId)}`); window.dispatchEvent(new PopStateEvent("popstate")) } else await load()
+      if (replacementId) { window.history.pushState({}, "", purchaseOrderUrl(result.replacementPurchaseOrder?.poNumber, replacementId)); window.dispatchEvent(new PopStateEvent("popstate")) } else await load()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to replace the supplier PO.") } finally { setSaving(false) }
   }
   const moveLineToDropship = async () => {
@@ -2621,9 +2637,9 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
       <AlertTitle>{["canceled", "cancelled"].includes(String(po.status || "").toLowerCase()) ? nextStep.label : `Next step: ${nextStep.label}`}</AlertTitle>
       <AlertDescription>{nextStep.description}</AlertDescription>
     </Alert>
-    {po.replacesPurchaseOrderId ? <Alert><RotateCcw className="size-4" /><AlertTitle>Replacement purchase order</AlertTitle><AlertDescription>This PO replaces open quantities from <a className="font-medium text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.replacesPurchaseOrderId))}`}>{String(po.replacesPurchaseOrderNumber || po.replacesPurchaseOrderId)}</a>. Received quantities remain on the original PO.</AlertDescription></Alert> : null}
-    {po.replacedByPurchaseOrderId ? <Alert><Archive className="size-4" /><AlertTitle>This PO was superseded</AlertTitle><AlertDescription>Its open quantities were moved to <a className="font-medium text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(String(po.replacedByPurchaseOrderId))}`}>{String(po.replacedByPurchaseOrderNumber || po.replacedByPurchaseOrderId)}</a>. This record is retained for receipts and audit history.</AlertDescription></Alert> : null}
-    {Array.isArray(po.replacedByPurchaseOrderIds) && po.replacedByPurchaseOrderIds.length > 1 ? <Alert><Archive className="size-4" /><AlertTitle>This PO was split into dropship POs</AlertTitle><AlertDescription className="flex flex-wrap gap-x-2 gap-y-1">Its lines were grouped by recipient and delivery address into {(po.replacedByPurchaseOrderIds as unknown[]).map((replacementId, index) => <a key={String(replacementId)} className="font-medium text-primary hover:underline" href={`/purchase-orders/${encodeURIComponent(String(replacementId))}`}>{String((po.replacedByPurchaseOrderNumbers as unknown[] | undefined)?.[index] || replacementId)}</a>)}.</AlertDescription></Alert> : null}
+    {po.replacesPurchaseOrderId ? <Alert><RotateCcw className="size-4" /><AlertTitle>Replacement purchase order</AlertTitle><AlertDescription>This PO replaces open quantities from <a className="font-medium text-primary hover:underline" href={purchaseOrderUrl(po.replacesPurchaseOrderNumber, po.replacesPurchaseOrderId)}>{String(po.replacesPurchaseOrderNumber || po.replacesPurchaseOrderId)}</a>. Received quantities remain on the original PO.</AlertDescription></Alert> : null}
+    {po.replacedByPurchaseOrderId ? <Alert><Archive className="size-4" /><AlertTitle>This PO was superseded</AlertTitle><AlertDescription>Its open quantities were moved to <a className="font-medium text-primary hover:underline" href={purchaseOrderUrl(po.replacedByPurchaseOrderNumber, po.replacedByPurchaseOrderId)}>{String(po.replacedByPurchaseOrderNumber || po.replacedByPurchaseOrderId)}</a>. This record is retained for receipts and audit history.</AlertDescription></Alert> : null}
+    {Array.isArray(po.replacedByPurchaseOrderIds) && po.replacedByPurchaseOrderIds.length > 1 ? <Alert><Archive className="size-4" /><AlertTitle>This PO was split into dropship POs</AlertTitle><AlertDescription className="flex flex-wrap gap-x-2 gap-y-1">Its lines were grouped by recipient and delivery address into {(po.replacedByPurchaseOrderIds as unknown[]).map((replacementId, index) => <a key={String(replacementId)} className="font-medium text-primary hover:underline" href={purchaseOrderUrl((po.replacedByPurchaseOrderNumbers as unknown[] | undefined)?.[index], replacementId)}>{String((po.replacedByPurchaseOrderNumbers as unknown[] | undefined)?.[index] || replacementId)}</a>)}.</AlertDescription></Alert> : null}
     {unresolvedCatalogLines.length ? <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>{numberLabel(unresolvedCatalogLines.length)} PO line{unresolvedCatalogLines.length === 1 ? " needs" : "s need"} a catalog SKU</AlertTitle><AlertDescription>The warehouse can receive these lines now. Their physical counts remain on SKU-resolution hold and are posted to inventory automatically after you link an existing product or create the missing draft SKU.</AlertDescription></Alert> : null}
     {canceledDemandExceptions.length ? <Alert variant="destructive"><AlertTriangle className="size-4" /><AlertTitle>Canceled or refunded customer demand</AlertTitle><AlertDescription>{canceledDemandExceptions.length} committed PO line{canceledDemandExceptions.length === 1 ? " is" : "s are"} no longer needed by the customer. Segregate these units at receiving; DataPlus will place them in vendor-return hold instead of releasing them to fulfillment.</AlertDescription></Alert> : null}
     {isDropship ? <Card className="border-blue-500/30">

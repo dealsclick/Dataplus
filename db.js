@@ -13996,17 +13996,26 @@ async function quickSearchOperations(query, options = {}) {
   return { orders: orders.rows, purchaseOrders: purchaseOrders.rows };
 }
 
+function normalizedPurchaseOrderLookupNumber(value) {
+  const match = String(value || "").trim().match(/^po[\s#_-]*(\d+)$/i);
+  return match ? `PO#${match[1]}` : "";
+}
+
 async function readPurchaseOrderByKey(key) {
   const client = getPool();
   const value = nullableString(key);
   if (!client || !value) return null;
   await initRelationalSchema();
+  const normalizedPoNumber = normalizedPurchaseOrderLookupNumber(value);
   const result = await client.query(`
     select *
     from purchase_order_records
-    where po_id = $1 or lower(po_number) = lower($1)
+    where po_id = $1
+      or lower(po_number) = lower($1)
+      or ($2 <> '' and lower(po_number) = lower($2))
+    order by case when po_id = $1 then 0 when lower(po_number) = lower($1) then 1 else 2 end
     limit 1
-  `, [value]);
+  `, [value, normalizedPoNumber]);
   if (!result.rows[0]) return null;
   const lines = await client.query(`
     select *
@@ -21167,6 +21176,7 @@ module.exports = {
   reconcileEbayActiveListings,
   readProductsForOrderSkus,
   readPurchaseOrderByKey,
+  normalizedPurchaseOrderLookupNumber,
   readShopifyStatusMap,
   readShopifyStatusMapForSkus,
   countShopifyVariantStatuses,
