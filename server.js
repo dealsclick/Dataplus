@@ -43028,7 +43028,7 @@ async function createOutboundLiveQuickProduct({ barcode, title, cost, warehouse,
   return product;
 }
 
-async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, clientScanId, actor, quickCreate = null }) {
+async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, clientScanId, actor, quickCreate = null, forceItem = false }) {
   return withOutboundLiveItemLock(`${auditId}:${scanId}`, async () => {
     const audit = await outboundAuditStore.read(scope, auditId);
     if (!audit) throw Object.assign(new Error("Outbound audit not found."), { statusCode: 404 });
@@ -43107,6 +43107,15 @@ async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, cl
     let lookup = await resolveScannedCatalogBarcode(barcode);
     let product = lookup.product;
     let quickCreated = false;
+    if (!product && !forceItem && /^\d{12,14}$/.test(barcode) && inferCarrierFromTracking(barcode) === "FedEx") {
+      return {
+        scan,
+        trackingCandidate: true,
+        trackingNumber: barcode,
+        carrier: "FedEx",
+        message: `${barcode} could be FedEx tracking or an unknown product barcode. Confirm how it should be recorded.`
+      };
+    }
     if (!product && quickCreate && scan.liveItemRequired) {
       product = await createOutboundLiveQuickProduct({
         barcode,
@@ -67012,9 +67021,10 @@ async function handleApi(req, res) {
         barcodeValue: body.barcode || body.upc || body.value,
         clientScanId: body.clientScanId,
         actor: authUser,
-        quickCreate: action === "quick-item" ? { title: body.title, cost: body.cost } : null
+        quickCreate: action === "quick-item" ? { title: body.title, cost: body.cost } : null,
+        forceItem: body.forceItem === true
       });
-      return sendJson(res, result.notFound ? 200 : result.duplicate ? 200 : 201, result);
+      return sendJson(res, result.notFound || result.trackingCandidate ? 200 : result.duplicate ? 200 : 201, result);
     }
     if (req.method === "POST" && action === "reconcile") {
       const audit = await outboundAuditStore.read(scope, auditId);

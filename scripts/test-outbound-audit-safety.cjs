@@ -110,6 +110,9 @@ assert.match(serverSource, /isLikelyTrackingNumber\(barcode\)/);
 assert.match(serverSource, /That looks like a new package tracking label\. Record it as the next package/);
 assert.match(serverSource, /catalogBarcodeCandidate/);
 assert.match(serverSource, /is the item barcode for \$\{productSku\}, not package tracking\. Scan the shipping label first/);
+assert.match(serverSource, /trackingCandidate: true/);
+assert.match(serverSource, /could be FedEx tracking or an unknown product barcode/);
+assert.match(serverSource, /forceItem: body\.forceItem === true/);
 assert.match(serverSource, /outboundAuditStore\.removeLiveItem/);
 assert.match(serverSource, /Removed optional outbound item scan/);
 assert.match(serverSource, /req\.method !== "DELETE"/);
@@ -123,6 +126,8 @@ assert.match(scannerSource, /reader\.possibleFormats/);
 assert.doesNotMatch(scannerSource, /ideal: 1920, max: 1920/);
 
 const workspaceSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'outbound-audit-workspace.tsx'), 'utf8');
+const warehouseRouteSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'warehouse-route.tsx'), 'utf8');
+const appSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'App.tsx'), 'utf8');
 assert.match(workspaceSource, /captureCompressedEvidence/);
 assert.match(workspaceSource, /savePendingOutboundEvidence/);
 assert.match(workspaceSource, /DataPlus order/);
@@ -143,6 +148,14 @@ assert.match(workspaceSource, /That is the package tracking label\. Scan the pro
 assert.match(workspaceSource, /isLikelyPackageTrackingBarcode/);
 assert.match(workspaceSource, /New package tracking label detected\. Starting the next package now/);
 assert.match(workspaceSource, /This Live shipment still needs its item scans/);
+assert.match(workspaceSource, /Confirm FedEx barcode/);
+assert.match(workspaceSource, /FedEx tracking or item UPC\?/);
+assert.match(workspaceSource, /Start FedEx package/);
+assert.match(workspaceSource, /Use as item UPC/);
+assert.match(appSource, /path: "\/warehouse\/outbound"/);
+assert.match(appSource, /<WarehouseWorkspace warehouses=\{state\.warehouses \|\| \[\]\} \/>/);
+assert.match(warehouseRouteSource, /<TabsTrigger value="outbound">Outbound<\/TabsTrigger>/);
+assert.match(warehouseRouteSource, /<OutboundAuditWorkspace warehouses=\{warehouses\} \/>/);
 assert.match(workspaceSource, /Undo last item/);
 assert.match(workspaceSource, /Remove \$\{item\.sku\} scan/);
 assert.match(workspaceSource, /removeOptionalItem/);
@@ -160,7 +173,6 @@ const warehouseMobileSource = fs.readFileSync(path.join(__dirname, '..', 'web', 
 assert.match(warehouseMobileSource, /id: "outbound"/);
 assert.match(warehouseMobileSource, /section === "outbound"/);
 
-const warehouseRouteSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'warehouse-route.tsx'), 'utf8');
 assert.match(warehouseRouteSource, /OutboundAuditWorkspace/);
 assert.match(warehouseRouteSource, /startFastBarcodeScanner/);
 assert.match(warehouseRouteSource, /compressEvidenceImage/);

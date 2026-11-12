@@ -36,6 +36,8 @@ assert.equal(isCarrierProviderPlaceholder("UPS"), false);
 assert.equal(isLikelyTrackingNumber("SWX523010000247149463"), true);
 assert.equal(isLikelyTrackingNumber("GFUS01083339081733"), true);
 assert.equal(isLikelyTrackingNumber("1Z999AA10123456784"), true);
+assert.equal(isLikelyTrackingNumber("9400111899223856928499"), true);
+assert.equal(isLikelyTrackingNumber("123456789012345"), true);
 assert.equal(isLikelyTrackingNumber("045242551453"), false, "12-digit UPC values remain valid item scans");
 assert.equal(isLikelyTrackingNumber("00012345678905"), false, "GTIN-14 values remain valid item scans");
 assert.equal(normalizeTrackingNumber("1Z 999-AA"), "1Z999AA");

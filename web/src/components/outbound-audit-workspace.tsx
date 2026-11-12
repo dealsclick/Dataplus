@@ -81,7 +81,7 @@ type LiveItem = {
 }
 type AuditDetail = { session: AuditSession; scans: AuditScan[] }
 type ScanResponse = { scan: AuditScan; session: AuditSession; duplicate?: boolean; message?: string }
-type LiveItemResponse = { scan: AuditScan; item?: LiveItem; duplicate?: boolean; complete?: boolean; notFound?: boolean; allowQuickCreate?: boolean; barcode?: string; target?: { orderNumber?: string; listingTitle?: string }; message?: string }
+type LiveItemResponse = { scan: AuditScan; item?: LiveItem; duplicate?: boolean; complete?: boolean; notFound?: boolean; allowQuickCreate?: boolean; barcode?: string; target?: { orderNumber?: string; listingTitle?: string }; trackingCandidate?: boolean; trackingNumber?: string; carrier?: string; message?: string }
 type CapturedPhoto = { blob: Blob; width: number; height: number; previewUrl: string }
 
 const carriers = ["UPS", "USPS", "FedEx", "DHL", "Amazon Shipping", "OnTrac", "Other"]
@@ -171,7 +171,7 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
   initialScan?: AuditScan | null
   onOpenChange: (open: boolean) => void
   onScan: (tracking: string) => Promise<ScanResponse>
-  onItemScan: (scan: AuditScan, barcode: string, clientScanId: string) => Promise<LiveItemResponse>
+  onItemScan: (scan: AuditScan, barcode: string, clientScanId: string, options?: { forceItem?: boolean }) => Promise<LiveItemResponse>
   onQuickCreate: (scan: AuditScan, input: { barcode: string; title: string; cost: number; clientScanId: string }) => Promise<LiveItemResponse>
   onRemoveItem: (scan: AuditScan, item: LiveItem) => Promise<AuditScan>
   onPhoto: (scan: AuditScan, photo: Omit<CapturedPhoto, "previewUrl">) => Promise<void>
@@ -182,10 +182,11 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
   const [manualValue, setManualValue] = useState("")
   const [busy, setBusy] = useState(false)
   const [lastResult, setLastResult] = useState<ScanResponse | null>(null)
-  const [mode, setMode] = useState<"scan" | "items" | "quick" | "photo" | "preview">("scan")
+  const [mode, setMode] = useState<"scan" | "items" | "tracking" | "quick" | "photo" | "preview">("scan")
   const [activeScan, setActiveScan] = useState<AuditScan | null>(null)
   const [lastItem, setLastItem] = useState<LiveItem | null>(null)
   const [unknownItem, setUnknownItem] = useState<{ barcode: string; clientScanId: string; target?: LiveItemResponse["target"] } | null>(null)
+  const [trackingCandidate, setTrackingCandidate] = useState<{ barcode: string; clientScanId: string; carrier: string } | null>(null)
   const [quickDraft, setQuickDraft] = useState({ title: "", cost: "" })
   const [photo, setPhoto] = useState<CapturedPhoto | null>(null)
   const [torchAvailable, setTorchAvailable] = useState(false)
@@ -213,6 +214,7 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
       setLastItem(null)
     }
     setUnknownItem(null)
+    setTrackingCandidate(null)
     setQuickDraft({ title: "", cost: "" })
   }, [initialScan, open])
   useEffect(() => () => { if (photo?.previewUrl) URL.revokeObjectURL(photo.previewUrl) }, [photo?.previewUrl])
@@ -255,7 +257,7 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
     }
   }, [clearPhoto, onScan])
 
-  const submitItem = useCallback(async (barcode: string, existingClientScanId = "") => {
+  const submitItem = useCallback(async (barcode: string, existingClientScanId = "", forceItem = false) => {
     const value = barcode.trim()
     const scan = activeScanRef.current
     if (!value || !scan || scanBusyRef.current) return
@@ -285,8 +287,14 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
     setBusy(true)
     const clientScanId = existingClientScanId || crypto.randomUUID()
     try {
-      const result = await onItemScan(scan, value, clientScanId)
+      const result = await onItemScan(scan, value, clientScanId, { forceItem })
       setManualValue("")
+      if (result.trackingCandidate) {
+        setTrackingCandidate({ barcode: result.trackingNumber || value, clientScanId, carrier: result.carrier || "FedEx" })
+        setMode("tracking")
+        if (navigator.vibrate) navigator.vibrate([80, 40, 80])
+        return
+      }
       if (result.notFound) {
         if (result.allowQuickCreate === false) {
           toast.warning(result.message || "This item was not found. Scan another item or skip to the package photo.")
@@ -317,6 +325,22 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
       scanBusyRef.current = false
     }
   }, [clearPhoto, onItemScan, submit])
+
+  async function useTrackingCandidateAsPackage() {
+    if (!trackingCandidate || busy) return
+    const trackingNumber = trackingCandidate.barcode
+    setTrackingCandidate(null)
+    setMode("items")
+    await submit(trackingNumber)
+  }
+
+  async function useTrackingCandidateAsItem() {
+    if (!trackingCandidate || busy) return
+    const candidate = trackingCandidate
+    setTrackingCandidate(null)
+    setMode("items")
+    await submitItem(candidate.barcode, candidate.clientScanId, true)
+  }
 
   async function quickCreateItem() {
     const scan = activeScanRef.current
@@ -405,6 +429,7 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
       await onPhoto(activeScan, photo)
       clearPhoto()
       setActiveScan(null)
+      setTrackingCandidate(null)
       setMode("scan")
       setLastResult(null)
     } catch (error) {
@@ -416,6 +441,7 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
     if (!activeScan || activeScan.liveItemRequired) return
     setManualValue("")
     setUnknownItem(null)
+    setTrackingCandidate(null)
     clearPhoto()
     setMode(activeScan.evidenceCount ? "scan" : "photo")
   }
@@ -447,8 +473,8 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
       <DialogHeader className="shrink-0 border-b px-4 py-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <DialogTitle>{mode === "scan" ? "Scan outbound packages" : mode === "items" ? "Scan package items" : mode === "quick" ? "Create missing catalog item" : mode === "photo" ? "Photograph this package" : "Review package photo"}</DialogTitle>
-            <DialogDescription className="break-words">{mode === "scan" ? "Tracking is recorded even when no DataPlus order is found. Every package can continue to item scans and a photo." : mode === "items" && activeScan ? `${activeScan.liveItemRequired ? "Required" : "Optional"} · ${itemProgressLabel(activeScan)} · ${activeScan.trackingNumber}` : mode === "quick" ? "This barcode was not found. Create a Draft SKU and use it for the current group line." : activeScan ? `${activeScan.trackingNumber} · ${scanOrderReference(activeScan)}` : "Capture the exterior shipping box."}</DialogDescription>
+            <DialogTitle>{mode === "scan" ? "Scan outbound packages" : mode === "items" ? "Scan package items" : mode === "tracking" ? "Confirm FedEx barcode" : mode === "quick" ? "Create missing catalog item" : mode === "photo" ? "Photograph this package" : "Review package photo"}</DialogTitle>
+            <DialogDescription className="break-words">{mode === "scan" ? "Tracking is recorded even when no DataPlus order is found. Every package can continue to item scans and a photo." : mode === "items" && activeScan ? `${activeScan.liveItemRequired ? "Required" : "Optional"} · ${itemProgressLabel(activeScan)} · ${activeScan.trackingNumber}` : mode === "tracking" ? "FedEx tracking and UPCs can both contain 12 digits. Choose the barcode's purpose." : mode === "quick" ? "This barcode was not found. Create a Draft SKU and use it for the current group line." : activeScan ? `${activeScan.trackingNumber} · ${scanOrderReference(activeScan)}` : "Capture the exterior shipping box."}</DialogDescription>
           </div>
           {torchAvailable ? <Button size="icon" variant={torchEnabled ? "default" : "outline"} title={torchEnabled ? "Turn off camera light" : "Turn on camera light"} onClick={() => void toggleTorch()}><Flashlight className="size-4" /></Button> : null}
         </div>
@@ -462,12 +488,13 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
         {cameraState === "ready" && (mode === "scan" || mode === "items") ? <div className="pointer-events-none absolute inset-x-[7%] top-1/2 -translate-y-1/2"><div className={`h-28 rounded-md border-2 shadow-[0_0_18px_rgba(74,222,128,.55)] ${mode === "items" ? "border-blue-400/90" : "border-emerald-400/90"}`}><div className={`mt-14 h-0.5 ${mode === "items" ? "bg-blue-400" : "bg-emerald-400"}`} /></div><p className="mx-auto mt-3 w-fit rounded-full bg-black/75 px-3 py-1.5 text-xs font-medium text-white">{mode === "items" && activeScan ? `Scan actual item UPC · ${itemProgressLabel(activeScan)}` : "Align one tracking barcode inside the frame"} · {scannerEngine === "native" ? "Fast scan" : "Compatible scan"}</p></div> : null}
         {lastResult && mode === "scan" ? <div className={`absolute inset-x-3 top-3 flex items-start gap-3 rounded-md border p-3 text-white shadow-xl ${lastResult.duplicate ? "border-amber-300 bg-amber-700" : lastResult.scan.matchStatus === "unmatched" ? "border-amber-300 bg-amber-700" : "border-emerald-300 bg-emerald-700"}`}>{lastResult.duplicate || lastResult.scan.matchStatus === "unmatched" ? <AlertTriangle className="mt-0.5 size-5 shrink-0" /> : <CheckCircle2 className="mt-0.5 size-5 shrink-0" />}<div className="min-w-0"><p className="font-medium">{lastResult.message}</p><p className="mt-1 truncate font-mono text-xs text-white/80">{lastResult.scan.trackingNumber}</p></div></div> : null}
         {mode === "items" && activeScan ? <div className="absolute inset-x-3 top-3 rounded-md border border-blue-300 bg-blue-950/90 p-3 text-white shadow-xl"><div className="flex items-center justify-between gap-3"><div><p className="font-medium">{activeScan.liveItemRequired ? activeScan.matches.length > 1 ? "Combined Live shipment" : "Live shipment" : activeScan.matches.length ? "Optional item verification" : "Unmatched package contents"}</p><p className="text-xs text-blue-100">{activeScan.matches.length ? `${activeScan.matches.length} order${activeScan.matches.length === 1 ? "" : "s"}` : "No DataPlus order matched"}{activeScan.liveItemRequired ? " · inventory assignment required" : " · scan items or skip to the package photo"}</p></div><Badge variant="secondary" className="shrink-0">{itemProgressLabel(activeScan)}</Badge></div>{lastItem ? <div className="mt-3 rounded border border-white/20 bg-black/30 p-2"><p className="truncate text-sm font-medium">{lastItem.sku} · {lastItem.title}</p><p className="truncate text-xs text-white/70">{lastItem.orderNumber ? `${lastItem.verificationOnly ? lastItem.verificationMatched === false ? "Does not match" : "Verified for" : "Assigned to"} ${lastItem.orderNumber} · ${lastItem.listingTitle}` : "Recorded with this unmatched package"}</p></div> : <p className="mt-3 text-sm text-blue-100">{activeScan.liveItemRequired ? "Scan each actual product in the box. DataPlus assigns inventory to the next open line across the group." : "Scan any item UPCs you want recorded, or skip this optional step and photograph the package."}</p>}</div> : null}
+        {mode === "tracking" && trackingCandidate ? <div className="absolute inset-0 overflow-y-auto bg-background/98 p-4 text-foreground"><div className="mx-auto grid max-w-lg gap-4 rounded-md border bg-card p-4 shadow-xl"><div><div className="flex items-center gap-2 font-semibold"><AlertTriangle className="size-4 text-amber-500" /> FedEx tracking or item UPC?</div><p className="mt-2 break-all font-mono text-sm">{trackingCandidate.barcode}</p><p className="mt-2 text-sm text-muted-foreground">DataPlus did not find this 12–14 digit value in the catalog. FedEx tracking uses the same numeric format as many product barcodes.</p></div><div className="grid gap-2 sm:grid-cols-2"><Button variant="outline" disabled={busy} onClick={() => void useTrackingCandidateAsItem()}><PackageCheck className="size-4" /> Use as item UPC</Button><Button disabled={busy} onClick={() => void useTrackingCandidateAsPackage()}><Truck className="size-4" /> Start FedEx package</Button></div></div></div> : null}
         {mode === "quick" && unknownItem ? <div className="absolute inset-0 overflow-y-auto bg-background/98 p-4 text-foreground"><div className="mx-auto grid max-w-lg gap-4 rounded-md border bg-card p-4 shadow-xl"><div><div className="flex items-center gap-2 font-semibold"><AlertTriangle className="size-4 text-amber-500" /> Product not found</div><p className="mt-1 break-all font-mono text-xs text-muted-foreground">{unknownItem.barcode}</p>{unknownItem.target ? <p className="mt-2 text-sm text-muted-foreground">Next group line: {unknownItem.target.orderNumber} · {unknownItem.target.listingTitle}</p> : null}</div><div className="grid gap-2"><Label>Product title</Label><Input value={quickDraft.title} onChange={(event) => setQuickDraft((current) => ({ ...current, title: event.target.value }))} placeholder="Actual product name" autoFocus /></div><div className="grid gap-2"><Label>Unit cost</Label><Input type="number" min="0" step="0.01" inputMode="decimal" value={quickDraft.cost} onChange={(event) => setQuickDraft((current) => ({ ...current, cost: event.target.value }))} placeholder="0.00" /></div><p className="text-xs text-muted-foreground">Creates a Draft catalog SKU at this audit warehouse, records the outbound unit, and leaves the product for catalog review.</p><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" disabled={busy} onClick={() => { setUnknownItem(null); setMode("items") }}>Scan another UPC</Button><Button disabled={busy || !quickDraft.title.trim()} onClick={() => void quickCreateItem()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <PackageCheck className="size-4" />} Create and use item</Button></div></div></div> : null}
         {mode === "photo" && cameraState === "ready" ? <div className="absolute inset-x-0 bottom-5 flex justify-center"><Button className="size-16 rounded-full border-4 border-white bg-white text-black shadow-2xl hover:bg-white" size="icon" title="Take package photo" disabled={busy} onClick={() => void capturePhoto()}>{busy ? <Loader2 className="size-6 animate-spin" /> : <Camera className="size-7" />}</Button></div> : null}
         {mode === "preview" && photo ? <div className="absolute inset-0 grid bg-black"><img src={photo.previewUrl} alt="Package evidence preview" className="size-full object-contain" /><div className="absolute inset-x-0 bottom-0 flex justify-center gap-3 bg-black/70 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="secondary" disabled={busy} onClick={() => { clearPhoto(); setMode("photo") }}><RotateCcw className="size-4" /> Retake</Button><Button disabled={busy} onClick={() => void usePhoto()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <UploadCloud className="size-4" />} Use photo</Button></div></div> : null}
         {busy ? <div className="absolute inset-0 grid place-items-center bg-black/40"><div className="flex items-center gap-2 rounded-md bg-background px-4 py-3 text-foreground shadow-xl"><Loader2 className="size-5 animate-spin" /> {mode === "items" || mode === "quick" ? activeScan?.liveItemRequired ? "Assigning inventory..." : "Verifying item..." : "Recording package..."}</div></div> : null}
       </div>
-      <DialogFooter className="!m-0 shrink-0 !flex-col gap-2 rounded-none border-t bg-background px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 sm:!flex-row sm:items-center sm:justify-between"><p className="w-full text-xs text-muted-foreground sm:min-w-0 sm:flex-1 sm:truncate">{pendingUploads ? `${pendingUploads} photo upload${pendingUploads === 1 ? "" : "s"} continuing in the background.` : mode === "scan" ? "Camera stays open between packages for faster scanning." : mode === "items" ? activeScan?.liveItemRequired ? "Item scans apply to the complete shipment group, including combined orders." : "Item verification is optional. You can remove mistakes or skip directly to the package photo." : mode === "quick" ? "Quick-created products remain Draft until catalog review." : "Include the label and the exterior condition of the box."}</p><div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">{mode === "items" && lastItem?.verificationOnly ? <Button className="w-full sm:w-auto" variant="outline" disabled={busy} onClick={() => void undoLastItemScan()}><Undo2 className="size-4" /> Undo last item</Button> : null}{mode === "items" && activeScan && !activeScan.liveItemRequired ? <Button className="w-full sm:w-auto" onClick={skipOptionalItemScan}><ImageIcon className="size-4" /> {activeScan.evidenceCount ? "Skip item scan" : "Skip to package photo"}</Button> : null}<Button className="w-full sm:w-auto" variant="outline" onClick={() => onOpenChange(false)}>Done</Button></div></DialogFooter>
+      <DialogFooter className="!m-0 shrink-0 !flex-col gap-2 rounded-none border-t bg-background px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 sm:!flex-row sm:items-center sm:justify-between"><p className="w-full text-xs text-muted-foreground sm:min-w-0 sm:flex-1 sm:truncate">{pendingUploads ? `${pendingUploads} photo upload${pendingUploads === 1 ? "" : "s"} continuing in the background.` : mode === "scan" ? "Camera stays open between packages for faster scanning." : mode === "items" ? activeScan?.liveItemRequired ? "Item scans apply to the complete shipment group, including combined orders." : "Item verification is optional. You can remove mistakes or skip directly to the package photo." : mode === "tracking" ? "Choose tracking only when this barcode came from the shipping label." : mode === "quick" ? "Quick-created products remain Draft until catalog review." : "Include the label and the exterior condition of the box."}</p><div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">{mode === "items" && lastItem?.verificationOnly ? <Button className="w-full sm:w-auto" variant="outline" disabled={busy} onClick={() => void undoLastItemScan()}><Undo2 className="size-4" /> Undo last item</Button> : null}{mode === "items" && activeScan && !activeScan.liveItemRequired ? <Button className="w-full sm:w-auto" onClick={skipOptionalItemScan}><ImageIcon className="size-4" /> {activeScan.evidenceCount ? "Skip item scan" : "Skip to package photo"}</Button> : null}<Button className="w-full sm:w-auto" variant="outline" onClick={() => onOpenChange(false)}>Done</Button></div></DialogFooter>
     </DialogContent>
   </Dialog>
 }
@@ -593,13 +620,13 @@ export function OutboundAuditWorkspace({ warehouses = [] }: { warehouses?: Row[]
     return result
   }, [detail?.session.id])
 
-  const recordLiveItem = useCallback(async (scan: AuditScan, barcode: string, clientScanId: string) => {
+  const recordLiveItem = useCallback(async (scan: AuditScan, barcode: string, clientScanId: string, options: { forceItem?: boolean } = {}) => {
     if (!detail?.session.id) throw new Error("The outbound audit is no longer available.")
     const result = await api<LiveItemResponse>(`/api/fulfillment/outbound-audits/${encodeURIComponent(detail.session.id)}/item-scan`, {
       method: "POST",
-      body: JSON.stringify({ scanId: scan.id, barcode, clientScanId }),
+      body: JSON.stringify({ scanId: scan.id, barcode, clientScanId, forceItem: options.forceItem === true }),
     })
-    if (!result.notFound) setDetail((current) => current ? { ...current, scans: current.scans.map((row) => row.id === result.scan.id ? result.scan : row) } : current)
+    if (!result.notFound && !result.trackingCandidate) setDetail((current) => current ? { ...current, scans: current.scans.map((row) => row.id === result.scan.id ? result.scan : row) } : current)
     return result
   }, [detail?.session.id])
 

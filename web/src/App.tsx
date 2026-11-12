@@ -28,6 +28,7 @@ Puzzle,
 RefreshCw,
 RotateCcw,
 Save,
+ScanBarcode,
 Search,
 Settings,
 ShieldCheck,
@@ -1508,6 +1509,7 @@ const warehouseSidebarItems: Array<{ label: string; path: string; icon: React.Co
   { label: "Mobile warehouse", path: "/warehouse/mobile", icon: Warehouse },
   { label: "Warehouses", path: "/warehouse/warehouses", icon: Warehouse },
   { label: "Receiving", path: "/warehouse/receiving", icon: Archive },
+  { label: "Outbound", path: "/warehouse/outbound", icon: ScanBarcode },
   { label: "Warehouse Audits", path: "/warehouse/audits", icon: CheckCircle2 },
   { label: "Bins", path: "/warehouse/bins", icon: Boxes },
   { label: "Fulfillment", path: "/fulfillment", icon: Truck },
@@ -3114,7 +3116,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 {view === "shipping-disputes" && <ShippingDisputes isSuperuser={authUser.isSuperuser === true} />}
                 {view === "sales-reports" && <SalesReportsPage />}
                 {view === "shipping-reports" && <ShippingReportsPage />}
-                {view === "warehouse" && <WarehouseWorkspace />}
+                {view === "warehouse" && <WarehouseWorkspace warehouses={state.warehouses || []} />}
                 {view === "fulfillment" && (window.location.pathname.replace(/\/+$/, "") === "/fulfillment/batches" ? <ShippingBatchesPage /> : <FulfillmentPage />)}
                 {view === "purchasing" && <PurchasingRouter operatorName={authUser.name || authUser.username || "Buyer"} />}
                 {view === "po-detail" && <PurchaseOrderDetailPage operatorName={authUser.name || authUser.username || "Buyer"} />}
