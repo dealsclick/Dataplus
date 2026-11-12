@@ -78,6 +78,7 @@ async function main() {
       manufacturer text,mfr_part_number text,vendor_sku text,barcode text,category text,main_category text,source_category text,
       supplier text,supplier_code text,active boolean,to_be_discontinued boolean,uom text,uom_qty numeric,cost numeric,price numeric,
       qty numeric,default_image text,raw jsonb,created_at timestamptz,updated_at timestamptz);
+      create table inventory_levels(product_id text,location_key text,on_hand numeric,available numeric,reserved numeric,committed numeric,incoming numeric,updated_at timestamptz);
       create table walmart_documents(doc_key text primary key,data jsonb,updated_at timestamptz);
       create table vendors(name text, code text);
       create table category_channel_mappings(channel text,category_name text,channel_category_id text,status text);`);
@@ -86,6 +87,10 @@ async function main() {
     for (const [id, raw, date] of [['A', ready, '2026-09-08T23:59:59Z'], ['B', { ...ready, ebayListing: { offerId: 'offer' } }, '2026-09-08'], ['C', { ebayListing: { listingId: 'live' } }, '2026-09-09'], ['D', {}, '2026-09-07']]) {
       await client.query(`insert into products(product_id,sku,title,price,qty,raw,created_at) values($1,$1,'same',10,5,$2,$3)`, [id, JSON.stringify(raw), date]);
     }
+    await client.query(`insert into inventory_levels(product_id,location_key,on_hand,available,reserved,committed,incoming,updated_at) values
+      ('A','warehouse-a',3,2,1,0,0,now()),
+      ('A','datawarehouse',20,20,0,0,0,now()),
+      ('B','warehouse-a',0,0,0,0,0,now())`);
     await client.query(fs.readFileSync(path.join(__dirname, 'catalog-filter-indexes.sql'), 'utf8').replaceAll('CONCURRENTLY ', ''));
     const run = filters => context.listProducts({ fastPage: true, includeTotal: true, limit: 1, filters });
     const missing = await run({ channelStatus: 'ebay-missing' });
@@ -94,6 +99,10 @@ async function main() {
     assert.equal(offer.total, 1); assert.equal(offer.inventory[0].sku, 'B');
     const readyRows = await run({ channelStatus: 'ebay-offer|ebay-ready' });
     assert.equal(readyRows.total, 2);
+    const physicalStock = await context.listProducts({ fastPage: true, includeTotal: true, limit: 100, filters: { inventoryLocationKeys: 'warehouse-a', inventoryAvailability: 'in-stock' } });
+    assert.equal(physicalStock.total, 1); assert.equal(physicalStock.inventory[0].sku, 'A'); assert.equal(physicalStock.totalQty, 3);
+    const supplierStock = await context.listProducts({ fastPage: true, includeTotal: true, limit: 100, filters: { inventoryLocationKeys: 'datawarehouse', inventoryAvailability: 'in-stock' } });
+    assert.equal(supplierStock.total, 1); assert.equal(supplierStock.inventory[0].sku, 'A'); assert.equal(supplierStock.totalQty, 20);
     const scoped = await context.listProducts({ fastPage: true, includeTotal: true, limit: 100, productIds: ['B'], filters: { channelStatus: 'ebay-ready' } });
     assert.equal(scoped.total, 0, 'selected IDs must not expand to other matching catalog products');
     await client.query("update products set active=false where product_id='A'");

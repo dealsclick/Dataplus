@@ -28849,6 +28849,7 @@ function publicInventoryListItem(item = {}, context = {}) {
   const warehouseStock = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
   const onHand = Number(item.qty || 0);
   const reserved = Number(item.reserved || 0);
+  const available = Number(item.available ?? (onHand - reserved));
   const supplierName = canonicalCatalogSupplierName(item.supplier || item.vendor, item.supplierCode);
   return {
     id: item.id,
@@ -28899,7 +28900,7 @@ function publicInventoryListItem(item = {}, context = {}) {
     qty: onHand,
     stockQty: Number(item.stockQty || 0),
     reserved,
-    available: onHand - reserved,
+    available,
     reorderPoint: Number(item.reorderPoint || 0),
     replenishable: productIsReplenishable(item),
     replenishableEffective: productReplenishablePlan(item, rulesDb).enabled,
@@ -47625,6 +47626,7 @@ function catalogFilterParams(searchParams) {
     brand: searchParams.get("brand") || "",
     manufacturer: searchParams.get("manufacturer") || "",
     category: searchParams.get("category") || "",
+    inventoryScope: searchParams.get("inventoryScope") || "",
     inventoryAvailability: searchParams.get("inventoryAvailability") || "",
     lowStock: searchParams.get("lowStock") || "",
     replenishable: searchParams.get("replenishable") || "",
@@ -47635,6 +47637,46 @@ function catalogFilterParams(searchParams) {
     includedSuppliers: searchParams.get("includedSuppliers") || "",
     includedSupplierCodes: searchParams.get("includedSupplierCodes") || "",
     excludedSuppliers: searchParams.get("excludedSuppliers") || ""
+  };
+}
+
+function inventoryLocationAliases(warehouse = {}) {
+  return [...new Set([
+    warehouse.id,
+    warehouse.code,
+    warehouse.name,
+    warehouse.warehouseId,
+    warehouse.warehouseCode,
+    warehouse.warehouseName
+  ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))];
+}
+
+function resolveInventoryLocationFilters(filters = {}, warehouses = []) {
+  const scope = ["physical", "supplier_feed"].includes(String(filters.inventoryScope || "").toLowerCase())
+    ? String(filters.inventoryScope).toLowerCase()
+    : "all";
+  const requestedWarehouse = String(filters.warehouse || "").trim().toLowerCase();
+  if (scope === "all" && !requestedWarehouse) return { ...filters };
+
+  const locations = ensureDataWarehouseLocation(warehouses);
+  let selected = [];
+  if (requestedWarehouse) {
+    selected = locations.filter((warehouse) => {
+      if (!inventoryLocationAliases(warehouse).includes(requestedWarehouse)) return false;
+      if (scope === "physical") return isPhysicalWarehouse(warehouse);
+      if (scope === "supplier_feed") return isDataWarehouseLocation(warehouse);
+      return true;
+    });
+  } else if (scope === "physical") {
+    selected = locations.filter(isPhysicalWarehouse);
+  } else if (scope === "supplier_feed") {
+    selected = locations.filter(isDataWarehouseLocation);
+  }
+  const locationKeys = [...new Set(selected.flatMap(inventoryLocationAliases))];
+  return {
+    ...filters,
+    inventoryScope: scope,
+    inventoryLocationKeys: (locationKeys.length ? locationKeys : [requestedWarehouse || "__no_inventory_location__"]).join("|")
   };
 }
 
@@ -55547,7 +55589,11 @@ async function handleApi(req, res) {
       "Cache-Control": "no-store"
     });
     res.write("sku,title,on_hand,reserved,available,reorder_point,warehouse_count,cost,supplier,replenishable,status\n");
-    const filters = catalogFilterParams(url.searchParams);
+    const warehouses = await postgres.readStateField("warehouses").catch(() => []);
+    const filters = resolveInventoryLocationFilters(
+      catalogFilterParams(url.searchParams),
+      Array.isArray(warehouses) ? warehouses : []
+    );
     const query = url.searchParams.get("q") || "";
     const ebayReadinessDefaults = await ebayReadinessDefaultsForFilters(filters);
     const shopifyStatusMap = readShopifyStatusMapSync();
@@ -55746,9 +55792,15 @@ async function handleApi(req, res) {
       const fastPage = ["1", "true", "yes"].includes(String(url.searchParams.get("fastPage") || "").toLowerCase());
       // Do not hydrate the complete legacy state here. The catalog is a hot path and
       // its only state dependency is the small vendor participation document.
-      const catalogVendors = await postgres.readStateField("vendors").catch(() => []);
+      const [catalogVendors, catalogWarehouses] = await Promise.all([
+        postgres.readStateField("vendors").catch(() => []),
+        postgres.readStateField("warehouses").catch(() => [])
+      ]);
       const catalogQuery = String(url.searchParams.get("q") || "").trim();
-      const requestedFilters = catalogFilterParams(url.searchParams);
+      const requestedFilters = resolveInventoryLocationFilters(
+        catalogFilterParams(url.searchParams),
+        Array.isArray(catalogWarehouses) ? catalogWarehouses : []
+      );
       // A deliberate SKU/title/UPC search must always be able to find a record.
       // Vendor participation keeps the default catalog fast, but it must never hide
       // a product the operator explicitly asked to inspect.
@@ -55764,7 +55816,7 @@ async function handleApi(req, res) {
       cacheParams.delete('retryCount');
       if (countOnly) for (const key of ['page', 'limit', 'sort', 'sortDirection', 'fastPage', 'includeTotal']) cacheParams.delete(key);
       cacheParams.sort();
-      const cacheQuery = `${cacheParams.toString()}|feedCodes:${String(filters.includedSupplierCodes || "")}|ebayDefaults:${stableJsonKey(ebayReadinessDefaults)}`;
+      const cacheQuery = `${cacheParams.toString()}|feedCodes:${String(filters.includedSupplierCodes || "")}|inventoryLocations:${String(filters.inventoryLocationKeys || "")}|ebayDefaults:${stableJsonKey(ebayReadinessDefaults)}`;
       const cacheKey = `dataplus:products:v12:${crypto.createHash("sha1").update(cacheQuery).digest("hex")}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true }, req);

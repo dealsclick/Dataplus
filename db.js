@@ -16636,16 +16636,34 @@ async function listProducts(options = {}) {
     params.push(stockStatusValues);
     where.push(`coalesce(raw ->> 'stockStatus', '') = any($${params.length})`);
   }
-  const stockQtyExpression = `coalesce(
-    qty,
-    case when coalesce(raw ->> 'stockQty', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'stockQty')::numeric end,
-    case when coalesce(raw ->> 'qty', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'qty')::numeric end
-  )`;
-  const reservedQtyExpression = `coalesce(
-    case when coalesce(raw ->> 'reserved', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'reserved')::numeric end,
-    0
-  )`;
-  const availableQtyExpression = `(${stockQtyExpression} - ${reservedQtyExpression})`;
+  const inventoryLocationValues = splitFilterValues(filters.inventoryLocationKeys).map((value) => value.toLowerCase());
+  let inventoryLocationParam = 0;
+  if (inventoryLocationValues.length) {
+    params.push(inventoryLocationValues);
+    inventoryLocationParam = params.length;
+  }
+  const scopedInventorySum = (column) => `coalesce((
+    select sum(il.${column})
+    from inventory_levels il
+    where il.product_id = products.product_id
+      and lower(il.location_key) = any($${inventoryLocationParam}::text[])
+  ), 0)`;
+  const stockQtyExpression = inventoryLocationParam
+    ? scopedInventorySum("on_hand")
+    : `coalesce(
+      qty,
+      case when coalesce(raw ->> 'stockQty', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'stockQty')::numeric end,
+      case when coalesce(raw ->> 'qty', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'qty')::numeric end
+    )`;
+  const reservedQtyExpression = inventoryLocationParam
+    ? scopedInventorySum("reserved")
+    : `coalesce(
+      case when coalesce(raw ->> 'reserved', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'reserved')::numeric end,
+      0
+    )`;
+  const availableQtyExpression = inventoryLocationParam
+    ? scopedInventorySum("available")
+    : `(${stockQtyExpression} - ${reservedQtyExpression})`;
   const reorderPointExpression = `coalesce(
     case when coalesce(raw ->> 'reorderPoint', '') ~ '^-?[0-9]+(\\.[0-9]+)?$' then (raw ->> 'reorderPoint')::numeric end,
     0
@@ -16740,13 +16758,15 @@ async function listProducts(options = {}) {
     params.push(`Job ${createdSourceJobId}`);
     where.push(`coalesce(raw ->> 'createdSourceDetail', '') = $${params.length}`);
   }
-  const warehouseValues = splitFilterValues(filters.warehouse);
+  const warehouseValues = inventoryLocationValues.length
+    ? inventoryLocationValues
+    : splitFilterValues(filters.warehouse).map((value) => value.toLowerCase());
   if (warehouseValues.length) {
     params.push(warehouseValues);
     where.push(`exists (
       select 1 from inventory_levels il
       where il.product_id = products.product_id
-        and il.location_key = any($${params.length})
+        and lower(il.location_key) = any($${params.length}::text[])
     )`);
   }
   const requestedHazardousValues = splitFilterValues(filters.hazardous);
@@ -17207,7 +17227,7 @@ async function listProducts(options = {}) {
   `, params);
   const hasMore = fastPage && result.rows.length > limit;
   let inventory = result.rows.slice(0, limit).map(productRowToState);
-  if (options.includeInventoryLevels) inventory = await hydrateProductsWithInventoryLevels(inventory);
+  if (options.includeInventoryLevels) inventory = await hydrateProductsWithInventoryLevels(inventory, inventoryLocationValues);
   inventory = await hydrateProductsWithShopifyStatuses(inventory);
   if (options.includeVendorOffers) inventory = await hydrateProductsWithVendorOffers(inventory);
   return {
@@ -18932,16 +18952,20 @@ async function findBarcodeMatches(values = []) {
   return { products: [], sourceItems: sourceRows.rows.map(vendorCatalogRowToState) };
 }
 
-async function hydrateProductsWithInventoryLevels(items = []) {
+async function hydrateProductsWithInventoryLevels(items = [], locationKeys = []) {
   const client = getPool();
   const ids = [...new Set((Array.isArray(items) ? items : []).map((item) => nullableString(item.id)).filter(Boolean))];
   if (!client || !ids.length) return items;
+  const scopedLocationKeys = [...new Set((Array.isArray(locationKeys) ? locationKeys : [])
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean))];
   const result = await client.query(`
     select product_id, location_key, on_hand, available, reserved, committed, incoming, updated_at
     from inventory_levels
     where product_id = any($1::text[])
+      ${scopedLocationKeys.length ? "and lower(location_key) = any($2::text[])" : ""}
     order by location_key
-  `, [ids]);
+  `, scopedLocationKeys.length ? [ids, scopedLocationKeys] : [ids]);
   const byProductId = new Map();
   for (const row of result.rows) {
     const rows = byProductId.get(row.product_id) || [];
@@ -18950,8 +18974,10 @@ async function hydrateProductsWithInventoryLevels(items = []) {
   }
   return items.map((item) => {
     const warehouseStock = byProductId.get(item.id) || [];
-    if (!warehouseStock.length) return item;
-    return withDataWarehouseStock({
+    if (!warehouseStock.length) return scopedLocationKeys.length
+      ? { ...item, warehouseStock: [], qty: 0, reserved: 0, available: 0 }
+      : item;
+    const hydrated = {
       ...item,
       warehouseStock,
       qty: warehouseStock.reduce((sum, row) => sum + Number(row.qty || 0), 0),
@@ -18959,8 +18985,10 @@ async function hydrateProductsWithInventoryLevels(items = []) {
         ? warehouseStock.filter(isDataWarehouseLocation).reduce((sum, row) => sum + Number(row.qty || 0), 0)
         : item.stockQty,
       reserved: warehouseStock.reduce((sum, row) => sum + Number(row.reserved || 0), 0),
-      reorderPoint: warehouseStock.reduce((sum, row) => sum + Number(row.reorderPoint || 0), 0)
-    });
+      available: warehouseStock.reduce((sum, row) => sum + Number(row.available || 0), 0),
+      reorderPoint: Number(item.reorderPoint || 0)
+    };
+    return scopedLocationKeys.length ? hydrated : withDataWarehouseStock(hydrated);
   });
 }
 
