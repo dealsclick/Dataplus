@@ -66929,6 +66929,27 @@ async function handleApi(req, res) {
     }
   }
 
+  const outboundAuditItemMatch = url.pathname.match(/^\/api\/fulfillment\/outbound-audits\/([^/]+)\/scans\/([^/]+)\/items\/([^/]+)$/);
+  if (outboundAuditItemMatch && postgres.isPostgresEnabled()) {
+    const scope = notificationScope(req);
+    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
+      return sendJson(res, 409, { error: "Outbound handoff audits are available only for LINQ while fulfillment isolation is completed." });
+    }
+    if (req.method !== "DELETE") return sendJson(res, 405, { error: "Outbound item action not supported." });
+    const auditId = decodeURIComponent(outboundAuditItemMatch[1]);
+    const scanId = decodeURIComponent(outboundAuditItemMatch[2]);
+    const clientScanId = decodeURIComponent(outboundAuditItemMatch[3]);
+    const result = await outboundAuditStore.removeLiveItem(scope, auditId, scanId, clientScanId);
+    void recordUserActivity(req, authUser, {
+      eventType: "fulfillment",
+      action: "Removed optional outbound item scan",
+      entityType: "outbound_audit",
+      entityId: auditId,
+      metadata: { scanId, clientScanId, sku: result.item?.sku || "", trackingNumber: result.scan.trackingNumber }
+    });
+    return sendJson(res, 200, { ...result, message: `${result.item?.sku || "Item"} was removed from this package scan.` });
+  }
+
   const outboundAuditMatch = url.pathname.match(/^\/api\/fulfillment\/outbound-audits\/([^/]+)(?:\/(scan|item-scan|quick-item|close|reconcile|print|export\.csv))?$/);
   if (outboundAuditMatch && postgres.isPostgresEnabled()) {
     const scope = notificationScope(req);

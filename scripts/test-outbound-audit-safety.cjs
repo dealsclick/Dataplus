@@ -106,6 +106,9 @@ assert.match(serverSource, /recorded for this package\. Scan another item or con
 assert.match(serverSource, /Item scanning is optional; scan the items or continue to the package photo/);
 assert.match(serverSource, /Reused today's outbound handoff audit/);
 assert.match(serverSource, /That is the package tracking barcode\. Scan the product UPC, or skip to the package photo/);
+assert.match(serverSource, /outboundAuditStore\.removeLiveItem/);
+assert.match(serverSource, /Removed optional outbound item scan/);
+assert.match(serverSource, /req\.method !== "DELETE"/);
 assert.match(routes, /action === "item-scan"/);
 assert.match(routes, /action === "quick-item"/);
 
@@ -133,12 +136,18 @@ assert.match(workspaceSource, /Item verification/);
 assert.match(workspaceSource, /Use today&apos;s audit/);
 assert.match(workspaceSource, /isPackageTrackingBarcode/);
 assert.match(workspaceSource, /That is the package tracking label\. Scan the product UPC, or skip to the package photo/);
+assert.match(workspaceSource, /Undo last item/);
+assert.match(workspaceSource, /Remove \$\{item\.sku\} scan/);
+assert.match(workspaceSource, /removeOptionalItem/);
 
 const outboundStoreSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'outbound-audit-store.js'), 'utf8');
 assert.match(outboundStoreSource, /timezone\('America\/New_York', started_at\)::date = timezone\('America\/New_York', now\(\)\)::date/);
 assert.match(outboundStoreSource, /pg_advisory_xact_lock/);
 assert.match(outboundStoreSource, /when scan\.live_item_expected_count > 0 and jsonb_array_length\(scan\.live_item_scans\) \+ 1 >= scan\.live_item_expected_count then 'complete'/);
 assert.doesNotMatch(outboundStoreSource, /scan\.live_item_required = true or scan\.live_item_expected_count > 0/);
+assert.match(outboundStoreSource, /async function removeLiveItem/);
+assert.match(outboundStoreSource, /removedItem\.verificationOnly !== true/);
+assert.match(outboundStoreSource, /Inventory-assigned Live item scans require an audited stock reversal/);
 
 const warehouseMobileSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'warehouse-mobile.tsx'), 'utf8');
 assert.match(warehouseMobileSource, /id: "outbound"/);

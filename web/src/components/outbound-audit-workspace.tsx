@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { AlertTriangle, Camera, CheckCircle2, ClipboardCheck, ExternalLink, FileDown, Flashlight, Image as ImageIcon, Keyboard, Loader2, PackageCheck, Printer, RefreshCw, RotateCcw, ScanBarcode, Search, Truck, UploadCloud } from "lucide-react"
+import { AlertTriangle, Camera, CheckCircle2, ClipboardCheck, ExternalLink, FileDown, Flashlight, Image as ImageIcon, Keyboard, Loader2, PackageCheck, Printer, RefreshCw, RotateCcw, ScanBarcode, Search, Trash2, Truck, Undo2, UploadCloud } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -138,17 +138,17 @@ function TrackingReference({ scan, compact = false }: { scan: AuditScan; compact
   return <a className={`${className} text-primary hover:underline`} href={scan.trackingUrl} target="_blank" rel="noreferrer" title={`Track with ${scan.carrier || "carrier"}`}>{scan.trackingNumber}<ExternalLink className="size-3 shrink-0" /></a>
 }
 
-function MatchedOrders({ scan, compact = false }: { scan: AuditScan; compact?: boolean }) {
-  if (!scan.matches.length) return <span className="text-sm text-amber-700 dark:text-amber-300">Tracking retained without an order link</span>
+function MatchedOrders({ scan, compact = false, onRemoveItem, removingItemId = "" }: { scan: AuditScan; compact?: boolean; onRemoveItem?: (scan: AuditScan, item: LiveItem) => void; removingItemId?: string }) {
   const shipmentGroupId = String(scan.matches.find((match) => match.shipmentGroupId)?.shipmentGroupId || "")
   return <div className="grid gap-2">
+    {!scan.matches.length ? <span className="text-sm text-amber-700 dark:text-amber-300">Tracking retained without an order link</span> : null}
     {shipmentGroupId ? <p className="text-xs font-medium text-muted-foreground">Shipment group {shipmentGroupId}</p> : null}
     {scan.matches.map((match) => {
       const orderNumber = String(match.orderNumber || match.orderId || "")
       const channelOrderNumber = String(match.channelOrderNumber || "")
       return <div key={`${match.orderId}:${match.shipmentId}`} className="min-w-0"><a className="w-fit font-medium text-primary hover:underline" href={String(match.href || `/orders/${encodeURIComponent(String(match.orderId || ""))}`)}>DataPlus order {orderNumber}</a>{channelOrderNumber && channelOrderNumber !== orderNumber ? <p className={`${compact ? "max-w-[16rem] truncate" : "break-all"} text-xs text-muted-foreground`}>{String(match.channel || "Channel")} order {channelOrderNumber}</p> : null}</div>
     })}
-    {scan.liveItems.length ? <div className="mt-1 grid gap-1 border-t pt-2"><p className="text-xs font-medium">Scanned package items</p>{scan.liveItems.map((item) => <div key={item.clientScanId} className="rounded border bg-muted/20 p-2 text-xs"><a href={`/products/${encodeURIComponent(item.sku)}`} className="font-medium text-primary hover:underline">{item.sku}</a><p className={compact ? "line-clamp-2" : "max-w-80 truncate"} title={item.title}>{item.title}</p><p className="text-muted-foreground">{item.orderNumber ? `Order ${item.orderNumber} · ` : "Unmatched package · "}Cost ${Number(item.cost || 0).toFixed(2)}{item.orderNumber ? ` · Sold $${Number(item.soldPrice || 0).toFixed(2)}` : ""}{item.verificationOnly ? item.verificationMatched === false ? " · SKU mismatch" : item.verificationMatched === true ? " · Verified" : " · Recorded" : " · Inventory assigned"}</p></div>)}</div> : null}
+    {scan.liveItems.length ? <div className="mt-1 grid gap-1 border-t pt-2"><p className="text-xs font-medium">Scanned package items</p>{scan.liveItems.map((item) => <div key={item.clientScanId} className="flex items-start gap-2 rounded border bg-muted/20 p-2 text-xs"><div className="min-w-0 flex-1"><a href={`/products/${encodeURIComponent(item.sku)}`} className="font-medium text-primary hover:underline">{item.sku}</a><p className={compact ? "line-clamp-2" : "max-w-80 truncate"} title={item.title}>{item.title}</p><p className="text-muted-foreground">{item.orderNumber ? `Order ${item.orderNumber} · ` : "Unmatched package · "}Cost ${Number(item.cost || 0).toFixed(2)}{item.orderNumber ? ` · Sold $${Number(item.soldPrice || 0).toFixed(2)}` : ""}{item.verificationOnly ? item.verificationMatched === false ? " · SKU mismatch" : item.verificationMatched === true ? " · Verified" : " · Recorded" : " · Inventory assigned"}</p></div>{item.verificationOnly && onRemoveItem ? <Button size="icon" variant="ghost" className="size-8 shrink-0 text-destructive" title={`Remove ${item.sku} scan`} disabled={removingItemId === item.clientScanId} onClick={() => onRemoveItem(scan, item)}>{removingItemId === item.clientScanId ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />}</Button> : null}</div>)}</div> : null}
   </div>
 }
 
@@ -160,13 +160,14 @@ function scanOrderReference(scan: AuditScan) {
   return [`DataPlus ${orderNumber}`, channelOrderNumber && channelOrderNumber !== orderNumber ? `${String(match.channel || "Channel")} ${channelOrderNumber}` : ""].filter(Boolean).join(" · ")
 }
 
-function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQuickCreate, onPhoto, pendingUploads }: {
+function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQuickCreate, onRemoveItem, onPhoto, pendingUploads }: {
   open: boolean
   initialScan?: AuditScan | null
   onOpenChange: (open: boolean) => void
   onScan: (tracking: string) => Promise<ScanResponse>
   onItemScan: (scan: AuditScan, barcode: string, clientScanId: string) => Promise<LiveItemResponse>
   onQuickCreate: (scan: AuditScan, input: { barcode: string; title: string; cost: number; clientScanId: string }) => Promise<LiveItemResponse>
+  onRemoveItem: (scan: AuditScan, item: LiveItem) => Promise<AuditScan>
   onPhoto: (scan: AuditScan, photo: Omit<CapturedPhoto, "previewUrl">) => Promise<void>
   pendingUploads: number
 }) {
@@ -199,7 +200,7 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
     if (initialScan) {
       setActiveScan(initialScan)
       setMode(itemScanAvailable(initialScan) && initialScan.liveItemStatus !== "complete" ? "items" : initialScan.evidenceCount ? "scan" : "photo")
-      setLastItem(initialScan.liveItems[0] || null)
+      setLastItem(initialScan.liveItems[initialScan.liveItems.length - 1] || null)
     } else {
       setMode("scan")
       setActiveScan(null)
@@ -230,7 +231,7 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
       if (itemScanAvailable(result.scan) && result.scan.liveItemStatus !== "complete") {
         clearPhoto()
         setActiveScan(result.scan)
-        setLastItem(result.scan.liveItems[0] || null)
+        setLastItem(result.scan.liveItems[result.scan.liveItems.length - 1] || null)
         setMode("items")
       } else if (!result.scan.evidenceCount) {
         clearPhoto()
@@ -401,6 +402,20 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
     setMode(activeScan.evidenceCount ? "scan" : "photo")
   }
 
+  async function undoLastItemScan() {
+    if (!activeScan || !lastItem?.verificationOnly || busy) return
+    setBusy(true)
+    try {
+      const updated = await onRemoveItem(activeScan, lastItem)
+      setActiveScan(updated)
+      setLastItem(updated.liveItems[updated.liveItems.length - 1] || null)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to remove the last item scan.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function toggleTorch() {
     const next = !torchEnabled
     try {
@@ -434,7 +449,7 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
         {mode === "preview" && photo ? <div className="absolute inset-0 grid bg-black"><img src={photo.previewUrl} alt="Package evidence preview" className="size-full object-contain" /><div className="absolute inset-x-0 bottom-0 flex justify-center gap-3 bg-black/70 p-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="secondary" disabled={busy} onClick={() => { clearPhoto(); setMode("photo") }}><RotateCcw className="size-4" /> Retake</Button><Button disabled={busy} onClick={() => void usePhoto()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <UploadCloud className="size-4" />} Use photo</Button></div></div> : null}
         {busy ? <div className="absolute inset-0 grid place-items-center bg-black/40"><div className="flex items-center gap-2 rounded-md bg-background px-4 py-3 text-foreground shadow-xl"><Loader2 className="size-5 animate-spin" /> {mode === "items" || mode === "quick" ? activeScan?.liveItemRequired ? "Assigning inventory..." : "Verifying item..." : "Recording package..."}</div></div> : null}
       </div>
-      <DialogFooter className="!m-0 shrink-0 !flex-col gap-2 rounded-none border-t bg-background px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 sm:!flex-row sm:items-center sm:justify-between"><p className="w-full text-xs text-muted-foreground sm:min-w-0 sm:flex-1 sm:truncate">{pendingUploads ? `${pendingUploads} photo upload${pendingUploads === 1 ? "" : "s"} continuing in the background.` : mode === "scan" ? "Camera stays open between packages for faster scanning." : mode === "items" ? activeScan?.liveItemRequired ? "Item scans apply to the complete shipment group, including combined orders." : "Item verification is optional. You can skip directly to the package photo." : mode === "quick" ? "Quick-created products remain Draft until catalog review." : "Include the label and the exterior condition of the box."}</p><div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">{mode === "items" && activeScan && !activeScan.liveItemRequired ? <Button className="w-full sm:w-auto" onClick={skipOptionalItemScan}><ImageIcon className="size-4" /> {activeScan.evidenceCount ? "Skip item scan" : "Skip to package photo"}</Button> : null}<Button className="w-full sm:w-auto" variant="outline" onClick={() => onOpenChange(false)}>Done</Button></div></DialogFooter>
+      <DialogFooter className="!m-0 shrink-0 !flex-col gap-2 rounded-none border-t bg-background px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 sm:!flex-row sm:items-center sm:justify-between"><p className="w-full text-xs text-muted-foreground sm:min-w-0 sm:flex-1 sm:truncate">{pendingUploads ? `${pendingUploads} photo upload${pendingUploads === 1 ? "" : "s"} continuing in the background.` : mode === "scan" ? "Camera stays open between packages for faster scanning." : mode === "items" ? activeScan?.liveItemRequired ? "Item scans apply to the complete shipment group, including combined orders." : "Item verification is optional. You can remove mistakes or skip directly to the package photo." : mode === "quick" ? "Quick-created products remain Draft until catalog review." : "Include the label and the exterior condition of the box."}</p><div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">{mode === "items" && lastItem?.verificationOnly ? <Button className="w-full sm:w-auto" variant="outline" disabled={busy} onClick={() => void undoLastItemScan()}><Undo2 className="size-4" /> Undo last item</Button> : null}{mode === "items" && activeScan && !activeScan.liveItemRequired ? <Button className="w-full sm:w-auto" onClick={skipOptionalItemScan}><ImageIcon className="size-4" /> {activeScan.evidenceCount ? "Skip item scan" : "Skip to package photo"}</Button> : null}<Button className="w-full sm:w-auto" variant="outline" onClick={() => onOpenChange(false)}>Done</Button></div></DialogFooter>
     </DialogContent>
   </Dialog>
 }
@@ -452,6 +467,7 @@ export function OutboundAuditWorkspace({ warehouses = [] }: { warehouses?: Row[]
   const [closeOpen, setCloseOpen] = useState(false)
   const [manualTracking, setManualTracking] = useState("")
   const [uploadStates, setUploadStates] = useState<Record<string, "uploading" | "failed">>({})
+  const [removingItemId, setRemovingItemId] = useState("")
   const uploadingEvidenceRef = useRef(new Set<string>())
   const [startDraft, setStartDraft] = useState({ warehouseId: "", carrier: "any", notes: "" })
   const [closeDraft, setCloseDraft] = useState({ handoffMethod: "pickup", driverName: "", pickupConfirmation: "", notes: "", evidenceOverrideReason: "" })
@@ -579,6 +595,19 @@ export function OutboundAuditWorkspace({ warehouses = [] }: { warehouses?: Row[]
     return result
   }, [detail?.session.id])
 
+  const removeOptionalItem = useCallback(async (scan: AuditScan, item: LiveItem) => {
+    if (!detail?.session.id) throw new Error("The outbound audit is no longer available.")
+    setRemovingItemId(item.clientScanId)
+    try {
+      const result = await api<{ scan: AuditScan; item: LiveItem; message?: string }>(`/api/fulfillment/outbound-audits/${encodeURIComponent(detail.session.id)}/scans/${encodeURIComponent(scan.id)}/items/${encodeURIComponent(item.clientScanId)}`, { method: "DELETE" })
+      setDetail((current) => current ? { ...current, scans: current.scans.map((row) => row.id === result.scan.id ? result.scan : row) } : current)
+      toast.success(result.message || `${item.sku} was removed from this package scan.`)
+      return result.scan
+    } finally {
+      setRemovingItemId("")
+    }
+  }, [detail?.session.id])
+
   async function submitManualScan() {
     const tracking = manualTracking.trim()
     if (!tracking) return
@@ -634,8 +663,8 @@ export function OutboundAuditWorkspace({ warehouses = [] }: { warehouses?: Row[]
         {session.unmatchedCount > 0 ? <div className="flex flex-col gap-3 rounded-md border border-amber-500/40 bg-amber-500/5 p-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-start gap-2"><AlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-600" /><div><p className="text-sm font-medium">{numberLabel(session.unmatchedCount)} package{session.unmatchedCount === 1 ? "" : "s"} retained without an order match</p><p className="text-xs text-muted-foreground">These packages remain part of the handoff record. Recheck after channel tracking or missing orders import.</p></div></div><Button size="sm" variant="outline" disabled={busy} onClick={() => void reconcileUnmatched()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Recheck unmatched</Button></div> : null}
         {incompleteLiveScans.length ? <div className="flex flex-col gap-3 rounded-md border border-blue-500/40 bg-blue-500/5 p-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-start gap-2"><ScanBarcode className="mt-0.5 size-4 shrink-0 text-blue-600" /><div><p className="text-sm font-medium">{incompleteLiveScans.length} Live shipment group{incompleteLiveScans.length === 1 ? "" : "s"} still need item scans</p><p className="text-xs text-muted-foreground">Combined orders are scanned as one group. Inventory is deducted from {session.warehouseName} as each actual UPC is assigned.</p></div></div><Button size="sm" variant="outline" onClick={() => { setScannerInitialScan(incompleteLiveScans[0]); setScannerOpen(true) }}><ScanBarcode className="size-4" /> Continue item scans</Button></div> : null}
         {session.evidenceMissingCount > 0 || pendingUploadCount > 0 ? <div className="flex flex-col gap-3 rounded-md border border-amber-500/40 bg-amber-500/5 p-3 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-start gap-2"><ImageIcon className="mt-0.5 size-4 shrink-0 text-amber-600" /><div><p className="text-sm font-medium">{pendingUploadCount ? `${pendingUploadCount} package photo upload${pendingUploadCount === 1 ? "" : "s"} pending` : `${session.evidenceMissingCount} package${session.evidenceMissingCount === 1 ? "" : "s"} still need a photo`}</p><p className="text-xs text-muted-foreground">Photos are compressed on the phone, queued locally, and uploaded without holding the image in server memory.</p></div></div>{pendingUploadCount ? <Button size="sm" variant="outline" onClick={() => void retryPendingEvidence()}><RefreshCw className="size-4" /> Retry uploads</Button> : null}</div> : null}
-        <div className="grid gap-2 md:hidden">{detail.scans.map((scan) => <div key={scan.id} className="rounded-md border p-3"><div className="flex items-start justify-between gap-2"><div className="min-w-0"><TrackingReference scan={scan} compact /><p className="mt-1 text-xs text-muted-foreground">{scan.carrier || "Carrier unknown"} · {dateLabel(scan.scannedAt)}</p></div>{matchBadge(scan)}</div><div className="mt-3"><MatchedOrders scan={scan} compact /></div><div className="mt-3 flex flex-wrap items-center gap-2">{itemScanBadge(scan)}{evidenceBadge(scan)}{scan.evidence[0]?.contentUrl ? <a href={scan.evidence[0].contentUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-primary hover:underline">View photo</a> : null}{open && ((itemScanAvailable(scan) && scan.liveItemStatus !== "complete") || !scan.evidenceCount) ? <Button size="sm" variant="outline" onClick={() => { setScannerInitialScan(scan); setScannerOpen(true) }}>{itemScanAvailable(scan) && scan.liveItemStatus !== "complete" ? <><ScanBarcode className="size-4" /> {scan.liveItemRequired ? "Continue" : "Scan items"}</> : <><Camera className="size-4" /> Add photo</>}</Button> : null}</div></div>)}</div>
-        <div className="hidden overflow-x-auto rounded-md border md:block"><Table><TableHeader><TableRow><TableHead>Tracking</TableHead><TableHead>Carrier</TableHead><TableHead>Order</TableHead><TableHead>Match</TableHead><TableHead>Item verification</TableHead><TableHead>Photo</TableHead><TableHead>Scanned</TableHead></TableRow></TableHeader><TableBody>{detail.scans.map((scan) => <TableRow key={scan.id}><TableCell><TrackingReference scan={scan} /></TableCell><TableCell>{scan.carrier || "Unknown"}</TableCell><TableCell><MatchedOrders scan={scan} /></TableCell><TableCell>{matchBadge(scan)}</TableCell><TableCell><div className="grid justify-items-start gap-1">{itemScanBadge(scan) || <span className="text-xs text-muted-foreground">No order items</span>}{open && ((itemScanAvailable(scan) && scan.liveItemStatus !== "complete") || !scan.evidenceCount) ? <Button size="sm" variant="outline" onClick={() => { setScannerInitialScan(scan); setScannerOpen(true) }}>{itemScanAvailable(scan) && scan.liveItemStatus !== "complete" ? <><ScanBarcode className="size-4" /> {scan.liveItemRequired ? "Continue" : "Scan items"}</> : <><Camera className="size-4" /> Add photo</>}</Button> : null}</div></TableCell><TableCell><div className="flex items-center gap-2">{evidenceBadge(scan)}{scan.evidence[0]?.contentUrl ? <a href={scan.evidence[0].contentUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-primary hover:underline">View</a> : null}</div></TableCell><TableCell><p className="whitespace-nowrap text-xs">{dateLabel(scan.scannedAt)}</p><p className="text-xs text-muted-foreground">{scan.scannedByName}</p></TableCell></TableRow>)}{!detail.scans.length ? <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No packages scanned yet.</TableCell></TableRow> : null}</TableBody></Table></div>
+        <div className="grid gap-2 md:hidden">{detail.scans.map((scan) => <div key={scan.id} className="rounded-md border p-3"><div className="flex items-start justify-between gap-2"><div className="min-w-0"><TrackingReference scan={scan} compact /><p className="mt-1 text-xs text-muted-foreground">{scan.carrier || "Carrier unknown"} · {dateLabel(scan.scannedAt)}</p></div>{matchBadge(scan)}</div><div className="mt-3"><MatchedOrders scan={scan} compact removingItemId={removingItemId} onRemoveItem={(selectedScan, item) => void removeOptionalItem(selectedScan, item)} /></div><div className="mt-3 flex flex-wrap items-center gap-2">{itemScanBadge(scan)}{evidenceBadge(scan)}{scan.evidence[0]?.contentUrl ? <a href={scan.evidence[0].contentUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-primary hover:underline">View photo</a> : null}{open && ((itemScanAvailable(scan) && scan.liveItemStatus !== "complete") || !scan.evidenceCount) ? <Button size="sm" variant="outline" onClick={() => { setScannerInitialScan(scan); setScannerOpen(true) }}>{itemScanAvailable(scan) && scan.liveItemStatus !== "complete" ? <><ScanBarcode className="size-4" /> {scan.liveItemRequired ? "Continue" : "Scan items"}</> : <><Camera className="size-4" /> Add photo</>}</Button> : null}</div></div>)}</div>
+        <div className="hidden overflow-x-auto rounded-md border md:block"><Table><TableHeader><TableRow><TableHead>Tracking</TableHead><TableHead>Carrier</TableHead><TableHead>Order</TableHead><TableHead>Match</TableHead><TableHead>Item verification</TableHead><TableHead>Photo</TableHead><TableHead>Scanned</TableHead></TableRow></TableHeader><TableBody>{detail.scans.map((scan) => <TableRow key={scan.id}><TableCell><TrackingReference scan={scan} /></TableCell><TableCell>{scan.carrier || "Unknown"}</TableCell><TableCell><MatchedOrders scan={scan} removingItemId={removingItemId} onRemoveItem={(selectedScan, item) => void removeOptionalItem(selectedScan, item)} /></TableCell><TableCell>{matchBadge(scan)}</TableCell><TableCell><div className="grid justify-items-start gap-1">{itemScanBadge(scan) || <span className="text-xs text-muted-foreground">No order items</span>}{open && ((itemScanAvailable(scan) && scan.liveItemStatus !== "complete") || !scan.evidenceCount) ? <Button size="sm" variant="outline" onClick={() => { setScannerInitialScan(scan); setScannerOpen(true) }}>{itemScanAvailable(scan) && scan.liveItemStatus !== "complete" ? <><ScanBarcode className="size-4" /> {scan.liveItemRequired ? "Continue" : "Scan items"}</> : <><Camera className="size-4" /> Add photo</>}</Button> : null}</div></TableCell><TableCell><div className="flex items-center gap-2">{evidenceBadge(scan)}{scan.evidence[0]?.contentUrl ? <a href={scan.evidence[0].contentUrl} target="_blank" rel="noreferrer" className="text-xs font-medium text-primary hover:underline">View</a> : null}</div></TableCell><TableCell><p className="whitespace-nowrap text-xs">{dateLabel(scan.scannedAt)}</p><p className="text-xs text-muted-foreground">{scan.scannedByName}</p></TableCell></TableRow>)}{!detail.scans.length ? <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">No packages scanned yet.</TableCell></TableRow> : null}</TableBody></Table></div>
       </> : <div className="grid min-h-72 place-items-center text-center"><div><ClipboardCheck className="mx-auto size-8 text-muted-foreground" /><p className="mt-3 font-medium">No outbound audit selected</p><p className="mt-1 text-sm text-muted-foreground">Open or create today&apos;s warehouse audit.</p><Button className="mt-4" onClick={() => setStartOpen(true)}>Use today&apos;s audit</Button></div></div>}</CardContent>
     </Card>
     <Dialog open={startOpen} onOpenChange={setStartOpen}><DialogContent><DialogHeader><DialogTitle>Use today&apos;s outbound audit</DialogTitle><DialogDescription>DataPlus reopens the current warehouse audit when one is already active today. Otherwise it creates a new daily audit.</DialogDescription></DialogHeader><div className="grid gap-4"><div className="grid gap-2"><Label>Warehouse</Label><Select value={startDraft.warehouseId} onValueChange={(warehouseId) => setStartDraft((current) => ({ ...current, warehouseId }))}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{availableWarehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || warehouse.id)}</SelectItem>)}</SelectContent></Select></div><div className="grid gap-2"><Label>Expected carrier</Label><Select value={startDraft.carrier} onValueChange={(carrier) => setStartDraft((current) => ({ ...current, carrier }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="any">Any carrier</SelectItem>{carriers.map((carrier) => <SelectItem key={carrier} value={carrier}>{carrier}</SelectItem>)}</SelectContent></Select><p className="text-xs text-muted-foreground">Any carrier is useful for mixed drop-offs. The detected carrier is saved on every package.</p></div><div className="grid gap-2"><Label>Notes</Label><Textarea value={startDraft.notes} onChange={(event) => setStartDraft((current) => ({ ...current, notes: event.target.value }))} placeholder="Pickup window, dock, route, or other context" /></div></div><DialogFooter><Button variant="outline" onClick={() => setStartOpen(false)}>Cancel</Button><Button disabled={busy || !startDraft.warehouseId} onClick={() => void startAudit()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <ClipboardCheck className="size-4" />} Continue</Button></DialogFooter></DialogContent></Dialog>
@@ -655,6 +684,6 @@ export function OutboundAuditWorkspace({ warehouses = [] }: { warehouses?: Row[]
         <DialogFooter><Button variant="outline" onClick={() => setCloseOpen(false)}>Keep scanning</Button><Button disabled={busy || !session?.packageCount || incompleteLiveScans.length > 0 || Boolean(session?.evidenceMissingCount && !closeDraft.evidenceOverrideReason.trim())} onClick={() => void closeAudit()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Close {numberLabel(session?.packageCount || 0)} package handoff</Button></DialogFooter>
       </DialogContent>
     </Dialog>
-    <AuditCamera open={scannerOpen} initialScan={scannerInitialScan} onOpenChange={(next) => { setScannerOpen(next); if (!next) setScannerInitialScan(null) }} onScan={recordScan} onItemScan={recordLiveItem} onQuickCreate={quickCreateLiveItem} onPhoto={queueEvidencePhoto} pendingUploads={pendingUploadCount} />
+    <AuditCamera open={scannerOpen} initialScan={scannerInitialScan} onOpenChange={(next) => { setScannerOpen(next); if (!next) setScannerInitialScan(null) }} onScan={recordScan} onItemScan={recordLiveItem} onQuickCreate={quickCreateLiveItem} onRemoveItem={removeOptionalItem} onPhoto={queueEvidencePhoto} pendingUploads={pendingUploadCount} />
   </div>
 }
