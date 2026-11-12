@@ -13859,7 +13859,7 @@ async function quickSearchProducts(query, options = {}) {
     )
     select p.product_id, p.sku, p.title, p.marketplace_title, p.brand, p.manufacturer,
       p.mfr_part_number, p.vendor_sku, p.barcode, p.supplier, p.cost, p.qty,
-      p.default_image, r.match_label
+      p.uom, p.uom_qty, p.raw, p.default_image, r.match_label
     from ranked r
     join products p on p.product_id = r.product_id
     order by r.rank, p.updated_at desc, p.sku
@@ -13886,7 +13886,7 @@ async function quickSearchProducts(query, options = {}) {
     )
     select p.product_id, p.sku, p.title, p.marketplace_title, p.brand, p.manufacturer,
       p.mfr_part_number, p.vendor_sku, p.barcode, p.supplier, p.cost, p.qty,
-      p.default_image, r.match_label
+      p.uom, p.uom_qty, p.raw, p.default_image, r.match_label
     from ranked r
     join products p on p.product_id = r.product_id
     order by r.rank, p.updated_at desc, p.sku
@@ -13909,7 +13909,7 @@ async function quickSearchProducts(query, options = {}) {
     )
     select p.product_id, p.sku, p.title, p.marketplace_title, p.brand, p.manufacturer,
       p.mfr_part_number, p.vendor_sku, p.barcode, p.supplier, p.cost, p.qty,
-      p.default_image, r.match_label
+      p.uom, p.uom_qty, p.raw, p.default_image, r.match_label
     from ranked r
     join products p on p.product_id = r.product_id
     order by r.rank, p.updated_at desc, p.sku

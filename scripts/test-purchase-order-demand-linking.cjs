@@ -118,4 +118,18 @@ function baseDb() {
   assert.match(result.skippedOrders[0].reason, /allocated/i);
 }
 
+{
+  const db = baseDb();
+  const route = { ...purchaseRoute("route-moq", "BUS265368TRV"), uom: "EA", uomQty: 6, unitCost: 5.96 };
+  const order = orderFixture("order-moq", "89431", route.sku, { routes: [route] });
+  db.orders = [order];
+  const result = createSupplierPurchaseOrdersFromOrders(db, [order.id], { user: "Test buyer" });
+  const line = result.purchaseOrders[0].items[0];
+  assert.equal(line.qty, 6, "supplier quantity should round customer demand up to the purchasing multiple");
+  assert.equal(line.customerDemandQty, 1);
+  assert.equal(line.purchaseMultiple, 6);
+  assert.equal(line.purchaseSurplusQty, 5);
+  assert.equal(line.purchaseDemandLinks[0].qty, 1, "the PO should retain the original customer demand separately from the supplier quantity");
+}
+
 console.log("Purchase-order demand linking checks passed.");

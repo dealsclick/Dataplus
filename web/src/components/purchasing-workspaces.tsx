@@ -1935,6 +1935,13 @@ function compactPurchaseItemTitle(value: unknown, maxLength = 50) {
   return title.length > maxLength ? `${title.slice(0, maxLength - 3)}...` : title
 }
 
+function quickProductPurchaseMultiple(product: QuickProductResult) {
+  const values = [product.uomQty, product.minQuantity, product.quantityIncrements]
+    .map((value) => Math.floor(Number(value || 0)))
+    .filter((value) => Number.isFinite(value) && value > 1)
+  return values.length ? Math.max(...values) : 1
+}
+
 export function purchaseOrderSalesChannel(po: Record<string, unknown>) {
   const line = purchaseOrderItems(po).find((item) => String(item.salesChannel || item.channelSource || item.source || "").trim())
   return String(po.salesChannel || po.channelSource || po.source || line?.salesChannel || line?.channelSource || line?.source || "-")
@@ -2027,6 +2034,10 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
   const [acknowledgeCanceledDemand, setAcknowledgeCanceledDemand] = useState(false)
   const [referenceData, setReferenceData] = useState<{ vendors?: Array<Record<string, unknown>>; warehouses?: Array<Record<string, unknown>> }>({})
   const [editDraft, setEditDraft] = useState<Record<string, unknown>>({})
+  const [editCatalogOpen, setEditCatalogOpen] = useState(false)
+  const [editCatalogQuery, setEditCatalogQuery] = useState("")
+  const [editCatalogResults, setEditCatalogResults] = useState<QuickProductResult[]>([])
+  const [editCatalogSearching, setEditCatalogSearching] = useState(false)
   const [financialDraft, setFinancialDraft] = useState<Record<string, string>>({ action: "bill", billNumber: "", billDate: "", dueDate: "", total: "", account: "Accounts Payable", billId: "", paymentDate: "", amount: "", method: "EFT", paymentAccount: "", reference: "", creditNumber: "", creditDate: "", reason: "" })
   const [acknowledgement, setAcknowledgement] = useState({ supplierOrderNumber: "", ctechId: "", expectedAt: "", note: "" })
   const [dropshipTracking, setDropshipTracking] = useState({ carrier: "UPS", carrierName: "UPS", service: "", trackingNumber: "", trackingUrl: "", carrierPhone: "", shipDate: new Date().toISOString().slice(0, 10) })
@@ -2075,6 +2086,20 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
     }, 100)
     return () => { window.clearTimeout(timer); controller.abort() }
   }, [catalogLine, catalogLineMode, catalogLineQuery])
+  useEffect(() => {
+    if (!editCatalogOpen || editCatalogQuery.trim().length < 2) { setEditCatalogResults([]); return }
+    const controller = new AbortController()
+    const timer = window.setTimeout(async () => {
+      setEditCatalogSearching(true)
+      try {
+        const result = await api<{ products?: QuickProductResult[] }>(`/api/quick-search/products?${new URLSearchParams({ q: editCatalogQuery.trim(), limit: "12" })}`, { signal: controller.signal })
+        setEditCatalogResults(result.products || [])
+      } catch (error) {
+        if (!controller.signal.aborted) toast.error(error instanceof Error ? error.message : "Unable to search the catalog.")
+      } finally { if (!controller.signal.aborted) setEditCatalogSearching(false) }
+    }, 100)
+    return () => { window.clearTimeout(timer); controller.abort() }
+  }, [editCatalogOpen, editCatalogQuery])
   const po = data.purchaseOrder || {}
   const shipFromWarehouses = data.shipFromWarehouses || (data.dropshipShipFromWarehouse ? [data.dropshipShipFromWarehouse] : [])
   const defaultShipFromWarehouseId = String(data.fulfillmentSettings?.defaultShipFromWarehouseId || "")
@@ -2219,7 +2244,72 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to link the selected orders.") }
     finally { setLinkOrderBusy(false) }
   }
-  const openEditor = () => { void loadReferenceData(); setEditDraft({ vendorId: String(po.vendorId || ""), ...(isDropship ? {} : { warehouseId: String(po.warehouseId || "") }), notes: String(po.notes || ""), expectedAt: String(po.expectedAt || ""), amendmentReason: "", items: lines.map((line) => ({ id: String(line.id || ""), sku: String(line.sku || ""), title: String(line.title || ""), qty: Number(line.qty || 0), estimatedUnitCost: Number(line.estimatedUnitCost ?? line.unitCost ?? line.cost ?? 0), receivedQty: Number(line.receivedQty || 0), source: String(line.source || "manual_line"), catalogProduct: line.catalogProduct === true })) }); setEditingOpen(true) }
+  const openEditor = () => {
+    void loadReferenceData()
+    setEditCatalogOpen(false)
+    setEditCatalogQuery("")
+    setEditCatalogResults([])
+    setEditDraft({
+      vendorId: String(po.vendorId || ""),
+      ...(isDropship ? {} : { warehouseId: String(po.warehouseId || "") }),
+      notes: String(po.notes || ""),
+      expectedAt: String(po.expectedAt || ""),
+      amendmentReason: "",
+      items: lines.map((line) => ({
+        ...line,
+        id: String(line.id || ""),
+        sku: String(line.sku || ""),
+        title: String(line.title || ""),
+        qty: Number(line.qty || 0),
+        estimatedUnitCost: Number(line.estimatedUnitCost ?? line.unitCost ?? line.cost ?? 0),
+        receivedQty: Number(line.receivedQty || 0),
+        source: String(line.source || "manual_line"),
+        catalogProduct: line.catalogProduct === true
+      }))
+    })
+    setEditingOpen(true)
+  }
+  const addBlankEditLine = () => {
+    setEditDraft((current) => ({
+      ...current,
+      items: [...(Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []), { id: crypto.randomUUID(), sku: "", title: "", qty: 1, estimatedUnitCost: 0, source: "manual_line" }]
+    }))
+    setEditCatalogOpen(false)
+    setEditCatalogQuery("")
+  }
+  const addCatalogEditLine = (product: QuickProductResult) => {
+    const existingItems = Array.isArray(editDraft.items) ? editDraft.items as Array<Record<string, unknown>> : []
+    if (existingItems.some((item) => String(item.sku || "").trim().toLowerCase() === product.sku.trim().toLowerCase())) {
+      toast.info(`${product.sku} is already on this PO. Update its quantity in the table.`)
+      return
+    }
+    const purchaseMultiple = quickProductPurchaseMultiple(product)
+    setEditDraft((current) => ({
+      ...current,
+      items: [...(Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []), {
+        id: crypto.randomUUID(),
+        sku: product.sku,
+        title: product.title,
+        qty: purchaseMultiple,
+        estimatedUnitCost: Number(product.cost || 0),
+        source: "catalog",
+        catalogProduct: true,
+        defaultImage: product.image || "",
+        supplier: product.supplier || "",
+        vendorSku: product.vendorSku || "",
+        brand: product.brand || "",
+        manufacturer: product.manufacturer || "",
+        mfrPartNumber: product.mfrPartNumber || "",
+        uom: product.uom || "",
+        uomQty: purchaseMultiple,
+        purchaseMultiple
+      }]
+    }))
+    setEditCatalogOpen(false)
+    setEditCatalogQuery("")
+    setEditCatalogResults([])
+    toast.success(`${product.sku} added to the draft PO.`)
+  }
   const saveEdit = async () => {
     setSaving(true)
     try {
@@ -2564,6 +2654,10 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
                     ["Vendor", line.vendorSku],
                     ["UPC", line.upc || line.barcode || line.gtin],
                   ].filter((entry) => String(entry[1] || "").trim())
+                  const linkedDemandQty = Array.isArray(line.purchaseDemandLinks) ? (line.purchaseDemandLinks as Array<Record<string, unknown>>).reduce((total, link) => total + Number(link.qty || 0), 0) : 0
+                  const customerDemandQty = Number(line.customerDemandQty ?? (linkedDemandQty || line.qty || 0))
+                  const purchaseMultiple = Math.max(1, Number(line.purchaseMultiple || line.uomQty || 1))
+                  const purchaseSurplusQty = Math.max(0, Number(line.purchaseSurplusQty ?? Number(line.qty || 0) - customerDemandQty))
                   return <TableRow key={`${sku}-${index}`}>
                     <TableCell className="align-top">
                       <div className="flex min-w-0 items-start gap-3">
@@ -2577,7 +2671,7 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
                       </div>
                     </TableCell>
                     <TableCell><PurchaseLineSupplier line={line} fallbackSupplier={String(po.supplier || "")} /></TableCell>
-                    <TableCell className="align-top"><p className="font-medium tabular-nums">{numberLabel(Number(line.qty || 0))} ordered</p><p className="text-xs text-muted-foreground tabular-nums">{numberLabel(Number(line.receivedQty || 0))} received</p>{purchaseOrderLineReceiverNames(line, receipts).length ? <p className="mt-1 text-xs text-emerald-700 dark:text-emerald-300">By {purchaseOrderLineReceiverNames(line, receipts).join(", ")}</p> : null}<p className="text-xs text-muted-foreground tabular-nums">{numberLabel(purchaseOrderLineRemaining(line))} remaining</p></TableCell>
+                    <TableCell className="align-top"><p className="font-medium tabular-nums">{numberLabel(Number(line.qty || 0))} ordered</p>{purchaseMultiple > 1 ? <p className="text-xs font-medium text-amber-700 dark:text-amber-300">MOQ / multiple {numberLabel(purchaseMultiple)}</p> : null}{purchaseSurplusQty > 0 ? <p className="text-xs text-muted-foreground tabular-nums">{numberLabel(customerDemandQty)} customer demand</p> : null}{purchaseSurplusQty > 0 ? <p className="text-xs text-emerald-700 dark:text-emerald-300 tabular-nums">{numberLabel(purchaseSurplusQty)} surplus to stock</p> : null}<p className="text-xs text-muted-foreground tabular-nums">{numberLabel(Number(line.receivedQty || 0))} received</p>{purchaseOrderLineReceiverNames(line, receipts).length ? <p className="mt-1 text-xs text-emerald-700 dark:text-emerald-300">By {purchaseOrderLineReceiverNames(line, receipts).join(", ")}</p> : null}<p className="text-xs text-muted-foreground tabular-nums">{numberLabel(purchaseOrderLineRemaining(line))} remaining</p></TableCell>
                     <TableCell className="text-right font-medium tabular-nums">{moneyLabel(Number(line.unitCost ?? line.estimatedUnitCost ?? 0))}</TableCell>
                     <TableCell className="text-right font-medium tabular-nums">{moneyLabel(Number(line.customerPaid || 0))}</TableCell>
                     <TableCell className="text-right align-top"><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon-sm" variant="ghost" aria-label={`Actions for ${sku || title}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{unresolved || String(line.source || "") === "external_po_pdf" ? <DropdownMenuItem disabled={!unresolved && Number(line.receivedQty || 0) > 0} onClick={() => openCatalogLine(line, index)}>{unresolved ? <Search className="size-4" /> : <Pencil className="size-4" />} {unresolved ? "Resolve SKU" : "Change SKU"}</DropdownMenuItem> : null}{!unresolved ? <DropdownMenuItem disabled={purchaseOrderLineRemaining(line) <= 0 || ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => openLineCost(line, index)}>Update cost</DropdownMenuItem> : null}{!unresolved && String(line.source || "") !== "external_po_pdf" && String(po.fulfillmentMode || "") !== "dropship_per_order" && purchaseOrderLineRemaining(line) > 0 && Number(line.receivedQty || 0) === 0 ? <DropdownMenuItem onClick={() => { const requestKey = `line-dropship:${String(line.routeId || index)}`; poMutationRequestIdsRef.current.set(requestKey, crypto.randomUUID()); setDropshipLine({ line, index }); setDropshipReasonCode("other_operational"); setDropshipReasonNote("") }}><Truck className="size-4" /> Move to dropship</DropdownMenuItem> : null}</DropdownMenuContent></DropdownMenu></TableCell>
@@ -2658,14 +2752,31 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
     <Dialog open={reminderOpen} onOpenChange={setReminderOpen}><DialogContent className="max-w-2xl"><DialogHeader><DialogTitle>Supplier overdue reminder</DialogTitle><DialogDescription>{Boolean(reminderPreview.overdue) ? "This PO is past its expected arrival date." : "You can send this reminder manually before the PO becomes overdue."}</DialogDescription></DialogHeader><div className="grid gap-3"><Field label="To"><Input readOnly value={String(reminderPreview.recipient || "No supplier email address")} /></Field><Field label="Subject"><Input readOnly value={String(reminderPreview.subject || "")} /></Field><Field label="Message"><Textarea readOnly className="min-h-40" value={String(reminderPreview.text || "")} /></Field>{Array.isArray(reminderPreview.missing) && reminderPreview.missing.length > 0 && <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{(reminderPreview.missing as string[]).join(" ")}</div>}</div><DialogFooter><Button variant="outline" onClick={() => setReminderOpen(false)}>Close</Button><Button disabled={saving || reminderPreview.ready !== true} onClick={() => void sendReminder()}>{saving ? <Loader2 className="size-4 animate-spin" /> : "Send reminder"}</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={documentOpen} onOpenChange={setDocumentOpen}><DialogContent><DialogHeader><DialogTitle>Link PO document</DialogTitle><DialogDescription>Add a supplier quote, acknowledgement, invoice, or other document URL to this purchase order.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="Document name"><Input value={documentDraft.name} onChange={(event) => setDocumentDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Supplier acknowledgement" /></Field><Field label="Document URL"><Input value={documentDraft.url} onChange={(event) => setDocumentDraft((current) => ({ ...current, url: event.target.value }))} placeholder="https://..." /></Field><Field label="Document type"><Input value={documentDraft.type} onChange={(event) => setDocumentDraft((current) => ({ ...current, type: event.target.value }))} /></Field><Field label="Note"><Textarea value={documentDraft.note} onChange={(event) => setDocumentDraft((current) => ({ ...current, note: event.target.value }))} placeholder="Optional internal note" /></Field></div><DialogFooter><Button variant="outline" onClick={() => setDocumentOpen(false)}>Cancel</Button><Button disabled={saving || !documentDraft.name || !documentDraft.url} onClick={() => void saveDocument()}>Link document</Button></DialogFooter></DialogContent></Dialog>
     {receivingDialog}
-    <Dialog open={editingOpen} onOpenChange={setEditingOpen}>
-      <DialogContent className="max-h-[90vh] w-[calc(100vw-2rem)] max-w-4xl overflow-y-auto">
-        <DialogHeader><DialogTitle>Edit {String(po.poNumber || "purchase order")}</DialogTitle><DialogDescription>{poCommitted ? "Changes to a sent PO are saved as an amendment and require supplier confirmation. Received quantities cannot be reduced." : isDropship ? "Update the supplier, expected date, buyer notes, and ordered quantities. Dropship POs ship directly to the customer and do not use a receiving warehouse." : "Update the supplier, receiving destination, expected date, buyer notes, and unreceived quantities before submitting the PO."}</DialogDescription></DialogHeader>
-        <div className="grid gap-4 sm:grid-cols-2"><Field label="Supplier"><Select value={String(editDraft.vendorId || "")} onValueChange={(value) => setEditDraft((current) => ({ ...current, vendorId: value }))}><SelectTrigger><SelectValue placeholder="Choose supplier" /></SelectTrigger><SelectContent>{(referenceData.vendors || []).map((vendor) => <SelectItem key={String(vendor.id)} value={String(vendor.id)}>{String(vendor.name || vendor.id)}</SelectItem>)}</SelectContent></Select></Field>{!isDropship ? <Field label="Receiving warehouse"><Select value={String(editDraft.warehouseId || "")} onValueChange={(value) => setEditDraft((current) => ({ ...current, warehouseId: value }))}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{(referenceData.warehouses || []).map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.id)}</SelectItem>)}</SelectContent></Select></Field> : <div className="rounded-md border bg-muted/30 p-3 text-sm"><p className="font-medium">Direct to customer</p><p className="mt-1 text-xs text-muted-foreground">No receiving warehouse is used for this dropship PO.</p></div>}<Field label="Expected date"><Input type="date" value={String(editDraft.expectedAt || "")} onChange={(event) => setEditDraft((current) => ({ ...current, expectedAt: event.target.value }))} /></Field></div>
-        {editableManualDraftLines ? <div className="grid gap-3"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-medium">Draft line items</p><p className="text-xs text-muted-foreground">Incomplete lines can be saved now and finished before approval.</p></div><Button size="sm" variant="outline" onClick={() => setEditDraft((current) => ({ ...current, items: [...(Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []), { id: crypto.randomUUID(), sku: "", title: "", qty: 1, estimatedUnitCost: 0, source: "manual_line" }] }))}><Plus className="size-4" /> Add line</Button></div><div className="overflow-x-auto rounded-md border"><Table><TableHeader><TableRow><TableHead className="min-w-36">SKU</TableHead><TableHead className="min-w-56">Item</TableHead><TableHead className="w-28">Quantity</TableHead><TableHead className="w-36">Unit cost</TableHead><TableHead className="w-12" /></TableRow></TableHeader><TableBody>{(Array.isArray(editDraft.items) ? editDraft.items as Array<Record<string, unknown>> : []).map((item, index) => <TableRow key={String(item.id || `draft-line-${index}`)}><TableCell><Input value={String(item.sku || "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, lineIndex) => lineIndex === index ? { ...candidate, sku: event.target.value } : candidate) }))} placeholder="SKU" /></TableCell><TableCell><Input value={String(item.title || "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, lineIndex) => lineIndex === index ? { ...candidate, title: event.target.value } : candidate) }))} placeholder="Product title" /></TableCell><TableCell><Input type="number" min="0" step="1" value={String(item.qty ?? "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, lineIndex) => lineIndex === index ? { ...candidate, qty: Number(event.target.value || 0) } : candidate) }))} /></TableCell><TableCell><Input type="number" min="0" step="0.01" value={String(item.estimatedUnitCost ?? "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, lineIndex) => lineIndex === index ? { ...candidate, estimatedUnitCost: Number(event.target.value || 0) } : candidate) }))} /></TableCell><TableCell><Button size="icon" variant="ghost" title="Remove line" onClick={() => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).filter((_, lineIndex) => lineIndex !== index) }))}><Trash2 className="size-4" /></Button></TableCell></TableRow>)}{!(Array.isArray(editDraft.items) && editDraft.items.length) ? <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No items yet. Save the draft now or add a line.</TableCell></TableRow> : null}</TableBody></Table></div></div> : <div className="overflow-hidden rounded-md border"><Table className="table-fixed"><TableHeader><TableRow><TableHead className="w-36">SKU</TableHead><TableHead>Item</TableHead><TableHead className="w-32">Ordered quantity</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => { const sku = String(line.sku || ""); const items = Array.isArray(editDraft.items) ? editDraft.items as Array<Record<string, unknown>> : []; const item = items.find((candidate) => String(candidate.sku) === sku) || { sku, qty: Number(line.qty || 0) }; const title = String(line.title || "-"); return <TableRow key={`edit-${index}`}><TableCell className="break-all font-mono text-xs">{sku}</TableCell><TableCell><p className="line-clamp-2 break-words" title={title}>{compactPurchaseItemTitle(title)}</p></TableCell><TableCell><Input type="number" min={Number(line.receivedQty || 0)} value={String(item.qty || 0)} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate) => String(candidate.sku) === sku ? { ...candidate, qty: Number(event.target.value || 0) } : candidate) }))} /></TableCell></TableRow> })}</TableBody></Table></div>}
-        <div className="grid gap-2"><Label htmlFor="po-notes">Buyer notes</Label><Textarea id="po-notes" value={String(editDraft.notes || "")} onChange={(event) => setEditDraft((current) => ({ ...current, notes: event.target.value }))} /></div>
-        {poCommitted ? <div className="grid gap-2"><Label htmlFor="po-amendment-reason">Reason for supplier amendment</Label><Textarea id="po-amendment-reason" value={String(editDraft.amendmentReason || "")} onChange={(event) => setEditDraft((current) => ({ ...current, amendmentReason: event.target.value }))} placeholder="Explain what changed and why the supplier must confirm it" /></div> : null}
-        <DialogFooter><Button variant="outline" onClick={() => setEditingOpen(false)}>Cancel</Button><Button disabled={saving} onClick={() => void saveEdit()}>{saving ? <Loader2 className="size-4 animate-spin" /> : "Save PO"}</Button></DialogFooter>
+    <Dialog open={editingOpen} onOpenChange={(open) => { setEditingOpen(open); if (!open) setEditCatalogOpen(false) }}>
+      <DialogContent className="flex h-[min(94dvh,58rem)] w-[calc(100vw-1rem)] max-w-[96rem] flex-col gap-0 overflow-hidden p-0 sm:w-[calc(100vw-2rem)]">
+        <DialogHeader className="shrink-0 border-b px-5 py-4 pr-12">
+          <DialogTitle>Edit {String(po.poNumber || "purchase order")}</DialogTitle>
+          <DialogDescription>{poCommitted ? "Changes to a sent PO are saved as an amendment and require supplier confirmation. Received quantities cannot be reduced." : isDropship ? "Update the supplier, expected date, buyer notes, and ordered quantities. Dropship POs ship directly to the customer and do not use a receiving warehouse." : "Update the supplier, receiving destination, expected date, buyer notes, and unreceived quantities before submitting the PO."}</DialogDescription>
+        </DialogHeader>
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          <div className="grid gap-5">
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3"><Field label="Supplier"><Select value={String(editDraft.vendorId || "")} onValueChange={(value) => setEditDraft((current) => ({ ...current, vendorId: value }))}><SelectTrigger><SelectValue placeholder="Choose supplier" /></SelectTrigger><SelectContent>{(referenceData.vendors || []).map((vendor) => <SelectItem key={String(vendor.id)} value={String(vendor.id)}>{String(vendor.name || vendor.id)}</SelectItem>)}</SelectContent></Select></Field>{!isDropship ? <Field label="Receiving warehouse"><Select value={String(editDraft.warehouseId || "")} onValueChange={(value) => setEditDraft((current) => ({ ...current, warehouseId: value }))}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{(referenceData.warehouses || []).map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.id)}</SelectItem>)}</SelectContent></Select></Field> : <div className="rounded-md border bg-muted/30 p-3 text-sm"><p className="font-medium">Direct to customer</p><p className="mt-1 text-xs text-muted-foreground">No receiving warehouse is used for this dropship PO.</p></div>}<Field label="Expected date"><Input type="date" value={String(editDraft.expectedAt || "")} onChange={(event) => setEditDraft((current) => ({ ...current, expectedAt: event.target.value }))} /></Field></div>
+            {editableManualDraftLines ? <div className="grid gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-medium">Draft line items</p><p className="text-xs text-muted-foreground">Search the catalog to add a complete SKU, or use a blank line for an item not yet in DataPlus.</p></div><Button size="sm" variant={editCatalogOpen ? "secondary" : "outline"} onClick={() => { setEditCatalogOpen((open) => !open); setEditCatalogQuery(""); setEditCatalogResults([]) }}><Plus className="size-4" /> Add SKU</Button></div>
+              {editCatalogOpen ? <div className="grid gap-3 rounded-md border bg-muted/20 p-3">
+                <div className="flex items-center gap-2"><Input autoFocus value={editCatalogQuery} onChange={(event) => setEditCatalogQuery(event.target.value)} placeholder="Search SKU, UPC, manufacturer part number, or title" /><Button size="icon" variant="ghost" aria-label="Close product search" onClick={() => setEditCatalogOpen(false)}><X className="size-4" /></Button></div>
+                <div className="max-h-64 overflow-y-auto rounded-md border bg-background">
+                  {editCatalogSearching ? <div className="flex h-24 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Searching catalog</div> : editCatalogQuery.trim().length < 2 ? <div className="flex h-20 items-center justify-center px-4 text-center text-sm text-muted-foreground">Enter at least two characters to search the catalog.</div> : editCatalogResults.length ? <div className="divide-y">{editCatalogResults.map((product) => { const multiple = quickProductPurchaseMultiple(product); return <div key={product.id || product.sku} className="flex items-center gap-3 p-3"><CatalogImage src={String(product.image || "")} alt={product.title} className="size-11 shrink-0" imageClassName="p-1" /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className="font-mono text-xs font-semibold">{product.sku}</span>{product.matchLabel ? <Badge variant="outline">{product.matchLabel}</Badge> : null}{multiple > 1 ? <Badge variant="warning">Buy in {multiple}s</Badge> : null}</div><p className="truncate text-sm font-medium" title={product.title}>{product.title}</p><p className="truncate text-xs text-muted-foreground">{product.supplier || "Supplier not set"} · {moneyLabel(Number(product.cost || 0))} cost · {numberLabel(Number(product.qty || 0))} available</p></div><Button size="sm" onClick={() => addCatalogEditLine(product)}>Add</Button></div> })}</div> : <div className="flex h-20 items-center justify-center px-4 text-center text-sm text-muted-foreground">No matching catalog products found.</div>}
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-xs text-muted-foreground">Catalog items bring their saved title, cost, supplier identifiers, and minimum purchase quantity.</p><Button size="sm" variant="ghost" onClick={addBlankEditLine}>Add unlisted SKU instead</Button></div>
+              </div> : null}
+              <div className="max-h-[min(52dvh,36rem)] overflow-auto rounded-md border"><Table className="min-w-[72rem]"><TableHeader className="sticky top-0 z-10 bg-popover"><TableRow><TableHead className="w-52">SKU</TableHead><TableHead className="min-w-[28rem]">Item</TableHead><TableHead className="w-32">Quantity</TableHead><TableHead className="w-40">Unit cost</TableHead><TableHead className="w-16" /></TableRow></TableHeader><TableBody>{(Array.isArray(editDraft.items) ? editDraft.items as Array<Record<string, unknown>> : []).map((item, index) => <TableRow key={String(item.id || `draft-line-${index}`)}><TableCell><Input value={String(item.sku || "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, lineIndex) => lineIndex === index ? { ...candidate, sku: event.target.value } : candidate) }))} placeholder="SKU" /></TableCell><TableCell><div className="flex items-center gap-2">{item.defaultImage ? <CatalogImage src={String(item.defaultImage)} alt={String(item.title || item.sku || "Product")} className="size-9 shrink-0" imageClassName="p-1" /> : null}<Input value={String(item.title || "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, lineIndex) => lineIndex === index ? { ...candidate, title: event.target.value } : candidate) }))} placeholder="Product title" /></div></TableCell><TableCell><Input type="number" min="0" step="1" value={String(item.qty ?? "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, lineIndex) => lineIndex === index ? { ...candidate, qty: Number(event.target.value || 0) } : candidate) }))} />{Number(item.purchaseMultiple || item.uomQty || 0) > 1 ? <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">Buy in {numberLabel(Number(item.purchaseMultiple || item.uomQty))}s</p> : null}</TableCell><TableCell><Input type="number" min="0" step="0.01" value={String(item.estimatedUnitCost ?? "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, lineIndex) => lineIndex === index ? { ...candidate, estimatedUnitCost: Number(event.target.value || 0) } : candidate) }))} /></TableCell><TableCell><Button size="icon" variant="ghost" title="Remove line" onClick={() => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).filter((_, lineIndex) => lineIndex !== index) }))}><Trash2 className="size-4" /></Button></TableCell></TableRow>)}{!(Array.isArray(editDraft.items) && editDraft.items.length) ? <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No items yet. Add a catalog SKU or an unlisted line.</TableCell></TableRow> : null}</TableBody></Table></div>
+            </div> : <div className="max-h-[min(52dvh,36rem)] overflow-auto rounded-md border"><Table className="min-w-[48rem] table-fixed"><TableHeader className="sticky top-0 z-10 bg-popover"><TableRow><TableHead className="w-44">SKU</TableHead><TableHead>Item</TableHead><TableHead className="w-40">Ordered quantity</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => { const sku = String(line.sku || ""); const items = Array.isArray(editDraft.items) ? editDraft.items as Array<Record<string, unknown>> : []; const item = items.find((candidate) => String(candidate.sku) === sku) || { sku, qty: Number(line.qty || 0) }; const title = String(line.title || "-"); const purchaseMultiple = Math.max(1, Number(line.purchaseMultiple || 1)); return <TableRow key={`edit-${index}`}><TableCell className="break-all font-mono text-xs">{sku}</TableCell><TableCell><p className="line-clamp-2 break-words" title={title}>{compactPurchaseItemTitle(title)}</p></TableCell><TableCell><Input type="number" min={Number(line.receivedQty || 0)} step={purchaseMultiple} value={String(item.qty || 0)} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate) => String(candidate.sku) === sku ? { ...candidate, qty: Number(event.target.value || 0) } : candidate) }))} />{purchaseMultiple > 1 ? <p className="mt-1 text-[11px] font-medium text-amber-700 dark:text-amber-300">Supplier requires multiples of {numberLabel(purchaseMultiple)}</p> : null}</TableCell></TableRow> })}</TableBody></Table></div>}
+            <div className="grid gap-2"><Label htmlFor="po-notes">Buyer notes</Label><Textarea id="po-notes" value={String(editDraft.notes || "")} onChange={(event) => setEditDraft((current) => ({ ...current, notes: event.target.value }))} /></div>
+            {poCommitted ? <div className="grid gap-2"><Label htmlFor="po-amendment-reason">Reason for supplier amendment</Label><Textarea id="po-amendment-reason" value={String(editDraft.amendmentReason || "")} onChange={(event) => setEditDraft((current) => ({ ...current, amendmentReason: event.target.value }))} placeholder="Explain what changed and why the supplier must confirm it" /></div> : null}
+          </div>
+        </div>
+        <DialogFooter className="shrink-0 border-t px-5 py-4"><Button variant="outline" onClick={() => setEditingOpen(false)}>Cancel</Button><Button disabled={saving} onClick={() => void saveEdit()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save PO</Button></DialogFooter>
       </DialogContent>
     </Dialog>
     <Dialog open={financialOpen} onOpenChange={setFinancialOpen}>

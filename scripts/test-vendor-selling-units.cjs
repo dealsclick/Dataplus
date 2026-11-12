@@ -56,7 +56,10 @@ assert.deepEqual(Array.from(context.systemProductVariants(feed, db), row => row.
 mode = 'case-only';
 assert.equal(context.systemProductVariants({ ...item, uomQty: 1 }, db).length, 0);
 assert.equal((source.match(/variationRuleFields = new Set\(\["shopifyVariantMode", "allowShopifyVariations", "sellingUnitMode"/g) || []).length, 2, 'Both vendor save paths must allow the new setting');
-const appSource = fs.readFileSync(path.resolve(__dirname, '../web/src/App.tsx'), 'utf8');
+const appSource = [
+  '../web/src/App.tsx',
+  '../web/src/components/vendor-workspaces.tsx'
+].map(file => fs.readFileSync(path.resolve(__dirname, file), 'utf8')).join('\n');
 assert.match(appSource, /Individual Each/);
 assert.match(appSource, /Supplier-defined unit/);
 assert.match(appSource, /updateSellingUnitPermission\("individual"/);

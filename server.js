@@ -13473,7 +13473,11 @@ function normalizeManualPurchaseOrderItems(rawItems = [], options = {}) {
     const requestedSku = String(raw?.sku || "").trim();
     const source = String(raw?.source || (raw?.catalogProduct === true ? "catalog" : "manual_line"));
     const unresolvedCatalogLine = source === "external_po_pdf" && raw?.catalogProduct !== true;
-    const qty = Number(raw?.qty);
+    const requestedQty = Number(raw?.qty);
+    const purchaseMultiple = Math.max(1, Math.floor(Number(raw?.purchaseMultiple || 1)));
+    const qty = Number.isFinite(requestedQty) && requestedQty > 0 && purchaseMultiple > 1
+      ? Math.ceil(requestedQty / purchaseMultiple) * purchaseMultiple
+      : requestedQty;
     const estimatedUnitCost = Number(raw?.estimatedUnitCost ?? raw?.unitCost ?? raw?.cost ?? 0);
     if (!allowIncompleteDraft && !requestedSku && !unresolvedCatalogLine) throw new Error(`Enter a SKU for line ${index + 1}.`);
     const lineLabel = requestedSku || String(raw?.vendorSku || raw?.manufacturerPartNumber || `line ${index + 1}`);
@@ -13489,6 +13493,7 @@ function normalizeManualPurchaseOrderItems(rawItems = [], options = {}) {
       brand: String(raw?.brand || "").trim(),
       manufacturer: String(raw?.manufacturer || "").trim(),
       qty: Number.isFinite(qty) ? qty : 0,
+      purchaseMultiple,
       estimatedUnitCost: Number.isFinite(estimatedUnitCost) ? estimatedUnitCost : 0,
       receivedQty: Math.max(0, Number(raw?.receivedQty || 0)),
       remainingQty: Math.max(0, (Number.isFinite(qty) ? qty : 0) - Math.max(0, Number(raw?.receivedQty || 0))),
@@ -14575,6 +14580,21 @@ function recalculateWaitingPurchaseOrder(db, po, vendor) {
   return po;
 }
 
+function supplierPurchaseMultiple(route = {}, orderLine = {}) {
+  const selectedOffer = (Array.isArray(route.supplierOffers) ? route.supplierOffers : []).find((offer) => {
+    if (route.vendorId && offer.vendorId && String(offer.vendorId) !== String(route.vendorId)) return false;
+    if (route.vendorSku && offer.vendorSku && String(offer.vendorSku).toLowerCase() !== String(route.vendorSku).toLowerCase()) return false;
+    return true;
+  }) || {};
+  return Math.max(1, productUomQty(route), productUomQty(selectedOffer), productUomQty(orderLine));
+}
+
+function supplierPurchaseQuantity(demandQty, purchaseMultiple = 1) {
+  const demand = Math.max(0, Number(demandQty || 0));
+  const multiple = Math.max(1, Math.floor(Number(purchaseMultiple || 1)));
+  return demand > 0 ? Math.ceil(demand / multiple) * multiple : 0;
+}
+
 function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
   const orders = (orderIds || []).map((id) => (db.orders || []).find((order) => order.id === id)).filter((order) => order && !orderIsReportingOnly(order) && !isTerminalCustomerDemand(order));
   if (!orders.length) throw new Error("No matching orders found for purchase order.");
@@ -14732,11 +14752,19 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
     for (const route of routesToAppend) {
       const orderLine = route.order?.items?.[route.lineIndex] || {};
       const unitCost = Number(route.unitCost || orderLine.unitCost || orderLine.cost || 0);
+      const customerDemandQty = Math.max(0, Number(route.qty || 0));
+      const purchaseMultiple = supplierPurchaseMultiple(route, orderLine);
+      const purchaseQty = supplierPurchaseQuantity(customerDemandQty, purchaseMultiple);
       po.items.push({
         sku: route.sku,
         title: route.title,
         defaultImage: String(route.defaultImage || route.imageUrl || route.image || orderLine.defaultImage || orderLine.imageUrl || orderLine.image || "").trim(),
-        qty: Number(route.qty || 0),
+        qty: purchaseQty,
+        customerDemandQty,
+        purchaseMultiple,
+        purchaseSurplusQty: Math.max(0, purchaseQty - customerDemandQty),
+        uom: String(route.uom || orderLine.uom || ""),
+        uomQty: purchaseMultiple,
         unitCost,
         estimatedUnitCost: unitCost,
         supplier: route.vendorName || po.supplier || "",
@@ -14749,7 +14777,16 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
         orderId: route.order.id,
         orderNumber: route.order.orderNumber,
         salesChannel: orderSourceChannelName(route.order, ""),
-        routeId: route.id
+        routeId: route.id,
+        purchaseDemandLinks: [{
+          orderId: route.order.id,
+          orderNumber: route.order.orderNumber,
+          routeId: route.id,
+          sku: route.sku,
+          qty: customerDemandQty,
+          linkedAt: now,
+          linkedBy: options.user || "System"
+        }]
       });
     }
     recalculateWaitingPurchaseOrder(db, po, group.vendor);
@@ -55494,6 +55531,10 @@ async function handleApi(req, res) {
       barcode: String(product.barcode || ""),
       cost: Number(product.cost ?? product.unitCost ?? 0),
       qty: Number(product.qty || 0),
+      uom: String(product.uom || product.raw?.uom || ""),
+      uomQty: Number(product.uom_qty ?? product.uomQty ?? product.raw?.uomQty ?? product.raw?.uom_qty ?? 1),
+      minQuantity: Number(product.min_quantity ?? product.minQuantity ?? product.raw?.minQuantity ?? product.raw?.min_quantity ?? 0),
+      quantityIncrements: Number(product.quantity_increments ?? product.quantityIncrements ?? product.raw?.quantityIncrements ?? product.raw?.quantity_increments ?? 0),
       image: String(product.default_image || product.defaultImage || ""),
       matchLabel: String(product.match_label || "Product")
     })).filter((product) => product.sku) });
@@ -63512,10 +63553,16 @@ async function handleApi(req, res) {
         const bySku = new Map((po.items || []).map((line) => [String(line.sku || "").toLowerCase(), line]));
         for (const item of body.items) {
           const line = bySku.get(String(item.sku || "").toLowerCase());
-          const qty = Number(item.qty || 0);
-          if (!line || !Number.isFinite(qty) || qty < Number(line.receivedQty || 0)) continue;
+          const requestedQty = Number(item.qty || 0);
+          if (!line || !Number.isFinite(requestedQty)) continue;
+          const purchaseMultiple = Math.max(1, Math.floor(Number(line.purchaseMultiple || 1)));
+          const qty = requestedQty > 0 && purchaseMultiple > 1
+            ? Math.ceil(requestedQty / purchaseMultiple) * purchaseMultiple
+            : requestedQty;
+          if (qty < Number(line.receivedQty || 0)) continue;
           amendmentNeeded = amendmentNeeded || committed && Number(line.qty || 0) !== qty;
           line.qty = qty;
+          line.purchaseSurplusQty = Math.max(0, qty - Number(line.customerDemandQty || 0));
           line.remainingQty = Math.max(0, qty - Number(line.receivedQty || 0));
         }
       }

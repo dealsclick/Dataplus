@@ -263,6 +263,10 @@ export type QuickProductResult = {
   barcode?: string
   cost?: number
   qty?: number
+  uom?: string
+  uomQty?: number
+  minQuantity?: number
+  quantityIncrements?: number
   image?: string
   matchLabel?: string
 }
