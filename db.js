@@ -16762,11 +16762,15 @@ async function listProducts(options = {}) {
     ? inventoryLocationValues
     : splitFilterValues(filters.warehouse).map((value) => value.toLowerCase());
   if (warehouseValues.length) {
-    params.push(warehouseValues);
+    let warehouseParam = inventoryLocationParam;
+    if (!warehouseParam) {
+      params.push(warehouseValues);
+      warehouseParam = params.length;
+    }
     where.push(`exists (
       select 1 from inventory_levels il
       where il.product_id = products.product_id
-        and lower(il.location_key) = any($${params.length}::text[])
+        and lower(il.location_key) = any($${warehouseParam}::text[])
     )`);
   }
   const requestedHazardousValues = splitFilterValues(filters.hazardous);

@@ -101,6 +101,8 @@ async function main() {
     assert.equal(readyRows.total, 2);
     const physicalStock = await context.listProducts({ fastPage: true, includeTotal: true, limit: 100, filters: { inventoryLocationKeys: 'warehouse-a', inventoryAvailability: 'in-stock' } });
     assert.equal(physicalStock.total, 1); assert.equal(physicalStock.inventory[0].sku, 'A'); assert.equal(physicalStock.totalQty, 3);
+    const physicalLocations = await context.listProducts({ fastPage: true, includeTotal: true, limit: 100, filters: { inventoryLocationKeys: 'warehouse-a' } });
+    assert.equal(physicalLocations.total, 2); assert.equal(physicalLocations.totalQty, 3);
     const supplierStock = await context.listProducts({ fastPage: true, includeTotal: true, limit: 100, filters: { inventoryLocationKeys: 'datawarehouse', inventoryAvailability: 'in-stock' } });
     assert.equal(supplierStock.total, 1); assert.equal(supplierStock.inventory[0].sku, 'A'); assert.equal(supplierStock.totalQty, 20);
     const scoped = await context.listProducts({ fastPage: true, includeTotal: true, limit: 100, productIds: ['B'], filters: { channelStatus: 'ebay-ready' } });
