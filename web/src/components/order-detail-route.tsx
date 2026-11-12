@@ -200,7 +200,8 @@ function ReportingOrderDetail({ order, onRefresh, loading }: { order: Record<str
 
 function OrderDetailWorkspace() {
   const fulfillmentCarriers = useFulfillmentCarriers()
-  const orderId = decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
+  const orderKeyFromLocation = () => decodeURIComponent((window.location.pathname.split("/")[2] || "").trim())
+  const [orderId, setOrderId] = useState(orderKeyFromLocation)
   const [order, setOrder] = useState<Record<string, unknown> | null>(null)
   const [warehouses, setWarehouses] = useState<Array<Record<string, unknown>>>([])
   const [fulfillmentSettings, setFulfillmentSettings] = useState<Record<string, unknown>>({})
@@ -278,7 +279,7 @@ function OrderDetailWorkspace() {
       setOrder(nextOrder)
       if (nextOrder) {
         const canonicalKey = orderUrlKey(nextOrder)
-        if (canonicalKey && canonicalKey !== orderId) window.history.replaceState({}, "", orderHref(nextOrder) + window.location.search)
+        if (canonicalKey && canonicalKey !== orderId) window.history.replaceState(window.history.state, "", orderHref(nextOrder) + window.location.search + window.location.hash)
       }
       setWarehouses(result.warehouses || [])
       setFulfillmentSettings(result.fulfillmentSettings || {})
@@ -359,6 +360,11 @@ function OrderDetailWorkspace() {
     } catch (error) { toast.error(error instanceof Error ? error.message : "Walmart cancellation could not be confirmed. Refresh the order before retrying.") }
     finally { setWalmartCancelLoading(false) }
   }
+  useEffect(() => {
+    const syncOrderKey = () => setOrderId(orderKeyFromLocation())
+    window.addEventListener("popstate", syncOrderKey)
+    return () => window.removeEventListener("popstate", syncOrderKey)
+  }, [])
   useEffect(() => { void load() }, [orderId])
   useEffect(() => { const refresh = () => void load(); window.addEventListener("dataplus:order-updated", refresh); return () => window.removeEventListener("dataplus:order-updated", refresh) }, [orderId])
   const lines = Array.isArray(order?.items) ? order.items as Array<Record<string, unknown>> : []

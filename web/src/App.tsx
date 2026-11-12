@@ -1651,7 +1651,7 @@ function jobIdFromPath(pathname = window.location.pathname) {
 }
 
 export function orderUrlKey(order: Record<string, unknown> = {}) {
-  return String(order.id || order.orderId || order.internalOrderNumber || order.orderNumber || order.displayOrderNumber || "").trim()
+  return String(order.internalOrderNumber || order.orderNumber || order.displayOrderNumber || order.id || order.orderId || "").trim()
 }
 
 export function orderHref(order: Record<string, unknown> = {}) {

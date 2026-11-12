@@ -89,8 +89,8 @@ test("PostgreSQL persists company-channel identities and canonical claims", () =
   assert.match(dbSource, /records\.tenant_id=\$1 and records\.company_id=\$2/);
 });
 
-test("order links prefer immutable record IDs over display numbers", () => {
-  assert.match(appSource, /String\(order\.id \|\| order\.orderId \|\| order\.internalOrderNumber/);
+test("order links prefer the unique internal order number with record ID fallback", () => {
+  assert.match(appSource, /String\(order\.internalOrderNumber \|\| order\.orderNumber \|\| order\.displayOrderNumber \|\| order\.id \|\| order\.orderId/);
 });
 
 test("void and duplicate orders are never reportable", () => {
