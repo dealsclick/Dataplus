@@ -174,6 +174,34 @@ async function ensureOutboundAuditSchema(client) {
     alter table if exists outbound_audit_scans add column if not exists live_item_expected_count integer not null default 0;
     alter table if exists outbound_audit_scans add column if not exists live_item_scans jsonb not null default '[]'::jsonb;
   `);
+  await client.query(`
+    with cleaned_tracking_items as (
+      select scan.scan_id, coalesce((
+        select jsonb_agg(saved)
+        from jsonb_array_elements(scan.live_item_scans) saved
+        where not (
+          saved->>'verificationOnly' = 'true'
+          and regexp_replace(upper(coalesce(saved->>'barcode', '')), '[^A-Z0-9]', '', 'g') = scan.tracking_normalized
+        )
+      ), '[]'::jsonb) as kept_items
+      from outbound_audit_scans scan
+      where exists (
+        select 1
+        from jsonb_array_elements(scan.live_item_scans) saved
+        where saved->>'verificationOnly' = 'true'
+          and regexp_replace(upper(coalesce(saved->>'barcode', '')), '[^A-Z0-9]', '', 'g') = scan.tracking_normalized
+      )
+    )
+    update outbound_audit_scans scan set
+      live_item_scans = cleaned.kept_items,
+      live_item_status = case
+        when scan.live_item_expected_count > 0 and jsonb_array_length(cleaned.kept_items) >= scan.live_item_expected_count then 'complete'
+        when scan.live_item_required or jsonb_array_length(cleaned.kept_items) > 0 then 'pending'
+        else 'not_required'
+      end
+    from cleaned_tracking_items cleaned
+    where scan.scan_id = cleaned.scan_id;
+  `);
 }
 
 function invalidateReturnsWorkspaceSummary() {

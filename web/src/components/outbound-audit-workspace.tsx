@@ -110,6 +110,15 @@ function itemScanAvailable(scan: AuditScan) {
   return Boolean(scan.id && scan.trackingNumber)
 }
 
+function normalizedScanValue(value = "") {
+  return String(value).trim().toUpperCase().replace(/[^A-Z0-9]/g, "")
+}
+
+function isPackageTrackingBarcode(scan: AuditScan, value = "") {
+  const normalized = normalizedScanValue(value)
+  return Boolean(normalized && [scan.trackingRaw, scan.trackingNumber].some((tracking) => normalizedScanValue(tracking) === normalized))
+}
+
 function itemProgressLabel(scan: AuditScan) {
   return scan.liveItemExpectedCount > 0
     ? `${scan.liveItemScannedCount}/${scan.liveItemExpectedCount}`
@@ -179,6 +188,7 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
   const controlsRef = useRef<Awaited<ReturnType<typeof startFastBarcodeScanner>> | null>(null)
   const scanBusyRef = useRef(false)
   const lastScanRef = useRef({ value: "", at: 0 })
+  const lastTrackingRejectRef = useRef(0)
   const modeRef = useRef(mode)
   const activeScanRef = useRef<AuditScan | null>(null)
 
@@ -242,6 +252,16 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
     const value = barcode.trim()
     const scan = activeScanRef.current
     if (!value || !scan || scanBusyRef.current) return
+    if (isPackageTrackingBarcode(scan, value)) {
+      setManualValue("")
+      const now = Date.now()
+      if (now - lastTrackingRejectRef.current > 5000) {
+        lastTrackingRejectRef.current = now
+        toast.warning("That is the package tracking label. Scan the product UPC, or skip to the package photo.")
+        if (navigator.vibrate) navigator.vibrate([80, 40, 80])
+      }
+      return
+    }
     scanBusyRef.current = true
     setBusy(true)
     const clientScanId = existingClientScanId || crypto.randomUUID()

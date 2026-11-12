@@ -43080,6 +43080,13 @@ async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, cl
 
     const barcode = barcodeLookupForms(barcodeValue)[0] || "";
     if (!barcode) throw Object.assign(new Error("Scan or enter a valid UPC, GTIN, or product barcode."), { statusCode: 400 });
+    const normalizedItemBarcode = canonicalTrackingValue(barcode);
+    const packageTrackingValues = [scan.trackingNormalized, scan.trackingNumber, scan.trackingRaw]
+      .map((value) => canonicalTrackingValue(value))
+      .filter(Boolean);
+    if (normalizedItemBarcode && packageTrackingValues.includes(normalizedItemBarcode)) {
+      throw Object.assign(new Error("That is the package tracking barcode. Scan the product UPC, or skip to the package photo."), { statusCode: 409 });
+    }
     const state = await postgres.readStateFields(["warehouses"]);
     const warehouse = (state.warehouses || []).find((row) => String(row.id || "") === String(audit.session.warehouseId || ""));
     if (!warehouse || !isPhysicalFulfillmentWarehouse(warehouse)) {

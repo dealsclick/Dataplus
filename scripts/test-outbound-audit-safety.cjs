@@ -72,6 +72,9 @@ assert.match(dbSource, /live_item_expected_count integer not null default 0/);
 assert.match(dbSource, /live_item_scans jsonb not null default '\[\]'::jsonb/);
 assert.match(dbSource, /async function ensureOutboundAuditSchema\(client\)/);
 assert.match(dbSource, /if \(schemaVersion\.rows\[0\]\?\.current === true\) \{\s+await ensureOutboundAuditSchema\(client\)/);
+assert.match(dbSource, /cleaned_tracking_items/);
+assert.match(dbSource, /saved->>'verificationOnly' = 'true'/);
+assert.match(dbSource, /regexp_replace\(upper\(coalesce\(saved->>'barcode', ''\)\), '\[\^A-Z0-9\]', '', 'g'\) = scan\.tracking_normalized/);
 const outboundScanCreate = dbSource.match(/create table if not exists outbound_audit_scans \([\s\S]*?\n    \);/)?.[0] || '';
 assert.match(outboundScanCreate, /live_item_required boolean not null default false/);
 assert.match(outboundScanCreate, /live_item_status text not null default 'not_required'/);
@@ -102,6 +105,7 @@ assert.match(serverSource, /Unrecognized item barcode/);
 assert.match(serverSource, /recorded for this package\. Scan another item or continue to the package photo/);
 assert.match(serverSource, /Item scanning is optional; scan the items or continue to the package photo/);
 assert.match(serverSource, /Reused today's outbound handoff audit/);
+assert.match(serverSource, /That is the package tracking barcode\. Scan the product UPC, or skip to the package photo/);
 assert.match(routes, /action === "item-scan"/);
 assert.match(routes, /action === "quick-item"/);
 
@@ -127,6 +131,8 @@ assert.match(workspaceSource, /Every package can continue to item scans and a ph
 assert.match(workspaceSource, /Skip to package photo/);
 assert.match(workspaceSource, /Item verification/);
 assert.match(workspaceSource, /Use today&apos;s audit/);
+assert.match(workspaceSource, /isPackageTrackingBarcode/);
+assert.match(workspaceSource, /That is the package tracking label\. Scan the product UPC, or skip to the package photo/);
 
 const outboundStoreSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'outbound-audit-store.js'), 'utf8');
 assert.match(outboundStoreSource, /timezone\('America\/New_York', started_at\)::date = timezone\('America\/New_York', now\(\)\)::date/);
