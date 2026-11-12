@@ -38,7 +38,9 @@ assert.match(server, /\/api\/purchasing\/receiving-recent/, 'mobile receiving ha
 assert.match(server, /\/api\/purchase-orders\/:id\/receipt-preview|parts\[3\] === "receipt-preview"/, 'PO receiving previews matching fulfillment work before posting');
 assert.match(server, /body\.closeRemaining === true[\s\S]*shortClosedQty/, 'a supplier short shipment can close the unreceived PO balance without rewriting ordered or received quantities');
 assert.match(server, /stockRow\.qty = receivingAudit \? qtyBefore \+ countedQty : countedQty/, 'inbound receipts add inventory while ordinary audits preserve count semantics');
-assert.match(server, /Add at least one packing slip before posting this inbound receipt/, 'inbound completion requires packing-slip evidence');
+assert.doesNotMatch(server, /Add at least one packing slip before posting this inbound receipt/, 'inbound completion does not require packing-slip evidence');
+assert.doesNotMatch(server, /Add at least one packing slip to the inbound receiving audit before posting the PO receipt/, 'linked PO receiving does not require packing-slip evidence');
+assert.match(server, /packingSlipMissing/, 'receipts retain whether they were completed without a packing slip');
 assert.match(warehouseUi, /value:\s*"external_po_receipt",\s*label:\s*"External PO receipt"/, 'warehouse UI exposes the reason');
 assert.match(warehouseUi, /External PO or reference \(optional\)/, 'warehouse UI captures an optional external PO or other reference');
 assert.match(warehouseUi, /isReceivingAuditReason\(current\.reason\)/, 'external receipts retain the receiving-document workflow');
@@ -50,7 +52,8 @@ assert.match(warehouseUi, /!\["retired", "deleted"\]\.includes\(status\)/, 'exte
 assert.match(warehouseUi, /status !== "active".*capitalize/, 'inactive suppliers are clearly identified in the receiving picker');
 assert.match(warehouseUi, /capture="environment"/, 'mobile receiving offers direct packing-slip camera capture');
 assert.match(warehouseUi, /compressEvidenceImage/, 'packing-slip photos are compressed before upload');
-assert.match(warehouseUi, /Packing slip required/, 'the UI explains the packing-slip completion safeguard');
+assert.match(warehouseUi, /Packing slip optional/, 'the UI explains that packing-slip evidence is optional');
+assert.doesNotMatch(warehouseUi, /Add at least one packing-slip photo or file before finishing this receipt/, 'the UI does not block completion without a packing slip');
 assert.match(warehouseUi, /Extra item[\s\S]*Expected on another open PO/, 'linked PO receiving flags extra items and shows other open PO expectations');
 assert.match(warehouseUi, /Found in recent PO/, 'manual receiving displays a dedicated recent-PO match column');
 assert.match(warehouseUi, /recentOpenPurchaseOrders[\s\S]*\/purchase-orders\//, 'each detected recent PO opens its purchase-order detail');

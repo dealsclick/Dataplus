@@ -59661,7 +59661,8 @@ async function handleApi(req, res) {
     if (!audit) return notFound(res);
     if (!["in_progress", "pending_review"].includes(String(audit.status || "").toLowerCase())) return sendJson(res, 400, { error: "This audit no longer has inventory awaiting an action." });
     const receivingAudit = ["receiving_inventory", "external_po_receipt", "purchase_order_receipt"].includes(String(audit.reason || ""));
-    if (receivingAudit && !(audit.receivingDocuments || []).some((document) => String(document.documentType || "") === "packing_slip")) return sendJson(res, 409, { error: "Add at least one packing slip before posting this inbound receipt." });
+    const hasPackingSlip = (audit.receivingDocuments || []).some((document) => String(document.documentType || "") === "packing_slip");
+    if (receivingAudit) audit.packingSlipMissingAtCompletion = !hasPackingSlip;
     if (String(audit.reason || "") === "purchase_order_receipt" && audit.linkedPurchaseOrderId) {
       const linkedPo = await postgres.readPurchaseOrderByKey(audit.linkedPurchaseOrderId);
       if (!linkedPo) return sendJson(res, 404, { error: "The linked purchase order no longer exists." });
@@ -59985,6 +59986,7 @@ async function handleApi(req, res) {
         note: String(body.dispositionNote || "").trim(),
         attachments: (audit.receivingDocuments || []).map((document) => ({ id: document.id, name: document.name, mimeType: document.mimeType, size: document.size, documentType: document.documentType, url: document.url, sourceAuditId: audit.id })),
         packingSlipReview: audit.packingSlipReview || null,
+        packingSlipMissing: !hasPackingSlip,
         detectedOpenPurchaseOrders: Array.isArray(audit.recentOpenPurchaseOrders) ? audit.recentOpenPurchaseOrders : [],
         items: dispositionLines
       };
@@ -59993,7 +59995,7 @@ async function handleApi(req, res) {
     audit.status = "completed"; audit.completedAt = new Date().toISOString(); audit.approvedAt = audit.completedAt; audit.approvedBy = String(body.user || "Approver").trim() || "Approver"; audit.appliedLines = products.length;
     const allocatedQty = routedOrders.reduce((sum, row) => sum + Number(row.allocatedQty || 0), 0);
     const blockedQty = routedOrders.reduce((sum, row) => sum + Number(row.blockedQty || 0), 0);
-    audit.disposition = { type: receivingAudit ? "inbound_receipt" : dispositionType, label: receivingAudit ? `Inbound receipt ${inboundReceipt?.receiptNumber || "posted"}` : dispositionType === "fulfill_orders" ? "Allocated to open orders" : dispositionType === "transfer" ? "Transferred" : dispositionType === "return_to_supplier" ? "Return to suppliers" : "Stocked here", receiptId: inboundReceipt?.id || "", receiptNumber: inboundReceipt?.receiptNumber || "", destinationWarehouseId: destinationWarehouse?.id || "", destinationWarehouseName: destinationWarehouse?.name || "", supplierReturns: createdSupplierReturns.map((row) => ({ id: row.id, returnNumber: row.returnNumber, supplierId: row.supplierId, supplierName: row.supplierName, totalUnits: row.totalUnits })), routedOrders, allocatedQty, blockedQty, compatibleDemand: { orderCount: actionPreview.affectedOrderCount, usableQty: actionPreview.totalUsableQty }, marketplaceShadows: marketplaceShadowSummary?.shadows || [], note: String(body.dispositionNote || "").trim(), appliedAt: audit.completedAt, appliedBy: audit.approvedBy };
+    audit.disposition = { type: receivingAudit ? "inbound_receipt" : dispositionType, label: receivingAudit ? `Inbound receipt ${inboundReceipt?.receiptNumber || "posted"}` : dispositionType === "fulfill_orders" ? "Allocated to open orders" : dispositionType === "transfer" ? "Transferred" : dispositionType === "return_to_supplier" ? "Return to suppliers" : "Stocked here", receiptId: inboundReceipt?.id || "", receiptNumber: inboundReceipt?.receiptNumber || "", destinationWarehouseId: destinationWarehouse?.id || "", destinationWarehouseName: destinationWarehouse?.name || "", supplierReturns: createdSupplierReturns.map((row) => ({ id: row.id, returnNumber: row.returnNumber, supplierId: row.supplierId, supplierName: row.supplierName, totalUnits: row.totalUnits })), routedOrders, allocatedQty, blockedQty, compatibleDemand: { orderCount: actionPreview.affectedOrderCount, usableQty: actionPreview.totalUsableQty }, marketplaceShadows: marketplaceShadowSummary?.shadows || [], packingSlipAttached: hasPackingSlip, note: String(body.dispositionNote || "").trim(), appliedAt: audit.completedAt, appliedBy: audit.approvedBy };
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500), inventoryLedger: db.inventoryLedger || [], ...(manualWarehouseReceipts ? { manualWarehouseReceipts: manualWarehouseReceipts.slice(0, 5000) } : {}) });
     const outcome = dispositionType === "fulfill_orders" ? `stocked in ${auditWarehouse.name}; ${allocatedQty} unit${allocatedQty === 1 ? " was" : "s were"} allocated to open orders${blockedQty ? ` and ${blockedQty} remained tied to submitted supplier POs` : ""}` : dispositionType === "transfer" ? `transferred to ${destinationWarehouse.name}` : dispositionType === "return_to_supplier" ? `placed on hold in ${createdSupplierReturns.length} supplier return draft${createdSupplierReturns.length === 1 ? "" : "s"}` : `stocked in ${auditWarehouse.name}`;
     return sendJson(res, 200, { audit, receipt: inboundReceipt, supplierReturn: createdSupplierReturns[0] || null, supplierReturns: createdSupplierReturns, routedOrders, actionPreview, message: receivingAudit ? `${audit.auditNumber} completed. ${inboundReceipt?.receiptNumber || "The inbound receipt"} added ${dispositionLines.reduce((sum, line) => sum + Number(line.quantity || 0), 0)} unit${dispositionLines.reduce((sum, line) => sum + Number(line.quantity || 0), 0) === 1 ? "" : "s"} to ${auditWarehouse.name}.` : `${audit.auditNumber} completed. ${products.length} catalog counts were ${outcome}.` });
@@ -65026,7 +65028,6 @@ async function handleApi(req, res) {
     const sourceAudit = sourceAuditId ? await postgres.readWarehouseAudit(sourceAuditId) : null;
     if (sourceAuditId && !sourceAudit) return sendJson(res, 404, { error: "The linked inbound receiving audit no longer exists." });
     if (sourceAudit && String(sourceAudit.linkedPurchaseOrderId || "") !== String(po.id || "")) return sendJson(res, 409, { error: "This inbound receiving audit is linked to a different purchase order." });
-    if (sourceAudit && !(sourceAudit.receivingDocuments || []).some((document) => String(document.documentType || "") === "packing_slip")) return sendJson(res, 409, { error: "Add at least one packing slip to the inbound receiving audit before posting the PO receipt." });
     if (String(po.fulfillmentMode || "").toLowerCase() === "dropship_per_order" || po.directToCustomer === true) {
       return sendJson(res, 400, { error: "Dropship purchase orders bypass warehouse receiving. Record supplier tracking on the linked customer order instead." });
     }
@@ -65098,6 +65099,7 @@ async function handleApi(req, res) {
       warehouseId: warehouse?.id || po.warehouseId || "",
       warehouseName: warehouse?.name || po.warehouseName || "",
       attachments,
+      packingSlipMissing: mode === "final" && !attachments.some((attachment) => String(attachment.documentType || "") === "packing_slip"),
       items: []
     };
 
