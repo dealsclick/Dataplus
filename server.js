@@ -126,6 +126,19 @@ const { createCarrierCredentials } = require("./lib/carrier-credentials");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
 const shippingDisputeStore = createShippingDisputeStore(() => postgres.getPool(), { ensureSchema: () => postgres.initRelationalSchema() });
 const outboundAuditStore = createOutboundAuditStore(() => postgres.getPool(), { ensureSchema: () => postgres.initRelationalSchema() });
+const outboundLiveItemLocks = new Map();
+
+async function withOutboundLiveItemLock(key, operation) {
+  const lockKey = String(key || "outbound-live-item");
+  const prior = outboundLiveItemLocks.get(lockKey) || Promise.resolve();
+  const current = prior.catch(() => {}).then(operation);
+  outboundLiveItemLocks.set(lockKey, current);
+  try {
+    return await current;
+  } finally {
+    if (outboundLiveItemLocks.get(lockKey) === current) outboundLiveItemLocks.delete(lockKey);
+  }
+}
 const { storeUpsDeliveryEvidence } = require("./lib/ups-delivery-evidence");
 const { createAccountingHandler, accountingPermission } = require("./lib/accounting-http");
 const accountingHandler = createAccountingHandler({
@@ -171,7 +184,7 @@ const { mergeImportedShipments } = require("./lib/imported-shipment-merge");
 const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, packageFor: fulfillmentPackageFor, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
 const shipmentConsolidation = require("./lib/shipment-consolidation");
 const { normalizeCarrierShippingAddress } = require("./lib/shipping-address");
-const { ebayLiveLineContext, ebayLiveOrderUsesCommittedStock } = require("./lib/ebay-live-order");
+const { ebayLiveLineContext, ebayLiveOrderContext, ebayLiveOrderUsesCommittedStock } = require("./lib/ebay-live-order");
 const { packageDimensionsChanged, applyManualPackageDimensions, applyShippingPreferences } = require("./lib/product-dimensions");
 const { canonicalCarrierName, carrierTrackingUrl, inferCarrierFromTracking: detectCarrierFromTracking, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
 const { buildPrintPreview, attachmentFilePath, restorePurchasedLabelReferences, printJobsByBatchId } = require("./lib/fulfillment-print");
@@ -28847,6 +28860,12 @@ function publicInventoryListItem(item = {}, context = {}) {
   const compatibilityAliases = productCompatibilityAliases(pricedItem, rulesDb);
   const images = Array.isArray(item.images) ? item.images : [];
   const warehouseStock = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
+  const physicalStock = warehouseStock.filter(isPhysicalWarehouse);
+  const supplierStock = warehouseStock.filter(isDataWarehouseLocation);
+  const physicalOnHand = physicalStock.reduce((sum, row) => sum + Number(row.qty || 0), 0);
+  const physicalReserved = physicalStock.reduce((sum, row) => sum + Number(row.reserved || 0), 0);
+  const physicalAvailable = physicalStock.reduce((sum, row) => sum + Number(row.available ?? (Number(row.qty || 0) - Number(row.reserved || 0))), 0);
+  const supplierAvailable = supplierStock.reduce((sum, row) => sum + Number(row.available ?? row.qty ?? 0), 0);
   const onHand = Number(item.qty || 0);
   const reserved = Number(item.reserved || 0);
   const available = Number(item.available ?? (onHand - reserved));
@@ -28901,6 +28920,14 @@ function publicInventoryListItem(item = {}, context = {}) {
     stockQty: Number(item.stockQty || 0),
     reserved,
     available,
+    physicalOnHand,
+    physicalReserved,
+    physicalAvailable,
+    supplierAvailable,
+    combinedAvailable: physicalAvailable + supplierAvailable,
+    physicalValue: physicalOnHand * cost,
+    physicalWarehouseCount: physicalStock.length,
+    lastSoldAt: item.lastSoldAt || "",
     reorderPoint: Number(item.reorderPoint || 0),
     replenishable: productIsReplenishable(item),
     replenishableEffective: productReplenishablePlan(item, rulesDb).enabled,
@@ -42796,14 +42823,40 @@ async function resolveOutboundAuditTracking(scannedValue = "") {
   const candidates = trackingLookupCandidates(raw);
   if (!candidates.length) candidates.push(normalized);
   const orderMatches = await postgres.readOrdersByTrackingCandidates(candidates, { limit: 20 });
-  const matches = orderMatches.map(({ order, shipmentId, trackingNumber, provider }) => {
+  const groupIds = [...new Set(orderMatches.map(({ order }) => String(order.shipmentGroupId || "").trim()).filter(Boolean))];
+  const groupedOrders = (await Promise.all(groupIds.map((groupId) => postgres.readOrdersByShipmentGroupId(groupId)))).flat();
+  const trackingByOrderId = new Map(orderMatches.map((entry) => [String(entry.order.id || ""), entry]));
+  const fallbackTracking = orderMatches[0] || {};
+  const expandedOrders = [...new Map([
+    ...orderMatches.map((entry) => [String(entry.order.id || ""), entry.order]),
+    ...groupedOrders.map((order) => [String(order.id || ""), order])
+  ]).values()];
+  const matches = expandedOrders.map((order) => {
+    const tracked = trackingByOrderId.get(String(order.id || "")) || fallbackTracking;
+    const shipmentId = tracked.shipmentId || "";
+    const trackingNumber = tracked.trackingNumber || order.trackingNumber || raw;
+    const provider = tracked.provider || "";
     const savedTracking = String(trackingNumber || order.trackingNumber || raw).trim();
+    const isLiveOrder = ebayLiveOrderContext(order).isLive;
+    const liveOrderItems = isLiveOrder ? orderLineItems(order).map((line, lineIndex) => ({
+      orderId: String(order.id || ""),
+      orderNumber: String(order.orderNumber || order.internalOrderNumber || order.id || ""),
+      lineIndex,
+      listingSku: String(line.sku || ""),
+      listingTitle: String(line.title || line.name || line.sku || "Live item"),
+      qty: Math.max(0, Number(line.qty || line.quantity || 0)),
+      soldPrice: Number(line.price ?? line.unitPrice ?? line.unit_price ?? 0)
+    })).filter((line) => line.qty > 0) : [];
     return {
       orderId: String(order.id || ""),
       orderNumber: String(order.orderNumber || order.internalOrderNumber || order.id || ""),
       channelOrderNumber: String(order.channelOrderNumber || order.marketplaceOrderNumber || order.marketplaceOrderId || ""),
       channel: String(order.channelSource || order.source || ""),
       status: String(order.status || order.fulfillmentStatus || ""),
+      shipmentGroupId: String(order.shipmentGroupId || ""),
+      shipmentGroupPrimaryOrderId: String(order.shipmentGroupPrimaryOrderId || ""),
+      isLiveOrder,
+      liveOrderItems,
       shipmentId: String(shipmentId || ""),
       trackingNumber: savedTracking,
       carrier: inferCarrierFromTracking(savedTracking, order.shippingCarrier || order.carrier || provider),
@@ -42812,6 +42865,7 @@ async function resolveOutboundAuditTracking(scannedValue = "") {
   });
   const trackingNumber = String(matches[0]?.trackingNumber || raw).trim();
   const carrier = inferCarrierFromTracking(trackingNumber || raw, matches[0]?.carrier || "");
+  const liveItemExpectedCount = matches.reduce((sum, match) => sum + (match.liveOrderItems || []).reduce((lineSum, line) => lineSum + Number(line.qty || 0), 0), 0);
   return {
     scannedValue: raw,
     normalizedCandidates: candidates,
@@ -42819,8 +42873,336 @@ async function resolveOutboundAuditTracking(scannedValue = "") {
     trackingNormalized: canonicalTrackingValue(trackingNumber || raw),
     carrier,
     trackingUrl: carrierTrackingUrl(carrier, trackingNumber || raw),
-    matches
+    matches,
+    liveItemRequired: liveItemExpectedCount > 0,
+    liveItemExpectedCount
   };
+}
+
+function outboundLiveLineKey(value = {}) {
+  return `${String(value.orderId || "")}:${Number(value.listingLineIndex ?? value.lineIndex ?? -1)}`;
+}
+
+function attachOutboundLiveItemToOrder(order, item, actor = "DataPlus user") {
+  order.outboundLiveItems = Array.isArray(order.outboundLiveItems) ? order.outboundLiveItems : [];
+  if (order.outboundLiveItems.some((saved) => String(saved.clientScanId || "") === String(item.clientScanId || ""))) return false;
+  order.outboundLiveItems.push(item);
+  const lines = orderLineItems(order);
+  const lineIndex = Number(item.listingLineIndex ?? -1);
+  const line = lines[lineIndex];
+  if (line) {
+    line.actualFulfillmentItems = Array.isArray(line.actualFulfillmentItems) ? line.actualFulfillmentItems : [];
+    if (!line.actualFulfillmentItems.some((saved) => String(saved.clientScanId || "") === String(item.clientScanId || ""))) {
+      line.actualFulfillmentItems.push({
+        clientScanId: item.clientScanId,
+        sku: item.sku,
+        productId: item.productId,
+        title: item.title,
+        barcode: item.barcode,
+        cost: item.cost,
+        warehouseId: item.warehouseId,
+        warehouseName: item.warehouseName,
+        scannedAt: item.scannedAt,
+        scannedByName: item.scannedByName
+      });
+    }
+  }
+  order.items = lines;
+  order.fulfillmentLines = Array.isArray(order.fulfillmentLines) ? order.fulfillmentLines : [];
+  const listingSku = String(item.listingSku || line?.sku || "");
+  let fulfillment = order.fulfillmentLines.find((entry) => Number(entry.lineIndex) === lineIndex);
+  if (!fulfillment) {
+    fulfillment = { lineIndex, sku: listingSku, qtyFulfilled: 0 };
+    order.fulfillmentLines.push(fulfillment);
+  }
+  fulfillment.qtyFulfilled = Math.min(
+    Math.max(0, Number(line?.qty || line?.quantity || 1)),
+    Math.max(0, Number(fulfillment.qtyFulfilled || 0)) + 1
+  );
+  order.outboundLiveItemStatus = "scanning";
+  order.updatedAt = item.scannedAt || new Date().toISOString();
+  addOrderTimeline(order, {
+    type: "fulfillment",
+    title: "Live order item scanned",
+    message: `${item.sku} was assigned to ${item.listingTitle || listingSku || "the Live listing"} from outbound shipment group ${item.shipmentGroupId || "without a group ID"}.`,
+    user: actor
+  });
+  return true;
+}
+
+async function completeOutboundLiveShipmentGroup(matches = [], scan = {}, actor = "DataPlus user") {
+  const orderIds = [...new Set((Array.isArray(matches) ? matches : [])
+    .map((match) => String(match.orderId || "").trim())
+    .filter(Boolean))];
+  const completedAt = new Date().toISOString();
+  for (const orderId of orderIds) {
+    const order = await postgres.readOrderByKey(orderId);
+    if (!order || order.outboundLiveItemStatus === "complete") continue;
+    order.outboundLiveItemStatus = "complete";
+    order.outboundLiveItemScannedAt = completedAt;
+    order.outboundLiveShipmentGroupId = String(scan.matches?.find((match) => String(match.orderId || "") === orderId)?.shipmentGroupId || order.shipmentGroupId || "");
+    order.outboundLiveTrackingNumber = String(scan.trackingNumber || order.trackingNumber || "");
+    order.updatedAt = completedAt;
+    addOrderTimeline(order, {
+      type: "fulfillment",
+      title: "Live shipment items verified",
+      message: `All ${Number(scan.liveItemExpectedCount || 0)} item${Number(scan.liveItemExpectedCount || 0) === 1 ? "" : "s"} for the combined outbound shipment were scanned before handoff.`,
+      user: actor
+    });
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+  }
+}
+
+async function createOutboundLiveQuickProduct({ barcode, title, cost, warehouse, audit, scan, clientScanId, actor }) {
+  const sku = String(await postgres.nextWarehouseSkuAtomic() || "").trim();
+  if (!sku) throw Object.assign(new Error("Automatic SKU generation is unavailable."), { statusCode: 503 });
+  const now = new Date().toISOString();
+  const productTitle = String(title || "").trim();
+  if (!productTitle) throw Object.assign(new Error("Enter a product title before creating the SKU."), { statusCode: 400 });
+  const numericCost = Number(cost);
+  if (!Number.isFinite(numericCost) || numericCost < 0) throw Object.assign(new Error("Cost must be zero or a positive amount."), { statusCode: 400 });
+  const product = {
+    id: crypto.randomUUID(),
+    sku,
+    title: productTitle,
+    marketplaceTitle: productTitle,
+    barcode,
+    upc: /^\d{12}$/.test(barcode) ? barcode : "",
+    gtin: /^\d{8,14}$/.test(barcode) ? barcode : "",
+    qty: 1,
+    stockQty: 1,
+    reserved: 0,
+    reorderPoint: 0,
+    active: true,
+    status: "Draft",
+    condition: "New",
+    source: "outbound-live-quick-create",
+    category: "",
+    mainCategory: "",
+    supplier: "",
+    brand: "",
+    manufacturer: "",
+    mfrPartNumber: "",
+    vendorSku: "",
+    shortDescription: "",
+    uom: "EA",
+    uomQty: 1,
+    packageQuantity: "1",
+    cost: numericCost,
+    sourceCost: numericCost,
+    price: 0,
+    warehouseStock: [normalizeWarehouseStockRow({
+      warehouseId: warehouse.id,
+      warehouseName: warehouse.name,
+      qty: 1,
+      reserved: 0
+    }, warehouse)],
+    images: [],
+    defaultImage: "",
+    tags: ["outbound-live-quick-create", "needs-product-details"],
+    catalogReviewStatus: "needs_details",
+    catalogAttentionRequired: true,
+    catalogAttentionReason: "Created while scanning an eBay Live outbound shipment and requires catalog review.",
+    needsProductDetails: true,
+    createdAt: now,
+    updatedAt: now,
+    createdBy: actor,
+    createdMethod: "Outbound Live quick create",
+    createdSource: "Outbound audit",
+    createdSourceDetail: `${audit.session.auditNumber} / ${scan.trackingNumber}`,
+    quickCreate: { barcode, auditId: audit.session.id, scanId: scan.id, clientScanId }
+  };
+  await postgres.upsertProductsFromState([product]);
+  await postgres.upsertInventoryLevelsFromProducts([product]);
+  return product;
+}
+
+async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, clientScanId, actor, quickCreate = null }) {
+  return withOutboundLiveItemLock(`${auditId}:${scanId}`, async () => {
+    const audit = await outboundAuditStore.read(scope, auditId);
+    if (!audit) throw Object.assign(new Error("Outbound audit not found."), { statusCode: 404 });
+    if (audit.session.status !== "open") throw Object.assign(new Error("This outbound audit is closed."), { statusCode: 409 });
+    const scan = audit.scans.find((row) => String(row.id) === String(scanId));
+    if (!scan) throw Object.assign(new Error("Outbound package scan not found."), { statusCode: 404 });
+    if (!scan.liveItemRequired) throw Object.assign(new Error("This package is not an eBay Live shipment that requires item scans."), { statusCode: 409 });
+    const requestId = String(clientScanId || "").trim();
+    if (!requestId || requestId.length > 120) throw Object.assign(new Error("The item scan identifier is missing."), { statusCode: 400 });
+    const priorScan = scan.liveItems.find((item) => String(item.clientScanId || "") === requestId);
+    if (priorScan) return { scan, item: priorScan, duplicate: true, complete: scan.liveItemStatus === "complete" };
+
+    const orderIds = [...new Set(scan.matches.map((match) => String(match.orderId || "").trim()).filter(Boolean))];
+    const orders = (await Promise.all(orderIds.map((orderId) => postgres.readOrderByKey(orderId)))).filter(Boolean);
+    const priorOrderItem = orders.flatMap((order) => Array.isArray(order.outboundLiveItems) ? order.outboundLiveItems : [])
+      .find((item) => String(item.clientScanId || "") === requestId);
+    if (priorOrderItem) {
+      const recorded = await outboundAuditStore.recordLiveItem(scope, auditId, scanId, priorOrderItem, actor);
+      if (recorded.scan.liveItemStatus === "complete") {
+        await completeOutboundLiveShipmentGroup(scan.matches, recorded.scan, String(actor?.name || actor?.username || "Warehouse user"));
+      }
+      return { ...recorded, complete: recorded.scan.liveItemStatus === "complete" };
+    }
+
+    const expectedLines = scan.matches.flatMap((match) => (Array.isArray(match.liveOrderItems) ? match.liveOrderItems : []).map((line) => ({
+      ...line,
+      shipmentGroupId: String(match.shipmentGroupId || ""),
+      channelOrderNumber: String(match.channelOrderNumber || "")
+    })));
+    const recordedItems = [...new Map([
+      ...scan.liveItems,
+      ...orders.flatMap((order) => (Array.isArray(order.outboundLiveItems) ? order.outboundLiveItems : []).filter((item) => String(item.outboundAuditId || "") === String(auditId)))
+    ].map((item) => [String(item.clientScanId || crypto.randomUUID()), item])).values()];
+    const assignedCounts = new Map();
+    for (const item of recordedItems) {
+      const key = outboundLiveLineKey(item);
+      assignedCounts.set(key, Number(assignedCounts.get(key) || 0) + 1);
+    }
+    const target = expectedLines.find((line) => Number(assignedCounts.get(outboundLiveLineKey(line)) || 0) < Math.max(0, Number(line.qty || 0)));
+    if (!target) throw Object.assign(new Error("Every item in this Live shipment group has already been scanned."), { statusCode: 409 });
+    const order = orders.find((candidate) => String(candidate.id || "") === String(target.orderId || ""));
+    if (!order) throw Object.assign(new Error("The next order in this shipment group could not be loaded."), { statusCode: 409 });
+
+    const barcode = barcodeLookupForms(barcodeValue)[0] || "";
+    if (!barcode) throw Object.assign(new Error("Scan or enter a valid UPC, GTIN, or product barcode."), { statusCode: 400 });
+    const state = await postgres.readStateFields(["warehouses"]);
+    const warehouse = (state.warehouses || []).find((row) => String(row.id || "") === String(audit.session.warehouseId || ""));
+    if (!warehouse || !isPhysicalFulfillmentWarehouse(warehouse)) {
+      throw Object.assign(new Error("The outbound audit must use an active physical fulfillment warehouse."), { statusCode: 409 });
+    }
+
+    let lookup = await resolveScannedCatalogBarcode(barcode);
+    let product = lookup.product;
+    let quickCreated = false;
+    if (!product && quickCreate) {
+      product = await createOutboundLiveQuickProduct({
+        barcode,
+        title: quickCreate.title,
+        cost: quickCreate.cost,
+        warehouse,
+        audit,
+        scan,
+        clientScanId: requestId,
+        actor: String(actor?.name || actor?.username || "Warehouse user")
+      });
+      quickCreated = true;
+      lookup = { ...lookup, product };
+    }
+    if (!product) {
+      return {
+        scan,
+        notFound: true,
+        barcode,
+        target: { orderId: target.orderId, orderNumber: target.orderNumber, listingTitle: target.listingTitle },
+        message: `${barcode} is not in the DataPlus catalog. Quick-create it to continue this shipment group.`
+      };
+    }
+    product = await postgres.readProductByKey(product.id || product.sku) || product;
+    const priorProductItem = (Array.isArray(product.outboundLiveItemScans) ? product.outboundLiveItemScans : [])
+      .find((item) => String(item.clientScanId || "") === requestId);
+    if (priorProductItem) {
+      attachOutboundLiveItemToOrder(order, priorProductItem, String(actor?.name || actor?.username || "Warehouse user"));
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+      const recorded = await outboundAuditStore.recordLiveItem(scope, auditId, scanId, priorProductItem, actor);
+      if (recorded.scan.liveItemStatus === "complete") {
+        await completeOutboundLiveShipmentGroup(scan.matches, recorded.scan, String(actor?.name || actor?.username || "Warehouse user"));
+      }
+      return { ...recorded, complete: recorded.scan.liveItemStatus === "complete" };
+    }
+
+    const stock = ensureInventoryWarehouseStock(product, warehouse);
+    const qtyBefore = Math.max(0, Number(stock.qty || 0));
+    const reservedBefore = Math.max(0, Number(stock.reserved || 0));
+    const availableBefore = Math.max(0, qtyBefore - reservedBefore);
+    if (availableBefore < 1) {
+      throw Object.assign(new Error(`${product.sku} has no unreserved physical stock in ${warehouse.name}. Receive or adjust the item before shipping it.`), { statusCode: 409 });
+    }
+    const now = new Date().toISOString();
+    stock.qty = qtyBefore - 1;
+    stock.updatedAt = now;
+    syncInventoryTotalsFromWarehouses(product);
+    product.updatedAt = now;
+    const item = {
+      clientScanId: requestId,
+      outboundAuditId: auditId,
+      outboundAuditNumber: audit.session.auditNumber,
+      outboundScanId: scanId,
+      trackingNumber: scan.trackingNumber,
+      shipmentGroupId: target.shipmentGroupId,
+      orderId: String(order.id || ""),
+      orderNumber: String(order.orderNumber || order.internalOrderNumber || order.id || ""),
+      channelOrderNumber: target.channelOrderNumber,
+      listingLineIndex: Number(target.lineIndex),
+      listingSku: String(target.listingSku || ""),
+      listingTitle: String(target.listingTitle || target.listingSku || "Live item"),
+      soldPrice: Number(target.soldPrice || 0),
+      productId: String(product.id || ""),
+      sku: String(product.sku || ""),
+      title: String(product.title || product.marketplaceTitle || product.sku || ""),
+      barcode,
+      image: String(product.defaultImage || product.image || product.images?.[0] || ""),
+      cost: Number(product.sellUnitCost ?? product.unitCost ?? product.cost ?? product.sourceCost ?? 0),
+      warehouseId: String(warehouse.id || ""),
+      warehouseName: String(warehouse.name || ""),
+      quickCreated,
+      scannedAt: now,
+      scannedById: String(actor?.id || ""),
+      scannedByName: String(actor?.name || actor?.username || "Warehouse user")
+    };
+    product.outboundLiveItemScans = [...(Array.isArray(product.outboundLiveItemScans) ? product.outboundLiveItemScans : []), item].slice(-250);
+    const ledgerDb = { inventoryLedger: [] };
+    if (quickCreated) {
+      addInventoryLedger(ledgerDb, product, {
+        type: "outbound_live_quick_create",
+        source: "outbound_audit",
+        referenceId: `${auditId}:${scanId}:${requestId}:created`,
+        referenceNumber: audit.session.auditNumber,
+        warehouseId: warehouse.id,
+        warehouseName: warehouse.name,
+        qtyBefore: 0,
+        qtyAfter: 1,
+        quantityChange: 1,
+        reason: `Quick-created ${product.sku} while scanning ${scan.trackingNumber}`,
+        user: item.scannedByName
+      });
+    }
+    addInventoryLedger(ledgerDb, product, {
+      type: "outbound_live_fulfillment",
+      source: "outbound_audit",
+      referenceId: `${auditId}:${scanId}:${requestId}`,
+      referenceNumber: item.orderNumber,
+      warehouseId: warehouse.id,
+      warehouseName: warehouse.name,
+      locationBin: stock.locationBin || "",
+      qtyBefore,
+      qtyAfter: stock.qty,
+      reservedBefore,
+      reservedAfter: reservedBefore,
+      quantityChange: -1,
+      reservedChange: 0,
+      reason: `Scanned ${product.sku} for Live listing ${item.listingTitle} in shipment group ${item.shipmentGroupId || "unassigned"}`,
+      user: item.scannedByName
+    });
+    await postgres.upsertProductsFromState([product]);
+    await postgres.upsertInventoryLevelsFromProducts([product]);
+    await postgres.prependInventoryLedgerEvents(ledgerDb.inventoryLedger);
+    attachOutboundLiveItemToOrder(order, item, item.scannedByName);
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
+    const recorded = await outboundAuditStore.recordLiveItem(scope, auditId, scanId, item, actor);
+    if (recorded.scan.liveItemStatus === "complete") {
+      await completeOutboundLiveShipmentGroup(scan.matches, recorded.scan, item.scannedByName);
+    }
+    return {
+      ...recorded,
+      complete: recorded.scan.liveItemStatus === "complete",
+      message: recorded.scan.liveItemStatus === "complete"
+        ? `${product.sku} assigned to ${item.orderNumber}. All ${recorded.scan.liveItemExpectedCount} items in this shipment group are scanned.`
+        : `${product.sku} assigned to ${item.orderNumber}. ${recorded.scan.liveItemScannedCount} of ${recorded.scan.liveItemExpectedCount} group items scanned.`
+    };
+  });
 }
 
 function outboundEvidenceFilePath(record = {}) {
@@ -47677,6 +48059,47 @@ function resolveInventoryLocationFilters(filters = {}, warehouses = []) {
     ...filters,
     inventoryScope: scope,
     inventoryLocationKeys: (locationKeys.length ? locationKeys : [requestedWarehouse || "__no_inventory_location__"]).join("|")
+  };
+}
+
+function inventoryMetricLocationKeys(filters = {}, warehouses = []) {
+  const locations = ensureDataWarehouseLocation(warehouses);
+  const requestedWarehouse = String(filters.warehouse || "").trim().toLowerCase();
+  const selected = requestedWarehouse
+    ? locations.find((warehouse) => inventoryLocationAliases(warehouse).includes(requestedWarehouse)) || null
+    : null;
+  const physicalLocations = selected && isPhysicalWarehouse(selected)
+    ? [selected]
+    : locations.filter(isPhysicalWarehouse);
+  const supplierLocations = selected && isDataWarehouseLocation(selected)
+    ? [selected]
+    : locations.filter(isDataWarehouseLocation);
+  return {
+    physicalLocationKeys: [...new Set(physicalLocations.flatMap(inventoryLocationAliases))],
+    supplierLocationKeys: [...new Set(supplierLocations.flatMap(inventoryLocationAliases))]
+  };
+}
+
+function inventoryOwnershipForLocations(item = {}, locationKeys = {}) {
+  const physicalKeys = new Set((locationKeys.physicalLocationKeys || []).map((value) => String(value || "").trim().toLowerCase()));
+  const supplierKeys = new Set((locationKeys.supplierLocationKeys || []).map((value) => String(value || "").trim().toLowerCase()));
+  const rows = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
+  const matches = (row, keys) => inventoryLocationAliases(row).some((key) => keys.has(key));
+  const physicalRows = rows.filter((row) => isPhysicalWarehouse(row) && matches(row, physicalKeys));
+  const supplierRows = rows.filter((row) => isDataWarehouseLocation(row) && matches(row, supplierKeys));
+  const physicalOnHand = physicalRows.reduce((sum, row) => sum + Number(row.qty || 0), 0);
+  const physicalReserved = physicalRows.reduce((sum, row) => sum + Number(row.reserved || 0), 0);
+  const physicalAvailable = physicalRows.reduce((sum, row) => sum + Number(row.available ?? (Number(row.qty || 0) - Number(row.reserved || 0))), 0);
+  const supplierAvailable = supplierRows.reduce((sum, row) => sum + Number(row.available ?? row.qty ?? 0), 0);
+  return {
+    physicalRows,
+    supplierRows,
+    physicalOnHand,
+    physicalReserved,
+    physicalAvailable,
+    supplierAvailable,
+    combinedAvailable: physicalAvailable + supplierAvailable,
+    physicalValue: physicalOnHand * Number(item.cost || 0)
   };
 }
 
@@ -55588,28 +56011,77 @@ async function handleApi(req, res) {
       "Content-Disposition": `attachment; filename="inventory-export-${new Date().toISOString().slice(0, 10)}.csv"`,
       "Cache-Control": "no-store"
     });
-    res.write("sku,title,on_hand,reserved,available,reorder_point,warehouse_count,cost,supplier,replenishable,status\n");
+    res.write("sku,title,physical_on_hand,physical_reserved,physical_available,supplier_available,combined_available,physical_warehouse_count,physical_warehouses,unit_cost,physical_inventory_value,last_sold_at,reorder_point,supplier,replenishable,status\n");
     const warehouses = await postgres.readStateField("warehouses").catch(() => []);
     const filters = resolveInventoryLocationFilters(
       catalogFilterParams(url.searchParams),
       Array.isArray(warehouses) ? warehouses : []
     );
+    const metricLocations = inventoryMetricLocationKeys(filters, Array.isArray(warehouses) ? warehouses : []);
     const query = url.searchParams.get("q") || "";
     const ebayReadinessDefaults = await ebayReadinessDefaultsForFilters(filters);
     const shopifyStatusMap = readShopifyStatusMapSync();
     const sourceEnrichmentMap = readProductSourceEnrichmentSync();
     for (let page = 1; ; page += 1) {
-      const result = await postgres.listProducts({ q: query, page, limit: 1000, includeInventoryLevels: true, filters, ebayDefaults: ebayReadinessDefaults });
+      const result = await postgres.listProducts({ q: query, page, limit: 1000, fastPage: true, includeInventoryLevels: true, includeInventoryBreakdown: true, includeLastSold: true, filters, ebayDefaults: ebayReadinessDefaults });
       const rows = result?.inventory || [];
       if (!rows.length) break;
       const csvRows = rows.map((item) => {
         const product = publicInventoryListItem(item, { shopifyStatusMap, sourceEnrichmentMap });
-        return [product.sku, product.title || product.marketplaceTitle || "", product.qty, product.reserved, product.available, product.reorderPoint, product.warehouseCount, product.cost, product.supplier || product.vendor || "", product.replenishable ? "true" : "false", product.active === false ? "Inactive" : "Active"].map(escapeCsv).join(",");
+        const ownership = inventoryOwnershipForLocations(product, metricLocations);
+        const warehouseSummary = ownership.physicalRows.map((row) => `${row.warehouseName || row.warehouseId || "Warehouse"}: ${Number(row.qty || 0)}`).join(" | ");
+        return [product.sku, product.title || product.marketplaceTitle || "", ownership.physicalOnHand, ownership.physicalReserved, ownership.physicalAvailable, ownership.supplierAvailable, ownership.combinedAvailable, ownership.physicalRows.length, warehouseSummary, product.cost, ownership.physicalValue, product.lastSoldAt || "", product.reorderPoint, product.supplier || product.vendor || "", product.replenishable ? "true" : "false", product.active === false ? "Inactive" : "Active"].map(escapeCsv).join(",");
       });
       res.write(`${csvRows.join("\n")}\n`);
       if (rows.length < 1000) break;
     }
     return res.end();
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/inventory/summary" && postgres.isPostgresEnabled()) {
+    const [catalogVendors, catalogWarehouses] = await Promise.all([
+      postgres.readStateField("vendors").catch(() => []),
+      postgres.readStateField("warehouses").catch(() => [])
+    ]);
+    const catalogQuery = String(url.searchParams.get("q") || "").trim();
+    const requestedFilters = resolveInventoryLocationFilters(
+      catalogFilterParams(url.searchParams),
+      Array.isArray(catalogWarehouses) ? catalogWarehouses : []
+    );
+    const filters = catalogQuery
+      ? { ...requestedFilters, vendorScope: "all" }
+      : applyVendorCatalogScope(requestedFilters, Array.isArray(catalogVendors) ? catalogVendors : []);
+    const metricLocations = inventoryMetricLocationKeys(filters, Array.isArray(catalogWarehouses) ? catalogWarehouses : []);
+    const cacheParams = new URLSearchParams(url.searchParams);
+    cacheParams.sort();
+    const cacheKey = `dataplus:inventory-summary:v1:${crypto.createHash("sha1").update(`${cacheParams.toString()}|${String(filters.includedSupplierCodes || "")}|${metricLocations.physicalLocationKeys.join("|")}|${metricLocations.supplierLocationKeys.join("|")}`).digest("hex")}`;
+    const cached = await redisCache.getJson(cacheKey);
+    if (cached) return sendJson(res, 200, { ...cached, cached: true }, req);
+    const ebayReadinessDefaults = await ebayReadinessDefaultsForFilters(filters);
+    const result = await postgres.listProducts({
+      q: catalogQuery,
+      inventorySummary: true,
+      filters,
+      physicalLocationKeys: metricLocations.physicalLocationKeys,
+      supplierLocationKeys: metricLocations.supplierLocationKeys,
+      ebayDefaults: ebayReadinessDefaults
+    });
+    const row = result?.summary || {};
+    const payload = {
+      skuCount: Number(row.sku_count || 0),
+      physicalSkuCount: Number(row.physical_sku_count || 0),
+      supplierSkuCount: Number(row.supplier_sku_count || 0),
+      physicalOnHand: Number(row.physical_on_hand || 0),
+      physicalReserved: Number(row.physical_reserved || 0),
+      physicalAvailable: Number(row.physical_available || 0),
+      supplierAvailable: Number(row.supplier_available || 0),
+      combinedAvailable: Number(row.combined_available || 0),
+      physicalValue: Number(row.physical_value || 0),
+      missingCostSkuCount: Number(row.missing_cost_sku_count || 0),
+      generatedAt: new Date().toISOString()
+    };
+    await redisCache.setJson(cacheKey, payload, REDIS_PRODUCTS_CACHE_TTL_SECONDS).catch(() => {});
+    return sendJson(res, 200, payload, req);
   }
 
   if (req.method === "GET" && url.pathname === "/api/quick-search/products") {
@@ -55839,6 +56311,8 @@ async function handleApi(req, res) {
         sort: url.searchParams.get("sort") || "",
         sortDirection: url.searchParams.get("sortDirection") || "asc",
         includeInventoryLevels: ["1", "true", "yes"].includes(String(url.searchParams.get("inventoryWorkspace") || "").toLowerCase()),
+        includeInventoryBreakdown: ["1", "true", "yes"].includes(String(url.searchParams.get("inventoryWorkspace") || "").toLowerCase()),
+        includeLastSold: ["1", "true", "yes"].includes(String(url.searchParams.get("inventoryWorkspace") || "").toLowerCase()),
         includeVendorOffers: true,
         filters,
         ebayDefaults: ebayReadinessDefaults
@@ -66283,7 +66757,7 @@ async function handleApi(req, res) {
     }
   }
 
-  const outboundAuditMatch = url.pathname.match(/^\/api\/fulfillment\/outbound-audits\/([^/]+)(?:\/(scan|close|reconcile|print|export\.csv))?$/);
+  const outboundAuditMatch = url.pathname.match(/^\/api\/fulfillment\/outbound-audits\/([^/]+)(?:\/(scan|item-scan|quick-item|close|reconcile|print|export\.csv))?$/);
   if (outboundAuditMatch && postgres.isPostgresEnabled()) {
     const scope = notificationScope(req);
     if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
@@ -66304,16 +66778,35 @@ async function handleApi(req, res) {
         trackingNumber: resolved.trackingNumber,
         trackingNormalized: resolved.trackingNormalized,
         carrier: resolved.carrier,
-        matches: resolved.matches
+        matches: resolved.matches,
+        liveItemRequired: resolved.liveItemRequired,
+        liveItemExpectedCount: resolved.liveItemExpectedCount
       }, authUser);
       const message = result.duplicate
         ? `${result.scan.trackingNumber} was already scanned into this handoff.`
         : resolved.matches.length === 1
-          ? `${resolved.trackingNumber} matched order ${resolved.matches[0].orderNumber}.`
+          ? resolved.liveItemRequired
+            ? `${resolved.trackingNumber} matched Live order ${resolved.matches[0].orderNumber}. Scan ${resolved.liveItemExpectedCount} item${resolved.liveItemExpectedCount === 1 ? "" : "s"} before handoff.`
+            : `${resolved.trackingNumber} matched order ${resolved.matches[0].orderNumber}.`
           : resolved.matches.length > 1
-            ? `${resolved.trackingNumber} matched ${resolved.matches.length} orders and was retained with every match.`
+            ? resolved.liveItemRequired
+              ? `${resolved.trackingNumber} matched shipment group ${resolved.matches[0].shipmentGroupId || ""} with ${resolved.matches.length} orders. Scan ${resolved.liveItemExpectedCount} Live item${resolved.liveItemExpectedCount === 1 ? "" : "s"}.`
+              : `${resolved.trackingNumber} matched ${resolved.matches.length} orders and was retained with every match.`
             : `${resolved.trackingNumber} has no matching order and was retained in the handoff record.`;
       return sendJson(res, result.duplicate ? 200 : 201, { ...result, resolution: resolved, message });
+    }
+    if (req.method === "POST" && (action === "item-scan" || action === "quick-item")) {
+      const body = await parseBody(req);
+      const result = await recordOutboundLiveItem({
+        scope,
+        auditId,
+        scanId: body.scanId,
+        barcodeValue: body.barcode || body.upc || body.value,
+        clientScanId: body.clientScanId,
+        actor: authUser,
+        quickCreate: action === "quick-item" ? { title: body.title, cost: body.cost } : null
+      });
+      return sendJson(res, result.notFound ? 200 : result.duplicate ? 200 : 201, result);
     }
     if (req.method === "POST" && action === "reconcile") {
       const audit = await outboundAuditStore.read(scope, auditId);
@@ -66354,6 +66847,14 @@ async function handleApi(req, res) {
           order_numbers: scan.matches.map((match) => match.orderNumber).filter(Boolean).join(" | "),
           channel_order_numbers: scan.matches.map((match) => match.channelOrderNumber).filter(Boolean).join(" | "),
           channels: [...new Set(scan.matches.map((match) => match.channel).filter(Boolean))].join(" | "),
+          shipment_group_ids: [...new Set(scan.matches.map((match) => match.shipmentGroupId).filter(Boolean))].join(" | "),
+          live_item_status: scan.liveItemStatus,
+          live_items_scanned: scan.liveItemScannedCount,
+          live_items_expected: scan.liveItemExpectedCount,
+          actual_skus: scan.liveItems.map((item) => item.sku).filter(Boolean).join(" | "),
+          actual_titles: scan.liveItems.map((item) => item.title).filter(Boolean).join(" | "),
+          actual_cost: scan.liveItems.reduce((sum, item) => sum + Number(item.cost || 0), 0).toFixed(2),
+          sold_price: scan.liveItems.reduce((sum, item) => sum + Number(item.soldPrice || 0), 0).toFixed(2),
           scanned_by: scan.scannedByName,
           scanned_at: scan.scannedAt,
           closed_at: audit.session.closedAt,
@@ -66365,8 +66866,11 @@ async function handleApi(req, res) {
         return sendCsv(res, rowsToCsv(rows.length ? rows : [{ audit_number: audit.session.auditNumber }]), `${audit.session.auditNumber.toLowerCase()}-outbound-audit.csv`);
       }
       const scanRows = audit.scans.slice().reverse().map((scan, index) => {
-        const orders = scan.matches.map((match) => escapeHtml([match.orderNumber, match.channel].filter(Boolean).join(" · "))).join("<br>") || "No matching order";
-        return `<tr><td>${index + 1}</td><td>${escapeHtml(scan.trackingNumber)}</td><td>${escapeHtml(scan.carrier || "Unknown")}</td><td>${orders}</td><td>${escapeHtml(scan.matchStatus.replace("multiple", "multiple orders"))}</td><td>${escapeHtml(scan.evidenceCount ? `${scan.evidenceCount} saved` : scan.evidenceStatus)}</td><td>${escapeHtml(scan.scannedByName)}</td><td>${escapeHtml(new Date(scan.scannedAt).toLocaleString())}</td></tr>`;
+        const orderLinks = scan.matches.map((match) => escapeHtml([match.orderNumber, match.channel].filter(Boolean).join(" · "))).join("<br>") || "No matching order";
+        const actualItems = scan.liveItems.map((item) => `${escapeHtml(item.sku)} · ${escapeHtml(item.title)} · Cost $${Number(item.cost || 0).toFixed(2)} · Sold $${Number(item.soldPrice || 0).toFixed(2)}`).join("<br>");
+        const orders = actualItems ? `${orderLinks}<hr><strong>Actual items shipped</strong><br>${actualItems}` : orderLinks;
+        const matchStatus = scan.liveItemRequired ? `${scan.matchStatus.replace("multiple", "multiple orders")} · Live items ${scan.liveItemScannedCount}/${scan.liveItemExpectedCount}` : scan.matchStatus.replace("multiple", "multiple orders");
+        return `<tr><td>${index + 1}</td><td>${escapeHtml(scan.trackingNumber)}</td><td>${escapeHtml(scan.carrier || "Unknown")}</td><td>${orders}</td><td>${escapeHtml(matchStatus)}</td><td>${escapeHtml(scan.evidenceCount ? `${scan.evidenceCount} saved` : scan.evidenceStatus)}</td><td>${escapeHtml(scan.scannedByName)}</td><td>${escapeHtml(new Date(scan.scannedAt).toLocaleString())}</td></tr>`;
       }).join("");
       return sendHtml(res, 200, `<!doctype html><html><head><title>${escapeHtml(audit.session.auditNumber)} outbound audit</title><style>body{font-family:Arial,sans-serif;margin:30px;color:#111}h1{margin-bottom:4px}.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:18px 0}.meta div{border:1px solid #bbb;padding:8px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #bbb;padding:7px;text-align:left;vertical-align:top}th{background:#eee}.sign{margin-top:28px;display:grid;grid-template-columns:1fr 1fr;gap:36px}.line{border-top:1px solid #111;padding-top:6px;margin-top:28px}@media print{body{margin:10px}}</style></head><body><h1>${escapeHtml(audit.session.auditNumber)} · Outbound handoff audit</h1><p>Internal warehouse custody record. This is not carrier acceptance.</p><div class="meta"><div><strong>Warehouse</strong><br>${escapeHtml(audit.session.warehouseName)}</div><div><strong>Carrier</strong><br>${escapeHtml(audit.session.carrier || "Any carrier")}</div><div><strong>Status</strong><br>${escapeHtml(audit.session.status)}</div><div><strong>Packages</strong><br>${audit.session.packageCount}</div><div><strong>Photos saved / missing</strong><br>${audit.session.evidenceCompleteCount} / ${audit.session.evidenceMissingCount}</div><div><strong>Closed</strong><br>${escapeHtml(audit.session.closedAt ? new Date(audit.session.closedAt).toLocaleString() : "Open")}</div></div><table><thead><tr><th>#</th><th>Tracking</th><th>Carrier</th><th>Order</th><th>Match</th><th>Photo</th><th>Scanned by</th><th>Scanned at</th></tr></thead><tbody>${scanRows || '<tr><td colspan="8">No packages scanned.</td></tr>'}</tbody></table><div class="sign"><div class="line">Warehouse handoff</div><div class="line">Driver / receiving party</div></div></body></html>`);
     }

@@ -29,6 +29,17 @@ const upsScan = publicScan({
 assert.match(upsScan.trackingUrl, /^https:\/\/www\.ups\.com\/track/);
 assert.equal(upsScan.carrier, 'UPS');
 
+const groupedLiveScan = publicScan({
+  scan_id: 'scan-live', tracking_number: '1Z999AA10123456784', carrier: 'UPS', match_status: 'multiple',
+  order_matches: [{ orderId: 'order-1', shipmentGroupId: 'SG-1' }, { orderId: 'order-2', shipmentGroupId: 'SG-1' }],
+  live_item_required: true, live_item_status: 'pending', live_item_expected_count: 3,
+  live_item_scans: [{ clientScanId: 'item-1', orderId: 'order-1', listingLineIndex: 0, sku: 'DPS10001' }]
+});
+assert.equal(groupedLiveScan.liveItemRequired, true);
+assert.equal(groupedLiveScan.liveItemExpectedCount, 3);
+assert.equal(groupedLiveScan.liveItemScannedCount, 1);
+assert.equal(groupedLiveScan.liveItemStatus, 'pending');
+
 const dbSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
 assert.match(dbSource, /RELATIONAL_SCHEMA_VERSION = "2026-10-29-shipping-report-facts-v1"/);
 assert.match(dbSource, /create table if not exists outbound_audit_sessions/);
@@ -36,6 +47,9 @@ assert.match(dbSource, /create table if not exists outbound_audit_scans/);
 assert.match(dbSource, /create table if not exists outbound_audit_evidence/);
 assert.match(dbSource, /storage_backend text not null default 'filesystem'/);
 assert.match(dbSource, /unique \(audit_id, tracking_normalized\)/);
+assert.match(dbSource, /live_item_required boolean not null default false/);
+assert.match(dbSource, /live_item_expected_count integer not null default 0/);
+assert.match(dbSource, /live_item_scans jsonb not null default '\[\]'::jsonb/);
 
 const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 const routeStart = serverSource.indexOf('if (url.pathname === "/api/fulfillment/outbound-audits"');
@@ -48,6 +62,14 @@ for (const forbidden of ['saveOrder(', 'addInventoryLedger(', 'syncOrder', 'purc
 assert.match(serverSource, /writeOutboundEvidenceFile/);
 assert.match(serverSource, /createWriteStream/);
 assert.doesNotMatch(routes, /data:image\//);
+assert.match(serverSource, /readOrdersByShipmentGroupId/);
+assert.match(serverSource, /recordOutboundLiveItem/);
+assert.match(serverSource, /completeOutboundLiveShipmentGroup/);
+assert.match(serverSource, /Live shipment items verified/);
+assert.match(serverSource, /outbound_live_fulfillment/);
+assert.match(serverSource, /Every item in this Live shipment group has already been scanned/);
+assert.match(routes, /action === "item-scan"/);
+assert.match(routes, /action === "quick-item"/);
 
 const scannerSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'lib', 'fast-barcode-scanner.ts'), 'utf8');
 assert.match(scannerSource, /BarcodeDetector/);
@@ -62,6 +84,9 @@ assert.match(workspaceSource, /DataPlus order/);
 assert.match(workspaceSource, /channelOrderNumber/);
 assert.match(workspaceSource, /TrackingReference/);
 assert.match(workspaceSource, /trackingUrl/);
+assert.match(workspaceSource, /Combined Live shipment/);
+assert.match(workspaceSource, /Continue item scans/);
+assert.match(workspaceSource, /incompleteLiveScans\.length > 0/);
 
 const warehouseMobileSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'warehouse-mobile.tsx'), 'utf8');
 assert.match(warehouseMobileSource, /id: "outbound"/);

@@ -991,6 +991,14 @@ export type ProductItem = CatalogItem & {
   qty?: number
   reserved?: number
   available?: number
+  physicalOnHand?: number
+  physicalReserved?: number
+  physicalAvailable?: number
+  supplierAvailable?: number
+  combinedAvailable?: number
+  physicalValue?: number
+  physicalWarehouseCount?: number
+  lastSoldAt?: string
   sourceCost?: number
   sellUnitCost?: number
   listPrice?: number

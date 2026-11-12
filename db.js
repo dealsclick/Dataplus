@@ -1164,6 +1164,10 @@ async function initRelationalSchema() {
     alter table outbound_audit_sessions add column if not exists evidence_override_reason text;
     alter table outbound_audit_scans add column if not exists evidence_status text not null default 'missing';
     alter table outbound_audit_scans add column if not exists evidence_count integer not null default 0;
+    alter table outbound_audit_scans add column if not exists live_item_required boolean not null default false;
+    alter table outbound_audit_scans add column if not exists live_item_status text not null default 'not_required';
+    alter table outbound_audit_scans add column if not exists live_item_expected_count integer not null default 0;
+    alter table outbound_audit_scans add column if not exists live_item_scans jsonb not null default '[]'::jsonb;
 
     create table if not exists outbound_audit_evidence (
       evidence_id text primary key,
@@ -17148,6 +17152,50 @@ async function listProducts(options = {}) {
     created: "created_at"
   };
   const orderBy = sortableColumns[sortKey] || "sku";
+  if (options.inventorySummary) {
+    const physicalLocationKeys = [...new Set((Array.isArray(options.physicalLocationKeys) ? options.physicalLocationKeys : [])
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean))];
+    const supplierLocationKeys = [...new Set((Array.isArray(options.supplierLocationKeys) ? options.supplierLocationKeys : [])
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean))];
+    const summaryParams = [...params, physicalLocationKeys, supplierLocationKeys];
+    const physicalLocationParam = summaryParams.length - 1;
+    const supplierLocationParam = summaryParams.length;
+    const summaryResult = await client.query(`
+      with filtered_products as materialized (
+        select product_id, cost
+        from products
+        ${whereSql}
+      ), stock as (
+        select
+          fp.product_id,
+          fp.cost as unit_cost,
+          count(il.location_key) filter (where lower(il.location_key) = any($${physicalLocationParam}::text[])) as physical_location_count,
+          count(il.location_key) filter (where lower(il.location_key) = any($${supplierLocationParam}::text[])) as supplier_location_count,
+          coalesce(sum(il.on_hand) filter (where lower(il.location_key) = any($${physicalLocationParam}::text[])), 0) as physical_on_hand,
+          coalesce(sum(il.reserved) filter (where lower(il.location_key) = any($${physicalLocationParam}::text[])), 0) as physical_reserved,
+          coalesce(sum(il.available) filter (where lower(il.location_key) = any($${physicalLocationParam}::text[])), 0) as physical_available,
+          coalesce(sum(il.available) filter (where lower(il.location_key) = any($${supplierLocationParam}::text[])), 0) as supplier_available
+        from filtered_products fp
+        left join inventory_levels il on il.product_id = fp.product_id
+        group by fp.product_id, fp.cost
+      )
+      select
+        count(*)::int as sku_count,
+        count(*) filter (where physical_location_count > 0)::int as physical_sku_count,
+        count(*) filter (where supplier_location_count > 0)::int as supplier_sku_count,
+        coalesce(sum(physical_on_hand), 0)::numeric as physical_on_hand,
+        coalesce(sum(physical_reserved), 0)::numeric as physical_reserved,
+        coalesce(sum(physical_available), 0)::numeric as physical_available,
+        coalesce(sum(supplier_available), 0)::numeric as supplier_available,
+        coalesce(sum(physical_available + supplier_available), 0)::numeric as combined_available,
+        coalesce(sum(physical_on_hand * coalesce(unit_cost, 0)), 0)::numeric as physical_value,
+        count(*) filter (where physical_on_hand <> 0 and unit_cost is null)::int as missing_cost_sku_count
+      from stock
+    `, summaryParams);
+    return { summary: summaryResult.rows[0] || {} };
+  }
   const countSql = `
     select
       count(*)::int as total,
@@ -17231,9 +17279,13 @@ async function listProducts(options = {}) {
   `, params);
   const hasMore = fastPage && result.rows.length > limit;
   let inventory = result.rows.slice(0, limit).map(productRowToState);
-  if (options.includeInventoryLevels) inventory = await hydrateProductsWithInventoryLevels(inventory, inventoryLocationValues);
+  if (options.includeInventoryLevels) inventory = await hydrateProductsWithInventoryLevels(
+    inventory,
+    options.includeInventoryBreakdown ? [] : inventoryLocationValues
+  );
   inventory = await hydrateProductsWithShopifyStatuses(inventory);
   if (options.includeVendorOffers) inventory = await hydrateProductsWithVendorOffers(inventory);
+  if (options.includeLastSold) inventory = await hydrateProductsWithLastSold(inventory);
   return {
     inventory,
     total: countResult?.rows[0]?.total || 0,
@@ -18994,6 +19046,28 @@ async function hydrateProductsWithInventoryLevels(items = [], locationKeys = [])
     };
     return scopedLocationKeys.length ? hydrated : withDataWarehouseStock(hydrated);
   });
+}
+
+async function hydrateProductsWithLastSold(items = []) {
+  const client = getPool();
+  const skuKeys = [...new Set((Array.isArray(items) ? items : [])
+    .map((item) => String(item.sku || "").trim().toLowerCase())
+    .filter(Boolean))];
+  if (!client || !skuKeys.length) return items;
+  const result = await client.query(`
+    select lower(line.sku) as sku_key, max(coalesce(order_record.order_date, order_record.created_at)) as last_sold_at
+    from order_line_items line
+    join order_records order_record on order_record.order_id = line.order_id
+    where lower(line.sku) = any($1::text[])
+      and order_record.reportable = true
+      and lower(coalesce(order_record.status, '')) not in ('canceled', 'cancelled', 'deleted', 'void', 'voided')
+    group by lower(line.sku)
+  `, [skuKeys]);
+  const bySku = new Map(result.rows.map((row) => [String(row.sku_key || ""), row.last_sold_at]));
+  return items.map((item) => ({
+    ...item,
+    lastSoldAt: bySku.get(String(item.sku || "").trim().toLowerCase()) || ""
+  }));
 }
 
 async function productFacets(filters = {}) {

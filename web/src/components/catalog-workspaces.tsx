@@ -1889,6 +1889,56 @@ export function InventorySourceCell({ item }: { item: ProductItem }) {
   return <div className="flex min-w-44 flex-wrap items-center gap-1.5"><Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">Physical {numberLabel(physical)}</Badge><Badge variant="outline" className="border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300">Supplier {numberLabel(supplier)}</Badge><span className="w-full truncate text-xs text-muted-foreground" title={item.supplier || item.vendor || ""}>{item.supplier || item.vendor || "No primary supplier"}</span></div>
 }
 
+type InventoryWorkspaceSummary = {
+  skuCount?: number
+  physicalSkuCount?: number
+  supplierSkuCount?: number
+  physicalOnHand?: number
+  physicalReserved?: number
+  physicalAvailable?: number
+  supplierAvailable?: number
+  combinedAvailable?: number
+  physicalValue?: number
+  missingCostSkuCount?: number
+  generatedAt?: string
+}
+
+type InventoryWorkspaceLocation = {
+  id?: string
+  name?: string
+  code?: string
+  bins?: unknown[]
+  warehouseType?: string
+  inventorySourceType?: string
+  isPhysical?: boolean
+}
+
+function inventoryOwnership(item: ProductItem, selectedLocation?: InventoryWorkspaceLocation) {
+  const physicalRows = (item.warehouseStock || []).filter((row) => row.isPhysical !== false && row.inventorySourceType !== "supplier_feed")
+  const supplierRows = (item.warehouseStock || []).filter((row) => row.isPhysical === false || row.inventorySourceType === "supplier_feed")
+  const selectedIsSupplier = selectedLocation && (selectedLocation.isPhysical === false || selectedLocation.inventorySourceType === "supplier_feed")
+  const selectedId = String(selectedLocation?.id || "").toLowerCase()
+  const ownedRows = selectedLocation && !selectedIsSupplier
+    ? physicalRows.filter((row) => String(row.warehouseId || "").toLowerCase() === selectedId)
+    : physicalRows
+  const outsideRows = selectedLocation && selectedIsSupplier
+    ? supplierRows.filter((row) => String(row.warehouseId || "").toLowerCase() === selectedId)
+    : supplierRows
+  const physicalOnHand = ownedRows.reduce((sum, row) => sum + Number(row.qty || 0), 0)
+  const physicalReserved = ownedRows.reduce((sum, row) => sum + Number(row.reserved || 0), 0)
+  const physicalAvailable = ownedRows.reduce((sum, row) => sum + Number(row.available ?? Number(row.qty || 0) - Number(row.reserved || 0)), 0)
+  const supplierAvailable = outsideRows.reduce((sum, row) => sum + Number(row.available ?? row.qty ?? 0), 0)
+  return {
+    physicalRows: ownedRows,
+    physicalOnHand,
+    physicalReserved,
+    physicalAvailable,
+    supplierAvailable,
+    combinedAvailable: physicalAvailable + supplierAvailable,
+    physicalValue: physicalOnHand * Number(item.cost || 0)
+  }
+}
+
 type SalesReportRow = Record<string, string | number | null | undefined>
 type SalesReportData = {
   generatedAt?: string
@@ -2390,16 +2440,35 @@ export function InventoryWorkspace() {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(25)
   const [loading, setLoading] = useState(false)
-  const [warehouses, setWarehouses] = useState<Array<{ id?: string; name?: string; code?: string; bins?: unknown[]; warehouseType?: string; inventorySourceType?: string; isPhysical?: boolean }>>([])
+  const [summary, setSummary] = useState<InventoryWorkspaceSummary | null>(null)
+  const [summaryLoading, setSummaryLoading] = useState(false)
+  const summaryRequestRef = useRef(0)
+  const [warehouses, setWarehouses] = useState<InventoryWorkspaceLocation[]>([])
   const [transferItem, setTransferItem] = useState<ProductItem | null>(null)
   const [fromWarehouseId, setFromWarehouseId] = useState("")
   const [toWarehouseId, setToWarehouseId] = useState("")
   const [transferQty, setTransferQty] = useState("1")
   const [transferBusy, setTransferBusy] = useState(false)
-  async function load(nextPage = page, nextFilters = filters) {
-    setLoading(true)
+  async function loadSummary(nextFilters = filters, nextQuery = query) {
+    const requestId = summaryRequestRef.current + 1
+    summaryRequestRef.current = requestId
+    setSummaryLoading(true)
     try {
-      const params = new URLSearchParams({ q: query, page: String(nextPage), limit: String(pageSize), fastPage: "true", inventoryWorkspace: "true" })
+      const params = new URLSearchParams({ q: nextQuery })
+      Object.entries(nextFilters).forEach(([key, value]) => { if (value) params.set(key, value) })
+      const result = await api<InventoryWorkspaceSummary>(`/api/inventory/summary?${params}`)
+      if (summaryRequestRef.current === requestId) setSummary(result)
+    } catch {
+      if (summaryRequestRef.current === requestId) setSummary(null)
+    } finally {
+      if (summaryRequestRef.current === requestId) setSummaryLoading(false)
+    }
+  }
+  async function load(nextPage = page, nextFilters = filters, nextQuery = query) {
+    setLoading(true)
+    void loadSummary(nextFilters, nextQuery)
+    try {
+      const params = new URLSearchParams({ q: nextQuery, page: String(nextPage), limit: String(pageSize), fastPage: "true", inventoryWorkspace: "true" })
       Object.entries(nextFilters).forEach(([key, value]) => { if (value) params.set(key, value) })
       const result = await api<{ inventory?: ProductItem[]; total?: number; page?: number; hasMore?: boolean }>(`/api/inventory?${params}`)
       setRows(result.inventory || [])
@@ -2427,6 +2496,7 @@ export function InventoryWorkspace() {
   }
   const filterBadge = (key: string, label: string) => filters[key] ? <Badge key={key} variant="outline" className="gap-1">{label}: {filters[key]}<button onClick={() => setFilter(key, "")} aria-label={`Remove ${label} filter`}>x</button></Badge> : null
   const physicalWarehouses = warehouses.filter((row) => row.isPhysical !== false && row.inventorySourceType !== "supplier_feed")
+  const selectedWarehouse = warehouses.find((row) => row.id === filters.warehouse)
   const openTransfer = (item: ProductItem) => { const currentPhysical = item.warehouseStock?.find((row) => row.isPhysical !== false && row.inventorySourceType !== "supplier_feed")?.warehouseId || ""; setTransferItem(item); setFromWarehouseId(currentPhysical); setToWarehouseId(physicalWarehouses.find((row) => row.id !== currentPhysical)?.id || ""); setTransferQty("1") }
   async function transfer() {
     if (!transferItem) return
@@ -2469,9 +2539,89 @@ export function InventoryWorkspace() {
         </SelectContent>
       </Select>
     </div>
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
+      <Detail label="Matching SKUs" value={summaryLoading && !summary ? "Loading" : numberLabel(summary?.skuCount)} />
+      <Detail label="Physical owned" value={summaryLoading && !summary ? "Loading" : numberLabel(summary?.physicalOnHand)} />
+      <Detail label="Physical available" value={summaryLoading && !summary ? "Loading" : numberLabel(summary?.physicalAvailable)} />
+      <Detail label="Supplier available" value={summaryLoading && !summary ? "Loading" : numberLabel(summary?.supplierAvailable)} />
+      <Detail label="Combined availability" value={summaryLoading && !summary ? "Loading" : numberLabel(summary?.combinedAvailable)} />
+      <Detail label="Physical inventory value" value={summaryLoading && !summary ? "Loading" : moneyLabel(summary?.physicalValue)} />
+    </div>
+    <p className="text-xs text-muted-foreground">Supplier availability is sourcing capacity, not warehouse-owned inventory. Physical value uses owned on-hand quantity and the current catalog unit cost.{Number(summary?.missingCostSkuCount || 0) > 0 ? ` ${numberLabel(summary?.missingCostSkuCount)} stocked SKU${Number(summary?.missingCostSkuCount || 0) === 1 ? " is" : "s are"} missing cost.` : ""}</p>
     <Tabs value={tab} onValueChange={setTab}>
       <div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0"><TabsTrigger value="inventory" className="text-xs">Inventory</TabsTrigger><TabsTrigger value="replenishment" className="text-xs">Replenishment</TabsTrigger><TabsTrigger value="warehouses" className="text-xs">Warehouses ({warehouses.length})</TabsTrigger><TabsTrigger value="exports" className="text-xs">Exports</TabsTrigger></TabsList></div>
-      <TabsContent value="inventory" className="mt-5"><Card><CardHeader className="gap-3 border-b"><div className="flex flex-wrap items-center gap-2"><div className="relative"><Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" /><Input className="w-80 max-w-[75vw] pl-8" placeholder="Search SKU, title, supplier" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void load(1) }} /></div><Select value={filters.inventoryAvailability || "all"} onValueChange={(value) => setFilter("inventoryAvailability", value === "all" ? "" : value)}><SelectTrigger className="w-40"><SelectValue placeholder="Availability" /></SelectTrigger><SelectContent><SelectItem value="all">All availability</SelectItem><SelectItem value="in-stock">In stock</SelectItem><SelectItem value="out-of-stock">Out of stock</SelectItem><SelectItem value="negative">Negative</SelectItem></SelectContent></Select><Select value={filters.lowStock || "all"} onValueChange={(value) => setFilter("lowStock", value === "all" ? "" : value)}><SelectTrigger className="w-36"><SelectValue placeholder="Stock level" /></SelectTrigger><SelectContent><SelectItem value="all">All stock</SelectItem><SelectItem value="true">Low stock</SelectItem><SelectItem value="false">Not low</SelectItem></SelectContent></Select><Select value={filters.replenishable || "all"} onValueChange={(value) => setFilter("replenishable", value === "all" ? "" : value)}><SelectTrigger className="w-40"><SelectValue placeholder="Replenishable" /></SelectTrigger><SelectContent><SelectItem value="all">All products</SelectItem><SelectItem value="true">Replenishable</SelectItem><SelectItem value="false">Not replenishable</SelectItem></SelectContent></Select><Select value={filters.warehouse || "all"} onValueChange={(value) => setFilter("warehouse", value === "all" ? "" : value)}><SelectTrigger className="w-48"><SelectValue placeholder="Warehouse" /></SelectTrigger><SelectContent><SelectItem value="all">All warehouses</SelectItem>{warehouses.map((warehouse) => <SelectItem key={warehouse.id} value={warehouse.id || ""}>{warehouse.name || warehouse.id}</SelectItem>)}</SelectContent></Select><Button size="sm" variant="ghost" onClick={() => { setQuery(""); setFilters({}); void load(1, {}) }}>Clear</Button></div><div className="flex flex-wrap gap-2 text-xs">{filterBadge("inventoryAvailability", "Availability")}{filterBadge("lowStock", "Low stock")}{filterBadge("replenishable", "Replenishable")}{filterBadge("warehouse", "Warehouse")}</div></CardHeader><CardContent className="p-0">{loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>SKU / product</TableHead><TableHead>Recorded</TableHead><TableHead>Reserved</TableHead><TableHead>Available</TableHead><TableHead>Reorder</TableHead><TableHead>Warehouse</TableHead><TableHead>Cost</TableHead><TableHead>Stock sources</TableHead><TableHead>State</TableHead><TableHead /></TableRow></TableHeader><TableBody>{rows.map((item) => { const available = Number(item.available ?? Number(item.qty || 0) - Number(item.reserved || 0)); const low = Number(item.reorderPoint || 0) > 0 && available <= Number(item.reorderPoint || 0); return <TableRow key={item.id || item.sku}><TableCell className="min-w-64"><a className="font-medium hover:underline" href={`/inventory/${encodeURIComponent(item.sku || "")}`}>{item.sku}</a><p className="max-w-72 truncate text-xs text-muted-foreground">{item.marketplaceTitle || item.title || "Untitled product"}</p></TableCell><TableCell>{numberLabel(item.qty)}</TableCell><TableCell>{numberLabel(item.reserved)}</TableCell><TableCell className={available <= 0 ? "font-medium text-destructive" : "font-medium"}>{numberLabel(available)}</TableCell><TableCell>{numberLabel(item.reorderPoint)}</TableCell><TableCell><span title={item.warehouseStock?.map((row) => `${row.warehouseName}: ${numberLabel(row.qty)}`).join("\n")}>{item.warehouseCount ? `${item.warehouseCount} location${item.warehouseCount === 1 ? "" : "s"}` : "Unassigned"}</span></TableCell><TableCell>{moneyLabel(item.cost)}</TableCell><TableCell><InventorySourceCell item={item} /></TableCell><TableCell className="space-x-1">{low && <Badge variant="destructive">Low</Badge>}{(item.replenishableEffective ?? item.replenishable) && <Badge variant="secondary">Replenishable</Badge>}{!low && !(item.replenishableEffective ?? item.replenishable) && <Badge variant="outline">Normal</Badge>}</TableCell><TableCell><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => openTransfer(item)}>Transfer stock</DropdownMenuItem><DropdownMenuItem onClick={() => window.open(`/products/${encodeURIComponent(item.sku || "")}`, "_blank")}>Open product</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell></TableRow> })}{!rows.length && <TableRow><TableCell colSpan={10} className="h-28 text-center text-muted-foreground">No inventory rows match these filters.</TableCell></TableRow>}</TableBody></Table></div>}</CardContent><div className="flex flex-wrap items-center justify-between gap-3 border-t p-3 text-sm text-muted-foreground"><span>Showing {numberLabel(rows.length)} products | Page {page}</span><div className="flex items-center gap-2"><Select value={String(pageSize)} onValueChange={(value) => { setPageSize(Number(value)); void load(1) }}><SelectTrigger className="h-8 w-20"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="25">25</SelectItem><SelectItem value="50">50</SelectItem><SelectItem value="100">100</SelectItem></SelectContent></Select><Button size="sm" variant="outline" disabled={page <= 1 || loading} onClick={() => void load(page - 1)}>Previous</Button><Button size="sm" variant="outline" disabled={!hasMore || loading} onClick={() => void load(page + 1)}>Next</Button></div></div></Card></TabsContent>
+      <TabsContent value="inventory" className="mt-5">
+        <Card>
+          <CardHeader className="gap-3 border-b">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative">
+                  <Search className="absolute left-2 top-2.5 size-4 text-muted-foreground" />
+                  <Input className="w-80 max-w-[75vw] pl-8" placeholder="Search SKU, title, supplier" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void load(1) }} />
+                </div>
+                <Select value={filters.inventoryAvailability || "all"} onValueChange={(value) => setFilter("inventoryAvailability", value === "all" ? "" : value)}>
+                  <SelectTrigger className="w-40"><SelectValue placeholder="Availability" /></SelectTrigger>
+                  <SelectContent><SelectItem value="all">All availability</SelectItem><SelectItem value="in-stock">In stock</SelectItem><SelectItem value="out-of-stock">Out of stock</SelectItem><SelectItem value="negative">Negative</SelectItem></SelectContent>
+                </Select>
+                <Select value={filters.lowStock || "all"} onValueChange={(value) => setFilter("lowStock", value === "all" ? "" : value)}>
+                  <SelectTrigger className="w-36"><SelectValue placeholder="Stock level" /></SelectTrigger>
+                  <SelectContent><SelectItem value="all">All stock</SelectItem><SelectItem value="true">Low stock</SelectItem><SelectItem value="false">Not low</SelectItem></SelectContent>
+                </Select>
+                <Select value={filters.replenishable || "all"} onValueChange={(value) => setFilter("replenishable", value === "all" ? "" : value)}>
+                  <SelectTrigger className="w-40"><SelectValue placeholder="Replenishable" /></SelectTrigger>
+                  <SelectContent><SelectItem value="all">All products</SelectItem><SelectItem value="true">Replenishable</SelectItem><SelectItem value="false">Not replenishable</SelectItem></SelectContent>
+                </Select>
+                <Select value={filters.warehouse || "all"} onValueChange={(value) => setFilter("warehouse", value === "all" ? "" : value)}>
+                  <SelectTrigger className="w-48"><SelectValue placeholder="Warehouse" /></SelectTrigger>
+                  <SelectContent><SelectItem value="all">All warehouses</SelectItem>{warehouses.map((warehouse) => <SelectItem key={warehouse.id} value={warehouse.id || ""}>{warehouse.name || warehouse.id}</SelectItem>)}</SelectContent>
+                </Select>
+                <Button size="sm" variant="ghost" onClick={() => { setQuery(""); setFilters({}); void load(1, {}, "") }}>Clear</Button>
+              </div>
+              <Button asChild size="sm" variant="outline">
+                <a href={`/api/inventory/export.csv?${new URLSearchParams({ q: query, ...filters })}`}><FileDown className="size-4" /> Export results</a>
+              </Button>
+            </div>
+            <div className="flex flex-wrap gap-2 text-xs">{filterBadge("inventoryAvailability", "Availability")}{filterBadge("lowStock", "Low stock")}{filterBadge("replenishable", "Replenishable")}{filterBadge("warehouse", "Warehouse")}</div>
+          </CardHeader>
+          <CardContent className="p-0">
+            {loading ? <div className="grid gap-2 p-4"><Skeleton className="h-12" /><Skeleton className="h-12" /><Skeleton className="h-12" /></div> : <div className="overflow-x-auto">
+              <Table>
+                <TableHeader><TableRow><TableHead className="min-w-64">SKU / product</TableHead><TableHead>Physical owned</TableHead><TableHead>Reserved</TableHead><TableHead>Physical available</TableHead><TableHead>Supplier available</TableHead><TableHead>Combined</TableHead><TableHead className="min-w-44">Warehouse ownership</TableHead><TableHead>Unit cost</TableHead><TableHead>Owned value</TableHead><TableHead className="min-w-28">Last sold</TableHead><TableHead>State</TableHead><TableHead /></TableRow></TableHeader>
+                <TableBody>
+                  {rows.map((item) => {
+                    const ownership = inventoryOwnership(item, selectedWarehouse)
+                    const low = Number(item.reorderPoint || 0) > 0 && ownership.physicalAvailable <= Number(item.reorderPoint || 0)
+                    const warehouseNames = ownership.physicalRows.map((row) => row.warehouseName || row.warehouseId || "Warehouse")
+                    return <TableRow key={item.id || item.sku}>
+                      <TableCell className="min-w-64"><a className="font-medium hover:underline" href={`/inventory/${encodeURIComponent(item.sku || "")}`}>{item.sku}</a><p className="max-w-72 truncate text-xs text-muted-foreground">{item.marketplaceTitle || item.title || "Untitled product"}</p></TableCell>
+                      <TableCell className="font-medium tabular-nums">{numberLabel(ownership.physicalOnHand)}</TableCell>
+                      <TableCell className="tabular-nums">{numberLabel(ownership.physicalReserved)}</TableCell>
+                      <TableCell className={ownership.physicalAvailable <= 0 ? "font-medium tabular-nums text-destructive" : "font-medium tabular-nums"}>{numberLabel(ownership.physicalAvailable)}</TableCell>
+                      <TableCell><p className="font-medium tabular-nums text-amber-700 dark:text-amber-300">{numberLabel(ownership.supplierAvailable)}</p><p className="text-xs text-muted-foreground">Not owned</p></TableCell>
+                      <TableCell><p className="font-medium tabular-nums">{numberLabel(ownership.combinedAvailable)}</p><p className="text-xs text-muted-foreground">Network</p></TableCell>
+                      <TableCell><span title={ownership.physicalRows.map((row) => `${row.warehouseName || row.warehouseId}: ${numberLabel(row.qty)}`).join("\n")}>{ownership.physicalRows.length ? `${ownership.physicalRows.length} location${ownership.physicalRows.length === 1 ? "" : "s"}` : "No owned stock"}</span>{warehouseNames.length > 0 && <p className="max-w-44 truncate text-xs text-muted-foreground">{warehouseNames.join(", ")}</p>}</TableCell>
+                      <TableCell className="tabular-nums">{moneyLabel(item.cost)}</TableCell>
+                      <TableCell className="font-medium tabular-nums">{moneyLabel(ownership.physicalValue)}</TableCell>
+                      <TableCell className="whitespace-nowrap text-sm">{item.lastSoldAt ? new Date(item.lastSoldAt).toLocaleDateString() : <span className="text-muted-foreground">Never recorded</span>}</TableCell>
+                      <TableCell className="space-x-1">{low && <Badge variant="destructive">Low</Badge>}{(item.replenishableEffective ?? item.replenishable) && <Badge variant="secondary">Replenishable</Badge>}{!low && !(item.replenishableEffective ?? item.replenishable) && <Badge variant="outline">Normal</Badge>}<p className="mt-1 text-xs text-muted-foreground">Reorder {numberLabel(item.reorderPoint)}</p></TableCell>
+                      <TableCell><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost"><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem disabled={!ownership.physicalRows.length} onClick={() => openTransfer(item)}>Transfer stock</DropdownMenuItem><DropdownMenuItem onClick={() => window.open(`/products/${encodeURIComponent(item.sku || "")}`, "_blank")}>Open product</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell>
+                    </TableRow>
+                  })}
+                  {!rows.length && <TableRow><TableCell colSpan={12} className="h-28 text-center text-muted-foreground">No inventory rows match these filters.</TableCell></TableRow>}
+                </TableBody>
+              </Table>
+            </div>}
+          </CardContent>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t p-3 text-sm text-muted-foreground">
+            <span>Showing {numberLabel(rows.length)} of {summary ? numberLabel(summary.skuCount) : "matching"} products | Page {page}</span>
+            <div className="flex items-center gap-2">
+              <Select value={String(pageSize)} onValueChange={(value) => { setPageSize(Number(value)); void load(1) }}><SelectTrigger className="h-8 w-20"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="25">25</SelectItem><SelectItem value="50">50</SelectItem><SelectItem value="100">100</SelectItem></SelectContent></Select>
+              <Button size="sm" variant="outline" disabled={page <= 1 || loading} onClick={() => void load(page - 1)}>Previous</Button>
+              <Button size="sm" variant="outline" disabled={!hasMore || loading} onClick={() => void load(page + 1)}>Next</Button>
+            </div>
+          </div>
+        </Card>
+      </TabsContent>
       <TabsContent value="replenishment" className="mt-5"><Card><CardHeader><CardTitle className="text-sm">Low-stock queue</CardTitle><CardDescription>Products where available quantity is at or below the reorder point. Use the inventory filters to narrow this queue by warehouse or supplier.</CardDescription></CardHeader><CardContent><div className="flex flex-wrap gap-2"><Button size="sm" onClick={() => { setTab("inventory"); setFilter("lowStock", "true") }}>Open low-stock inventory</Button><Badge variant="outline">{numberLabel(lowRows.length)} on this page need review</Badge></div></CardContent></Card></TabsContent>
       <TabsContent value="warehouses" className="mt-5"><Card><CardHeader><CardTitle className="text-sm">Inventory locations and bins</CardTitle><CardDescription>Physical warehouses support receiving, audits, allocations, and transfers. DataWarehouse is a virtual supplier-feed location and cannot be used for physical operations.</CardDescription></CardHeader><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Location</TableHead><TableHead>Type</TableHead><TableHead>Code</TableHead><TableHead>Bins</TableHead><TableHead /></TableRow></TableHeader><TableBody>{warehouses.map((warehouse) => { const physical = warehouse.isPhysical !== false && warehouse.inventorySourceType !== "supplier_feed"; return <TableRow key={warehouse.id}><TableCell className="font-medium">{warehouse.name || "Unnamed location"}</TableCell><TableCell><Badge variant="outline" className={physical ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300"}>{physical ? "Physical warehouse" : "Supplier feed"}</Badge></TableCell><TableCell>{warehouse.code || "-"}</TableCell><TableCell>{Array.isArray(warehouse.bins) ? warehouse.bins.length : 0}</TableCell><TableCell><Button size="sm" variant="outline" onClick={() => { setTab("inventory"); setFilter("warehouse", warehouse.id || "") }}>View stock</Button></TableCell></TableRow> })}{!warehouses.length && <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No inventory locations are configured.</TableCell></TableRow>}</TableBody></Table></CardContent></Card></TabsContent>
       <TabsContent value="exports" className="mt-5"><Card><CardHeader><CardTitle className="text-sm">Inventory export</CardTitle><CardDescription>Download every product matching the current filters as a CSV, including available quantity, reorder point, supplier, and replenishable state.</CardDescription></CardHeader><CardContent><Button asChild variant="outline"><a href={`/api/inventory/export.csv?${new URLSearchParams({ q: query, ...filters })}`}><FileDown className="size-4" /> Download CSV</a></Button></CardContent></Card></TabsContent>
