@@ -42838,7 +42838,7 @@ async function resolveOutboundAuditTracking(scannedValue = "") {
     const provider = tracked.provider || "";
     const savedTracking = String(trackingNumber || order.trackingNumber || raw).trim();
     const isLiveOrder = ebayLiveOrderContext(order).isLive;
-    const liveOrderItems = isLiveOrder ? orderLineItems(order).map((line, lineIndex) => ({
+    const itemScanItems = orderLineItems(order).map((line, lineIndex) => ({
       orderId: String(order.id || ""),
       orderNumber: String(order.orderNumber || order.internalOrderNumber || order.id || ""),
       lineIndex,
@@ -42846,7 +42846,8 @@ async function resolveOutboundAuditTracking(scannedValue = "") {
       listingTitle: String(line.title || line.name || line.sku || "Live item"),
       qty: Math.max(0, Number(line.qty || line.quantity || 0)),
       soldPrice: Number(line.price ?? line.unitPrice ?? line.unit_price ?? 0)
-    })).filter((line) => line.qty > 0) : [];
+    })).filter((line) => line.qty > 0);
+    const liveOrderItems = isLiveOrder ? itemScanItems : [];
     return {
       orderId: String(order.id || ""),
       orderNumber: String(order.orderNumber || order.internalOrderNumber || order.id || ""),
@@ -42856,6 +42857,7 @@ async function resolveOutboundAuditTracking(scannedValue = "") {
       shipmentGroupId: String(order.shipmentGroupId || ""),
       shipmentGroupPrimaryOrderId: String(order.shipmentGroupPrimaryOrderId || ""),
       isLiveOrder,
+      itemScanItems,
       liveOrderItems,
       shipmentId: String(shipmentId || ""),
       trackingNumber: savedTracking,
@@ -42865,7 +42867,7 @@ async function resolveOutboundAuditTracking(scannedValue = "") {
   });
   const trackingNumber = String(matches[0]?.trackingNumber || raw).trim();
   const carrier = inferCarrierFromTracking(trackingNumber || raw, matches[0]?.carrier || "");
-  const liveItemExpectedCount = matches.reduce((sum, match) => sum + (match.liveOrderItems || []).reduce((lineSum, line) => lineSum + Number(line.qty || 0), 0), 0);
+  const liveItemExpectedCount = matches.reduce((sum, match) => sum + (match.itemScanItems || []).reduce((lineSum, line) => lineSum + Number(line.qty || 0), 0), 0);
   return {
     scannedValue: raw,
     normalizedCandidates: candidates,
@@ -42874,7 +42876,7 @@ async function resolveOutboundAuditTracking(scannedValue = "") {
     carrier,
     trackingUrl: carrierTrackingUrl(carrier, trackingNumber || raw),
     matches,
-    liveItemRequired: liveItemExpectedCount > 0,
+    liveItemRequired: liveItemExpectedCount > 0 && matches.some((match) => match.isLiveOrder === true),
     liveItemExpectedCount
   };
 }
@@ -43025,7 +43027,6 @@ async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, cl
     if (audit.session.status !== "open") throw Object.assign(new Error("This outbound audit is closed."), { statusCode: 409 });
     const scan = audit.scans.find((row) => String(row.id) === String(scanId));
     if (!scan) throw Object.assign(new Error("Outbound package scan not found."), { statusCode: 404 });
-    if (!scan.liveItemRequired) throw Object.assign(new Error("This package is not an eBay Live shipment that requires item scans."), { statusCode: 409 });
     const requestId = String(clientScanId || "").trim();
     if (!requestId || requestId.length > 120) throw Object.assign(new Error("The item scan identifier is missing."), { statusCode: 400 });
     const priorScan = scan.liveItems.find((item) => String(item.clientScanId || "") === requestId);
@@ -43043,11 +43044,14 @@ async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, cl
       return { ...recorded, complete: recorded.scan.liveItemStatus === "complete" };
     }
 
-    const expectedLines = scan.matches.flatMap((match) => (Array.isArray(match.liveOrderItems) ? match.liveOrderItems : []).map((line) => ({
-      ...line,
-      shipmentGroupId: String(match.shipmentGroupId || ""),
-      channelOrderNumber: String(match.channelOrderNumber || "")
-    })));
+    const expectedLines = scan.matches.flatMap((match) => {
+      const lines = Array.isArray(match.itemScanItems) ? match.itemScanItems : Array.isArray(match.liveOrderItems) ? match.liveOrderItems : [];
+      return lines.map((line) => ({
+        ...line,
+        shipmentGroupId: String(match.shipmentGroupId || ""),
+        channelOrderNumber: String(match.channelOrderNumber || "")
+      }));
+    });
     const recordedItems = [...new Map([
       ...scan.liveItems,
       ...orders.flatMap((order) => (Array.isArray(order.outboundLiveItems) ? order.outboundLiveItems : []).filter((item) => String(item.outboundAuditId || "") === String(auditId)))
@@ -43057,10 +43061,22 @@ async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, cl
       const key = outboundLiveLineKey(item);
       assignedCounts.set(key, Number(assignedCounts.get(key) || 0) + 1);
     }
-    const target = expectedLines.find((line) => Number(assignedCounts.get(outboundLiveLineKey(line)) || 0) < Math.max(0, Number(line.qty || 0)));
-    if (!target) throw Object.assign(new Error("Every item in this Live shipment group has already been scanned."), { statusCode: 409 });
-    const order = orders.find((candidate) => String(candidate.id || "") === String(target.orderId || ""));
-    if (!order) throw Object.assign(new Error("The next order in this shipment group could not be loaded."), { statusCode: 409 });
+    const remainingTargets = expectedLines.filter((line) => Number(assignedCounts.get(outboundLiveLineKey(line)) || 0) < Math.max(0, Number(line.qty || 0)));
+    let target = remainingTargets[0];
+    if (!target && !scan.liveItemRequired && expectedLines.length === 0) {
+      target = {
+        orderId: "",
+        orderNumber: "",
+        lineIndex: scan.liveItems.length,
+        listingSku: "",
+        listingTitle: "Unmatched package item",
+        qty: 1,
+        soldPrice: 0,
+        shipmentGroupId: "",
+        channelOrderNumber: ""
+      };
+    }
+    if (!target) throw Object.assign(new Error(scan.liveItemRequired ? "Every item in this Live shipment group has already been scanned." : "Every item in this package has already been verified."), { statusCode: 409 });
 
     const barcode = barcodeLookupForms(barcodeValue)[0] || "";
     if (!barcode) throw Object.assign(new Error("Scan or enter a valid UPC, GTIN, or product barcode."), { statusCode: 400 });
@@ -43073,7 +43089,7 @@ async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, cl
     let lookup = await resolveScannedCatalogBarcode(barcode);
     let product = lookup.product;
     let quickCreated = false;
-    if (!product && quickCreate) {
+    if (!product && quickCreate && scan.liveItemRequired) {
       product = await createOutboundLiveQuickProduct({
         barcode,
         title: quickCreate.title,
@@ -43087,16 +43103,75 @@ async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, cl
       quickCreated = true;
       lookup = { ...lookup, product };
     }
+    if (!product && !scan.liveItemRequired) {
+      product = {
+        id: "",
+        sku: barcode,
+        title: "Unrecognized item barcode",
+        defaultImage: "",
+        images: [],
+        sellUnitCost: 0
+      };
+    }
     if (!product) {
       return {
         scan,
         notFound: true,
+        allowQuickCreate: true,
         barcode,
         target: { orderId: target.orderId, orderNumber: target.orderNumber, listingTitle: target.listingTitle },
         message: `${barcode} is not in the DataPlus catalog. Quick-create it to continue this shipment group.`
       };
     }
     product = await postgres.readProductByKey(product.id || product.sku) || product;
+    if (!scan.liveItemRequired) {
+      target = remainingTargets.find((line) => skuMatchesInventoryItem(line.listingSku, product)) || target;
+    }
+    const order = target.orderId ? orders.find((candidate) => String(candidate.id || "") === String(target.orderId || "")) : null;
+    if (target.orderId && !order) throw Object.assign(new Error("The next order in this package could not be loaded."), { statusCode: 409 });
+    if (!scan.liveItemRequired) {
+      const now = new Date().toISOString();
+      const verificationMatched = target.listingSku ? skuMatchesInventoryItem(target.listingSku, product) : undefined;
+      const item = {
+        clientScanId: requestId,
+        outboundAuditId: auditId,
+        outboundAuditNumber: audit.session.auditNumber,
+        outboundScanId: scanId,
+        trackingNumber: scan.trackingNumber,
+        shipmentGroupId: target.shipmentGroupId,
+        orderId: String(order?.id || ""),
+        orderNumber: String(order?.orderNumber || order?.internalOrderNumber || order?.id || ""),
+        channelOrderNumber: target.channelOrderNumber,
+        listingLineIndex: Number(target.lineIndex),
+        listingSku: String(target.listingSku || ""),
+        listingTitle: String(target.listingTitle || target.listingSku || "Order item"),
+        soldPrice: Number(target.soldPrice || 0),
+        productId: String(product.id || ""),
+        sku: String(product.sku || ""),
+        title: String(product.title || product.marketplaceTitle || product.sku || ""),
+        barcode,
+        image: String(product.defaultImage || product.image || product.images?.[0] || ""),
+        cost: Number(product.sellUnitCost ?? product.unitCost ?? product.cost ?? product.sourceCost ?? 0),
+        warehouseId: String(warehouse.id || ""),
+        warehouseName: String(warehouse.name || ""),
+        quickCreated: false,
+        verificationOnly: true,
+        verificationMatched,
+        scannedAt: now,
+        scannedById: String(actor?.id || ""),
+        scannedByName: String(actor?.name || actor?.username || "Warehouse user")
+      };
+      const recorded = await outboundAuditStore.recordLiveItem(scope, auditId, scanId, item, actor);
+      return {
+        ...recorded,
+        complete: recorded.scan.liveItemStatus === "complete",
+        message: !target.orderId
+          ? `${product.sku} recorded for this package. Scan another item or continue to the package photo.`
+          : verificationMatched
+          ? `${product.sku} verified for order ${item.orderNumber}. ${recorded.scan.liveItemScannedCount} of ${recorded.scan.liveItemExpectedCount} items scanned.`
+          : `${product.sku} was recorded, but the order expected ${item.listingSku || item.listingTitle}. Review the package or skip to the photo.`
+      };
+    }
     const priorProductItem = (Array.isArray(product.outboundLiveItemScans) ? product.outboundLiveItemScans : [])
       .find((item) => String(item.clientScanId || "") === requestId);
     if (priorProductItem) {
@@ -66778,8 +66853,13 @@ async function handleApi(req, res) {
     if (req.method === "POST") {
       const body = await parseBody(req);
       const audit = await outboundAuditStore.start(scope, body, authUser);
-      void recordUserActivity(req, authUser, { eventType: "fulfillment", action: "Started outbound handoff audit", entityType: "outbound_audit", entityId: audit.id, metadata: { auditNumber: audit.auditNumber, warehouseId: audit.warehouseId, carrier: audit.carrier } });
-      return sendJson(res, 201, { audit, message: `${audit.auditNumber} is ready for package scans.` });
+      void recordUserActivity(req, authUser, { eventType: "fulfillment", action: audit.reused ? "Reused today's outbound handoff audit" : "Started outbound handoff audit", entityType: "outbound_audit", entityId: audit.id, metadata: { auditNumber: audit.auditNumber, warehouseId: audit.warehouseId, carrier: audit.carrier } });
+      return sendJson(res, audit.reused ? 200 : 201, {
+        audit,
+        message: audit.reused
+          ? `${audit.auditNumber} is already open for ${audit.warehouseName} today.`
+          : `${audit.auditNumber} is ready for today's package scans.`
+      });
     }
   }
 
@@ -66872,11 +66952,15 @@ async function handleApi(req, res) {
         : resolved.matches.length === 1
           ? resolved.liveItemRequired
             ? `${resolved.trackingNumber} matched Live order ${resolved.matches[0].orderNumber}. Scan ${resolved.liveItemExpectedCount} item${resolved.liveItemExpectedCount === 1 ? "" : "s"} before handoff.`
-            : `${resolved.trackingNumber} matched order ${resolved.matches[0].orderNumber}.`
+            : resolved.liveItemExpectedCount > 0
+              ? `${resolved.trackingNumber} matched order ${resolved.matches[0].orderNumber}. Item scanning is optional; scan the items or continue to the package photo.`
+              : `${resolved.trackingNumber} matched order ${resolved.matches[0].orderNumber}.`
           : resolved.matches.length > 1
             ? resolved.liveItemRequired
               ? `${resolved.trackingNumber} matched shipment group ${resolved.matches[0].shipmentGroupId || ""} with ${resolved.matches.length} orders. Scan ${resolved.liveItemExpectedCount} Live item${resolved.liveItemExpectedCount === 1 ? "" : "s"}.`
-              : `${resolved.trackingNumber} matched ${resolved.matches.length} orders and was retained with every match.`
+              : resolved.liveItemExpectedCount > 0
+                ? `${resolved.trackingNumber} matched ${resolved.matches.length} orders. Item scanning is optional; scan the items or continue to the package photo.`
+                : `${resolved.trackingNumber} matched ${resolved.matches.length} orders and was retained with every match.`
             : `${resolved.trackingNumber} has no matching order and was retained in the handoff record.`;
       return sendJson(res, result.duplicate ? 200 : 201, { ...result, resolution: resolved, message });
     }
@@ -66952,9 +67036,9 @@ async function handleApi(req, res) {
       }
       const scanRows = audit.scans.slice().reverse().map((scan, index) => {
         const orderLinks = scan.matches.map((match) => escapeHtml([match.orderNumber, match.channel].filter(Boolean).join(" · "))).join("<br>") || "No matching order";
-        const actualItems = scan.liveItems.map((item) => `${escapeHtml(item.sku)} · ${escapeHtml(item.title)} · Cost $${Number(item.cost || 0).toFixed(2)} · Sold $${Number(item.soldPrice || 0).toFixed(2)}`).join("<br>");
-        const orders = actualItems ? `${orderLinks}<hr><strong>Actual items shipped</strong><br>${actualItems}` : orderLinks;
-        const matchStatus = scan.liveItemRequired ? `${scan.matchStatus.replace("multiple", "multiple orders")} · Live items ${scan.liveItemScannedCount}/${scan.liveItemExpectedCount}` : scan.matchStatus.replace("multiple", "multiple orders");
+        const actualItems = scan.liveItems.map((item) => `${escapeHtml(item.sku)} · ${escapeHtml(item.title)} · Cost $${Number(item.cost || 0).toFixed(2)} · Sold $${Number(item.soldPrice || 0).toFixed(2)}${item.verificationOnly ? item.verificationMatched === false ? " · SKU mismatch" : " · Verified" : " · Inventory assigned"}`).join("<br>");
+        const orders = actualItems ? `${orderLinks}<hr><strong>Scanned package items</strong><br>${actualItems}` : orderLinks;
+        const matchStatus = scan.liveItemExpectedCount > 0 ? `${scan.matchStatus.replace("multiple", "multiple orders")} · ${scan.liveItemRequired ? "Required" : "Optional"} items ${scan.liveItemScannedCount}/${scan.liveItemExpectedCount}` : scan.matchStatus.replace("multiple", "multiple orders");
         return `<tr><td>${index + 1}</td><td>${escapeHtml(scan.trackingNumber)}</td><td>${escapeHtml(scan.carrier || "Unknown")}</td><td>${orders}</td><td>${escapeHtml(matchStatus)}</td><td>${escapeHtml(scan.evidenceCount ? `${scan.evidenceCount} saved` : scan.evidenceStatus)}</td><td>${escapeHtml(scan.scannedByName)}</td><td>${escapeHtml(new Date(scan.scannedAt).toLocaleString())}</td></tr>`;
       }).join("");
       return sendHtml(res, 200, `<!doctype html><html><head><title>${escapeHtml(audit.session.auditNumber)} outbound audit</title><style>body{font-family:Arial,sans-serif;margin:30px;color:#111}h1{margin-bottom:4px}.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:18px 0}.meta div{border:1px solid #bbb;padding:8px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #bbb;padding:7px;text-align:left;vertical-align:top}th{background:#eee}.sign{margin-top:28px;display:grid;grid-template-columns:1fr 1fr;gap:36px}.line{border-top:1px solid #111;padding-top:6px;margin-top:28px}@media print{body{margin:10px}}</style></head><body><h1>${escapeHtml(audit.session.auditNumber)} · Outbound handoff audit</h1><p>Internal warehouse custody record. This is not carrier acceptance.</p><div class="meta"><div><strong>Warehouse</strong><br>${escapeHtml(audit.session.warehouseName)}</div><div><strong>Carrier</strong><br>${escapeHtml(audit.session.carrier || "Any carrier")}</div><div><strong>Status</strong><br>${escapeHtml(audit.session.status)}</div><div><strong>Packages</strong><br>${audit.session.packageCount}</div><div><strong>Photos saved / missing</strong><br>${audit.session.evidenceCompleteCount} / ${audit.session.evidenceMissingCount}</div><div><strong>Closed</strong><br>${escapeHtml(audit.session.closedAt ? new Date(audit.session.closedAt).toLocaleString() : "Open")}</div></div><table><thead><tr><th>#</th><th>Tracking</th><th>Carrier</th><th>Order</th><th>Match</th><th>Photo</th><th>Scanned by</th><th>Scanned at</th></tr></thead><tbody>${scanRows || '<tr><td colspan="8">No packages scanned.</td></tr>'}</tbody></table><div class="sign"><div class="line">Warehouse handoff</div><div class="line">Driver / receiving party</div></div></body></html>`);

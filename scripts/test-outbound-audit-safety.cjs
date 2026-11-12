@@ -40,6 +40,26 @@ assert.equal(groupedLiveScan.liveItemExpectedCount, 3);
 assert.equal(groupedLiveScan.liveItemScannedCount, 1);
 assert.equal(groupedLiveScan.liveItemStatus, 'pending');
 
+const optionalItemScan = publicScan({
+  scan_id: 'scan-standard', tracking_number: '9400111899223856928499', carrier: 'USPS', match_status: 'matched',
+  order_matches: [{ orderId: 'order-2', itemScanItems: [{ listingSku: 'SKU-2', qty: 1 }] }],
+  live_item_required: false, live_item_status: 'pending', live_item_expected_count: 1,
+  live_item_scans: [{ clientScanId: 'item-2', orderId: 'order-2', sku: 'SKU-2', verificationOnly: true, verificationMatched: true }]
+});
+assert.equal(optionalItemScan.liveItemRequired, false);
+assert.equal(optionalItemScan.liveItemExpectedCount, 1);
+assert.equal(optionalItemScan.liveItemScannedCount, 1);
+
+const unmatchedItemScan = publicScan({
+  scan_id: 'scan-unmatched-item', tracking_number: 'EXTERNAL-TRACKING-456', match_status: 'unmatched',
+  order_matches: [], live_item_required: false, live_item_status: 'pending', live_item_expected_count: 0,
+  live_item_scans: [{ clientScanId: 'item-3', sku: 'DPS10003', verificationOnly: true }]
+});
+assert.equal(unmatchedItemScan.matches.length, 0);
+assert.equal(unmatchedItemScan.liveItemExpectedCount, 0);
+assert.equal(unmatchedItemScan.liveItemScannedCount, 1);
+assert.equal(unmatchedItemScan.liveItemStatus, 'pending');
+
 const dbSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
 assert.match(dbSource, /RELATIONAL_SCHEMA_VERSION = "2026-10-29-shipping-report-facts-v1"/);
 assert.match(dbSource, /create table if not exists outbound_audit_sessions/);
@@ -75,6 +95,13 @@ assert.match(serverSource, /completeOutboundLiveShipmentGroup/);
 assert.match(serverSource, /Live shipment items verified/);
 assert.match(serverSource, /outbound_live_fulfillment/);
 assert.match(serverSource, /Every item in this Live shipment group has already been scanned/);
+assert.match(serverSource, /itemScanItems/);
+assert.match(serverSource, /verificationOnly: true/);
+assert.match(serverSource, /Unmatched package item/);
+assert.match(serverSource, /Unrecognized item barcode/);
+assert.match(serverSource, /recorded for this package\. Scan another item or continue to the package photo/);
+assert.match(serverSource, /Item scanning is optional; scan the items or continue to the package photo/);
+assert.match(serverSource, /Reused today's outbound handoff audit/);
 assert.match(routes, /action === "item-scan"/);
 assert.match(routes, /action === "quick-item"/);
 
@@ -94,6 +121,18 @@ assert.match(workspaceSource, /trackingUrl/);
 assert.match(workspaceSource, /Combined Live shipment/);
 assert.match(workspaceSource, /Continue item scans/);
 assert.match(workspaceSource, /incompleteLiveScans\.length > 0/);
+assert.match(workspaceSource, /Optional item verification/);
+assert.match(workspaceSource, /Unmatched package contents/);
+assert.match(workspaceSource, /Every package can continue to item scans and a photo/);
+assert.match(workspaceSource, /Skip to package photo/);
+assert.match(workspaceSource, /Item verification/);
+assert.match(workspaceSource, /Use today&apos;s audit/);
+
+const outboundStoreSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'outbound-audit-store.js'), 'utf8');
+assert.match(outboundStoreSource, /timezone\('America\/New_York', started_at\)::date = timezone\('America\/New_York', now\(\)\)::date/);
+assert.match(outboundStoreSource, /pg_advisory_xact_lock/);
+assert.match(outboundStoreSource, /when scan\.live_item_expected_count > 0 and jsonb_array_length\(scan\.live_item_scans\) \+ 1 >= scan\.live_item_expected_count then 'complete'/);
+assert.doesNotMatch(outboundStoreSource, /scan\.live_item_required = true or scan\.live_item_expected_count > 0/);
 
 const warehouseMobileSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'warehouse-mobile.tsx'), 'utf8');
 assert.match(warehouseMobileSource, /id: "outbound"/);
