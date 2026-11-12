@@ -6,6 +6,14 @@ const root = path.resolve(__dirname, "..");
 const server = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const database = fs.readFileSync(path.join(root, "db.js"), "utf8");
 const purchasing = fs.readFileSync(path.join(root, "web", "src", "components", "purchasing-route.tsx"), "utf8");
+const purchaseOrderDetail = fs.readFileSync(path.join(root, "web", "src", "components", "purchasing-workspaces.tsx"), "utf8");
+
+const searchRouteStart = server.indexOf('url.pathname === "/api/purchasing/purchase-order-search"');
+const searchRouteEnd = server.indexOf('url.pathname === "/api/purchasing/work"', searchRouteStart);
+assert.ok(searchRouteStart >= 0 && searchRouteEnd > searchRouteStart, "global purchase-order search route must exist");
+const searchRoute = server.slice(searchRouteStart, searchRouteEnd);
+assert.match(searchRoute, /listPurchaseOrders\(\{ query, limit, includeDeleted: true \}\)/, "global search must include every PO lifecycle status");
+assert.match(searchRoute, /compactQuery\.length < 2/, "global search must reject punctuation-only and one-character scans");
 
 const routeStart = server.indexOf('url.pathname === "/api/purchasing/work"');
 const routeEnd = server.indexOf('url.pathname === "/api/purchasing/supplier-returns"', routeStart);
@@ -35,6 +43,9 @@ assert.ok(listStart >= 0 && listEnd > listStart, "purchase-order database list m
 const list = database.slice(listStart, listEnd);
 assert.match(list, /options\.statuses/, "PO lists must support an included status set");
 assert.match(list, /options\.excludeStatuses/, "PO lists must support an excluded status set");
+assert.match(list, /options\.query/, "PO lists must support a global PO search query");
+assert.match(list, /search_line\.raw->>'orderNumber'/, "global PO search must include linked order numbers");
+assert.match(list, /regexp_replace\(lower\(coalesce\(po_number/, "PO number search must ignore punctuation differences");
 assert.match(list, /offset \$\$\{offsetParameter\}/, "PO lists must retain bounded paging support");
 
 assert.match(purchasing, /loadHistoryScope/, "the React purchasing workspace must lazy-load history tabs");
@@ -48,5 +59,8 @@ assert.match(purchasing, /api\/purchase-orders\/reference-data/, "purchasing mus
 assert.doesNotMatch(purchasing, /api<LiteState>\("\/api\/state\?lite=1"\)/, "purchasing must not load global lite state for PO references");
 assert.match(purchasing, /historyLoadingScope === "canceled"/, "large canceled history loads must show progress");
 assert.match(purchasing, /purchasingTabs = new Set\([^\n]+"rejected"/, "the rejected PO tab must remain reachable");
+assert.match(purchasing, /api\/purchasing\/purchase-order-search/, "the main purchasing search must query every PO queue");
+assert.match(purchasing, /All purchase-order results/, "global PO matches must be visible without switching tabs");
+assert.match(purchaseOrderDetail, /sm:!max-w-\[96rem\]/, "the PO edit dialog must use the wide desktop layout");
 
 console.log("Purchasing workspace performance checks passed.");

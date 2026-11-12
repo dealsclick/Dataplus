@@ -61315,6 +61315,16 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { updates, cursor });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/purchasing/purchase-order-search" && postgres.isPostgresEnabled()) {
+    const query = String(url.searchParams.get("q") || "").trim();
+    const compactQuery = query.toLowerCase().replace(/[^a-z0-9]+/g, "");
+    if (query.length < 2 || compactQuery.length < 2) return sendJson(res, 200, { purchaseOrders: [], hasMore: false });
+    if (query.length > 120) return sendJson(res, 400, { error: "Use a search of 120 characters or fewer." });
+    const limit = 50;
+    const purchaseOrders = await postgres.listPurchaseOrders({ query, limit, includeDeleted: true });
+    return sendJson(res, 200, { purchaseOrders: purchaseOrders || [], hasMore: (purchaseOrders || []).length === limit });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/purchasing/work" && postgres.isPostgresEnabled()) {
     const queryStartedAt = Date.now();
     const sendPurchasingWork = (status, payload) => {

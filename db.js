@@ -13502,6 +13502,8 @@ async function listPurchaseOrders(options = {}) {
   const offset = Math.max(0, Number(options.offset || 0));
   const sku = nullableString(options.sku);
   const vendorId = nullableString(options.vendorId);
+  const query = nullableString(options.query)?.toLowerCase();
+  const compactQuery = query ? query.replace(/[^a-z0-9]+/g, "") || query : undefined;
   const statuses = [...new Set((Array.isArray(options.statuses) ? options.statuses : [])
     .map((value) => nullableString(value)?.toLowerCase())
     .filter(Boolean))];
@@ -13534,16 +13536,53 @@ async function listPurchaseOrders(options = {}) {
     params.push(vendorId);
     where.push(`vendor_id = $${params.length}`);
   }
+  let compactQueryParameter = 0;
+  if (query) {
+    params.push(query);
+    const queryParameter = params.length;
+    params.push(compactQuery);
+    compactQueryParameter = params.length;
+    where.push(`(
+      position($${queryParameter} in lower(coalesce(po_number, ''))) > 0
+      or position($${queryParameter} in lower(coalesce(supplier, ''))) > 0
+      or position($${queryParameter} in lower(coalesce(warehouse_name, ''))) > 0
+      or position($${queryParameter} in lower(coalesce(status, ''))) > 0
+      or position($${queryParameter} in lower(coalesce(raw->>'ctechId', ''))) > 0
+      or position($${queryParameter} in lower(coalesce(raw->>'externalPoNumber', ''))) > 0
+      or position($${queryParameter} in lower(coalesce(raw->>'supplierOrderNumber', ''))) > 0
+      or position($${queryParameter} in lower(coalesce(raw->>'trackingNumber', ''))) > 0
+      or position($${compactQueryParameter} in regexp_replace(lower(coalesce(po_number, '')), '[^a-z0-9]+', '', 'g')) > 0
+      or exists (
+        select 1
+        from purchase_order_line_items search_line
+        where search_line.po_id = purchase_order_records.po_id
+          and (
+            position($${queryParameter} in lower(coalesce(search_line.sku, ''))) > 0
+            or position($${queryParameter} in lower(coalesce(search_line.title, ''))) > 0
+            or position($${queryParameter} in lower(coalesce(search_line.raw->>'orderNumber', ''))) > 0
+            or position($${queryParameter} in lower(coalesce(search_line.raw->>'vendorSku', ''))) > 0
+            or position($${queryParameter} in lower(coalesce(search_line.raw->>'manufacturerPartNumber', ''))) > 0
+            or position($${compactQueryParameter} in regexp_replace(lower(coalesce(search_line.sku, '')), '[^a-z0-9]+', '', 'g')) > 0
+          )
+      )
+    )`);
+  }
   params.push(limit);
   const limitParameter = params.length;
   params.push(offset);
   const offsetParameter = params.length;
   const whereSql = where.length ? `where ${where.join(" and ")}` : "";
+  const orderSql = query
+    ? `order by
+        case when regexp_replace(lower(coalesce(po_number, '')), '[^a-z0-9]+', '', 'g') = $${compactQueryParameter} then 0 else 1 end,
+        coalesce(created_at, updated_at) desc,
+        po_number desc`
+    : "order by coalesce(created_at, updated_at) desc, po_number desc";
   const result = await client.query(`
     select *
     from purchase_order_records
     ${whereSql}
-    order by coalesce(created_at, updated_at) desc, po_number desc
+    ${orderSql}
     limit $${limitParameter}
     offset $${offsetParameter}
   `, params);

@@ -33,6 +33,7 @@ import { cn } from "@/lib/utils"
 import { readWorkspaceCache, writeWorkspaceCache } from "../lib/workspace-cache"
 import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
 import { matchesSearch, normalizePastedSearch } from "../lib/multi-search"
+import { purchaseOrderUrl } from "../lib/purchase-order-url"
 import { BulkSearchActions } from "./bulk-search-csv-button"
 import { ContextActions, Detail, Field, PageHeader } from "./app-ui"
 import { CatalogImage } from "./product-workspaces"
@@ -946,6 +947,9 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const requestedPurchasingTab = ["sent", "awaiting_tracking", "incoming"].includes(requestedPurchasingTabValue) ? "inbound" : requestedPurchasingTabValue === "waiting" ? "approvals" : requestedPurchasingTabValue
   const [tab, setTabState] = useState(purchasingTabs.has(requestedPurchasingTab) ? requestedPurchasingTab : "attention")
   const [query, setQueryState] = useState(initialPurchasingParams.get("q") || "")
+  const [globalPoSearch, setGlobalPoSearch] = useState<{ purchaseOrders: Array<Record<string, unknown>>; hasMore: boolean }>({ purchaseOrders: [], hasMore: false })
+  const [globalPoSearchLoading, setGlobalPoSearchLoading] = useState(false)
+  const [globalPoSearchError, setGlobalPoSearchError] = useState("")
   const [pageByTab, setPageByTab] = useState<Record<string, number>>({})
   const currentPage = Math.max(1, Number(pageByTab[tab] || 1))
   const updatePurchasingLocation = (nextTab: string, nextQuery: string) => {
@@ -1053,6 +1057,33 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
       .then((state) => setPurchaseReferences({ vendors: state.vendors || [], warehouses: state.warehouses || [] }))
       .catch(() => undefined)
   }, [])
+  useEffect(() => {
+    const normalizedQuery = query.trim()
+    const compactQuery = normalizedQuery.toLowerCase().replace(/[^a-z0-9]+/g, "")
+    if (normalizedQuery.length < 2 || compactQuery.length < 2 || /[\r\n,;]/.test(normalizedQuery)) {
+      setGlobalPoSearch({ purchaseOrders: [], hasMore: false })
+      setGlobalPoSearchLoading(false)
+      setGlobalPoSearchError("")
+      return
+    }
+    const controller = new AbortController()
+    const timer = window.setTimeout(async () => {
+      setGlobalPoSearchLoading(true)
+      setGlobalPoSearchError("")
+      try {
+        const result = await api<{ purchaseOrders?: Array<Record<string, unknown>>; hasMore?: boolean }>(`/api/purchasing/purchase-order-search?${new URLSearchParams({ q: normalizedQuery })}`, { signal: controller.signal })
+        if (!controller.signal.aborted) setGlobalPoSearch({ purchaseOrders: result.purchaseOrders || [], hasMore: result.hasMore === true })
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          setGlobalPoSearch({ purchaseOrders: [], hasMore: false })
+          setGlobalPoSearchError(error instanceof Error ? error.message : "Unable to search all purchase orders.")
+        }
+      } finally {
+        if (!controller.signal.aborted) setGlobalPoSearchLoading(false)
+      }
+    }, 250)
+    return () => { window.clearTimeout(timer); controller.abort() }
+  }, [query])
   useEffect(() => {
     if (initialLoadComplete && purchasingHistoryStatusesByScope[tab]) void loadHistoryScope(tab, currentPage)
   }, [tab, currentPage, initialLoadComplete])
@@ -1454,6 +1485,15 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     <Tabs value={tab} onValueChange={setTab}>
       <div className="overflow-x-auto rounded-md border bg-card p-1"><TabsList className="h-auto min-w-max justify-start bg-transparent p-0 [&_[role=tab]]:h-8 [&_[role=tab]]:px-2 [&_[role=tab]]:text-xs"><TabsTrigger value="attention">Needs attention ({numberLabel(attentionCount)})</TabsTrigger><TabsTrigger value="buyer_review">Sourcing ({numberLabel(buyerReviewRequirements.length)})</TabsTrigger><TabsTrigger value="approvals">Review &amp; send ({numberLabel(reviewPurchaseOrders.length)})</TabsTrigger><TabsTrigger value="dropships">Dropships ({numberLabel(dropshipPos.length)})</TabsTrigger><TabsTrigger value="inbound">Inbound ({numberLabel(inboundPos.length)})</TabsTrigger><TabsTrigger value="receiving">Receiving ({numberLabel(receivingPos.length)})</TabsTrigger><TabsTrigger value="rejected">Rejected ({numberLabel(rejectedCount)})</TabsTrigger><TabsTrigger value="canceled">Canceled ({numberLabel(canceledCount)})</TabsTrigger><TabsTrigger value="archive">History ({numberLabel(archivedCount)})</TabsTrigger></TabsList></div>
       <div className="mt-4 flex max-w-3xl flex-wrap gap-2"><div className="relative min-w-64 flex-1"><Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" /><Input className="pl-9" value={query} onChange={(event) => setQuery(event.target.value)} onPaste={(event) => normalizePastedSearch(event, query, setQuery)} placeholder="Search or paste POs, orders, SKUs, tracking..." /></div><BulkSearchActions onApply={setQuery} /></div>
+      {query.trim().length >= 2 && !/[\r\n,;]/.test(query) ? <Card className="mt-3 overflow-hidden border-primary/30">
+        <CardHeader className="gap-1 border-b bg-primary/[0.03] py-3">
+          <div className="flex flex-wrap items-center justify-between gap-2"><div><CardTitle className="text-sm">All purchase-order results</CardTitle><CardDescription>Matches every PO status and queue. Open the PO directly without changing tabs.</CardDescription></div>{globalPoSearchLoading ? <Badge variant="outline"><Loader2 className="size-3.5 animate-spin" /> Searching</Badge> : <Badge variant="secondary">{numberLabel(globalPoSearch.purchaseOrders.length)} found{globalPoSearch.hasMore ? "+" : ""}</Badge>}</div>
+        </CardHeader>
+        <CardContent className="p-0">
+          {globalPoSearchError ? <div className="flex items-center gap-2 p-4 text-sm text-destructive"><AlertCircle className="size-4" />{globalPoSearchError}</div> : globalPoSearchLoading && !globalPoSearch.purchaseOrders.length ? <div className="flex h-20 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Searching every PO queue...</div> : globalPoSearch.purchaseOrders.length ? <div className="divide-y">{globalPoSearch.purchaseOrders.map((po) => { const poItems = purchaseOrderItems(po); const orderNumbers = [...new Set(poItems.map((line) => String(line.orderNumber || "").trim()).filter(Boolean))]; const status = String(po.status || "draft").toLowerCase(); return <div key={String(po.id || po.poNumber)} className="grid gap-3 p-3 md:grid-cols-[minmax(12rem,0.8fr)_minmax(12rem,1fr)_minmax(15rem,1.4fr)_auto] md:items-center"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><a className="font-semibold text-primary hover:underline" href={purchaseOrderUrl(po.poNumber, po.id)}>{String(po.poNumber || po.id || "Purchase order")}</a><Badge variant={status === "canceled" || status === "cancelled" || status === "rejected" ? "destructive" : ["received", "closed", "completed"].includes(status) ? "success" : "outline"}>{status.replace(/_/g, " ")}</Badge></div><p className="mt-1 truncate text-xs text-muted-foreground">Updated {dateLabel(String(po.updatedAt || po.createdAt || ""))}</p></div><div className="min-w-0"><p className="truncate font-medium" title={String(po.supplier || "")}>{String(po.supplier || "Unassigned supplier")}</p><p className="truncate text-xs text-muted-foreground">{String(po.warehouseName || (po.directToCustomer ? "Direct to customer" : "No destination"))}</p></div><div className="min-w-0"><div className="flex flex-wrap gap-1">{poItems.slice(0, 3).map((line, index) => <Badge key={`${String(line.sku || "line")}-${index}`} variant="secondary" className="max-w-40 truncate">{String(line.sku || line.title || "Unlisted item")}</Badge>)}{poItems.length > 3 ? <Badge variant="outline">+{poItems.length - 3} items</Badge> : null}</div>{orderNumbers.length ? <p className="mt-1 truncate text-xs text-muted-foreground">Order{orderNumbers.length === 1 ? "" : "s"}: {orderNumbers.slice(0, 4).join(", ")}{orderNumbers.length > 4 ? ` +${orderNumbers.length - 4}` : ""}</p> : null}</div><Button size="sm" variant="outline" asChild><a href={purchaseOrderUrl(po.poNumber, po.id)}>Open PO</a></Button></div> })}</div> : <div className="flex h-20 items-center justify-center px-4 text-center text-sm text-muted-foreground">No purchase order matches this search in any queue.</div>}
+          {globalPoSearch.hasMore ? <p className="border-t px-4 py-2 text-xs text-muted-foreground">Showing the first 50 matches. Add a PO number, supplier, SKU, order number, or tracking number to narrow the result.</p> : null}
+        </CardContent>
+      </Card> : null}
       <TabsContent value="attention" className="mt-4">
         <Card>
           <CardHeader className="border-b">
