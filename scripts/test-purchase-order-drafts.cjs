@@ -1,7 +1,8 @@
 const assert = require("node:assert/strict");
 const {
   createManualPurchaseOrder,
-  manualPurchaseOrderDraftIssues
+  manualPurchaseOrderDraftIssues,
+  purchaseOrderCatalogAddition
 } = require("../server");
 
 const db = {
@@ -48,5 +49,39 @@ assert.throws(() => createManualPurchaseOrder({ ...db, purchaseOrders: [] }, {
   warehouseId: "warehouse-1",
   items: []
 }), /Add at least one item/);
+
+const catalogAddition = purchaseOrderCatalogAddition({
+  vendorId: "true-value",
+  supplier: "True Value"
+}, {
+  sku: "BUS265368TRV",
+  title: "Milwaukee item",
+  supplier: "Other primary supplier",
+  cost: 99,
+  sourceCatalogMatches: [{
+    vendorId: "true-value",
+    supplier: "True Value",
+    vendorSku: "265368",
+    cost: 5.96,
+    uom: "EA",
+    uomQty: 6
+  }]
+}, { qty: 1 });
+
+assert.equal(catalogAddition.qty, 6, "a manual PO addition should honor the selected supplier purchase multiple");
+assert.equal(catalogAddition.purchaseMultiple, 6);
+assert.equal(catalogAddition.estimatedUnitCost, 5.96, "the PO should use the matching supplier cost");
+assert.equal(catalogAddition.vendorSku, "265368");
+assert.equal(catalogAddition.source, "manual_po_addition");
+assert.equal(catalogAddition.purchaseSurplusQty, 6);
+
+assert.throws(() => purchaseOrderCatalogAddition({
+  vendorId: "true-value",
+  supplier: "True Value"
+}, {
+  sku: "WRONG-SUPPLIER",
+  supplier: "Another Supplier",
+  sourceCatalogMatches: [{ vendorId: "other", supplier: "Another Supplier", cost: 1 }]
+}, { qty: 1 }), /not available from True Value/);
 
 console.log("purchase-order draft tests passed");

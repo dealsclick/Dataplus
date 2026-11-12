@@ -13508,6 +13508,66 @@ function normalizeManualPurchaseOrderItems(rawItems = [], options = {}) {
   });
 }
 
+function purchaseOrderCatalogAddition(po = {}, product = {}, raw = {}) {
+  const sku = String(product?.sku || raw?.sku || "").trim();
+  if (!sku) throw new Error("Choose a catalog SKU to add to this purchase order.");
+
+  const vendorId = String(po?.vendorId || "").trim().toLowerCase();
+  const supplierKey = String(po?.supplier || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const supplierRecords = [
+    ...(Array.isArray(product?.sourceCatalogMatches) ? product.sourceCatalogMatches : []),
+    ...(Array.isArray(product?.vendorOffers) ? product.vendorOffers : [])
+  ];
+  const supplierRecord = supplierRecords.find((record) => {
+    const recordVendorId = String(record?.vendorId || record?.vendor_id || "").trim().toLowerCase();
+    const recordSupplierKey = String(record?.supplier || record?.supplierName || record?.vendor || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+    return (vendorId && recordVendorId === vendorId) || (supplierKey && recordSupplierKey === supplierKey);
+  });
+  const productSupplierKey = String(product?.supplier || product?.vendor || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+  if ((vendorId || supplierKey) && !supplierRecord && (!supplierKey || productSupplierKey !== supplierKey)) {
+    throw new Error(`${sku} is not available from ${po?.supplier || "this PO supplier"}. Choose a SKU carried by the same supplier.`);
+  }
+
+  const source = supplierRecord || product;
+  const purchaseMultiple = Math.max(1, ...[
+    source?.purchaseMultiple,
+    source?.uomQty,
+    source?.uom_qty,
+    source?.minQuantity,
+    source?.min_quantity,
+    source?.quantityIncrements,
+    source?.quantity_increments,
+    product?.purchaseMultiple,
+    product?.uomQty,
+    raw?.purchaseMultiple
+  ].map((value) => Math.floor(Number(value || 0))).filter((value) => Number.isFinite(value) && value > 0));
+  const requestedQty = Number(raw?.qty || purchaseMultiple);
+  const qty = Math.ceil(Math.max(1, requestedQty) / purchaseMultiple) * purchaseMultiple;
+  const estimatedUnitCost = Number(source?.cost ?? source?.unitCost ?? product?.cost ?? raw?.estimatedUnitCost ?? 0);
+  const [line] = normalizeManualPurchaseOrderItems([{
+    ...raw,
+    id: crypto.randomUUID(),
+    sku,
+    title: String(product?.title || product?.marketplaceTitle || raw?.title || sku).trim(),
+    vendorSku: String(source?.vendorSku || source?.sourceSku || product?.vendorSku || raw?.vendorSku || "").trim(),
+    mfrPartNumber: String(source?.mfrPartNumber || product?.mfrPartNumber || raw?.mfrPartNumber || "").trim(),
+    brand: String(product?.brand || raw?.brand || "").trim(),
+    manufacturer: String(product?.manufacturer || raw?.manufacturer || "").trim(),
+    qty,
+    purchaseMultiple,
+    estimatedUnitCost: Number.isFinite(estimatedUnitCost) && estimatedUnitCost >= 0 ? estimatedUnitCost : 0,
+    receivedQty: 0,
+    source: "manual_po_addition",
+    catalogProduct: true,
+    uom: String(source?.uom || product?.uom || raw?.uom || "").trim(),
+    uomQty: purchaseMultiple
+  }]);
+  line.customerDemandQty = 0;
+  line.purchaseSurplusQty = qty;
+  line.remainingQty = qty;
+  return line;
+}
+
 function createManualPurchaseOrder(db, options = {}) {
   const allowIncompleteDraft = options.allowIncompleteDraft === true && !String(options.externalPoNumber || "").trim();
   const vendorId = String(options.vendorId || "").trim();
@@ -63543,15 +63603,16 @@ async function handleApi(req, res) {
       po.expectedAt = String(body.expectedAt || "").trim();
       addPoTimeline(po, { type: "edited", title: "Expected date updated", message: po.expectedAt ? `Expected on ${po.expectedAt}.` : "Expected date cleared.", user: actor });
     }
-    if (Array.isArray(body.items)) {
+    if (Array.isArray(body.items) || Array.isArray(body.addItems)) {
       const terminal = ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "draft").toLowerCase());
       if (terminal) return sendJson(res, 400, { error: "Closed, canceled, and fully received POs cannot be edited." });
+      let addedLineCount = 0;
       if (body.replaceDraftItems === true) {
         if (!editableManualDraft) return sendJson(res, 409, { error: "PO lines can only be added or removed while a manual PO is an unsubmitted draft." });
         po.items = normalizeManualPurchaseOrderItems(body.items, { allowIncompleteDraft: true });
       } else {
         const bySku = new Map((po.items || []).map((line) => [String(line.sku || "").toLowerCase(), line]));
-        for (const item of body.items) {
+        for (const item of Array.isArray(body.items) ? body.items : []) {
           const line = bySku.get(String(item.sku || "").toLowerCase());
           const requestedQty = Number(item.qty || 0);
           if (!line || !Number.isFinite(requestedQty)) continue;
@@ -63565,10 +63626,33 @@ async function handleApi(req, res) {
           line.purchaseSurplusQty = Math.max(0, qty - Number(line.customerDemandQty || 0));
           line.remainingQty = Math.max(0, qty - Number(line.receivedQty || 0));
         }
+        for (const item of Array.isArray(body.addItems) ? body.addItems : []) {
+          const requestedSku = String(item?.sku || "").trim();
+          if (!requestedSku) return sendJson(res, 400, { error: "Choose a catalog SKU for every new PO line." });
+          if (bySku.has(requestedSku.toLowerCase())) return sendJson(res, 409, { error: `${requestedSku} is already on this purchase order. Update its quantity instead.` });
+          const product = await postgres.readProductByKey(requestedSku);
+          if (!product) return sendJson(res, 404, { error: `${requestedSku} was not found in the catalog.` });
+          let addition;
+          try {
+            addition = purchaseOrderCatalogAddition(po, product, item);
+          } catch (error) {
+            return sendJson(res, 400, { error: error instanceof Error ? error.message : "Unable to add this catalog SKU." });
+          }
+          if (bySku.has(String(addition.sku || "").toLowerCase())) return sendJson(res, 409, { error: `${addition.sku} is already on this purchase order. Update its quantity instead.` });
+          po.items = [...(po.items || []), addition];
+          bySku.set(String(addition.sku || "").toLowerCase(), addition);
+          addedLineCount += 1;
+        }
+        amendmentNeeded = amendmentNeeded || committed && addedLineCount > 0;
       }
       po.totalUnits = (po.items || []).reduce((sum, line) => sum + Number(line.qty || 0), 0);
       po.estimatedCost = (po.items || []).reduce((sum, line) => sum + (Number(line.qty || 0) * Number(line.estimatedUnitCost || 0)), 0);
-      addPoTimeline(po, { type: "edited", title: body.replaceDraftItems === true ? "Draft PO lines updated" : "PO quantities updated", message: body.replaceDraftItems === true ? "Buyer saved the current draft line items." : "Buyer updated unreceived PO quantities.", user: actor });
+      addPoTimeline(po, {
+        type: "edited",
+        title: body.replaceDraftItems === true ? "Draft PO lines updated" : addedLineCount ? "PO line added" : "PO quantities updated",
+        message: body.replaceDraftItems === true ? "Buyer saved the current draft line items." : addedLineCount ? `Buyer added ${addedLineCount} catalog line${addedLineCount === 1 ? "" : "s"} and saved the unreceived PO quantities.` : "Buyer updated unreceived PO quantities.",
+        user: actor
+      });
     }
     if (amendmentNeeded) {
       const reason = String(body.amendmentReason || "").trim();
@@ -79210,6 +79294,7 @@ module.exports = {
   purchaseOrderStatusAfterReceiptCorrection,
   applyPurchaseOrderReceiptHistoryCorrection,
   createManualPurchaseOrder,
+  purchaseOrderCatalogAddition,
   manualPurchaseOrderDraftIssues,
   validatePurchaseOrderReceiptLines,
   openPurchaseOrderExpectationsFromState,
