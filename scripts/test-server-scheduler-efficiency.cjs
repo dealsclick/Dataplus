@@ -21,7 +21,8 @@ assert.match(orderRoutingScan, /sort: "created-asc"/, 'order routing must rescue
 assert.match(orderRoutingScan, /page <= totalPages/, 'order routing must continue beyond the first page when necessary');
 assert.doesNotMatch(orderRoutingScan, /limit: 1000/, 'order routing must not strand orders behind a fixed newest-order window');
 const orderRoutingQueue = functionBody('processScheduledOrderRouting');
-assert.match(orderRoutingQueue, /workerTask: "paid-order-routing"/, 'the web scheduler must queue routing on the background worker');
+assert.match(orderRoutingQueue, /workerTask: "paid-order-routing"/, 'the web scheduler must queue routing on a worker');
+assert.match(orderRoutingQueue, /queuePriority: 110/, 'paid-order routing must outrank background refresh work without delaying label purchases');
 assert.match(orderRoutingQueue, /candidateFingerprint/, 'the web scheduler must identify repeated candidate sets');
 assert.match(orderRoutingQueue, /SCHEDULED_ORDER_ROUTING_NOOP_COOLDOWN_MS/, 'the web scheduler must back off after a no-change routing pass');
 assert.doesNotMatch(orderRoutingQueue, /readDbFast|readOrdersByIds|routeOrderForFulfillment/, 'the web scheduler must not execute routing work');

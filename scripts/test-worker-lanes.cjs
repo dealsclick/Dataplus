@@ -11,6 +11,7 @@ assert.equal(jobWorkerStatus({workerId:'manual-new'},workers).workerId,'manual-n
 assert.equal(summarizeWorkers([{lastSeenAt:'2000-01-01',status:'running'}],true).online,false);
 assert.equal(summarizeWorkers([],true).online,false);
 assert.match(laneSql, /workerPayload'->>'background'/, 'explicit background jobs must be claimable by the background lane');
+assert.match(laneSql, /paid-order-routing/, 'paid-order routing must use the fulfillment worker even when scheduled');
 assert.equal(supportsTask('background', 'ebay-catalog-sync'), true);
 assert.equal(supportsTask('background', 'shopify-order-import'), false);
 assert.equal(supportsTask('orders-shopify', 'shopify-order-import'), true);
@@ -22,8 +23,9 @@ assert.equal(supportsTask('background', 'tiktok-settlements'), true);
 assert.equal(supportsTask('walmart', 'walmart-orders'), true);
 assert.equal(supportsTask('carrier', 'fulfillment-rate-refresh'), true);
 assert.equal(supportsTask('carrier', 'fulfillment-label-purchase'), true);
+assert.equal(supportsTask('carrier', 'paid-order-routing'), true);
 assert.equal(supportsTask('carrier', 'fulfillment-tracking-refresh'), false);
-assert.deepEqual(CARRIER_TASKS, ['fulfillment-rate-refresh', 'fulfillment-label-purchase']);
+assert.deepEqual(CARRIER_TASKS, ['paid-order-routing', 'fulfillment-rate-refresh', 'fulfillment-label-purchase']);
 assert.ok(HEAVY_RESOURCE_TASKS.includes('product-dump-import'));
 assert.ok(HEAVY_RESOURCE_TASKS.includes('supplier-coverage-refresh'));
 assert.ok(HEAVY_RESOURCE_TASKS.includes('walmart-bulk-launch'));
@@ -55,7 +57,7 @@ const {Pool}=require('pg');const url=process.env.WORKER_TEST_DATABASE_URL;
 if(!url || !['localhost','127.0.0.1'].includes(new URL(url).hostname)) throw new Error('Use an explicit local WORKER_TEST_DATABASE_URL');
 (async()=>{const pool=new Pool({connectionString:url});const c=await pool.connect();try{
 await c.query('begin');await c.query('create temp table lane_jobs(name text,raw jsonb) on commit drop');
-const cases=[['manual launch',{workerTask:'walmart-bulk-launch'},'walmart'],['Scheduled feed',{workerTask:'vendor-feed-import'},'background'],['Walmart order import',{workerTask:'walmart-orders'},'walmart'],['Shopify order import',{workerTask:'shopify-order-import'},'orders-shopify'],['scheduled eBay returns',{workerTask:'ebay-return-import',scheduled:true},'orders-ebay'],['Temu status',{workerTask:'temu-order-status'},'orders-temu'],['TikTok order import',{workerTask:'tiktok-orders'},'orders-tiktok'],['manual rates',{workerTask:'fulfillment-rate-refresh',workerPayload:{background:true,scheduled:false}},'carrier'],['scheduled rates',{workerTask:'fulfillment-rate-refresh',workerPayload:{background:true,scheduled:true}},'background'],['label purchase',{workerTask:'fulfillment-label-purchase',workerPayload:{background:true}},'carrier'],['sync',{workerTask:'shopify-inventory-update',workerPayload:{scheduled:true}},'background'],['explicit background sync',{workerTask:'ebay-catalog-sync',workerPayload:{background:true}},'background'],['manual sync',{workerTask:'shopify-inventory-update',scheduled:false},'manual']];
+const cases=[['manual launch',{workerTask:'walmart-bulk-launch'},'walmart'],['Scheduled feed',{workerTask:'vendor-feed-import'},'background'],['Walmart order import',{workerTask:'walmart-orders'},'walmart'],['Shopify order import',{workerTask:'shopify-order-import'},'orders-shopify'],['scheduled eBay returns',{workerTask:'ebay-return-import',scheduled:true},'orders-ebay'],['Temu status',{workerTask:'temu-order-status'},'orders-temu'],['TikTok order import',{workerTask:'tiktok-orders'},'orders-tiktok'],['paid order routing',{workerTask:'paid-order-routing',workerPayload:{background:true,scheduled:true}},'carrier'],['manual rates',{workerTask:'fulfillment-rate-refresh',workerPayload:{background:true,scheduled:false}},'carrier'],['scheduled rates',{workerTask:'fulfillment-rate-refresh',workerPayload:{background:true,scheduled:true}},'background'],['label purchase',{workerTask:'fulfillment-label-purchase',workerPayload:{background:true}},'carrier'],['sync',{workerTask:'shopify-inventory-update',workerPayload:{scheduled:true}},'background'],['explicit background sync',{workerTask:'ebay-catalog-sync',workerPayload:{background:true}},'background'],['manual sync',{workerTask:'shopify-inventory-update',scheduled:false},'manual']];
 const testLaneSql=laneSql.replace(/\$(4|5|6|7|8)\b/g,(_,value)=>`$${Number(value)-3}`);
 for(const [name,raw,lane]of cases){await c.query('truncate lane_jobs');await c.query('insert into lane_jobs values($1,$2)',[name,raw]);const result=await c.query(`select ${testLaneSql} lane from lane_jobs`,[SHOPIFY_ORDER_TASKS,EBAY_ORDER_TASKS,TEMU_ORDER_TASKS,TIKTOK_ORDER_TASKS,WALMART_TASKS]);assert.equal(result.rows[0].lane,lane);}
 await c.query('rollback');console.log('PASS SQL worker routing for independent marketplace order lanes and background work');

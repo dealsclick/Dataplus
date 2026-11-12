@@ -79462,6 +79462,7 @@ async function processScheduledOrderRouting() {
       processedRows: 0,
       progressPercent: 0,
       phase: "queued",
+      queuePriority: 110,
       workerTask: "paid-order-routing",
       workerPayload: { scheduled: true, background: true, candidateIds, candidateFingerprint },
       message: `${candidateIds.length} paid order${candidateIds.length === 1 ? " is" : "s are"} queued for fulfillment routing.`
