@@ -37972,11 +37972,89 @@ function createInventoryFromOrderLine(db, order, line, sku, body = {}) {
   return product;
 }
 
+function compactCatalogIdentifier(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function supplierSourcingPriority(db = {}, value = {}) {
+  const vendor = findVendorById(db, value.vendorId || value.id)
+    || findVendorByName(db, String(value.vendorName || value.supplier || value.vendor || "").trim());
+  const configured = Number(
+    vendor?.purchaseOrderRules?.sourcingPriority
+    ?? vendor?.purchaseOrderRules?.fulfillmentPriority
+    ?? 1000
+  );
+  return Number.isFinite(configured) && configured > 0 ? configured : 1000;
+}
+
+function importedOrderProductMatch(product = {}, importedSku = "") {
+  const literal = String(importedSku || "").trim().toLowerCase();
+  const compact = compactCatalogIdentifier(importedSku);
+  if (!literal) return null;
+  const directValues = [product.sku, product.id]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean);
+  const aliasValues = [
+    ...(product.aliases || []).map((alias) => alias.aliasSku || alias.sku || alias.value),
+    ...(product.shadowSkus || []).flatMap((shadow) => [shadow.shadowSku, shadow.marketplaceSku, shadow.channelSku])
+  ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+  const supplierValues = (product.supplierSourceSkus || [])
+    .map((entry) => String(entry.sourceSku || entry.sku || "").trim().toLowerCase())
+    .filter(Boolean);
+  const identifiers = [
+    ...(product.orderIdentifiers || []).map((entry) => ({ type: entry.type || "identifier", value: entry.value })),
+    { type: "vendor-sku", value: product.vendorSku },
+    { type: "manufacturer-part-number", value: product.mfrPartNumber || product.manufacturerPartNumber || product.mpn },
+    { type: "upc", value: product.barcode || product.upc || product.gtin || product.upcCode }
+  ];
+  let result = null;
+  if (directValues.includes(literal)) result = { mode: "catalog-sku", score: 100 };
+  else if (aliasValues.includes(literal)) result = { mode: "catalog-alias", score: 98 };
+  else if (supplierValues.includes(literal) || supplierValues.some((value) => compact && compactCatalogIdentifier(value) === compact)) result = { mode: "supplier-sku", score: 94 };
+  else {
+    const identifier = identifiers.find((entry) => {
+      const value = String(entry.value || "").trim().toLowerCase();
+      return value && (value === literal || (compact.length >= 4 && compactCatalogIdentifier(value) === compact));
+    });
+    if (identifier) {
+      const type = String(identifier.type || "identifier").toLowerCase();
+      result = {
+        mode: type.includes("manufacturer") || type === "mpn" ? "manufacturer-part-number" : type.includes("upc") || type.includes("gtin") || type.includes("barcode") ? "upc" : type.includes("vendor") || type.includes("supplier") ? "supplier-sku" : "catalog-identifier",
+        score: type.includes("manufacturer") || type === "mpn" ? 90 : 92
+      };
+    }
+  }
+  if (!result) return null;
+  if (product.systemCreatedFromOrderImport === true && product.catalogAttentionRequired === true) {
+    result.score -= 80;
+    result.systemDraft = true;
+  }
+  return result;
+}
+
+function selectImportedOrderProduct(db = {}, products = [], importedSku = "") {
+  return (products || []).map((product) => ({ product, match: importedOrderProductMatch(product, importedSku) }))
+    .filter((entry) => entry.match)
+    .sort((left, right) => {
+      const score = Number(right.match.score || 0) - Number(left.match.score || 0);
+      if (score) return score;
+      const active = Number(right.product.active !== false && !right.product.toBeDiscontinued) - Number(left.product.active !== false && !left.product.toBeDiscontinued);
+      if (active) return active;
+      const priority = supplierSourcingPriority(db, left.product) - supplierSourcingPriority(db, right.product);
+      if (priority) return priority;
+      const stock = Number(right.product.available ?? right.product.qty ?? 0) - Number(left.product.available ?? left.product.qty ?? 0);
+      if (stock) return stock;
+      const leftCost = Number(left.product.sellUnitCost ?? left.product.unitCost ?? left.product.cost ?? Number.MAX_SAFE_INTEGER);
+      const rightCost = Number(right.product.sellUnitCost ?? right.product.unitCost ?? right.product.cost ?? Number.MAX_SAFE_INTEGER);
+      return leftCost - rightCost || String(left.product.sku || "").localeCompare(String(right.product.sku || ""));
+    })[0] || null;
+}
+
 async function ensureProductsForImportedOrders(db = {}, orders = [], options = {}) {
   if (!postgres.isPostgresEnabled() || options.historicalBackfill === true) return { createdProducts: [], attentionSkus: [] };
   const channelName = String(options.channel || orders[0]?.source || orders[0]?.channel || "Marketplace").trim() || "Marketplace";
   const channel = orderChannelPolicy(db, { source: channelName, channel: channelName });
-  if (channel?.settings?.createMissingOrderSkusFromSource !== true) return { createdProducts: [], attentionSkus: [] };
+  const createMissingOrderSkus = channel?.settings?.createMissingOrderSkusFromSource === true;
 
   const firstLineBySku = new Map();
   for (const order of Array.isArray(orders) ? orders : []) {
@@ -37988,20 +38066,56 @@ async function ensureProductsForImportedOrders(db = {}, orders = [], options = {
   }
   if (!firstLineBySku.size) return { createdProducts: [], attentionSkus: [] };
 
-  const existing = await postgres.readProductsByKeys([...firstLineBySku.values()].map((entry) => entry.sku), { includeMarketplaceIds: false });
+  const existing = await postgres.readProductsForOrderSkus([...firstLineBySku.values()].map((entry) => entry.sku));
   const resolved = new Set();
-  for (const product of existing || []) {
-    for (const value of [
-      product.sku,
-      ...(product.aliases || []).map((alias) => alias.aliasSku || alias.sku || alias.value),
-      ...(product.shadowSkus || []).flatMap((shadow) => [shadow.shadowSku, shadow.marketplaceSku])
-    ]) {
-      if (value) resolved.add(String(value).trim().toLowerCase());
+  const selectedByImportedSku = new Map();
+  for (const [key, entry] of firstLineBySku) {
+    const selected = selectImportedOrderProduct(db, existing, entry.sku);
+    if (!selected) continue;
+    const family = (existing || []).filter((product) => importedOrderProductMatch(product, entry.sku));
+    selectedByImportedSku.set(key, { ...selected, family });
+    resolved.add(key);
+  }
+  const touchedOrders = new Set();
+  for (const order of Array.isArray(orders) ? orders : []) {
+    const mapped = [];
+    for (const line of orderLineItems(order)) {
+      const importedSku = String(line.sku || line.originalSku || line.channelSku || line.channelVariantSku || "").trim();
+      const selected = selectedByImportedSku.get(importedSku.toLowerCase());
+      if (!selected) continue;
+      const product = selected.product;
+      line.productId = product.id || line.productId || "";
+      line.catalogIdentityMatch = {
+        mode: selected.match.mode,
+        importedSku,
+        catalogSku: product.sku,
+        productId: product.id || "",
+        matchedAt: new Date().toISOString()
+      };
+      line.catalogFamilyProductIds = [...new Set(selected.family.map((member) => member.id).filter(Boolean))];
+      line.catalogFamilySkus = [...new Set(selected.family.map((member) => member.sku).filter(Boolean))];
+      if (String(product.sku || "").toLowerCase() !== importedSku.toLowerCase()) {
+        line.originalSku = line.originalSku || importedSku;
+        line.marketplaceSku = line.marketplaceSku || line.channelSku || importedSku;
+        line.mappedFromSku = importedSku;
+        line.sku = product.sku;
+        line.skuMappingMode = selected.match.mode;
+        mapped.push(`${importedSku} -> ${product.sku}`);
+      }
+    }
+    if (mapped.length) {
+      addOrderWorkflowEvent(order, {
+        step: "resolve_catalog_product_family",
+        title: "Order SKU matched to catalog family",
+        message: `${[...new Set(mapped)].join(", ")}. Independent supplier SKUs remain available for inventory and purchasing selection.`,
+        user: "DataPlus system"
+      });
+      touchedOrders.add(order.id || order.orderNumber);
     }
   }
 
   const createdProducts = [];
-  const touchedOrders = new Set();
+  if (!createMissingOrderSkus) return { createdProducts, attentionSkus: [], matchedProducts: selectedByImportedSku.size, touchedOrders: touchedOrders.size };
   db.inventory = Array.isArray(db.inventory) ? db.inventory : [];
   for (const [key, entry] of firstLineBySku) {
     if (resolved.has(key)) continue;
@@ -38020,7 +38134,7 @@ async function ensureProductsForImportedOrders(db = {}, orders = [], options = {
     createdProducts.push(product);
     resolved.add(key);
   }
-  if (!createdProducts.length) return { createdProducts: [], attentionSkus: [] };
+  if (!createdProducts.length) return { createdProducts: [], attentionSkus: [], matchedProducts: selectedByImportedSku.size, touchedOrders: touchedOrders.size };
 
   await postgres.upsertProductsFromState(createdProducts, { insertOnly: true });
   await postgres.upsertInventoryLevelsFromProducts(createdProducts);
@@ -38060,7 +38174,7 @@ async function ensureProductsForImportedOrders(db = {}, orders = [], options = {
     jobId: options.jobId || "",
     message: `${createdProducts.length} draft catalog SKU${createdProducts.length === 1 ? " was" : "s were"} created by DataPlus and added to Catalog Readiness for review: ${createdProducts.map((product) => product.sku).join(", ")}`
   });
-  return { createdProducts, attentionSkus: createdProducts.map((product) => product.sku), touchedOrders: touchedOrders.size };
+  return { createdProducts, attentionSkus: createdProducts.map((product) => product.sku), matchedProducts: selectedByImportedSku.size, touchedOrders: touchedOrders.size };
 }
 
 function releaseOrderReservation(db, order, body = {}) {
@@ -40116,6 +40230,8 @@ function routingSupplierCandidateRows(product = {}, line = {}) {
     || [...orderSourceSkus].some((orderedSku) => legacyPackSkuMatchesProduct(orderedSku, primarySku, productUomQty(product)));
   return [
     {
+      sourceProductId: product.id || "",
+      sourceProductSku: product.sku || "",
       vendorId: line.vendorId,
       supplier: line.vendor || line.supplier,
       vendorSku: line.vendorSku,
@@ -40128,6 +40244,8 @@ function routingSupplierCandidateRows(product = {}, line = {}) {
       matchMethod: "order_line"
     },
     {
+      sourceProductId: product.id || "",
+      sourceProductSku: product.sku || "",
       vendorId: product.vendorId,
       supplier: product.supplier || product.vendor,
       vendorSku: product.vendorSku,
@@ -40143,9 +40261,11 @@ function routingSupplierCandidateRows(product = {}, line = {}) {
       exactOrderSource: primaryMatchesOrderSource,
       matchMethod: "primary_supplier"
     },
-    ...(Array.isArray(product.vendorOffers) ? product.vendorOffers.map((offer) => ({ ...offer, matchMethod: offer.matchMethod || offer.matchType || "supplier_coverage" })) : []),
+    ...(Array.isArray(product.vendorOffers) ? product.vendorOffers.map((offer) => ({ ...offer, sourceProductId: product.id || "", sourceProductSku: product.sku || "", matchMethod: offer.matchMethod || offer.matchType || "supplier_coverage" })) : []),
     ...(Array.isArray(product.sourceCatalogMatches) ? product.sourceCatalogMatches.map((match) => ({
       ...match,
+      sourceProductId: product.id || "",
+      sourceProductSku: product.sku || "",
       vendorSku: match.vendorSku || match.sourceSku,
       stockQty: match.qty,
       unitCost: match.cost,
@@ -40186,7 +40306,10 @@ function normalizedRoutingSupplierCandidate(db, product = {}, line = {}, row = {
     uomQty: Math.max(1, Number(row.uomQty ?? row.packQty ?? row.packageQty ?? 1) || 1),
     sourceKey: String(row.sourceKey || row.source || ""),
     matchMethod: String(row.matchMethod || "supplier_coverage"),
-    exactOrderSource: row.exactOrderSource === true
+    exactOrderSource: row.exactOrderSource === true,
+    sourceProductId: String(row.sourceProductId || product.id || ""),
+    sourceProductSku: String(row.sourceProductSku || product.sku || ""),
+    sourcingPriority: supplierSourcingPriority(db, vendor)
   };
 }
 
@@ -40214,15 +40337,40 @@ function routingSupplierOffers(db, product = {}, line = {}) {
     if (!offer) continue;
     const key = String(vendor.id || vendor.name).toLowerCase();
     const existing = offers.get(key);
-    const offerScore = (offer.exactOrderSource ? 1000000000 : 0) + (offer.availabilityKnown && offer.availableQty > 0 ? 1000000 : 0) + offer.availableQty - offer.unitCost / 100000;
-    const existingScore = existing ? (existing.exactOrderSource ? 1000000000 : 0) + (existing.availabilityKnown && existing.availableQty > 0 ? 1000000 : 0) + existing.availableQty - existing.unitCost / 100000 : -Infinity;
+    const offerScore = (offer.availabilityKnown && offer.availableQty > 0 ? 1000000000 : 0) - offer.sourcingPriority * 100000 + (offer.exactOrderSource ? 1000 : 0) + offer.availableQty - offer.unitCost / 100000;
+    const existingScore = existing ? (existing.availabilityKnown && existing.availableQty > 0 ? 1000000000 : 0) - existing.sourcingPriority * 100000 + (existing.exactOrderSource ? 1000 : 0) + existing.availableQty - existing.unitCost / 100000 : -Infinity;
     if (!existing || offerScore > existingScore) offers.set(key, offer);
   }
   return [...offers.values()].sort((left, right) => {
-    const sourceMatch = Number(right.exactOrderSource === true) - Number(left.exactOrderSource === true);
     const leftStock = left.availabilityKnown && left.availableQty > 0 ? 0 : 1;
     const rightStock = right.availabilityKnown && right.availableQty > 0 ? 0 : 1;
-    return sourceMatch || leftStock - rightStock || left.unitCost - right.unitCost || left.vendorName.localeCompare(right.vendorName);
+    const sourceMatch = Number(right.exactOrderSource === true) - Number(left.exactOrderSource === true);
+    return leftStock - rightStock || left.sourcingPriority - right.sourcingPriority || left.unitCost - right.unitCost || sourceMatch || left.vendorName.localeCompare(right.vendorName);
+  });
+}
+
+function routingSupplierOffersForFamily(db, products = [], line = {}) {
+  const offers = new Map();
+  for (const product of products || []) {
+    for (const offer of routingSupplierOffers(db, product, line)) {
+      const key = String(offer.vendorId || offer.vendorName || "").toLowerCase();
+      const existing = offers.get(key);
+      const offerStock = offer.availabilityKnown && offer.availableQty > 0 ? 0 : 1;
+      const existingStock = existing?.availabilityKnown && existing.availableQty > 0 ? 0 : 1;
+      const shouldReplace = !existing
+        || offerStock < existingStock
+        || (offerStock === existingStock && offer.sourcingPriority < existing.sourcingPriority)
+        || (offerStock === existingStock && offer.sourcingPriority === existing.sourcingPriority && offer.unitCost < existing.unitCost);
+      if (shouldReplace) offers.set(key, offer);
+    }
+  }
+  return [...offers.values()].sort((left, right) => {
+    const leftStock = left.availabilityKnown && left.availableQty > 0 ? 0 : 1;
+    const rightStock = right.availabilityKnown && right.availableQty > 0 ? 0 : 1;
+    return leftStock - rightStock
+      || left.sourcingPriority - right.sourcingPriority
+      || left.unitCost - right.unitCost
+      || left.vendorName.localeCompare(right.vendorName);
   });
 }
 
@@ -40422,19 +40570,69 @@ function fulfillmentWarehousePlan(db = {}, order = {}, line = {}, product = {}, 
   return { channel, settings, mappings, mappingByWarehouse, matchedRule, warehouses, restrict: restrict || Boolean(shadowWarehouseId), shadowWarehouseId };
 }
 
-async function fulfillmentProductForOrderedSku(importedSku = "", db = {}) {
+async function fulfillmentProductFamilyForOrderedSku(importedSku = "", db = {}) {
   const orderedSku = String(importedSku || "").trim();
-  if (!orderedSku) return null;
-  const direct = await postgres.readProductByKey(orderedSku);
-  if (direct) return direct;
-  const candidate = legacyPackSkuCandidate(orderedSku);
-  if (!candidate) return null;
-  const parent = await postgres.readProductByKey(candidate.parentSku);
-  if (!parent || productUomQty(parent) !== candidate.quantity) return null;
-  const aliases = productCompatibilityAliases(parent, db);
-  const compatible = aliases.some((alias) => alias.active !== false
-    && String(alias.aliasSku || alias.sku || alias.value || "").trim().toLowerCase() === orderedSku.toLowerCase());
-  return compatible ? { ...parent, aliases } : null;
+  if (!orderedSku) return { product: null, products: [], match: null, similarity: null };
+  const candidates = await postgres.readProductsForOrderSkus([orderedSku]);
+  const selected = selectImportedOrderProduct(db, candidates, orderedSku);
+  let product = selected ? await postgres.readProductByKey(selected.product.id || selected.product.sku) : null;
+  if (!product) {
+    const direct = await postgres.readProductByKey(orderedSku);
+    if (direct) product = direct;
+  }
+  if (!product) {
+    const candidate = legacyPackSkuCandidate(orderedSku);
+    if (candidate) {
+      const parent = await postgres.readProductByKey(candidate.parentSku);
+      if (parent && productUomQty(parent) === candidate.quantity) {
+        const aliases = productCompatibilityAliases(parent, db);
+        const compatible = aliases.some((alias) => alias.active !== false
+          && String(alias.aliasSku || alias.sku || alias.value || "").trim().toLowerCase() === orderedSku.toLowerCase());
+        if (compatible) product = { ...parent, aliases };
+      }
+    }
+  }
+  if (!product) return { product: null, products: [], match: selected?.match || null, similarity: null };
+  const similarity = await postgres.readProductSimilarityGroup({ productId: product.id, sku: product.sku }).catch(() => null);
+  const familyKeys = [...new Set([
+    product.id,
+    ...candidates.map((candidate) => candidate.id),
+    ...(similarity?.members || []).map((member) => member.productId)
+  ].filter(Boolean))];
+  const hydrated = familyKeys.length
+    ? await postgres.readProductsByKeys(familyKeys, { includeMarketplaceIds: false, includeInventoryLevels: true, includeVendorOffers: true })
+    : [];
+  const byId = new Map(hydrated.map((member) => [String(member.id || ""), member]));
+  const products = [product, ...hydrated]
+    .map((member) => byId.get(String(member.id || "")) || member)
+    .filter((member, index, all) => member?.id && all.findIndex((candidate) => String(candidate.id || "") === String(member.id || "")) === index);
+  const primary = products.find((member) => String(member.id || "") === String(product.id || "")) || product;
+  return { product: primary, products: products.length ? products : [primary], match: selected?.match || importedOrderProductMatch(primary, orderedSku), similarity };
+}
+
+async function fulfillmentProductForOrderedSku(importedSku = "", db = {}) {
+  return (await fulfillmentProductFamilyForOrderedSku(importedSku, db)).product;
+}
+
+function familyProductsForWarehouse(db = {}, products = [], warehouse = {}, systemSettings = {}) {
+  return (products || []).map((product) => {
+    const stock = ensureInventoryWarehouseStock(product, warehouse);
+    return {
+      product,
+      stock,
+      available: physicalAvailableQuantity(stock, systemSettings),
+      priority: supplierSourcingPriority(db, product),
+      cost: Number(product.sellUnitCost ?? product.unitCost ?? product.cost ?? Number.MAX_SAFE_INTEGER)
+    };
+  }).sort((left, right) => {
+    const leftStock = left.available > 0 ? 0 : 1;
+    const rightStock = right.available > 0 ? 0 : 1;
+    return leftStock - rightStock
+      || left.priority - right.priority
+      || left.cost - right.cost
+      || right.available - left.available
+      || String(left.product.sku || "").localeCompare(String(right.product.sku || ""));
+  });
 }
 
 async function routeOrderForFulfillment(db, order, body = {}) {
@@ -40473,7 +40671,9 @@ async function routeOrderForFulfillment(db, order, body = {}) {
       });
       continue;
     }
-    let product = await fulfillmentProductForOrderedSku(importedSku, db);
+    let familyResolution = await fulfillmentProductFamilyForOrderedSku(importedSku, db);
+    let product = familyResolution.product;
+    let familyProducts = familyResolution.products;
     if (!product) {
       const channelPolicy = orderChannelPolicy(db, order);
       if (importedSku && channelPolicy?.settings?.createMissingOrderSkusFromSource === true) {
@@ -40496,6 +40696,8 @@ async function routeOrderForFulfillment(db, order, body = {}) {
           await postgres.upsertProductsFromState([product]);
           await postgres.upsertInventoryLevelsFromProducts([product]);
         }
+        familyProducts = [product];
+        familyResolution = { product, products: familyProducts, match: importedOrderProductMatch(product, importedSku), similarity: null };
         touchedProducts.push(product);
         resolveOrderRoutingExceptions(order, lineIndex, ["missing_catalog_product"]);
         addOrderWorkflowEvent(order, {
@@ -40545,7 +40747,10 @@ async function routeOrderForFulfillment(db, order, body = {}) {
       id: crypto.randomUUID(), lineIndex, sku: line.sku, createdAt: new Date().toISOString(),
       channel: plan.channel?.name || order.channel || order.source || "Direct",
       ruleId: plan.matchedRule?.id || "", ruleName: plan.matchedRule?.name || "",
-      restrictInventoryUsage: plan.restrict, consideredWarehouses: plan.warehouses.map((warehouse) => warehouse.name || warehouse.id), decisions: []
+      restrictInventoryUsage: plan.restrict,
+      catalogIdentityMatch: familyResolution.match || line.catalogIdentityMatch || null,
+      productFamilySkus: familyProducts.map((member) => member.sku).filter(Boolean),
+      consideredWarehouses: plan.warehouses.map((warehouse) => warehouse.name || warehouse.id), decisions: []
     };
     order.routingExplanation = order.routingExplanation.filter((entry) => entry.lineIndex !== lineIndex);
     order.routingExplanation.push(explanation);
@@ -40554,26 +40759,41 @@ async function routeOrderForFulfillment(db, order, body = {}) {
     const warehouses = plan.warehouses.filter(isPhysicalFulfillmentWarehouse);
     for (const warehouse of warehouses) {
       if (!product || remaining <= 0) break;
-      const stock = ensureInventoryWarehouseStock(product, warehouse);
-      const available = physicalAvailableQuantity(stock, systemSettings);
-      const qty = Math.min(remaining, Math.floor(available / inventoryMultiplier));
-      const inventoryQty = qty * inventoryMultiplier;
-      if (!qty) { explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "skipped", reason: "No available quantity." }); continue; }
-      stock.reserved = Number(stock.reserved || 0) + inventoryQty;
-      stock.updatedAt = new Date().toISOString();
-      syncInventoryTotalsFromWarehouses(product);
-      product.updatedAt = new Date().toISOString();
-      touchedProducts.push(product);
-      created.push(createWorkflowRoute(order, {
-        type: "warehouse", status: "allocated", lineIndex, sku: line.sku, title: line.title || line.sku, qty,
-        inventoryQty, inventoryMultiplier,
-        warehouseId: warehouse.id, warehouseName: warehouse.name, productId: product.id,
-        ...(body.sourceReceiptId ? { sourceReceiptId: body.sourceReceiptId, sourceReceiptNumber: body.sourceReceiptNumber || "" } : {}),
-        reservationExpiresAt: warehouseReservationExpiryAt(systemSettings)
-      }));
-      explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "routed", routeType: "warehouse", qty, reason: plan.matchedRule ? `Matched routing rule ${plan.matchedRule.name}.` : "Selected by channel warehouse priority and available stock." });
-      addInventoryLedger(db, product, { type: "workflow_reservation", source: "order_workflow", referenceId: order.id, referenceNumber: order.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name, quantityChange: 0, reservedChange: inventoryQty, reason: `Workflow allocation for ${order.orderNumber}: ${qty} sell unit${qty === 1 ? "" : "s"} (${inventoryQty} piece${inventoryQty === 1 ? "" : "s"})`, user: body.user || "System" });
-      remaining -= qty;
+      const inventoryCandidates = familyProductsForWarehouse(db, familyProducts, warehouse, systemSettings);
+      let warehouseAllocated = 0;
+      for (const candidate of inventoryCandidates) {
+        if (remaining <= 0) break;
+        const candidateMultiplier = orderLineInventoryMultiplier(line, candidate.product || {});
+        const qty = Math.min(remaining, Math.floor(candidate.available / candidateMultiplier));
+        const inventoryQty = qty * candidateMultiplier;
+        if (!qty) continue;
+        candidate.stock.reserved = Number(candidate.stock.reserved || 0) + inventoryQty;
+        candidate.stock.updatedAt = new Date().toISOString();
+        syncInventoryTotalsFromWarehouses(candidate.product);
+        candidate.product.updatedAt = new Date().toISOString();
+        touchedProducts.push(candidate.product);
+        created.push(createWorkflowRoute(order, {
+          type: "warehouse", status: "allocated", lineIndex, sku: line.sku, title: line.title || line.sku, qty,
+          inventoryQty, inventoryMultiplier: candidateMultiplier,
+          warehouseId: warehouse.id, warehouseName: warehouse.name, productId: candidate.product.id,
+          inventorySku: candidate.product.sku,
+          listingSku: line.marketplaceSku || line.originalSku || importedSku,
+          supplierPriority: candidate.priority,
+          ...(body.sourceReceiptId ? { sourceReceiptId: body.sourceReceiptId, sourceReceiptNumber: body.sourceReceiptNumber || "" } : {}),
+          reservationExpiresAt: warehouseReservationExpiryAt(systemSettings)
+        }));
+        explanation.decisions.push({
+          warehouseId: warehouse.id, warehouseName: warehouse.name, status: "routed", routeType: "warehouse", qty,
+          inventorySku: candidate.product.sku, supplierPriority: candidate.priority,
+          reason: String(candidate.product.sku || "").toLowerCase() === String(line.sku || "").toLowerCase()
+            ? (plan.matchedRule ? `Matched routing rule ${plan.matchedRule.name}.` : "Selected by channel warehouse priority and available stock.")
+            : `Used related managed SKU ${candidate.product.sku} because it has physical stock for the same product identity.`
+        });
+        addInventoryLedger(db, candidate.product, { type: "workflow_reservation", source: "order_workflow", referenceId: order.id, referenceNumber: order.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name, quantityChange: 0, reservedChange: inventoryQty, reason: `Workflow allocation for ${order.orderNumber}: ${qty} sell unit${qty === 1 ? "" : "s"} (${inventoryQty} piece${inventoryQty === 1 ? "" : "s"}) from related SKU ${candidate.product.sku}`, user: body.user || "System" });
+        remaining -= qty;
+        warehouseAllocated += qty;
+      }
+      if (!warehouseAllocated) explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "skipped", reason: `No unreserved physical quantity across ${familyProducts.length} related managed SKU${familyProducts.length === 1 ? "" : "s"}.` });
     }
     if (remaining > 0 && product && ebayLiveOrderUsesCommittedStock(order, line)) {
       const warehouse = warehouses[0] || null;
@@ -40637,7 +40857,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
       continue;
     }
     if (remaining > 0) {
-      const supplierOffers = routingSupplierOffers(db, product || {}, line);
+      const supplierOffers = routingSupplierOffersForFamily(db, familyProducts.length ? familyProducts : [product].filter(Boolean), line);
       const blockedSupplierOffers = supplierOffers.length ? [] : routingBlockedSupplierOffers(db, product || {}, line);
       const supplierOffer = supplierOffers.find((offer) => offer.availabilityKnown && offer.availableQty >= remaining)
         || supplierOffers.find((offer) => offer.availabilityKnown && offer.availableQty > 0)
@@ -40647,6 +40867,17 @@ async function routeOrderForFulfillment(db, order, body = {}) {
       const vendor = supplierOffer ? findVendorById(db, supplierOffer.vendorId) : null;
       const sourceWarehouse = supplierOffer ? supplierSourceWarehouseForOffer(db, supplierOffer, plan) : null;
       const supplierHasEnough = Boolean(supplierOffer && (!supplierOffer.availabilityKnown || supplierOffer.availableQty >= remaining));
+      explanation.supplierCandidates = supplierOffers.map((offer) => ({
+        vendorId: offer.vendorId,
+        vendorName: offer.vendorName,
+        vendorSku: offer.vendorSku,
+        sourceProductSku: offer.sourceProductSku,
+        sourcingPriority: offer.sourcingPriority,
+        availabilityKnown: offer.availabilityKnown,
+        availableQty: offer.availableQty,
+        unitCost: offer.unitCost,
+        selected: offer === supplierOffer
+      }));
       const reviewReason = !supplierOffer
         ? blockedSupplierOffers.length
           ? `${blockedSupplierOffers[0].vendorName} is ${blockedSupplierOffers[0].vendorStatus || "inactive"}; activate the supplier profile or choose another active supplier before creating the purchase order.`
@@ -40668,7 +40899,10 @@ async function routeOrderForFulfillment(db, order, body = {}) {
           supplierOffers,
           unitCost: supplierOffer?.unitCost || 0, availableQty: supplierOffer?.availableQty || 0,
           availabilityKnown: supplierOffer?.availabilityKnown === true, sourceWarehouseId: sourceWarehouse?.id || "",
-          sourceWarehouseName: sourceWarehouse?.name || "", supplierMatchMethod: supplierOffer?.matchMethod || ""
+          sourceWarehouseName: sourceWarehouse?.name || "", supplierMatchMethod: supplierOffer?.matchMethod || "",
+          supplierPriority: supplierOffer?.sourcingPriority || 1000,
+          supplierManagedProductId: supplierOffer?.sourceProductId || "",
+          supplierManagedSku: supplierOffer?.sourceProductSku || ""
         }));
         explanation.decisions.push({ status: "routed", routeType: "drop_ship", qty: remaining, reason: dropshipPerOrder ? "Supplier is configured to create one direct-to-customer PO per order." : "Product permits vendor drop shipment." });
         resolveOrderRoutingExceptions(order, lineIndex, ["no_fulfillment_source", "missing_catalog_product", "supplier_unavailable", "supplier_assignment_required"]);
@@ -40686,7 +40920,10 @@ async function routeOrderForFulfillment(db, order, body = {}) {
           availableQty: supplierOffer?.availableQty || 0, availabilityKnown: supplierOffer?.availabilityKnown === true,
           uom: supplierOffer?.uom || "", uomQty: supplierOffer?.uomQty || 1, sourceKey: supplierOffer?.sourceKey || "",
           sourceWarehouseId: sourceWarehouse?.id || "", sourceWarehouseName: sourceWarehouse?.name || "",
-          supplierMatchMethod: supplierOffer?.matchMethod || "", reviewReason
+          supplierMatchMethod: supplierOffer?.matchMethod || "", reviewReason,
+          supplierPriority: supplierOffer?.sourcingPriority || 1000,
+          supplierManagedProductId: supplierOffer?.sourceProductId || "",
+          supplierManagedSku: supplierOffer?.sourceProductSku || ""
         });
         created.push(route);
         pooledRequirements.push(ensurePooledPurchaseRequirement(db, order, route, line, workflowSettings, vendor, sourceWarehouse, {
@@ -43054,6 +43291,61 @@ async function createOutboundLiveQuickProduct({ barcode, title, cost, warehouse,
   return product;
 }
 
+async function outboundInventoryProductForWarehouse(db = {}, scannedProduct = {}, warehouse = {}, options = {}) {
+  const order = options.order || {};
+  const target = options.target || {};
+  const reservedProductIds = new Set((order.fulfillmentRoutes || [])
+    .filter((route) => Number(route.lineIndex) === Number(target.lineIndex)
+      && String(route.warehouseId || "") === String(warehouse.id || "")
+      && ["warehouse", "inventory"].includes(String(route.type || "").toLowerCase())
+      && !["canceled", "cancelled", "released", "void"].includes(String(route.status || "").toLowerCase()))
+    .map((route) => String(route.productId || ""))
+    .filter(Boolean));
+  const similarity = await postgres.readProductSimilarityGroup({ productId: scannedProduct.id, sku: scannedProduct.sku }).catch(() => null);
+  const memberById = new Map((similarity?.members || []).map((member) => [String(member.productId || ""), member]));
+  const familyKeys = [...new Set([
+    scannedProduct.id,
+    ...(similarity?.members || []).map((member) => member.productId)
+  ].filter(Boolean))];
+  const hydrated = familyKeys.length
+    ? await postgres.readProductsByKeys(familyKeys, { includeMarketplaceIds: false, includeInventoryLevels: true })
+    : [];
+  const candidates = [scannedProduct, ...hydrated]
+    .filter((product, index, all) => product?.id && all.findIndex((entry) => String(entry.id || "") === String(product.id || "")) === index)
+    .map((product) => {
+      const stock = ensureInventoryWarehouseStock(product, warehouse);
+      const qty = Math.max(0, Number(stock.qty || 0));
+      const reserved = Math.max(0, Number(stock.reserved || 0));
+      const consumesReservation = reserved > 0 && reservedProductIds.has(String(product.id || ""));
+      const available = consumesReservation ? Math.min(qty, reserved) : Math.max(0, qty - reserved);
+      return {
+        product,
+        stock,
+        available,
+        consumesReservation,
+        priority: supplierSourcingPriority(db, product),
+        cost: Number(product.sellUnitCost ?? product.unitCost ?? product.cost ?? Number.MAX_SAFE_INTEGER),
+        direct: String(product.id || "") === String(scannedProduct.id || ""),
+        similarityMember: memberById.get(String(product.id || "")) || null
+      };
+    })
+    .sort((left, right) => {
+      const leftStock = left.available > 0 ? 0 : 1;
+      const rightStock = right.available > 0 ? 0 : 1;
+      return leftStock - rightStock
+        || left.priority - right.priority
+        || Number(right.direct) - Number(left.direct)
+        || left.cost - right.cost
+        || right.available - left.available
+        || String(left.product.sku || "").localeCompare(String(right.product.sku || ""));
+    });
+  return {
+    selected: candidates.find((candidate) => candidate.available > 0) || null,
+    candidates,
+    similarity
+  };
+}
+
 async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, clientScanId, actor, quickCreate = null, forceItem = false }) {
   return withOutboundLiveItemLock(`${auditId}:${scanId}`, async () => {
     const audit = await outboundAuditStore.read(scope, auditId);
@@ -43124,7 +43416,7 @@ async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, cl
     if (isLikelyTrackingNumber(barcode)) {
       throw Object.assign(new Error("That looks like a new package tracking label. Record it as the next package, then scan its item UPC."), { statusCode: 409 });
     }
-    const state = await postgres.readStateFields(["warehouses"]);
+    const state = await postgres.readStateFields(["warehouses", "vendors"]);
     const warehouse = (state.warehouses || []).find((row) => String(row.id || "") === String(audit.session.warehouseId || ""));
     if (!warehouse || !isPhysicalFulfillmentWarehouse(warehouse)) {
       throw Object.assign(new Error("The outbound audit must use an active physical fulfillment warehouse."), { statusCode: 409 });
@@ -43225,6 +43517,14 @@ async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, cl
           : `${product.sku} was recorded, but the order expected ${item.listingSku || item.listingTitle}. Review the package or skip to the photo.`
       };
     }
+    const scannedProduct = product;
+    const inventoryFamily = await outboundInventoryProductForWarehouse(state, scannedProduct, warehouse, { order, target });
+    const inventorySelection = inventoryFamily.selected;
+    if (!inventorySelection) {
+      const relatedSkus = inventoryFamily.candidates.map((candidate) => candidate.product.sku).filter(Boolean);
+      throw Object.assign(new Error(`${scannedProduct.sku} has no unreserved physical stock in ${warehouse.name}${relatedSkus.length > 1 ? ` across its ${relatedSkus.length} related managed SKUs` : ""}. Receive or adjust a related SKU before shipping it.`), { statusCode: 409 });
+    }
+    product = inventorySelection.product;
     const priorProductItem = (Array.isArray(product.outboundLiveItemScans) ? product.outboundLiveItemScans : [])
       .find((item) => String(item.clientScanId || "") === requestId);
     if (priorProductItem) {
@@ -43238,7 +43538,7 @@ async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, cl
       return { ...recorded, complete: recorded.scan.liveItemStatus === "complete" };
     }
 
-    const stock = ensureInventoryWarehouseStock(product, warehouse);
+    const stock = inventorySelection.stock;
     const qtyBefore = Math.max(0, Number(stock.qty || 0));
     const reservedBefore = Math.max(0, Number(stock.reserved || 0));
     const availableBefore = Math.max(0, qtyBefore - reservedBefore);
@@ -43247,6 +43547,7 @@ async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, cl
     }
     const now = new Date().toISOString();
     stock.qty = qtyBefore - 1;
+    if (inventorySelection.consumesReservation) stock.reserved = Math.max(0, reservedBefore - 1);
     stock.updatedAt = now;
     syncInventoryTotalsFromWarehouses(product);
     product.updatedAt = now;
@@ -43266,6 +43567,10 @@ async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, cl
       soldPrice: Number(target.soldPrice || 0),
       productId: String(product.id || ""),
       sku: String(product.sku || ""),
+      scannedProductId: String(scannedProduct.id || ""),
+      scannedSku: String(scannedProduct.sku || ""),
+      inventoryMatchTypes: inventorySelection.similarityMember?.matchTypes || (inventorySelection.direct ? ["current"] : []),
+      consumedOrderReservation: inventorySelection.consumesReservation,
       title: String(product.title || product.marketplaceTitle || product.sku || ""),
       barcode,
       image: String(product.defaultImage || product.image || product.images?.[0] || ""),
@@ -43273,6 +43578,7 @@ async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, cl
       warehouseId: String(warehouse.id || ""),
       warehouseName: String(warehouse.name || ""),
       quickCreated,
+      relatedInventorySku: !inventorySelection.direct,
       scannedAt: now,
       scannedById: String(actor?.id || ""),
       scannedByName: String(actor?.name || actor?.username || "Warehouse user")
@@ -43305,9 +43611,9 @@ async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, cl
       qtyBefore,
       qtyAfter: stock.qty,
       reservedBefore,
-      reservedAfter: reservedBefore,
+      reservedAfter: Number(stock.reserved || 0),
       quantityChange: -1,
-      reservedChange: 0,
+      reservedChange: inventorySelection.consumesReservation ? -1 : 0,
       reason: `Scanned ${product.sku} for Live listing ${item.listingTitle} in shipment group ${item.shipmentGroupId || "unassigned"}`,
       user: item.scannedByName
     });
@@ -43327,8 +43633,8 @@ async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, cl
       ...recorded,
       complete: recorded.scan.liveItemStatus === "complete",
       message: recorded.scan.liveItemStatus === "complete"
-        ? `${product.sku} assigned to ${item.orderNumber}. All ${recorded.scan.liveItemExpectedCount} items in this shipment group are scanned.`
-        : `${product.sku} assigned to ${item.orderNumber}. ${recorded.scan.liveItemScannedCount} of ${recorded.scan.liveItemExpectedCount} group items scanned.`
+        ? `${product.sku} assigned to ${item.orderNumber}${inventorySelection.direct ? "" : ` using related inventory for scanned SKU ${scannedProduct.sku}`}. All ${recorded.scan.liveItemExpectedCount} items in this shipment group are scanned.`
+        : `${product.sku} assigned to ${item.orderNumber}${inventorySelection.direct ? "" : ` using related inventory for scanned SKU ${scannedProduct.sku}`}. ${recorded.scan.liveItemScannedCount} of ${recorded.scan.liveItemExpectedCount} group items scanned.`
     };
   });
 }
@@ -80427,6 +80733,11 @@ module.exports = {
     movePurchaseOrderLineToDropship,
   splitPurchaseOrderIntoDropshipPos,
   consolidateDropshipPurchaseOrders,
+  importedOrderProductMatch,
+  selectImportedOrderProduct,
+  supplierSourcingPriority,
+  familyProductsForWarehouse,
+  outboundInventoryProductForWarehouse,
   routingSupplierOffers,
   readOrderRoutingContext,
   routeOrderForFulfillment,

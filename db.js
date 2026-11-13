@@ -16843,6 +16843,9 @@ async function readProductsForOrderSkus(keys = []) {
     .map((key) => nullableString(key)?.toLowerCase())
     .filter(Boolean))];
   if (!normalized.length) return [];
+  const compact = [...new Set(normalized
+    .map((key) => key.replace(/[^a-z0-9]+/g, ""))
+    .filter((key) => key.length >= 4))];
   await initRelationalSchema();
   const result = await client.query(`
     with matched_product_ids as (
@@ -16871,15 +16874,40 @@ async function readProductsForOrderSkus(keys = []) {
           lower(sku) = any($1)
           or lower(coalesce(shopify_variant_id, '')) = any($1)
         )
+      union
+      select product_id
+      from products
+      where lower(coalesce(vendor_sku, '')) = any($1)
+         or lower(coalesce(mfr_part_number, '')) = any($1)
+         or lower(coalesce(barcode, '')) = any($1)
+         or lower(coalesce(raw ->> 'upc', '')) = any($1)
+         or lower(coalesce(raw ->> 'gtin', '')) = any($1)
+         or lower(coalesce(raw ->> 'upcCode', '')) = any($1)
+         or (
+           cardinality($2::text[]) > 0
+           and (
+             regexp_replace(lower(coalesce(vendor_sku, '')), '[^a-z0-9]+', '', 'g') = any($2)
+             or regexp_replace(lower(coalesce(mfr_part_number, '')), '[^a-z0-9]+', '', 'g') = any($2)
+             or regexp_replace(lower(coalesce(barcode, '')), '[^a-z0-9]+', '', 'g') = any($2)
+           )
+         )
+      union
+      select product_id
+      from product_identifiers
+      where lower(identifier_value) = any($1)
+      union
+      select product_id
+      from product_supplier_links
+      where lower(source_sku) = any($1)
     )
     select p.*
     from products p
     join matched_product_ids matched on matched.product_id = p.product_id
-  `, [normalized]);
+  `, [normalized, compact]);
   const products = result.rows.map(productRowToState);
   const productIds = products.map((product) => product.id).filter(Boolean);
   if (!productIds.length) return products;
-  const [aliases, shopifyStatuses] = await Promise.all([
+  const [aliases, shopifyStatuses, identifiers, supplierLinks] = await Promise.all([
     client.query(`
       select *
       from product_aliases
@@ -16889,6 +16917,16 @@ async function readProductsForOrderSkus(keys = []) {
     client.query(`
       select product_id, sku, shopify_variant_id, status_payload
       from shopify_product_statuses
+      where product_id = any($1::text[])
+    `, [productIds]),
+    client.query(`
+      select product_id, identifier_type, identifier_value, source
+      from product_identifiers
+      where product_id = any($1::text[])
+    `, [productIds]),
+    client.query(`
+      select product_id, vendor_id, source_sku, match_type
+      from product_supplier_links
       where product_id = any($1::text[])
     `, [productIds])
   ]);
@@ -16902,8 +16940,30 @@ async function readProductsForOrderSkus(keys = []) {
     if (!statusesByProduct.has(status.product_id)) statusesByProduct.set(status.product_id, []);
     statusesByProduct.get(status.product_id).push(status);
   }
+  const identifiersByProduct = new Map();
+  for (const identifier of identifiers.rows) {
+    const rows = identifiersByProduct.get(identifier.product_id) || [];
+    rows.push({
+      type: identifier.identifier_type || "",
+      value: identifier.identifier_value || "",
+      source: identifier.source || ""
+    });
+    identifiersByProduct.set(identifier.product_id, rows);
+  }
+  const supplierSkusByProduct = new Map();
+  for (const link of supplierLinks.rows) {
+    const rows = supplierSkusByProduct.get(link.product_id) || [];
+    rows.push({
+      vendorId: link.vendor_id || "",
+      sourceSku: link.source_sku || "",
+      matchType: link.match_type || ""
+    });
+    supplierSkusByProduct.set(link.product_id, rows);
+  }
   for (const product of products) {
     product.aliases = aliasesByProduct.get(product.id) || [];
+    product.orderIdentifiers = identifiersByProduct.get(product.id) || [];
+    product.supplierSourceSkus = supplierSkusByProduct.get(product.id) || [];
     const statuses = statusesByProduct.get(product.id) || [];
     product.shopifyVariantMatches = Object.fromEntries(statuses.map((status) => [String(status.sku || "").toLowerCase(), status.status_payload || {}]).filter(([sku]) => sku));
     product.shopifyVariantSkus = statuses.map((status) => String(status.sku || "").trim()).filter(Boolean);
