@@ -91,6 +91,7 @@ assert.match(dbSource, /'phase', 'paused'[\s\S]*?queueRecoveryCount[\s\S]*?>= 3/
 assert.match(dbSource, /failed_or_paused_last_hour/, 'critical queue telemetry must report recently failed or paused work');
 assert.match(criticalQueueWatchdog, /critical-job-paused/, 'the queue watchdog must notify operators when exhausted work is paused');
 assert.match(dbSource, /status === "attention"[\s\S]*?\('failed', 'warning', 'stopped'\)/, 'Jobs needs-review filtering must run across the full database result set');
+assert.match(dbSource, /coalesce\(ended_at, updated_at, started_at, created_at\) end desc/, 'completed and attention jobs must sort by their latest terminal update');
 const ratePreparation = source.slice(source.indexOf('async function prepareFulfillmentRateRefresh'), source.indexOf('async function refreshFulfillmentRateRow'));
 assert.match(ratePreparation, /readStateField\("fulfillmentOperationsSettings"\)/, 'rate jobs must read only fulfillment settings before hydrating targeted orders');
 assert.doesNotMatch(ratePreparation, /readFulfillmentOperationsState\(/, 'rate jobs must not hydrate historical label batches');

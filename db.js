@@ -15517,7 +15517,7 @@ async function readOperationJobsPage(options = {}) {
     ${where}
     order by
       case lower(status) when 'running' then 0 when 'queued' then 1 else 2 end,
-      case when lower(status) in ('running', 'queued') then updated_at else coalesce(started_at, created_at, updated_at) end desc,
+      case when lower(status) in ('running', 'queued') then updated_at else coalesce(ended_at, updated_at, started_at, created_at) end desc,
       job_id desc
     limit $${values.length - 1} offset $${values.length}
   `, values);
