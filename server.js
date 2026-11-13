@@ -62440,7 +62440,7 @@ async function handleApi(req, res) {
       const listFilters = orderListOptionsFromInput(url.searchParams);
       const scope = q ? "search" : openWorkOnly ? "open-work" : summary && dateFrom ? `recent-${recentDays}-days-plus-open-work` : "requested";
       const cacheSignature = crypto.createHash("sha1").update(JSON.stringify({ summary, limit, paginated, page, pageSize, dateFrom, dateTo, openWorkOnly, includeOpenWork, allDates, ...listFilters })).digest("hex");
-      const cacheKey = `dataplus:orders:v13:${cacheSignature}`;
+      const cacheKey = `dataplus:orders:v14:${cacheSignature}`;
       const cached = await redisCache.getJson(cacheKey);
       if (cached) return sendJson(res, 200, { ...cached, cached: true });
       let pending = pendingOrderApiLoads.get(cacheKey);
@@ -62451,8 +62451,8 @@ async function handleApi(req, res) {
             const [orderResult, metrics, orderDrafts, returns, customers] = await Promise.all([
               postgres.listOrders({ ...listFilters, limit: paginated ? pageSize : limit, summary, paginated, page, dateFrom, dateTo, includeOpenWork, openWorkOnly, q }),
               postgres.readOrderListMetrics(),
-              postgres.readStateField("orderDrafts"),
-              postgres.readStateField("returns"),
+              summary ? Promise.resolve([]) : postgres.readStateField("orderDrafts"),
+              summary ? Promise.resolve([]) : postgres.readStateField("returns"),
               summary ? Promise.resolve([]) : postgres.readStateField("customers")
             ]);
             const orders = paginated ? (orderResult?.orders || []) : (orderResult || []);

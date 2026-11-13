@@ -11572,7 +11572,8 @@ async function listOrders(options = {}) {
   const paginated = options.paginated === true || String(options.paginated).toLowerCase() === "true";
   const page = Math.max(1, Number(options.page || 1) || 1);
   const offset = paginated ? (page - 1) * limit : 0;
-  const countSelect = paginated ? "count(*) over()::int as filtered_count," : "";
+  const countSelect = paginated ? (summary ? "filtered_count," : "count(*) over()::int as filtered_count,") : "";
+  const filteredCountSelect = paginated ? "count(*) over()::int as filtered_count," : "";
   const orderDateSql = "order_date";
   const orderSelect = summary ? `
     select
@@ -11829,8 +11830,27 @@ async function listOrders(options = {}) {
   ` : `
     select ${countSelect} *, ${orderDateSql} as order_date
   `;
+  const sort = String(options.sort || "created-desc").toLowerCase();
+  const orderBySql = sort === "created-asc"
+    ? "order_date asc nulls last, created_at asc, order_number asc"
+    : sort === "total-desc"
+      ? "total desc nulls last, order_date desc nulls last, order_number desc"
+      : sort === "total-asc"
+        ? "total asc nulls last, order_date desc nulls last, order_number desc"
+        : sort === "customer-asc"
+          ? "buyer asc nulls last, order_date desc nulls last, order_number desc"
+          : "order_date desc nulls last, created_at desc, order_number desc";
+  params.push(limit);
+  const limitParameter = params.length;
+  if (paginated) params.push(offset);
   const orderFromSql = summary ? `
-    from order_records
+    from (
+      select ${filteredCountSelect} order_records.*
+      from order_records
+      ${whereSql}
+      order by ${orderBySql}
+      limit $${limitParameter}${paginated ? ` offset $${params.length}` : ""}
+    ) order_records
     cross join lateral jsonb_to_record(order_records.raw) as summary_raw(
       "marketplaceOrderNumber" text,
       "channelOrderNumber" text,
@@ -11908,25 +11928,12 @@ async function listOrders(options = {}) {
       "duplicateOrderRecord" text
     )
   ` : "from order_records";
-  const sort = String(options.sort || "created-desc").toLowerCase();
-  const orderBySql = sort === "created-asc"
-    ? "order_date asc nulls last, created_at asc, order_number asc"
-    : sort === "total-desc"
-      ? "total desc nulls last, order_date desc nulls last, order_number desc"
-      : sort === "total-asc"
-        ? "total asc nulls last, order_date desc nulls last, order_number desc"
-        : sort === "customer-asc"
-          ? "buyer asc nulls last, order_date desc nulls last, order_number desc"
-          : "order_date desc nulls last, created_at desc, order_number desc";
-  params.push(limit);
-  const limitParameter = params.length;
-  if (paginated) params.push(offset);
   const orders = await client.query(`
     ${orderSelect}
     ${orderFromSql}
-    ${whereSql}
+    ${summary ? "" : whereSql}
     order by ${orderBySql}
-    limit $${limitParameter}${paginated ? ` offset $${params.length}` : ""}
+    ${summary ? "" : `limit $${limitParameter}${paginated ? ` offset $${params.length}` : ""}`}
   `, params);
   const ids = orders.rows.map((row) => row.order_id).filter(Boolean);
   let lineRows = [];
