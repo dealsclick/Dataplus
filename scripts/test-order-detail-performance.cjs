@@ -33,6 +33,7 @@ const productLookupStart = database.indexOf("async function readProductsForOrder
 const productLookupEnd = database.indexOf("async function listProducts", productLookupStart);
 const productLookup = database.slice(productLookupStart, productLookupEnd);
 assert.match(productLookup, /const extendedMatches = fast \? "" :/, "order details need an indexed fast product lookup");
+assert.match(productLookup, /fast \? \[normalized\] : \[normalized, compact\]/, "the fast lookup must not bind unused SQL parameters");
 assert.match(route, /enrichOrderDetail\(order\)/, "order detail enrichment must remain enabled");
 assert.match(source, /readProductsForOrderSkus\(keys, \{ fast: true \}\)/, "order detail enrichment must use the indexed product lookup");
 

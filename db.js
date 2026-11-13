@@ -16952,14 +16952,14 @@ async function readProductsForOrderSkus(keys = [], options = {}) {
       union
       select product_id
       from product_identifiers
-      where identifier_type = any($3::text[])
+      where lower(identifier_type) in ('upc', 'gtin', 'barcode', 'ean', 'isbn', 'asin', 'mpn', 'manufacturer_part_number')
         and lower(identifier_value) = any($1)
       ${extendedMatches}
     )
     select p.*
     from products p
     join matched_product_ids matched on matched.product_id = p.product_id
-  `, [normalized, compact, ["upc", "gtin", "barcode", "ean", "isbn", "asin", "mpn", "manufacturer_part_number"]]);
+  `, fast ? [normalized] : [normalized, compact]);
   const products = result.rows.map(productRowToState);
   const productIds = products.map((product) => product.id).filter(Boolean);
   if (!productIds.length) return products;
