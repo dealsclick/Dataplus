@@ -27,7 +27,7 @@ let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
 let returnsWorkspaceSummaryCache = null;
 const RELATIONAL_SCHEMA_VERSION = "2026-10-29-shipping-report-facts-v1";
-const RUNTIME_SCHEMA_ENSURES_VERSION = "2026-11-13-runtime-schema-ensures-v1";
+const RUNTIME_SCHEMA_ENSURES_VERSION = "2026-11-13-runtime-schema-ensures-v2";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";

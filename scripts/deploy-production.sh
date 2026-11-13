@@ -110,7 +110,7 @@ wait_for_carrier_worker() {
 runtime_schema_is_ready() {
   local ready
   ready="$(run_with_timeout 10 docker exec dataplus-postgres psql -U postgres -d dataplus -Atqc \
-    "select case when exists(select 1 from schema_migrations where name='2026-11-13-runtime-schema-ensures-v1') then 1 else 0 end" \
+    "select case when exists(select 1 from schema_migrations where name='2026-11-13-runtime-schema-ensures-v2') then 1 else 0 end" \
     2>/dev/null || true)"
   [[ "$ready" == "1" ]]
 }
