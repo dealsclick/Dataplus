@@ -53598,10 +53598,14 @@ function orderSkuBaseFromUomVariant(sku = "") {
   return value.replace(/-(?:\d+(?:PC|PK|PACK|CT|CS|CASE|BX|EA)|EA|EACH)$/i, "");
 }
 
-function orderLineSkuLookupKeys(lines = []) {
+function orderLineSkuLookupKeys(lines = [], options = {}) {
   const keys = [];
   for (const line of Array.isArray(lines) ? lines : []) {
-    for (const value of [line.sku, line.mappedSku, line.originalSku, line.channelSku, line.channelVariantSku, line.channelVariantId]) {
+    const preferred = line.mappedSku || line.catalogSku || line.localSku || line.sku || "";
+    const values = options.preferredOnly && preferred
+      ? [preferred]
+      : [line.sku, line.mappedSku, line.originalSku, line.channelSku, line.channelVariantSku, line.channelVariantId];
+    for (const value of values) {
       const sku = String(value || "").trim();
       if (!sku) continue;
       keys.push(sku);
@@ -53610,6 +53614,17 @@ function orderLineSkuLookupKeys(lines = []) {
     }
   }
   return [...new Set(keys.map((value) => value.toLowerCase()))];
+}
+
+async function readOrderProductsForDetail(lines = []) {
+  if (!postgres.isPostgresEnabled()) return [];
+  const preferredKeys = orderLineSkuLookupKeys(lines, { preferredOnly: true });
+  if (!preferredKeys.length) return [];
+  const products = await postgres.readProductsForOrderSkus(preferredKeys, { fast: true });
+  if (products.length) return products;
+  const fallbackKeys = orderLineSkuLookupKeys(lines);
+  if (fallbackKeys.length === preferredKeys.length && fallbackKeys.every((key) => preferredKeys.includes(key))) return products;
+  return postgres.readProductsForOrderSkus(fallbackKeys, { fast: true });
 }
 
 function orderLineHasAuthoritativeStoredCost(line = {}) {
@@ -53721,11 +53736,10 @@ async function hydrateOrdersLocalCosts(orders = [], options = {}) {
 
 async function enrichOrderDetail(order = {}) {
   const lines = Array.isArray(order.items) ? order.items : [];
-  const keys = orderLineSkuLookupKeys(lines);
   const routePurchaseOrderIds = (order.fulfillmentRoutes || []).map((route) => String(route?.purchaseOrderId || "")).filter(Boolean);
   const purchaseOrderIds = [...new Set([...(order.purchaseOrderIds || []).map((id) => String(id || "")).filter(Boolean), ...routePurchaseOrderIds])];
   const [products, linkedPurchaseOrders, financialSummary] = await Promise.all([
-    postgres.isPostgresEnabled() ? postgres.readProductsForOrderSkus(keys, { fast: true }) : [],
+    readOrderProductsForDetail(lines),
     postgres.isPostgresEnabled() ? Promise.all(purchaseOrderIds.map((id) => postgres.readPurchaseOrderByKey(id))) : [],
     postgres.isPostgresEnabled() ? postgres.readOrderFinancialSummary(order.id) : { channelFees: [], settlements: [], shipping: { shipments: [], estimatedCost: 0, actualCost: null, effectiveCost: 0, reconciliationStatus: "not_recorded" } }
   ]);

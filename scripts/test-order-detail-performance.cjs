@@ -39,6 +39,8 @@ assert.match(productLookup, /identifier_type = any\(array\[/, "fallback identifi
 assert.match(route, /redisCache\.setJson\(requestedCacheKey, payload, 60\)/, "human order-number lookups should receive a short alias cache");
 assert.match(route, /enrichOrderDetail\(order\)/, "order detail enrichment must remain enabled");
 assert.match(source, /readProductsForOrderSkus\(keys, \{ fast: true \}\)/, "order detail enrichment must use the indexed product lookup");
+assert.match(source, /orderLineSkuLookupKeys\(lines, \{ preferredOnly: true \}\)/, "order details must not re-scan a line's channel identifiers after its catalog SKU resolves");
+assert.match(source, /if \(products\.length\) return products;/, "broader line identifiers must remain a fallback only when the preferred SKU is unresolved");
 
 const carriersStart = source.indexOf('url.pathname === "/api/fulfillment/carriers"');
 const carriersEnd = source.indexOf('\n  if (req.method', carriersStart + 1);
