@@ -38,9 +38,13 @@ test("production deploy drains label purchases before restarting services", () =
   assert.match(deploySource, /DATAPLUS_DEPLOY_STATUS_TIMEOUT_SECONDS:-90/);
   assert.match(deploySource, /DATAPLUS_RELEASE_HISTORY_TIMEOUT_SECONDS:-120/);
   assert.match(deploySource, /DATAPLUS_SERVICE_START_TIMEOUT_SECONDS:-300/);
+  assert.match(deploySource, /DATAPLUS_SCHEMA_READY_TIMEOUT_SECONDS:-300/);
+  const schemaReady = deploySource.indexOf("prepare-runtime-schema.cjs");
+  assert.ok(schemaReady >= 0 && schemaReady < restart);
+  assert.match(deploySource, /PGAPPNAME=dataplus-deploy-schema/);
   assert.match(deploySource, /cleanup_stale_deployment_helpers/);
   assert.match(deploySource, /com\.docker\.compose\.oneoff=True/);
-  assert.match(deploySource, /wait-for-label-purchases\.cjs\*\|\*generate-release-history\.js/);
+  assert.match(deploySource, /prepare-runtime-schema\.cjs/);
   assert.match(deploySource, /wait_for_dataplus_api/);
   assert.match(deploySource, /DATAPLUS_API_READY_TIMEOUT_SECONDS:-90/);
   assert.match(deploySource, /api\/auth\/session/);
@@ -52,6 +56,12 @@ test("production deploy drains label purchases before restarting services", () =
   assert.doesNotMatch(drainSource, /readOperationJobs\(/);
   assert.doesNotMatch(drainSource, /writeStateDocuments\(/);
   assert.match(serverSource, /reason: "deployment_drain"/);
+});
+
+test("runtime schema ensures run once per durable schema version", () => {
+  assert.match(dbSource, /RUNTIME_SCHEMA_ENSURES_VERSION = "2026-11-13-runtime-schema-ensures-v1"/);
+  assert.match(dbSource, /runtimeEnsures\.rows\[0\]\?\.current !== true/);
+  assert.match(dbSource, /\[RUNTIME_SCHEMA_ENSURES_VERSION\]/);
 });
 
 test("browser print packets use targeted state reads", () => {

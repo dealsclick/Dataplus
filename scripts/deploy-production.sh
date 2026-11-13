@@ -61,7 +61,7 @@ cleanup_stale_deployment_helpers() {
     [[ -n "$container_id" ]] || continue
     command="$(docker inspect -f '{{json .Config.Cmd}}' "$container_id" 2>/dev/null || true)"
     case "$command" in
-      *wait-for-label-purchases.cjs*|*generate-release-history.js*|*write-deployment-status.js*|*reconcile-source-completed-orders.js*|*repair-temu-shipping-costs.cjs*|*prune-redundant-routing-jobs.cjs*)
+      *wait-for-label-purchases.cjs*|*generate-release-history.js*|*write-deployment-status.js*|*prepare-runtime-schema.cjs*|*reconcile-source-completed-orders.js*|*repair-temu-shipping-costs.cjs*|*prune-redundant-routing-jobs.cjs*)
         echo "Removing abandoned deployment helper $container_id: $command"
         docker rm -f "$container_id" >/dev/null
         ;;
@@ -112,6 +112,11 @@ cleanup_stale_deployment_helpers
 
 echo "Building DataPlus application images..."
 docker compose build
+
+echo "Preparing the runtime database schema once before the service fleet restarts..."
+run_with_timeout "${DATAPLUS_SCHEMA_READY_TIMEOUT_SECONDS:-300}" docker compose run --rm --no-deps \
+  -e PGAPPNAME=dataplus-deploy-schema \
+  dataplus node scripts/prepare-runtime-schema.cjs
 
 PRESERVE_BACKGROUND_WORKER=false
 if [[ "$(docker inspect -f '{{.State.Running}}' dataplus-worker-background 2>/dev/null || true)" == "true" ]]; then

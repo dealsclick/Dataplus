@@ -27,6 +27,7 @@ let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
 let returnsWorkspaceSummaryCache = null;
 const RELATIONAL_SCHEMA_VERSION = "2026-10-29-shipping-report-facts-v1";
+const RUNTIME_SCHEMA_ENSURES_VERSION = "2026-11-13-runtime-schema-ensures-v1";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -360,9 +361,19 @@ async function initRelationalSchema() {
           [RELATIONAL_SCHEMA_VERSION]
         );
         if (schemaVersion.rows[0]?.current === true) {
-          await ensureOutboundAuditSchema(client);
-          await ensureProductShadowSkuSchema(client);
-          await ensureReturnWorkspaceSchema(client);
+          const runtimeEnsures = await client.query(
+            "select exists (select 1 from schema_migrations where name = $1) as current",
+            [RUNTIME_SCHEMA_ENSURES_VERSION]
+          );
+          if (runtimeEnsures.rows[0]?.current !== true) {
+            await ensureOutboundAuditSchema(client);
+            await ensureProductShadowSkuSchema(client);
+            await ensureReturnWorkspaceSchema(client);
+            await client.query(
+              "insert into schema_migrations (name) values ($1) on conflict (name) do nothing",
+              [RUNTIME_SCHEMA_ENSURES_VERSION]
+            );
+          }
           relationalSchemaReady = true;
           return true;
         }
@@ -2582,7 +2593,13 @@ async function initRelationalSchema() {
       [RELATIONAL_SCHEMA_VERSION]
     );
       await require('./lib/status-inventory-schema').installStatusInventoryTriggers(client);
+      await ensureOutboundAuditSchema(client);
+      await ensureProductShadowSkuSchema(client);
       await ensureReturnWorkspaceSchema(client);
+      await client.query(
+        "insert into schema_migrations (name) values ($1) on conflict (name) do nothing",
+        [RUNTIME_SCHEMA_ENSURES_VERSION]
+      );
       relationalSchemaReady = true;
       return true;
     } finally {
