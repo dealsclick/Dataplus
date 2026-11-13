@@ -43,6 +43,15 @@ run_with_timeout() {
   timeout --signal=TERM --kill-after=15s "${timeout_seconds}s" "$@"
 }
 
+run_optional_maintenance() {
+  local label="$1"
+  local timeout_seconds="$2"
+  shift 2
+  if ! run_with_timeout "$timeout_seconds" "$@"; then
+    echo "Warning: $label did not finish within ${timeout_seconds}s. Production is healthy; this maintenance can be retried separately." >&2
+  fi
+}
+
 resume_label_purchases() {
   run_with_timeout "${DATAPLUS_LABEL_GATE_TIMEOUT_SECONDS:-90}" docker compose run --rm --no-deps \
     dataplus node scripts/wait-for-label-purchases.cjs --resume
@@ -77,30 +86,18 @@ run_with_timeout "${DATAPLUS_LABEL_GATE_TIMEOUT_SECONDS:-360}" docker compose ru
   dataplus node scripts/wait-for-label-purchases.cjs --pause --timeout-seconds "${DATAPLUS_LABEL_DRAIN_TIMEOUT_SECONDS:-300}"
 
 echo "Generating release history from the checked-out repository..."
-docker compose run --rm --no-deps \
+run_with_timeout "${DATAPLUS_RELEASE_HISTORY_TIMEOUT_SECONDS:-120}" docker compose run --rm --no-deps \
   -v "$PWD/.git:/app/.git:ro" \
   dataplus node scripts/generate-release-history.js
 
 record_deployment_status deploying
-
-echo "Reconciling historical source-completed orders (one-time migration)..."
-docker compose run --rm --no-deps \
-  dataplus node scripts/reconcile-source-completed-orders.js --apply --once
-
-echo "Reconciling retained Temu label estimates and settlement matches..."
-docker compose run --rm --no-deps \
-  dataplus node scripts/repair-temu-shipping-costs.cjs --apply
-
-echo "Compacting redundant no-change routing job history..."
-docker compose run --rm --no-deps \
-  dataplus node scripts/prune-redundant-routing-jobs.cjs
 
 echo "Starting production services and waiting for health checks..."
 DEPLOY_SERVICES=(redis postgres dataplus worker worker-orders-shopify worker-carrier worker-orders-ebay worker-orders-temu)
 if [[ "$PRESERVE_BACKGROUND_WORKER" != "true" ]]; then
   DEPLOY_SERVICES+=(worker-background)
 fi
-docker compose up -d --build --remove-orphans --wait --wait-timeout 180 "${DEPLOY_SERVICES[@]}"
+run_with_timeout "${DATAPLUS_SERVICE_START_TIMEOUT_SECONDS:-300}" docker compose up -d --build --remove-orphans --wait --wait-timeout 180 "${DEPLOY_SERVICES[@]}"
 docker compose ps
 curl --fail --silent --show-error http://127.0.0.1:4173/ > /dev/null
 record_deployment_status healthy
@@ -108,3 +105,16 @@ resume_label_purchases
 trap - ERR
 
 echo "DataPlus production deployment is healthy."
+
+echo "Running bounded post-deploy maintenance..."
+echo "Reconciling historical source-completed orders (one-time migration)..."
+run_optional_maintenance "source-completed order reconciliation" "${DATAPLUS_DEPLOY_MAINTENANCE_TIMEOUT_SECONDS:-60}" docker compose run --rm --no-deps \
+  dataplus node scripts/reconcile-source-completed-orders.js --apply --once
+
+echo "Reconciling retained Temu label estimates and settlement matches..."
+run_optional_maintenance "Temu shipping-cost reconciliation" "${DATAPLUS_DEPLOY_MAINTENANCE_TIMEOUT_SECONDS:-60}" docker compose run --rm --no-deps \
+  dataplus node scripts/repair-temu-shipping-costs.cjs --apply
+
+echo "Compacting redundant no-change routing job history..."
+run_optional_maintenance "routing job history compaction" "${DATAPLUS_DEPLOY_MAINTENANCE_TIMEOUT_SECONDS:-60}" docker compose run --rm --no-deps \
+  dataplus node scripts/prune-redundant-routing-jobs.cjs

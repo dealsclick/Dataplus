@@ -36,6 +36,12 @@ test("production deploy drains label purchases before restarting services", () =
   assert.match(deploySource, /DATAPLUS_LABEL_GATE_TIMEOUT_SECONDS:-360/);
   assert.match(deploySource, /DATAPLUS_LABEL_DRAIN_TIMEOUT_SECONDS:-300/);
   assert.match(deploySource, /DATAPLUS_DEPLOY_STATUS_TIMEOUT_SECONDS:-90/);
+  assert.match(deploySource, /DATAPLUS_RELEASE_HISTORY_TIMEOUT_SECONDS:-120/);
+  assert.match(deploySource, /DATAPLUS_DEPLOY_MAINTENANCE_TIMEOUT_SECONDS:-60/);
+  assert.match(deploySource, /DATAPLUS_SERVICE_START_TIMEOUT_SECONDS:-300/);
+  assert.match(deploySource, /run_optional_maintenance/);
+  assert.match(deploySource, /Production is healthy; this maintenance can be retried separately/);
+  assert.ok(deploySource.indexOf("DataPlus production deployment is healthy.") < deploySource.indexOf("Running bounded post-deploy maintenance..."));
   assert.match(drainSource, /from operations_jobs[\s\S]*?workerTask' = 'fulfillment-label-purchase'/);
   assert.doesNotMatch(drainSource, /readOperationJobs\(/);
   assert.doesNotMatch(drainSource, /writeStateDocuments\(/);
