@@ -386,7 +386,6 @@ function OrderDetailWorkspace() {
     return !["purchase", "drop_ship", "dropship", "supplier_dropship"].includes(type)
       && !["canceled", "cancelled", "expired", "failed", "void", "voided"].includes(status)
   }).length
-  const fulfillmentRecordCount = Math.max(shipments.length, activeFulfillmentRouteCount)
   const savedPurchaseDismissals = (Array.isArray(order?.purchaseDemandDismissals) ? order.purchaseDemandDismissals as Array<Record<string, unknown>> : []).filter((entry) => entry.active !== false)
   const savedDismissalIds = new Set(savedPurchaseDismissals.map((entry) => String(entry.id || "")))
   const activePurchaseDismissals = [
@@ -703,6 +702,7 @@ function OrderDetailWorkspace() {
   if (!order) return <Card><CardContent className="p-8 text-center text-muted-foreground">This order was not found.</CardContent></Card>
   if (order.reportingOnly === true) return <ReportingOrderDetail order={order} onRefresh={load} loading={loading} />
   const routingState = getOrderRoutingState(order)
+  const fulfillmentRecordCount = Math.max(shipments.length, activeFulfillmentRouteCount, routingState.hasActiveRoutes ? 1 : 0)
   const attentionItems = orderAttentionItems(order)
   const operationalState = String(order.operationalStatus || order.workflowStatus || "").trim()
   const operationalStateLower = operationalState.toLowerCase()

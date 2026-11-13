@@ -117,5 +117,6 @@ assert.match(fulfillmentUiSource, /Package data needed/, 'package readiness must
 assert.match(fulfillmentUiSource, /FulfillmentRoutingStatus/, 'routed work must show its routing state independently');
 const orderDetailUiSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'order-detail-route.tsx'), 'utf8');
 assert.match(orderDetailUiSource, /Fulfillment \(\{fulfillmentRecordCount\}\)/, 'order detail must count active routes before a shipment is purchased');
+assert.match(orderDetailUiSource, /routingState\.hasActiveRoutes \? 1 : 0/, 'order detail must count routed purchase and supplier fulfillment before a shipment is purchased');
 
 console.log('Server scheduler efficiency checks passed.');
