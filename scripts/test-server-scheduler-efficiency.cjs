@@ -33,6 +33,25 @@ assert.doesNotMatch(orderRoutingWorker, /readDbFast/, 'the worker must not hydra
 assert.match(orderRoutingWorker, /routeOrderForFulfillment/, 'the worker must own fulfillment routing');
 assert.doesNotMatch(orderRoutingWorker, /listOrders\(\{ limit: 1000 \}\)/, 'order routing must not scan complete order documents');
 
+const immediateRoutingQueue = functionBody('queuePaidOrderRoutingCandidates');
+assert.match(immediateRoutingQueue, /lower\(status\) in \('queued', 'running'\)/, 'immediate routing must deduplicate active routing work');
+assert.match(immediateRoutingQueue, /queuePriority: options\.immediate === true \? 150 : 110/, 'import-triggered routing must outrank the periodic recovery pass');
+assert.match(immediateRoutingQueue, /pendingIds\.length; offset \+= SCHEDULED_ORDER_ROUTING_LIMIT/, 'immediate routing must preserve bounded worker payloads');
+for (const importSource of ['ebay-order-import', 'temu-order-import', 'shopify-order-import', 'walmart-order-import', 'tiktok-orders']) {
+  assert.match(source, new RegExp(`queuePaidOrderRoutingCandidates\\([^\\n]+source: ['\"]${importSource}['\"]`), `${importSource} must enqueue fulfillment routing immediately after a live import`);
+}
+
+const routingWatchdog = functionBody('refreshFulfillmentRoutingHealth');
+assert.match(source, /FULFILLMENT_ROUTING_WATCHDOG_INTERVAL_MS = 5 \* 60_000/, 'the reconciliation watchdog must run every five minutes');
+assert.match(source, /FULFILLMENT_ROUTING_BACKLOG_ALERT_MINUTES = 5/, 'paid orders waiting five minutes must trigger an alert');
+assert.match(routingWatchdog, /scanFulfillmentRoutingBacklog/, 'the watchdog must reconcile paid orders against routing state');
+assert.match(routingWatchdog, /createSystemNotification/, 'the watchdog must notify operators when routing or critical queues are late');
+assert.match(source, /\/api\/fulfillment\/routing-health/, 'fulfillment routing health must have a dedicated API');
+const criticalQueueWatchdog = functionBody('auditCriticalOperationQueues');
+assert.match(criticalQueueWatchdog, /recoverStaleCriticalOperationJobs/, 'the one-minute queue watchdog must recover stale queued critical work');
+assert.match(criticalQueueWatchdog, /createSystemNotification/, 'the one-minute queue watchdog must alert on critical queue age');
+assert.match(source, /setInterval\(\(\) => void auditCriticalOperationQueues\(\), 60_000\)/, 'critical queue SLAs must be audited every minute');
+
 const purchasePooling = functionBody('processScheduledPurchasePooling');
 assert.match(purchasePooling, /readOrderRoutingContext/, 'purchase pooling must use the targeted routing context');
 assert.doesNotMatch(purchasePooling, /readDbFast/, 'purchase pooling must not hydrate unrelated operational documents');
@@ -63,6 +82,9 @@ assert.match(dbSource, /coalesce\(summary_raw\."routingAttemptCount", '0'\) as r
 assert.match(dbSource, /async function listFulfillmentConsoleRateCandidates/, 'scheduled rate discovery must query a bounded relational projection');
 assert.match(dbSource, /async function listFulfillmentLabelBatchProjectionRows/, 'snapshot rebuilds must project compact label batches in PostgreSQL');
 assert.match(dbSource, /async function pruneRedundantNoopOperationJobs/, 'retention cleanup must compact redundant no-change routing history');
+assert.match(dbSource, /async function readCriticalOperationQueueHealth/, 'critical queue telemetry must report queue age and worker progress');
+assert.match(dbSource, /async function recoverStaleCriticalOperationJobs/, 'critical queued jobs must have bounded priority recovery');
+assert.match(dbSource, /queueRecoveryCount[\s\S]*?< 3/, 'automatic recovery must be bounded to prevent endless queue churn');
 const ratePreparation = source.slice(source.indexOf('async function prepareFulfillmentRateRefresh'), source.indexOf('async function refreshFulfillmentRateRow'));
 assert.match(ratePreparation, /readStateField\("fulfillmentOperationsSettings"\)/, 'rate jobs must read only fulfillment settings before hydrating targeted orders');
 assert.doesNotMatch(ratePreparation, /readFulfillmentOperationsState\(/, 'rate jobs must not hydrate historical label batches');
@@ -88,5 +110,12 @@ assert.doesNotMatch(batchCreationState, /readFulfillmentOperationsState\(/, 'bat
 const routingContext = functionBody('readOrderRoutingContext');
 assert.match(routingContext, /postgres\.readStateFields\(fields/, 'routing context must request named state fields only');
 assert.doesNotMatch(routingContext, /fulfillmentLabelBatches|warehouseAudits|fulfillmentPrintQueue/, 'routing context must exclude heavyweight operational history');
+
+const fulfillmentUiSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'fulfillment-route.tsx'), 'utf8');
+assert.match(fulfillmentUiSource, /Fulfillment routing health/, 'the fulfillment workspace must display routing health');
+assert.match(fulfillmentUiSource, /Package data needed/, 'package readiness must be distinct from routing status');
+assert.match(fulfillmentUiSource, /FulfillmentRoutingStatus/, 'routed work must show its routing state independently');
+const orderDetailUiSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'order-detail-route.tsx'), 'utf8');
+assert.match(orderDetailUiSource, /Fulfillment \(\{fulfillmentRecordCount\}\)/, 'order detail must count active routes before a shipment is purchased');
 
 console.log('Server scheduler efficiency checks passed.');

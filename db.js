@@ -1,4 +1,4 @@
-const { SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, TIKTOK_ORDER_TASKS, WALMART_TASKS, HEAVY_RESOURCE_TASKS, WORKLOAD_LIMITS, validateLane, laneSql } = require('./lib/worker-lanes');
+const { SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, TIKTOK_ORDER_TASKS, WALMART_TASKS, CRITICAL_JOB_POLICIES, HEAVY_RESOURCE_TASKS, WORKLOAD_LIMITS, validateLane, laneSql } = require('./lib/worker-lanes');
 const { shippingClassSql, shippingFunctionSql } = require("./lib/shipping-filter-sql");
 const { Pool } = require("pg");
 const { sourcePriceFloors } = require("./lib/product-price-floors");
@@ -3915,7 +3915,8 @@ const STATE_DOCUMENT_KEYS = [
   "fulfillmentDeploymentGate",
   "fulfillmentPrintStations",
   "fulfillmentManifests",
-  "fulfillmentOperationsSettings"
+  "fulfillmentOperationsSettings",
+  "fulfillmentRoutingHealth"
 ];
 
 const ENTITY_DOCUMENT_COLLECTIONS = new Set([
@@ -5115,6 +5116,136 @@ async function readOperationPerformanceSummary(hours = 1) {
     p95Ms: Number(row.p95_ms || 0),
     maxMs: Number(row.max_ms || 0)
   }));
+}
+
+async function readCriticalOperationQueueHealth() {
+  const client = getPool();
+  const policies = CRITICAL_JOB_POLICIES || {};
+  const tasks = Object.keys(policies);
+  if (!client || !tasks.length) return [];
+  await initRelationalSchema();
+  const result = await client.query(`
+    with active as (
+      select
+        raw->>'workerTask' as task,
+        count(*) filter (where lower(status) = 'queued')::int as queued_count,
+        count(*) filter (where lower(status) = 'running')::int as running_count,
+        min(created_at) filter (where lower(status) = 'queued') as oldest_queued_at,
+        min(coalesce(started_at, updated_at)) filter (where lower(status) = 'running') as oldest_running_at,
+        max(nullif(raw->>'queueRecoveredAt', '')::timestamptz) as last_recovered_at,
+        coalesce(sum(case when coalesce(raw->>'queueRecoveryCount', '') ~ '^[0-9]+$' then (raw->>'queueRecoveryCount')::int else 0 end), 0)::int as recovery_count
+      from operations_jobs
+      where raw->>'workerTask' = any($1::text[])
+        and lower(status) in ('queued', 'running')
+      group by raw->>'workerTask'
+    ), hourly as (
+      select
+        raw->>'workerTask' as task,
+        count(*) filter (where lower(status) in ('success', 'warning'))::int as completed_last_hour,
+        coalesce(sum(coalesce(changed_rows, case when raw->>'changedCount' ~ '^-?[0-9]+$' then (raw->>'changedCount')::int else 0 end, 0)), 0)::int as changed_last_hour
+      from operations_jobs
+      where raw->>'workerTask' = any($1::text[])
+        and coalesce(ended_at, updated_at) >= now() - interval '1 hour'
+      group by raw->>'workerTask'
+    ), latest as (
+      select distinct on (raw->>'workerTask')
+        raw->>'workerTask' as task,
+        status as latest_status,
+        coalesce(ended_at, updated_at, created_at) as latest_at,
+        job_id as latest_job_id
+      from operations_jobs
+      where raw->>'workerTask' = any($1::text[])
+      order by raw->>'workerTask', coalesce(ended_at, updated_at, created_at) desc, job_id desc
+    ), latest_success as (
+      select raw->>'workerTask' as task, max(coalesce(ended_at, updated_at)) as latest_success_at
+      from operations_jobs
+      where raw->>'workerTask' = any($1::text[])
+        and lower(status) in ('success', 'warning')
+      group by raw->>'workerTask'
+    )
+    select
+      task.task,
+      coalesce(active.queued_count, 0)::int as queued_count,
+      coalesce(active.running_count, 0)::int as running_count,
+      active.oldest_queued_at,
+      active.oldest_running_at,
+      active.last_recovered_at,
+      coalesce(active.recovery_count, 0)::int as recovery_count,
+      coalesce(hourly.completed_last_hour, 0)::int as completed_last_hour,
+      coalesce(hourly.changed_last_hour, 0)::int as changed_last_hour,
+      latest.latest_status,
+      latest.latest_at,
+      latest.latest_job_id,
+      latest_success.latest_success_at
+    from unnest($1::text[]) task(task)
+    left join active on active.task = task.task
+    left join hourly on hourly.task = task.task
+    left join latest on latest.task = task.task
+    left join latest_success on latest_success.task = task.task
+    order by task.task
+  `, [tasks]);
+  const now = Date.now();
+  return result.rows.map((row) => {
+    const policy = policies[row.task] || {};
+    const oldestQueuedAt = row.oldest_queued_at?.toISOString?.() || row.oldest_queued_at || "";
+    const oldestRunningAt = row.oldest_running_at?.toISOString?.() || row.oldest_running_at || "";
+    const queuedAgeMinutes = oldestQueuedAt ? Math.max(0, (now - Date.parse(oldestQueuedAt)) / 60000) : 0;
+    const runningAgeMinutes = oldestRunningAt ? Math.max(0, (now - Date.parse(oldestRunningAt)) / 60000) : 0;
+    return {
+      task: row.task,
+      label: policy.label || row.task,
+      lane: policy.lane || "background",
+      maxQueueAgeMinutes: Number(policy.maxQueueAgeMinutes || 5),
+      maxRunningAgeMinutes: Number(policy.maxRunningAgeMinutes || 15),
+      queuedCount: Number(row.queued_count || 0),
+      runningCount: Number(row.running_count || 0),
+      oldestQueuedAt,
+      oldestRunningAt,
+      queuedAgeMinutes: Math.round(queuedAgeMinutes * 10) / 10,
+      runningAgeMinutes: Math.round(runningAgeMinutes * 10) / 10,
+      stale: queuedAgeMinutes > Number(policy.maxQueueAgeMinutes || 5) || runningAgeMinutes > Number(policy.maxRunningAgeMinutes || 15),
+      lastRecoveredAt: row.last_recovered_at?.toISOString?.() || row.last_recovered_at || "",
+      recoveryCount: Number(row.recovery_count || 0),
+      completedLastHour: Number(row.completed_last_hour || 0),
+      changedLastHour: Number(row.changed_last_hour || 0),
+      latestStatus: row.latest_status || "",
+      latestAt: row.latest_at?.toISOString?.() || row.latest_at || "",
+      latestJobId: row.latest_job_id || "",
+      latestSuccessAt: row.latest_success_at?.toISOString?.() || row.latest_success_at || ""
+    };
+  });
+}
+
+async function recoverStaleCriticalOperationJobs() {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const recovered = [];
+  for (const [task, policy] of Object.entries(CRITICAL_JOB_POLICIES || {})) {
+    const result = await client.query(`
+      update operations_jobs
+      set raw = coalesce(raw, '{}'::jsonb) || jsonb_build_object(
+        'queuePriority', greatest(
+          case when coalesce(raw->>'queuePriority', '') ~ '^-?[0-9]+$' then (raw->>'queuePriority')::int else 0 end,
+          $3::int
+        ),
+        'queueRecoveryCount', coalesce(case when raw->>'queueRecoveryCount' ~ '^[0-9]+$' then (raw->>'queueRecoveryCount')::int end, 0) + 1,
+        'queueRecoveredAt', to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+        'queueRecoveryReason', 'Critical job exceeded its maximum queue age; priority was raised without replaying the job.'
+      ), updated_at = now()
+      where lower(status) = 'queued'
+        and raw->>'workerTask' = $1
+        and created_at <= now() - ($2::text || ' minutes')::interval
+        and coalesce(case when raw->>'queueRecoveryCount' ~ '^[0-9]+$' then (raw->>'queueRecoveryCount')::int end, 0) < 3
+        and (
+          nullif(raw->>'queueRecoveredAt', '') is null
+          or nullif(raw->>'queueRecoveredAt', '')::timestamptz <= now() - interval '5 minutes'
+        )
+      returning job_id
+    `, [task, Number(policy.maxQueueAgeMinutes || 5), Number(policy.recoveryPriority || 100)]);
+    recovered.push(...result.rows.map((row) => ({ task, jobId: row.job_id, lane: policy.lane || "background" })));
+  }
+  return recovered;
 }
 
 async function readStateArrayItem(docKey = "", entityId = "", identifierField = "id") {
@@ -21201,6 +21332,8 @@ module.exports = {
   readFulfillmentConsoleProjectionFacets,
   readOrderIdsUpdatedSince,
   readOperationPerformanceSummary,
+  readCriticalOperationQueueHealth,
+  recoverStaleCriticalOperationJobs,
   readStateArrayItem,
   readStateArrayItems,
   mutateStateArrayItem,

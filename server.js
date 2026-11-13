@@ -23668,6 +23668,7 @@ function getWalmartMarketplace() {
       if (db) await postgres.writeStateField('sequence', db.sequence);
       await postgres.upsertOrdersFromState([order], { replace: false });
       if (!historicalBackfill) await reconcilePersistedTerminalOrders([order], { user: 'Walmart order import' });
+      if (!historicalBackfill) await queuePaidOrderRoutingCandidates([order.id], { immediate: true, source: 'walmart-order-import', sourceJobId: options.jobId || '' });
       clearOrderApiCache();
     }
   });
@@ -23801,6 +23802,7 @@ function getTikTokMarketplace() {
       // Do not overwrite that committed sequence with this older state snapshot.
       await postgres.upsertOrdersFromState([order], { replace: false });
       if (!historicalBackfill) await reconcilePersistedTerminalOrders([order], { user: 'TikTok Shop order import' });
+      if (!historicalBackfill) await queuePaidOrderRoutingCandidates([order.id], { immediate: true, source: 'tiktok-orders', sourceJobId: options.jobId || '' });
       clearOrderApiCache();
       return { action: existing ? 'updated' : 'imported', order };
     }
@@ -26439,6 +26441,7 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
         await hydrateOrdersLocalCosts(importableOrders);
         await postgres.upsertOrdersFromState(importableOrders, { replace: false, batchSize: 250 });
         if (!payload.historicalBackfill) await reconcilePersistedTerminalOrders(importableOrders, { user: "eBay order import" });
+        if (!payload.historicalBackfill) await queuePaidOrderRoutingCandidates(importableOrders.map((order) => order.id), { immediate: true, source: "ebay-order-import", sourceJobId: job.id });
         clearOrderApiCache();
         invalidateFulfillmentConsoleSnapshot(importableOrders.map((order) => order.id));
       }
@@ -26877,6 +26880,7 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
         await linkReturns(importableOrders);
         const withReturns = importableOrders.filter((order) => order.returns?.length);
         if (withReturns.length) await postgres.upsertOrdersFromState(withReturns, { replace: false, batchSize: 250 });
+        if (!payload.historicalBackfill) await queuePaidOrderRoutingCandidates(importableOrders.map((order) => order.id), { immediate: true, source: "temu-order-import", sourceJobId: job.id });
         clearOrderApiCache();
       } else await linkReturns(importableOrders);
       lastOrderFlushCount += importableOrders.length;
@@ -52316,6 +52320,7 @@ async function importShopifyOrders(limit = 250, filters = {}) {
       if (filters.historicalBackfill !== true) await postgres.writeStateField("sequence", db.sequence);
       await postgres.upsertOrdersFromState(savedPage, { replace: false, batchSize: 250 });
       if (filters.historicalBackfill !== true) await reconcilePersistedTerminalOrders(savedPage, { user: "Shopify order import" });
+      if (filters.historicalBackfill !== true) await queuePaidOrderRoutingCandidates(savedPage.map((order) => order.id), { immediate: true, source: "shopify-order-import", sourceJobId: filters.jobId || "" });
       clearOrderApiCache();
     }
     if (typeof filters.progress === "function") {
@@ -56758,12 +56763,22 @@ async function handleApi(req, res) {
     return sendJson(res, 202, { recorded: true });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/fulfillment/routing-health" && postgres.isPostgresEnabled()) {
+    const health = url.searchParams.get("fresh") === "1"
+      ? await refreshFulfillmentRoutingHealth()
+      : await readFulfillmentRoutingHealth();
+    return sendJson(res, 200, { health });
+  }
+
   if (req.method === "GET" && url.pathname === "/api/fulfillment/console" && postgres.isPostgresEnabled()) {
     const requestStarted = fulfillmentPerformanceClock();
     const view = String(url.searchParams.get("view") || "ready").trim().toLowerCase();
     const fresh = url.searchParams.get("fresh") === "1";
     const paged = ["ready", "all-shipments", "purchased-labels", "shipments", "exceptions", "do-not-ship"].includes(view) && url.searchParams.get("paged") === "1";
-    if (fresh) void requestFulfillmentConsoleProjectionReconciliation().catch((error) => console.warn(`Fulfillment projection reconciliation failed: ${error.message}`));
+    if (fresh) {
+      void requestFulfillmentConsoleProjectionReconciliation().catch((error) => console.warn(`Fulfillment projection reconciliation failed: ${error.message}`));
+    }
+    const routingHealth = fresh ? await refreshFulfillmentRoutingHealth() : await readFulfillmentRoutingHealth();
     const readStarted = fulfillmentPerformanceClock();
     const projection = await (paged
       ? readFulfillmentConsoleProjectionPage(view, {
@@ -56793,6 +56808,7 @@ async function handleApi(req, res) {
     });
     const readMs = fulfillmentPerformanceClock() - readStarted;
     if (projection) {
+      projection.routingHealth = routingHealth;
       if (projection.fullRefreshRequired && !fulfillmentConsoleSnapshotPromise) void refreshFulfillmentConsoleSnapshot().catch((error) => console.warn(`Fulfillment snapshot refresh failed: ${error.message}`));
       delete projection.fullRefreshRequired;
       const rowCount = paged
@@ -56803,6 +56819,7 @@ async function handleApi(req, res) {
     const fallbackStarted = fulfillmentPerformanceClock();
     const snapshot = await readFulfillmentConsoleSnapshot();
     const payload = projectFulfillmentConsoleSnapshot(snapshot, view);
+    payload.routingHealth = routingHealth;
     const fallbackReadMs = readMs + (fulfillmentPerformanceClock() - fallbackStarted);
     const rowCount = [payload.work, payload.allWork, payload.shipments, payload.exceptions, payload.doNotShip, payload.batches].reduce((total, rows) => total + Number(Array.isArray(rows) ? rows.length : 0), 0);
     return sendFulfillmentConsoleResponse(res, payload, { startedAt: requestStarted, readMs: fallbackReadMs, view, paged, fresh, rowCount, source: "snapshot_fallback" });
@@ -79350,8 +79367,13 @@ function escapeHtml(value) {
 
 let orderRoutingProcessing = false;
 let purchasePoolProcessing = false;
+let fulfillmentRoutingWatchdogProcessing = false;
+let criticalQueueWatchdogProcessing = false;
+let fulfillmentRoutingHealthCache = null;
 const SCHEDULED_ORDER_ROUTING_LIMIT = 25;
 const SCHEDULED_ORDER_ROUTING_SCAN_PAGE_SIZE = 250;
+const FULFILLMENT_ROUTING_WATCHDOG_INTERVAL_MS = 5 * 60_000;
+const FULFILLMENT_ROUTING_BACKLOG_ALERT_MINUTES = 5;
 const SCHEDULED_ORDER_ROUTING_NOOP_COOLDOWN_MS = Math.max(
   60_000,
   Number(process.env.SCHEDULED_ORDER_ROUTING_NOOP_COOLDOWN_MS || 15 * 60_000) || 15 * 60_000
@@ -79359,6 +79381,258 @@ const SCHEDULED_ORDER_ROUTING_NOOP_COOLDOWN_MS = Math.max(
 
 function scheduledOrderRoutingFingerprint(candidateIds = []) {
   return [...new Set(candidateIds.map(String).filter(Boolean))].sort().join("|");
+}
+
+async function queuePaidOrderRoutingCandidates(candidateIds = [], options = {}) {
+  if (!postgres.isPostgresEnabled()) return [];
+  const requestedIds = [...new Set(candidateIds.map(String).filter(Boolean))];
+  if (!requestedIds.length) return [];
+  const active = await postgres.getPool().query(`
+    select raw->'workerPayload'->'candidateIds' as candidate_ids
+    from operations_jobs
+    where lower(status) in ('queued', 'running')
+      and raw->>'workerTask' = 'paid-order-routing'
+  `);
+  const alreadyQueued = new Set(active.rows.flatMap((row) => Array.isArray(row.candidate_ids) ? row.candidate_ids.map(String) : []));
+  const pendingIds = requestedIds.filter((id) => !alreadyQueued.has(id));
+  if (!pendingIds.length) return [];
+  const jobs = [];
+  for (let offset = 0; offset < pendingIds.length; offset += SCHEDULED_ORDER_ROUTING_LIMIT) {
+    const chunk = pendingIds.slice(offset, offset + SCHEDULED_ORDER_ROUTING_LIMIT);
+    const candidateFingerprint = scheduledOrderRoutingFingerprint(chunk);
+    const queueDb = { importJobs: [] };
+    const job = createImportJob(queueDb, {
+      section: "Orders",
+      category: "Fulfillment",
+      operation: "Paid order routing",
+      direction: "sync",
+      status: "queued",
+      startedAt: "",
+      totalRows: chunk.length,
+      processedRows: 0,
+      progressPercent: 0,
+      phase: "queued",
+      queuePriority: options.immediate === true ? 150 : 110,
+      workerTask: "paid-order-routing",
+      workerPayload: {
+        scheduled: true,
+        background: true,
+        immediate: options.immediate === true,
+        source: String(options.source || "routing-watchdog"),
+        sourceJobId: String(options.sourceJobId || ""),
+        candidateIds: chunk,
+        candidateFingerprint
+      },
+      message: `${chunk.length} paid order${chunk.length === 1 ? " is" : "s are"} queued for fulfillment routing${options.immediate === true ? " immediately after import" : ""}.`
+    });
+    await postgres.upsertOperationJob(job);
+    jobs.push(job);
+  }
+  return jobs;
+}
+
+function orderHasActiveFulfillmentRoute(order = {}) {
+  return (Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : []).some((route) => {
+    const status = String(route?.status || "").trim().toLowerCase();
+    return !["canceled", "cancelled", "closed", "expired", "failed", "void", "voided"].includes(status);
+  });
+}
+
+async function scanFulfillmentRoutingBacklog(workflowSettings, systemSettings) {
+  const candidateIds = [];
+  let unroutedPaidCount = 0;
+  let pausedCount = 0;
+  let oldestUnroutedAt = "";
+  let page = 1;
+  let totalPages = 1;
+  const now = Date.now();
+  do {
+    const result = await postgres.listOrders({
+      limit: SCHEDULED_ORDER_ROUTING_SCAN_PAGE_SIZE,
+      page,
+      paginated: true,
+      summary: true,
+      openWorkOnly: true,
+      sort: "created-asc"
+    });
+    const orderSummaries = Array.isArray(result?.orders) ? result.orders : [];
+    totalPages = Math.max(1, Number(result?.totalPages || 1));
+    for (const order of orderSummaries) {
+      const policy = orderRoutingPolicyDecision(order, workflowSettings);
+      const holdDecision = orderAutomaticHoldDecision(order, systemSettings);
+      const needsRouting = holdDecision.hold
+        ? orderNeedsAutomaticRouting(order, now, systemSettings)
+        : policy.allowed && orderNeedsAutomaticRouting(order, now, systemSettings);
+      if (needsRouting && order.id && candidateIds.length < 250) candidateIds.push(order.id);
+      const paidUnrouted = policy.allowed && isOrderPaymentCleared(order) && !orderHasActiveFulfillmentRoute(order)
+        && orderLineItems(order).some((line) => Number(line.qty || line.quantity || 0) > 0);
+      if (!paidUnrouted) continue;
+      unroutedPaidCount += 1;
+      const createdAt = order.createdAt || order.orderDate || order.orderedAt || order.importedAt || "";
+      if (createdAt && (!oldestUnroutedAt || Date.parse(createdAt) < Date.parse(oldestUnroutedAt))) oldestUnroutedAt = createdAt;
+      const exhausted = Number(order.routingAttemptCount || 0) >= Number(systemSettings.ordersRoutingMaxAttempts || 3)
+        && ["failed", "needs_review"].includes(String(order.routingLastResult || "").toLowerCase());
+      const blocked = (order.workflowExceptions || []).some((exception) => String(exception?.status || "open").toLowerCase() !== "resolved" && String(exception?.severity || "").toLowerCase() === "blocking");
+      if (exhausted || blocked) pausedCount += 1;
+    }
+    page += 1;
+  } while (page <= totalPages);
+  const oldestTimestamp = Date.parse(oldestUnroutedAt || "");
+  return {
+    candidateIds,
+    unroutedPaidCount,
+    pausedCount,
+    oldestUnroutedAt,
+    oldestUnroutedAgeMinutes: Number.isFinite(oldestTimestamp) ? Math.max(0, Math.round(((now - oldestTimestamp) / 60000) * 10) / 10) : 0
+  };
+}
+
+async function readFulfillmentRoutingHealth() {
+  if (fulfillmentRoutingHealthCache) return fulfillmentRoutingHealthCache;
+  const stored = await postgres.readStateField("fulfillmentRoutingHealth").catch(() => null);
+  return stored && typeof stored === "object" ? stored : {
+    status: "checking",
+    checkedAt: "",
+    unroutedPaidCount: 0,
+    pausedCount: 0,
+    oldestUnroutedAgeMinutes: 0,
+    routedLastHour: 0,
+    worker: { configured: true, online: false, label: "Fulfillment operations" },
+    criticalQueues: []
+  };
+}
+
+async function auditCriticalOperationQueues() {
+  if (!postgres.isPostgresEnabled() || criticalQueueWatchdogProcessing) {
+    const queues = await postgres.readCriticalOperationQueueHealth().catch(() => []);
+    return { queues, criticalQueues: queues.filter((queue) => queue.stale), recoveredJobs: [] };
+  }
+  criticalQueueWatchdogProcessing = true;
+  try {
+    const recoveredJobs = await postgres.recoverStaleCriticalOperationJobs();
+    const queues = await postgres.readCriticalOperationQueueHealth();
+    const criticalQueues = queues.filter((queue) => queue.stale);
+    const checkedAt = new Date().toISOString();
+    for (const queue of criticalQueues) {
+      const episodeId = String(queue.latestJobId || queue.oldestQueuedAt || queue.oldestRunningAt || "unknown");
+      await postgres.createSystemNotification({
+        tenantId: LEGACY_TENANT,
+        companyId: LEGACY_COMPANY,
+        severity: "error",
+        category: "job",
+        title: `${queue.label} exceeded its queue limit`,
+        message: `${queue.label} is assigned to ${queue.lane}. ${queue.queuedCount} queued and ${queue.runningCount} running; the oldest wait is ${Math.round(Math.max(queue.queuedAgeMinutes, queue.runningAgeMinutes))} minutes.`,
+        source: "critical-job-watchdog",
+        entityType: "job_queue",
+        entityId: queue.task,
+        actionUrl: queue.lane === "carrier" ? "/fulfillment" : "/jobs",
+        dedupeKey: `critical-job-stale:${queue.task}:${episodeId}`,
+        raw: { checkedAt, queue }
+      });
+    }
+    return { queues, criticalQueues, recoveredJobs };
+  } catch (error) {
+    console.error(`Critical queue watchdog failed: ${error.message}`);
+    return { queues: [], criticalQueues: [], recoveredJobs: [], error: error.message || "Critical queue watchdog failed." };
+  } finally {
+    criticalQueueWatchdogProcessing = false;
+  }
+}
+
+async function refreshFulfillmentRoutingHealth() {
+  if (!postgres.isPostgresEnabled() || fulfillmentRoutingWatchdogProcessing) return fulfillmentRoutingHealthCache;
+  fulfillmentRoutingWatchdogProcessing = true;
+  try {
+    const workflowSettings = await readOrderWorkflowSettings();
+    const storedSystemSettings = await postgres.readStateField("systemSettings").catch(() => null);
+    const systemSettings = readSystemSettingsStore(storedSystemSettings || dbCache.data?.systemSettings || {});
+    const [backlog, queueAudit, workerStatus] = await Promise.all([
+      scanFulfillmentRoutingBacklog(workflowSettings, systemSettings),
+      auditCriticalOperationQueues(),
+      readWorkerStatus(systemSettings)
+    ]);
+    const queueHealth = queueAudit.queues || [];
+    const recoveredJobs = queueAudit.recoveredJobs || [];
+    if (workflowSettings.automation?.routePaidOrders !== false && backlog.candidateIds.length) {
+      await queuePaidOrderRoutingCandidates(backlog.candidateIds, { source: "five-minute-watchdog" });
+    }
+    const carrierWorker = (workerStatus.workers || []).find((worker) => worker.lane === "carrier") || null;
+    const routingQueue = queueHealth.find((row) => row.task === "paid-order-routing") || {};
+    const criticalQueues = queueHealth.filter((row) => row.stale);
+    const workerOnline = workerStatus.configured === false ? true : carrierWorker?.online === true;
+    const backlogLate = backlog.oldestUnroutedAgeMinutes > FULFILLMENT_ROUTING_BACKLOG_ALERT_MINUTES;
+    const queueAuditError = String(queueAudit.error || "");
+    const status = queueAuditError || !workerOnline || backlogLate || criticalQueues.length ? "critical" : backlog.unroutedPaidCount ? "warning" : "healthy";
+    const checkedAt = new Date().toISOString();
+    fulfillmentRoutingHealthCache = {
+      status,
+      checkedAt,
+      lastSuccessfulPassAt: checkedAt,
+      lastRoutingSuccessAt: routingQueue.latestSuccessAt || "",
+      unroutedPaidCount: backlog.unroutedPaidCount,
+      pausedCount: backlog.pausedCount,
+      oldestUnroutedAt: backlog.oldestUnroutedAt,
+      oldestUnroutedAgeMinutes: backlog.oldestUnroutedAgeMinutes,
+      routedLastHour: Number(routingQueue.changedLastHour || 0),
+      recoveredJobs,
+      worker: {
+        configured: workerStatus.configured !== false,
+        online: workerOnline,
+        label: carrierWorker?.name || "Fulfillment operations",
+        currentTask: carrierWorker?.currentTask || (workerStatus.configured === false ? "Inline mode" : "Idle"),
+        lastSeenAt: carrierWorker?.lastSeenAt || ""
+      },
+      routingQueue,
+      criticalQueues,
+      queues: queueHealth,
+      error: queueAuditError
+    };
+    await postgres.writeStateDocuments({ fulfillmentRoutingHealth: fulfillmentRoutingHealthCache });
+    if (backlogLate) {
+      await postgres.createSystemNotification({
+        tenantId: LEGACY_TENANT,
+        companyId: LEGACY_COMPANY,
+        severity: "error",
+        category: "fulfillment",
+        title: "Paid orders are waiting for fulfillment routing",
+        message: `${backlog.unroutedPaidCount} paid order${backlog.unroutedPaidCount === 1 ? " is" : "s are"} unrouted. The oldest has waited ${Math.round(backlog.oldestUnroutedAgeMinutes)} minutes.`,
+        source: "fulfillment-routing-watchdog",
+        entityType: "fulfillment_queue",
+        entityId: "paid-order-routing",
+        actionUrl: "/fulfillment",
+        dedupeKey: `fulfillment-routing-backlog:${backlog.oldestUnroutedAt || "unknown"}`,
+        raw: { checkedAt, unroutedPaidCount: backlog.unroutedPaidCount, oldestUnroutedAgeMinutes: backlog.oldestUnroutedAgeMinutes }
+      });
+    }
+    if (!workerOnline) {
+      await postgres.createSystemNotification({
+        tenantId: LEGACY_TENANT,
+        companyId: LEGACY_COMPANY,
+        severity: "error",
+        category: "fulfillment",
+        title: "Fulfillment worker is offline",
+        message: "The Fulfillment operations worker is not reporting a current heartbeat. Paid-order routing, rate requests, and label purchases may be delayed.",
+        source: "fulfillment-routing-watchdog",
+        entityType: "worker_lane",
+        entityId: "carrier",
+        actionUrl: "/jobs",
+        dedupeKey: `fulfillment-worker-offline:${carrierWorker?.lastSeenAt || "no-heartbeat"}`,
+        raw: { checkedAt, worker: carrierWorker || null }
+      });
+    }
+    return fulfillmentRoutingHealthCache;
+  } catch (error) {
+    console.error(`Fulfillment routing watchdog failed: ${error.message}`);
+    fulfillmentRoutingHealthCache = {
+      ...(fulfillmentRoutingHealthCache || {}),
+      status: "critical",
+      checkedAt: new Date().toISOString(),
+      error: error.message || "Fulfillment routing health check failed."
+    };
+    return fulfillmentRoutingHealthCache;
+  } finally {
+    fulfillmentRoutingWatchdogProcessing = false;
+  }
 }
 
 async function readOrderRoutingContext(options = {}) {
@@ -79858,6 +80132,14 @@ function startServer() {
   orderRoutingStart.unref?.();
   const orderRoutingInterval = setInterval(() => void processScheduledOrderRouting(), 60_000);
   orderRoutingInterval.unref?.();
+  const routingWatchdogStart = setTimeout(() => void refreshFulfillmentRoutingHealth(), 12_000);
+  routingWatchdogStart.unref?.();
+  const routingWatchdogInterval = setInterval(() => void refreshFulfillmentRoutingHealth(), FULFILLMENT_ROUTING_WATCHDOG_INTERVAL_MS);
+  routingWatchdogInterval.unref?.();
+  const criticalQueueWatchdogStart = setTimeout(() => void auditCriticalOperationQueues(), 15_000);
+  criticalQueueWatchdogStart.unref?.();
+  const criticalQueueWatchdogInterval = setInterval(() => void auditCriticalOperationQueues(), 60_000);
+  criticalQueueWatchdogInterval.unref?.();
   const purchasePoolStart = setTimeout(() => void processScheduledPurchasePooling(), 25_000);
   purchasePoolStart.unref?.();
   const purchasePoolInterval = setInterval(() => void processScheduledPurchasePooling(), 60_000);
