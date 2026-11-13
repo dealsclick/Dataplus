@@ -11474,7 +11474,14 @@ async function listOrders(options = {}) {
   }
   const search = nullableString(options.q || options.query || options.search);
   const searchTerms = parseSearchTerms(search);
-  if (searchTerms.length > 1) {
+  const exactInternalNumberSearch = searchTerms.length === 1 && /^\d{4,10}$/.test(searchTerms[0]);
+  if (exactInternalNumberSearch) {
+    params.push(searchTerms[0]);
+    where.push(`(
+      lower(coalesce(order_number, '')) = $${params.length}
+      or lower(coalesce(internal_order_number, '')) = $${params.length}
+    )`);
+  } else if (searchTerms.length > 1) {
     params.push(searchTerms);
     where.push(`(
       lower(coalesce(order_number, '')) = any($${params.length}::text[])
@@ -11938,6 +11945,27 @@ async function listOrders(options = {}) {
   const ids = orders.rows.map((row) => row.order_id).filter(Boolean);
   let lineRows = [];
   if (ids.length) {
+    const leanSummary = summary && (options.leanSummary === true || String(options.leanSummary).toLowerCase() === "true");
+    const summaryLineJoins = leanSummary ? "" : `
+      left join products product on lower(product.sku) = lower(coalesce(nullif(order_line_items.mapped_sku, ''), order_line_items.sku))
+      left join product_aliases product_alias on product_alias.active = true
+        and lower(product_alias.alias_sku) = lower(coalesce(nullif(order_line_items.mapped_sku, ''), order_line_items.sku))
+      left join products alias_product on alias_product.product_id = product_alias.product_id`;
+    const summaryLineBrand = leanSummary
+      ? "coalesce(nullif(order_line_items.raw->>'brand', ''), nullif(order_line_items.raw->>'brandName', ''), '')"
+      : "coalesce(nullif(order_line_items.raw->>'brand', ''), nullif(order_line_items.raw->>'brandName', ''), nullif(product.brand, ''), nullif(alias_product.brand, ''), '')";
+    const summaryLineSupplier = leanSummary
+      ? "coalesce(nullif(order_line_items.raw->>'supplier', ''), nullif(order_line_items.raw->>'vendor', ''), nullif(order_line_items.raw->>'vendorName', ''), '')"
+      : "coalesce(nullif(order_line_items.raw->>'supplier', ''), nullif(order_line_items.raw->>'vendor', ''), nullif(order_line_items.raw->>'vendorName', ''), nullif(product.supplier, ''), nullif(alias_product.supplier, ''), '')";
+    const summaryLineVendorSku = leanSummary
+      ? "coalesce(nullif(order_line_items.raw->>'vendorSku', ''), nullif(order_line_items.raw->>'vendor_sku', ''), nullif(order_line_items.raw->>'sourceSku', ''), '')"
+      : "coalesce(nullif(order_line_items.raw->>'vendorSku', ''), nullif(order_line_items.raw->>'vendor_sku', ''), nullif(order_line_items.raw->>'sourceSku', ''), nullif(product.vendor_sku, ''), nullif(alias_product.vendor_sku, ''), '')";
+    const summaryLineMfrPartNumber = leanSummary
+      ? "coalesce(nullif(order_line_items.raw->>'mfrPartNumber', ''), nullif(order_line_items.raw->>'manufacturerPartNumber', ''), nullif(order_line_items.raw->>'mfr_part_number', ''), nullif(order_line_items.raw->>'mpn', ''), '')"
+      : "coalesce(nullif(order_line_items.raw->>'mfrPartNumber', ''), nullif(order_line_items.raw->>'manufacturerPartNumber', ''), nullif(order_line_items.raw->>'mfr_part_number', ''), nullif(order_line_items.raw->>'mpn', ''), nullif(product.mfr_part_number, ''), nullif(alias_product.mfr_part_number, ''), '')";
+    const summaryLineUpc = leanSummary
+      ? "coalesce(nullif(order_line_items.raw->>'upc', ''), nullif(order_line_items.raw->>'barcode', ''), nullif(order_line_items.raw->>'gtin', ''), nullif(order_line_items.raw->>'upcCode', ''), '')"
+      : "coalesce(nullif(order_line_items.raw->>'upc', ''), nullif(order_line_items.raw->>'barcode', ''), nullif(order_line_items.raw->>'gtin', ''), nullif(order_line_items.raw->>'upcCode', ''), nullif(product.barcode, ''), nullif(product.raw->>'upc', ''), nullif(product.raw->>'gtin', ''), nullif(product.raw->>'upcCode', ''), nullif(alias_product.barcode, ''), nullif(alias_product.raw->>'upc', ''), nullif(alias_product.raw->>'gtin', ''), nullif(alias_product.raw->>'upcCode', ''), '')";
     const lines = await client.query(summary ? `
       select
         order_line_items.line_id, order_line_items.order_id, order_line_items.line_index, order_line_items.sku,
@@ -11947,20 +11975,17 @@ async function listOrders(options = {}) {
         coalesce(order_line_items.raw->>'fulfillmentStatus', '') as line_fulfillment_status,
         coalesce(order_line_items.raw->>'fulfilledQty', order_line_items.raw->>'fulfilledQuantity', order_line_items.raw->>'qtyFulfilled') as line_fulfilled_qty,
         coalesce(order_line_items.raw->>'remainingQty', order_line_items.raw->>'remainingQuantity', order_line_items.raw->>'unfulfilledQuantity') as line_remaining_qty,
-        coalesce(nullif(order_line_items.raw->>'brand', ''), nullif(order_line_items.raw->>'brandName', ''), nullif(product.brand, ''), nullif(alias_product.brand, ''), '') as line_brand,
-        coalesce(nullif(order_line_items.raw->>'supplier', ''), nullif(order_line_items.raw->>'vendor', ''), nullif(order_line_items.raw->>'vendorName', ''), nullif(product.supplier, ''), nullif(alias_product.supplier, ''), '') as line_supplier,
-        coalesce(nullif(order_line_items.raw->>'vendorSku', ''), nullif(order_line_items.raw->>'vendor_sku', ''), nullif(order_line_items.raw->>'sourceSku', ''), nullif(product.vendor_sku, ''), nullif(alias_product.vendor_sku, ''), '') as line_vendor_sku,
-        coalesce(nullif(order_line_items.raw->>'mfrPartNumber', ''), nullif(order_line_items.raw->>'manufacturerPartNumber', ''), nullif(order_line_items.raw->>'mfr_part_number', ''), nullif(order_line_items.raw->>'mpn', ''), nullif(product.mfr_part_number, ''), nullif(alias_product.mfr_part_number, ''), '') as line_mfr_part_number,
-        coalesce(nullif(order_line_items.raw->>'upc', ''), nullif(order_line_items.raw->>'barcode', ''), nullif(order_line_items.raw->>'gtin', ''), nullif(order_line_items.raw->>'upcCode', ''), nullif(product.barcode, ''), nullif(product.raw->>'upc', ''), nullif(product.raw->>'gtin', ''), nullif(product.raw->>'upcCode', ''), nullif(alias_product.barcode, ''), nullif(alias_product.raw->>'upc', ''), nullif(alias_product.raw->>'gtin', ''), nullif(alias_product.raw->>'upcCode', ''), '') as line_upc,
+        ${summaryLineBrand} as line_brand,
+        ${summaryLineSupplier} as line_supplier,
+        ${summaryLineVendorSku} as line_vendor_sku,
+        ${summaryLineMfrPartNumber} as line_mfr_part_number,
+        ${summaryLineUpc} as line_upc,
         coalesce(order_line_items.raw->>'cancelledQty', order_line_items.raw->>'canceledQty', order_line_items.raw->>'cancelledQuantity', order_line_items.raw->>'canceledQuantity') as line_cancelled_qty,
         coalesce(order_line_items.raw->>'cancelledAt', order_line_items.raw->>'canceledAt', order_line_items.raw->>'cancelDate', '') as line_cancelled_at,
         coalesce(order_line_items.raw->>'refundedQty', order_line_items.raw->>'refundQty', order_line_items.raw->>'refundedQuantity', order_line_items.raw->>'refundQuantity') as line_refunded_qty,
         coalesce(order_line_items.raw->>'refundedAt', order_line_items.raw->>'refundDate', '') as line_refunded_at
       from order_line_items
-      left join products product on lower(product.sku) = lower(coalesce(nullif(order_line_items.mapped_sku, ''), order_line_items.sku))
-      left join product_aliases product_alias on product_alias.active = true
-        and lower(product_alias.alias_sku) = lower(coalesce(nullif(order_line_items.mapped_sku, ''), order_line_items.sku))
-      left join products alias_product on alias_product.product_id = product_alias.product_id
+      ${summaryLineJoins}
       where order_line_items.order_id = any($1::text[])
       order by order_line_items.order_id, order_line_items.line_index
     ` : `
@@ -12547,14 +12572,24 @@ async function readOrderByKey(key) {
     where order_id = $1
     limit 1
   `, [value]);
+  // Keep indexed identifiers in separate queries. Combining them with JSON
+  // fallbacks in one OR makes PostgreSQL scan the full order table.
+  const indexedIdentifiers = ["order_number", "internal_order_number", "marketplace_order_id"];
+  for (const column of indexedIdentifiers) {
+    if (result.rows[0]) break;
+    result = await client.query(`
+      select *
+      from order_records
+      where lower(${column}) = lower($1)
+      order by created_at desc nulls last, order_id
+      limit 2
+    `, [value]);
+  }
   if (!result.rows[0]) {
     result = await client.query(`
       select *
       from order_records
-      where lower(order_number) = lower($1)
-         or lower(internal_order_number) = lower($1)
-         or lower(marketplace_order_id) = lower($1)
-         or lower(coalesce(raw->'external'->>'customerOrderId', '')) = lower($1)
+      where lower(coalesce(raw->'external'->>'customerOrderId', '')) = lower($1)
          or lower(coalesce(raw->'external'->>'purchaseOrderId', '')) = lower($1)
       order by created_at desc nulls last, order_id
       limit 2
@@ -16843,7 +16878,7 @@ async function reconcileEbayActiveListings({ activeListingIds = [], activeSkus =
   return { changed: Number(result.rowCount || 0) };
 }
 
-async function readProductsForOrderSkus(keys = []) {
+async function readProductsForOrderSkus(keys = [], options = {}) {
   const client = getPool();
   if (!client) return [];
   const normalized = [...new Set((Array.isArray(keys) ? keys : [])
@@ -16853,6 +16888,30 @@ async function readProductsForOrderSkus(keys = []) {
   const compact = [...new Set(normalized
     .map((key) => key.replace(/[^a-z0-9]+/g, ""))
     .filter((key) => key.length >= 4))];
+  const fast = options.fast === true || String(options.fast).toLowerCase() === "true";
+  const extendedMatches = fast ? "" : `
+      union
+      select product_id
+      from shopify_product_statuses
+      where lower(coalesce(shopify_variant_id, '')) = any($1)
+      union
+      select product_id
+      from products
+      where lower(coalesce(raw ->> 'upc', '')) = any($1)
+         or lower(coalesce(raw ->> 'gtin', '')) = any($1)
+         or lower(coalesce(raw ->> 'upcCode', '')) = any($1)
+         or (
+           cardinality($2::text[]) > 0
+           and (
+             regexp_replace(lower(coalesce(vendor_sku, '')), '[^a-z0-9]+', '', 'g') = any($2)
+             or regexp_replace(lower(coalesce(mfr_part_number, '')), '[^a-z0-9]+', '', 'g') = any($2)
+             or regexp_replace(lower(coalesce(barcode, '')), '[^a-z0-9]+', '', 'g') = any($2)
+           )
+         )
+      union
+      select product_id
+      from product_supplier_links
+      where lower(source_sku) = any($1)`;
   await initRelationalSchema();
   const result = await client.query(`
     with matched_product_ids as (
@@ -16877,40 +16936,30 @@ async function readProductsForOrderSkus(keys = []) {
       select product_id
       from shopify_product_statuses
       where product_id is not null
-        and (
-          lower(sku) = any($1)
-          or lower(coalesce(shopify_variant_id, '')) = any($1)
-        )
+        and lower(sku) = any($1)
       union
       select product_id
       from products
       where lower(coalesce(vendor_sku, '')) = any($1)
-         or lower(coalesce(mfr_part_number, '')) = any($1)
-         or lower(coalesce(barcode, '')) = any($1)
-         or lower(coalesce(raw ->> 'upc', '')) = any($1)
-         or lower(coalesce(raw ->> 'gtin', '')) = any($1)
-         or lower(coalesce(raw ->> 'upcCode', '')) = any($1)
-         or (
-           cardinality($2::text[]) > 0
-           and (
-             regexp_replace(lower(coalesce(vendor_sku, '')), '[^a-z0-9]+', '', 'g') = any($2)
-             or regexp_replace(lower(coalesce(mfr_part_number, '')), '[^a-z0-9]+', '', 'g') = any($2)
-             or regexp_replace(lower(coalesce(barcode, '')), '[^a-z0-9]+', '', 'g') = any($2)
-           )
-         )
+      union
+      select product_id
+      from products
+      where lower(coalesce(mfr_part_number, '')) = any($1)
+      union
+      select product_id
+      from products
+      where lower(coalesce(barcode, '')) = any($1)
       union
       select product_id
       from product_identifiers
-      where lower(identifier_value) = any($1)
-      union
-      select product_id
-      from product_supplier_links
-      where lower(source_sku) = any($1)
+      where identifier_type = any($3::text[])
+        and lower(identifier_value) = any($1)
+      ${extendedMatches}
     )
     select p.*
     from products p
     join matched_product_ids matched on matched.product_id = p.product_id
-  `, [normalized, compact]);
+  `, [normalized, compact, ["upc", "gtin", "barcode", "ean", "isbn", "asin", "mpn", "manufacturer_part_number"]]);
   const products = result.rows.map(productRowToState);
   const productIds = products.map((product) => product.id).filter(Boolean);
   if (!productIds.length) return products;

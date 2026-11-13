@@ -18,6 +18,8 @@ assert.ok(boundedRows >= 0, "summary reads must first select a bounded set of or
 assert.ok(boundedLimit > boundedRows && summaryProjection > boundedLimit, "the row limit must run before the JSON summary projection");
 assert.match(listOrders, /\$\{summary \? "" : whereSql\}/, "non-summary reads must retain their normal where clause");
 assert.match(listOrders, /\$\{summary \? "" : `limit/, "non-summary reads must retain their normal limit");
+assert.match(listOrders, /const exactInternalNumberSearch = searchTerms\.length === 1/, "single DataPlus order numbers must use the exact search path");
+assert.match(listOrders, /lower\(coalesce\(order_number, ''\)\) = \$\$\{params\.length\}/, "exact order searches must use the indexed order number");
 
 const apiStart = server.indexOf('url.pathname === "/api/orders"');
 const apiEnd = server.indexOf('url.pathname === "/api/orders/references"', apiStart);
@@ -26,5 +28,6 @@ const ordersApi = server.slice(apiStart, apiEnd);
 assert.match(ordersApi, /dataplus:orders:v14:/, "orders cache version must invalidate older oversized summaries");
 assert.match(ordersApi, /summary \? Promise\.resolve\(\[\]\) : postgres\.readStateField\("orderDrafts"\)/, "summary reads must skip quote drafts");
 assert.match(ordersApi, /summary \? Promise\.resolve\(\[\]\) : postgres\.readStateField\("returns"\)/, "summary reads must skip returns");
+assert.match(ordersApi, /leanSummary: summary/, "summary reads must avoid catalog joins for order lines");
 
 console.log("Order list performance checks passed.");

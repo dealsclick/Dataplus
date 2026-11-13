@@ -53685,7 +53685,7 @@ function resolveOrderLineCatalogCost(order = {}, line = {}, localByKey = new Map
 async function hydrateOrdersLocalCosts(orders = [], options = {}) {
   const records = Array.isArray(orders) ? orders.filter(Boolean) : [];
   const keys = orderLineSkuLookupKeys(records.flatMap((order) => order.items || []));
-  const products = keys.length && postgres.isPostgresEnabled() ? await postgres.readProductsForOrderSkus(keys) : [];
+  const products = keys.length && postgres.isPostgresEnabled() ? await postgres.readProductsForOrderSkus(keys, { fast: true }) : [];
   const localByKey = orderProductLookup(products);
   const now = new Date().toISOString();
   let changedOrders = 0;
@@ -53725,7 +53725,7 @@ async function enrichOrderDetail(order = {}) {
   const routePurchaseOrderIds = (order.fulfillmentRoutes || []).map((route) => String(route?.purchaseOrderId || "")).filter(Boolean);
   const purchaseOrderIds = [...new Set([...(order.purchaseOrderIds || []).map((id) => String(id || "")).filter(Boolean), ...routePurchaseOrderIds])];
   const [products, linkedPurchaseOrders, financialSummary] = await Promise.all([
-    postgres.isPostgresEnabled() ? postgres.readProductsForOrderSkus(keys) : [],
+    postgres.isPostgresEnabled() ? postgres.readProductsForOrderSkus(keys, { fast: true }) : [],
     postgres.isPostgresEnabled() ? Promise.all(purchaseOrderIds.map((id) => postgres.readPurchaseOrderByKey(id))) : [],
     postgres.isPostgresEnabled() ? postgres.readOrderFinancialSummary(order.id) : { channelFees: [], settlements: [], shipping: { shipments: [], estimatedCost: 0, actualCost: null, effectiveCost: 0, reconciliationStatus: "not_recorded" } }
   ]);
@@ -62449,7 +62449,7 @@ async function handleApi(req, res) {
         pending = (async () => {
           try {
             const [orderResult, metrics, orderDrafts, returns, customers] = await Promise.all([
-              postgres.listOrders({ ...listFilters, limit: paginated ? pageSize : limit, summary, paginated, page, dateFrom, dateTo, includeOpenWork, openWorkOnly, q }),
+              postgres.listOrders({ ...listFilters, limit: paginated ? pageSize : limit, summary, leanSummary: summary, paginated, page, dateFrom, dateTo, includeOpenWork, openWorkOnly, q }),
               postgres.readOrderListMetrics(),
               summary ? Promise.resolve([]) : postgres.readStateField("orderDrafts"),
               summary ? Promise.resolve([]) : postgres.readStateField("returns"),

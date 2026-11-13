@@ -210,6 +210,7 @@ function OrderDetailWorkspace() {
   const initialDetailTab = new URLSearchParams(window.location.search).get("tab") || "notes"
   const [detailTab, setDetailTab] = useState(["returns", "transactions"].includes(initialDetailTab) ? initialDetailTab : "notes")
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<{ status?: number; message: string } | null>(null)
   const [fulfillOpen, setFulfillOpen] = useState(false)
   const [labelWorkflow, setLabelWorkflow] = useState(false)
   const [shippingLabelOpen, setShippingLabelOpen] = useState(false)
@@ -273,6 +274,7 @@ function OrderDetailWorkspace() {
   }
   async function load() {
     setLoading(true)
+    setLoadError(null)
     try {
       const result = await api<{ order?: Record<string, unknown>; warehouses?: Array<Record<string, unknown>>; fulfillmentSettings?: Record<string, unknown>; customerSummary?: Record<string, unknown>; relatedReturns?: Array<Record<string, unknown>> }>(`/api/orders/${encodeURIComponent(orderId)}`)
       const nextOrder = result.order || null
@@ -286,7 +288,10 @@ function OrderDetailWorkspace() {
       setCustomerSummary(result.customerSummary || {})
       setRelatedReturns(result.relatedReturns || [])
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to load order.")
+      const requestError = error as Error & { status?: number }
+      const message = requestError instanceof Error ? requestError.message : "Unable to load order."
+      setLoadError({ status: requestError.status, message })
+      toast.error(message)
     } finally {
       setLoading(false)
     }
@@ -700,6 +705,7 @@ function OrderDetailWorkspace() {
     }
   }
   if (loading) return <div className="grid gap-4"><Skeleton className="h-24" /><Skeleton className="h-44" /><Skeleton className="h-72" /></div>
+  if (loadError && !order) return <Card><CardHeader><CardTitle>{loadError.status === 404 ? "Order not found" : "Unable to load order"}</CardTitle><CardDescription>{loadError.status === 404 ? "This order may have been removed or the link is incorrect." : loadError.message}</CardDescription></CardHeader><CardContent className="flex flex-wrap justify-center gap-2"><HistoryBackButton fallback="/orders" label="Back to orders" /><Button onClick={() => void load()}><RefreshCw className="size-4" /> Retry</Button></CardContent></Card>
   if (!order) return <Card><CardContent className="p-8 text-center text-muted-foreground">This order was not found.</CardContent></Card>
   if (order.reportingOnly === true) return <ReportingOrderDetail order={order} onRefresh={load} loading={loading} />
   const routingState = getOrderRoutingState(order)
