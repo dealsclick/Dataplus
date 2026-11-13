@@ -76,6 +76,21 @@ function canonicalSupplierName(value = "", supplierCode = "") {
     || raw;
 }
 
+function databaseQueryFingerprint(args = []) {
+  const input = args[0];
+  const sql = typeof input === "string" ? input : input?.text;
+  const normalized = String(sql || "").replace(/\s+/g, " ").trim().toLowerCase();
+  if (!normalized) return "query";
+  const operation = normalized.match(/^(select|insert|update|delete|with|alter|create|drop|begin|commit|rollback)\b/)?.[1] || "query";
+  const tables = [];
+  for (const match of normalized.matchAll(/\b(?:from|join|update|into|table(?: if not exists)?)\s+([a-z_][a-z0-9_.]*)/g)) {
+    const table = match[1];
+    if (!tables.includes(table)) tables.push(table);
+    if (tables.length >= 5) break;
+  }
+  return tables.length ? `${operation}:${tables.join(",")}` : operation;
+}
+
 function getPool() {
   if (!isPostgresEnabled()) return null;
   if (!pool) {
@@ -85,13 +100,14 @@ function getPool() {
     const poolQuery = pool.query.bind(pool);
     pool.query = (...args) => {
       const startedAt = process.hrtime.bigint();
+      const fingerprint = databaseQueryFingerprint(args);
       const result = poolQuery(...args);
       if (!result || typeof result.then !== "function") return result;
       return result.then((value) => {
-        recordDatabaseQuery(Number(process.hrtime.bigint() - startedAt) / 1_000_000, value?.rowCount || 0);
+        recordDatabaseQuery(Number(process.hrtime.bigint() - startedAt) / 1_000_000, value?.rowCount || 0, fingerprint);
         return value;
       }, (error) => {
-        recordDatabaseQuery(Number(process.hrtime.bigint() - startedAt) / 1_000_000, 0);
+        recordDatabaseQuery(Number(process.hrtime.bigint() - startedAt) / 1_000_000, 0, fingerprint);
         throw error;
       });
     };
@@ -101,13 +117,14 @@ function getPool() {
       const query = client.query.bind(client);
       client.query = (...args) => {
         const startedAt = process.hrtime.bigint();
+        const fingerprint = databaseQueryFingerprint(args);
         const result = query(...args);
         if (!result || typeof result.then !== "function") return result;
         return result.then((value) => {
-          recordDatabaseQuery(Number(process.hrtime.bigint() - startedAt) / 1_000_000, value?.rowCount || 0);
+          recordDatabaseQuery(Number(process.hrtime.bigint() - startedAt) / 1_000_000, value?.rowCount || 0, fingerprint);
           return value;
         }, (error) => {
-          recordDatabaseQuery(Number(process.hrtime.bigint() - startedAt) / 1_000_000, 0);
+          recordDatabaseQuery(Number(process.hrtime.bigint() - startedAt) / 1_000_000, 0, fingerprint);
           throw error;
         });
       };
@@ -12564,17 +12581,29 @@ async function readOrderByKey(key) {
   const value = nullableString(key);
   if (!client || !value) return null;
   await initRelationalSchema();
-  // Detail routes normally use the internal order ID. Query it first so the
-  // primary-key index is not bypassed by the flexible identifier fallbacks.
-  let result = await client.query(`
-    select *
-    from order_records
-    where order_id = $1
-    limit 1
-  `, [value]);
+  const isHumanOrderNumber = /^\d{4,10}$/.test(value);
+  // List links use human order numbers while API relationships use UUIDs.
+  // Start with the index that matches the identifier shape to avoid a known
+  // miss before every order-number lookup.
+  let result = isHumanOrderNumber
+    ? await client.query(`
+        select *
+        from order_records
+        where lower(order_number) = lower($1)
+        order by created_at desc nulls last, order_id
+        limit 2
+      `, [value])
+    : await client.query(`
+        select *
+        from order_records
+        where order_id = $1
+        limit 1
+      `, [value]);
   // Keep indexed identifiers in separate queries. Combining them with JSON
   // fallbacks in one OR makes PostgreSQL scan the full order table.
-  const indexedIdentifiers = ["order_number", "internal_order_number", "marketplace_order_id"];
+  const indexedIdentifiers = isHumanOrderNumber
+    ? ["internal_order_number", "marketplace_order_id"]
+    : ["order_number", "internal_order_number", "marketplace_order_id"];
   for (const column of indexedIdentifiers) {
     if (result.rows[0]) break;
     result = await client.query(`
@@ -13399,16 +13428,11 @@ async function readOrderCustomerSummary(order = {}) {
   const email = nullableString(order.buyerEmail)?.toLowerCase();
   if (!customerId && !email) return { orderCount: 0, lifetimeValue: 0, firstOrderAt: "", lastOrderAt: "" };
   await initRelationalSchema();
-  const conditions = [];
-  const params = [];
-  if (customerId) {
-    params.push(customerId);
-    conditions.push(`customer_id = $${params.length}`);
-  }
-  if (email) {
-    params.push(email);
-    conditions.push(`lower(buyer_email) = $${params.length}`);
-  }
+  // A customer ID is authoritative and indexed. Email is a fallback for older
+  // imports without customer identity; combining both with OR broadens every
+  // current-customer lookup and can force an expensive bitmap scan.
+  const condition = customerId ? "customer_id = $1" : "lower(buyer_email) = $1";
+  const params = [customerId || email];
   const result = await client.query(`
     select
       count(*)::integer as order_count,
@@ -13416,7 +13440,7 @@ async function readOrderCustomerSummary(order = {}) {
       min(created_at) as first_order_at,
       max(created_at) as last_order_at
     from order_records
-    where (${conditions.join(" or ")})
+    where ${condition}
       and lower(coalesce(status, '')) <> 'deleted'
   `, params);
   const row = result.rows[0] || {};
@@ -16889,7 +16913,7 @@ async function readProductsForOrderSkus(keys = [], options = {}) {
     .map((key) => key.replace(/[^a-z0-9]+/g, ""))
     .filter((key) => key.length >= 4))];
   const fast = options.fast === true || String(options.fast).toLowerCase() === "true";
-  const extendedMatches = fast ? "" : `
+  const extendedMatches = `
       union
       select product_id
       from shopify_product_statuses
@@ -16913,8 +16937,59 @@ async function readProductsForOrderSkus(keys = [], options = {}) {
       from product_supplier_links
       where lower(source_sku) = any($1)`;
   await initRelationalSchema();
-  const result = await client.query(`
-    with matched_product_ids as (
+  let result;
+  if (fast) {
+    const direct = await client.query(`
+      select product_id, lower(sku) as match_key
+      from products
+      where lower(sku) = any($1)
+      union all
+      select product_id, lower(alias_sku) as match_key
+      from product_aliases
+      where active = true and lower(alias_sku) = any($1)
+    `, [normalized]);
+    const matchedKeys = new Set(direct.rows.map((row) => row.match_key).filter(Boolean));
+    const productIds = new Set(direct.rows.map((row) => row.product_id).filter(Boolean));
+    const unresolved = normalized.filter((key) => !matchedKeys.has(key));
+    if (unresolved.length) {
+      const fallback = await client.query(`
+        with matched_product_ids as (
+          select product_id
+          from product_shadow_skus
+          where active = true
+            and (
+              lower(shadow_sku) = any($1)
+              or lower(coalesce(marketplace_sku, '')) = any($1)
+              or lower(coalesce(channel_sku, '')) = any($1)
+            )
+          union
+          select product_id
+          from shopify_product_statuses
+          where product_id is not null and lower(sku) = any($1)
+          union
+          select product_id from products where lower(coalesce(vendor_sku, '')) = any($1)
+          union
+          select product_id from products where lower(coalesce(mfr_part_number, '')) = any($1)
+          union
+          select product_id from products where lower(coalesce(barcode, '')) = any($1)
+          union
+          select product_id
+          from product_identifiers
+          where identifier_type = any(array['upc', 'gtin', 'barcode', 'ean', 'isbn', 'asin', 'mpn', 'manufacturer_part_number']::text[])
+            and lower(identifier_value) = any($1)
+          union
+          select product_id from product_supplier_links where lower(source_sku) = any($1)
+        )
+        select product_id from matched_product_ids
+      `, [unresolved]);
+      for (const row of fallback.rows) if (row.product_id) productIds.add(row.product_id);
+    }
+    result = productIds.size
+      ? await client.query("select * from products where product_id = any($1::text[])", [[...productIds]])
+      : { rows: [] };
+  } else {
+    result = await client.query(`
+      with matched_product_ids as (
       select product_id
       from products
       where lower(sku) = any($1)
@@ -16955,11 +17030,12 @@ async function readProductsForOrderSkus(keys = [], options = {}) {
       where lower(identifier_type) in ('upc', 'gtin', 'barcode', 'ean', 'isbn', 'asin', 'mpn', 'manufacturer_part_number')
         and lower(identifier_value) = any($1)
       ${extendedMatches}
-    )
-    select p.*
-    from products p
-    join matched_product_ids matched on matched.product_id = p.product_id
-  `, fast ? [normalized] : [normalized, compact]);
+      )
+      select p.*
+      from products p
+      join matched_product_ids matched on matched.product_id = p.product_id
+    `, [normalized, compact]);
+  }
   const products = result.rows.map(productRowToState);
   const productIds = products.map((product) => product.id).filter(Boolean);
   if (!productIds.length) return products;

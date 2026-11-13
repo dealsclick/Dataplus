@@ -16,7 +16,7 @@ assert.ok(routeStart >= 0 && routeEnd > routeStart, "order-detail route must exi
 assert.match(route, /postgres\.readOrderReturns\(order\)/, "order detail must query only returns related to the selected order");
 assert.doesNotMatch(route, /readStateField\("returns"\)/, "order detail must not load the global returns document");
 assert.match(route, /Promise\.all\(\[\s*postgres\.readOrderCustomerSummary\(order\),[\s\S]*enrichOrderDetail\(order\)/, "optional order enrichment should run concurrently");
-assert.match(cache, /dataplus:order-detail:v8:\$\{orderId\}:/, "writes must invalidate only the changed order detail");
+assert.match(cache, /dataplus:order-detail:v9:\$\{orderId\}:/, "writes must invalidate only the changed order detail");
 assert.doesNotMatch(cache, /deleteByPrefix\("dataplus:order-detail:"\)/, "writes must not flush every cached order detail");
 assert.ok(appSource.includes('if (/^\\/orders\\/[^/]+\\/?$/.test(window.location.pathname)) { setLoading(false); return }'), "order details must not load the global application state");
 assert.match(source, /const omitOrders = lite && !includeOrders;/, "lite shell state must omit orders unless a caller explicitly requests them");
@@ -26,14 +26,17 @@ assert.match(appSource, /Unable to load order[\s\S]*Retry/, "request failures mu
 const readOrderStart = database.indexOf("async function readOrderByKey(key)");
 const readOrderEnd = database.indexOf("async function readOrderFinancialSummary", readOrderStart);
 const readOrder = database.slice(readOrderStart, readOrderEnd);
-assert.match(readOrder, /const indexedIdentifiers = \["order_number", "internal_order_number", "marketplace_order_id"\]/, "order references must use indexed identifier lookups");
+assert.match(readOrder, /const isHumanOrderNumber = \/\^\\d\{4,10\}\$\//, "human order numbers must use their index before UUID lookup");
+assert.match(readOrder, /const indexedIdentifiers = isHumanOrderNumber/, "order references must retain indexed identifier fallbacks");
 assert.doesNotMatch(readOrder, /where lower\(order_number\)[\s\S]{0,300}or lower\(coalesce\(raw->'external'/, "indexed order numbers must not share an OR predicate with JSON fallbacks");
 
 const productLookupStart = database.indexOf("async function readProductsForOrderSkus(keys = [], options = {})");
 const productLookupEnd = database.indexOf("async function listProducts", productLookupStart);
 const productLookup = database.slice(productLookupStart, productLookupEnd);
-assert.match(productLookup, /const extendedMatches = fast \? "" :/, "order details need an indexed fast product lookup");
-assert.match(productLookup, /fast \? \[normalized\] : \[normalized, compact\]/, "the fast lookup must not bind unused SQL parameters");
+assert.match(productLookup, /if \(fast\) \{[\s\S]*where lower\(sku\) = any\(\$1\)[\s\S]*const unresolved = normalized\.filter/, "order details must resolve exact SKU and aliases before broader identifiers");
+assert.match(productLookup, /if \(unresolved\.length\)/, "the fast lookup must skip broad identifier tables when exact matches resolve every key");
+assert.match(productLookup, /identifier_type = any\(array\[/, "fallback identifier lookup must preserve the identifier-type index");
+assert.match(route, /redisCache\.setJson\(requestedCacheKey, payload, 60\)/, "human order-number lookups should receive a short alias cache");
 assert.match(route, /enrichOrderDetail\(order\)/, "order detail enrichment must remain enabled");
 assert.match(source, /readProductsForOrderSkus\(keys, \{ fast: true \}\)/, "order detail enrichment must use the indexed product lookup");
 

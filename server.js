@@ -53553,7 +53553,7 @@ function clearOrderApiCache(orderId = "") {
   redisCache.deleteByPrefix("dataplus:orders:").catch(() => {});
   // Detail pages are cached by canonical order ID. Invalidate only the order that
   // changed so activity elsewhere does not make every order-detail load cold.
-  if (orderId) redisCache.deleteByPrefix(`dataplus:order-detail:v8:${orderId}:`).catch(() => {});
+  if (orderId) redisCache.deleteByPrefix(`dataplus:order-detail:v9:${orderId}:`).catch(() => {});
 }
 
 async function invalidateOrderFinancialCaches(orderIds = []) {
@@ -53561,10 +53561,10 @@ async function invalidateOrderFinancialCaches(orderIds = []) {
   orderApiCacheGeneration += 1;
   await redisCache.deleteByPrefix("dataplus:orders:").catch(() => {});
   if (ids.length > 100) {
-    await redisCache.deleteByPrefix("dataplus:order-detail:v8:").catch(() => {});
+    await redisCache.deleteByPrefix("dataplus:order-detail:v9:").catch(() => {});
     return;
   }
-  await Promise.all(ids.map((orderId) => redisCache.deleteByPrefix(`dataplus:order-detail:v8:${orderId}:`).catch(() => {})));
+  await Promise.all(ids.map((orderId) => redisCache.deleteByPrefix(`dataplus:order-detail:v9:${orderId}:`).catch(() => {})));
 }
 
 function orderAddressLabel(address = {}) {
@@ -62623,7 +62623,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[2] !== "tracking-lookup" && !parts[3] && postgres.isPostgresEnabled()) {
-    const requestedCacheKey = `dataplus:order-detail:v8:${parts[2]}:`;
+    const requestedCacheKey = `dataplus:order-detail:v9:${parts[2]}:`;
     const cached = await redisCache.getJson(requestedCacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
     const [order, warehouses, fulfillmentOperationsSettings] = await Promise.all([
@@ -62641,8 +62641,11 @@ async function handleApi(req, res) {
     const normalizedFulfillmentSettings = normalizeFulfillmentSettings(fulfillmentOperationsSettings || {});
     const defaultShipFromWarehouseId = fulfillmentDefaultShipFromWarehouseId({ warehouses: warehouses || [], fulfillmentOperationsSettings: normalizedFulfillmentSettings }, {});
     const payload = { order: enrichedOrder, warehouses: warehouses || [], settings, fulfillmentSettings: { ...normalizedFulfillmentSettings, defaultShipFromWarehouseId }, customerSummary, relatedReturns };
-    const cacheKey = `dataplus:order-detail:v8:${order.id}:`;
-    await redisCache.setJson(cacheKey, payload, 300);
+    const cacheKey = `dataplus:order-detail:v9:${order.id}:`;
+    await Promise.all([
+      redisCache.setJson(cacheKey, payload, 300),
+      requestedCacheKey === cacheKey ? Promise.resolve() : redisCache.setJson(requestedCacheKey, payload, 60)
+    ]);
     return sendJson(res, 200, payload);
   }
 
@@ -80585,6 +80588,7 @@ function startServer() {
           databaseMs: Math.round(Number(requestPerformance.databaseMs || 0) * 100) / 100,
           databaseQueries: Number(requestPerformance.databaseQueries || 0),
           databaseRows: Number(requestPerformance.databaseRows || 0),
+          databaseSlowQueries: Array.isArray(requestPerformance.databaseSlowQueries) ? requestPerformance.databaseSlowQueries : [],
           memoryGrowthBytes: Math.max(0, process.memoryUsage().rss - requestMemoryStartedAt),
           slow: elapsedMs >= SYSTEM_PERFORMANCE_SLOW_TOTAL_MS || payloadBytes >= SYSTEM_PERFORMANCE_LARGE_PAYLOAD_BYTES || Number(res.statusCode || 0) >= 500
         });
