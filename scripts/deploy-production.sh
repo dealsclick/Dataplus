@@ -135,11 +135,6 @@ else
   prepare_runtime_schema
 fi
 
-echo "Applying online order-detail lookup indexes..."
-run_with_timeout "${DATAPLUS_ORDER_DETAIL_INDEX_TIMEOUT_SECONDS:-600}" \
-  docker exec -i dataplus-postgres psql -v ON_ERROR_STOP=1 -U postgres -d dataplus \
-  < scripts/order-detail-lookup-indexes.sql
-
 PRESERVE_BACKGROUND_WORKER=false
 if [[ "$(docker inspect -f '{{.State.Running}}' dataplus-worker-background 2>/dev/null || true)" == "true" ]]; then
   ACTIVE_PRODUCT_DUMP="$(docker exec dataplus-postgres psql -U postgres -d dataplus -Atqc \
