@@ -37982,7 +37982,7 @@ function supplierSourcingPriority(db = {}, value = {}) {
   const vendorName = String(vendor?.name || value.vendorName || value.supplier || value.vendor || "").trim().toLowerCase();
   const defaultPriority = vendorName === "true value"
     ? 10
-    : vendorName === "rjs"
+    : vendorName === "rjs" || vendorName.includes("rj schinner")
       ? 20
       : ["do it best", "doitbest", "dib"].includes(vendorName)
         ? 30

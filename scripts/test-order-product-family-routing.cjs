@@ -18,6 +18,11 @@ const vendors = [
   { id: "do-it-best", name: "Do It Best", purchaseOrderRules: { sourcingPriority: 3 } },
 ];
 
+test("RJ Schinner canonical supplier name inherits the RJS default priority", () => {
+  const db = { vendors: [{ id: "rj-schinner", name: "RJ Schinner Company", purchaseOrderRules: {} }] };
+  assert.equal(supplierSourcingPriority(db, { vendorId: "rj-schinner" }), 20);
+});
+
 test("manufacturer SKU resolves to a managed supplier SKU instead of an order-created draft", () => {
   const importedSku = "48-32-4013";
   const draft = {

@@ -636,7 +636,7 @@ function VendorDetail({ vendor, vendors, onSave, marketplaceCoverage = emptyVend
   const allowSupplierUnit = sellingUnitMode === "supplier-uom" || sellingUnitMode === "case-only" || sellingUnitMode === "individual-and-case" || sellingUnitMode === "inherit"
   const purchaseOrderRules = vendor.purchaseOrderRules || {}
   const defaultSourcingPriority = String(vendor.name || "").trim().toLowerCase() === "true value" ? 10
-    : String(vendor.name || "").trim().toLowerCase() === "rjs" ? 20
+    : ["rjs"].includes(String(vendor.name || "").trim().toLowerCase()) || String(vendor.name || "").trim().toLowerCase().includes("rj schinner") ? 20
       : ["do it best", "doitbest", "dib"].includes(String(vendor.name || "").trim().toLowerCase()) ? 30 : 1000
   const submissionSettings = vendor.submissionSettings || {}
   const supplierDropshipSupported = Boolean(draft["purchaseOrderRules.dropShipEnabled"] ?? purchaseOrderRules.dropShipEnabled)

@@ -241,7 +241,7 @@ function SettingsPage({
   const defaultSupplierPriority = (vendor: Record<string, unknown>) => {
     const name = String(vendor.name || "").trim().toLowerCase()
     if (name === "true value") return 10
-    if (name === "rjs") return 20
+    if (name === "rjs" || name.includes("rj schinner")) return 20
     if (["do it best", "doitbest", "dib"].includes(name)) return 30
     return 1000
   }
