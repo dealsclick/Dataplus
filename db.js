@@ -15473,8 +15473,14 @@ async function readOperationJobsPage(options = {}) {
   if (options.importsOnly) conditions.push("coalesce(raw->>'workerTask', '') ~ '(^|[-_])(order|return|catalog|product|feed|dump)[-_]import$'");
   if (options.activeOnly) conditions.push("lower(status) in ('queued', 'running')");
   if (options.status && options.status !== "all") {
-    values.push(String(options.status).toLowerCase());
-    conditions.push(`lower(status) = $${values.length}`);
+    const status = String(options.status).toLowerCase();
+    if (status === "active") conditions.push("lower(status) in ('queued', 'running')");
+    else if (status === "attention") conditions.push("lower(status) in ('failed', 'warning', 'stopped')");
+    else if (status === "completed") conditions.push("lower(status) in ('success', 'done', 'ok', 'completed')");
+    else {
+      values.push(status);
+      conditions.push(`lower(status) = $${values.length}`);
+    }
   }
   const runType = String(options.runType || "").toLowerCase();
   if (runType === "manual") conditions.push(`not (${JOB_AUTOMATED_SQL})`);

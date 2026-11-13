@@ -68,11 +68,12 @@ export function JobsPage({
   onCleanup: () => void
   onRefresh: () => void
 }) {
+  const statusForTab = (value: string) => value === "active" ? "active" : value === "review" ? "attention" : value === "completed" ? "completed" : "all"
+  const requestedTab = new URLSearchParams(window.location.search).get("tab") || "all"
   const [query, setQuery] = useState("")
-  const [status, setStatus] = useState("all")
+  const [status, setStatus] = useState(() => statusForTab(requestedTab))
   const [tab, setTab] = useState(() => {
-    const requested = new URLSearchParams(window.location.search).get("tab") || "all"
-    return ["all", "manual", "automated", "active", "review", "completed", "logs", "scheduled", "imports"].includes(requested) ? requested : "all"
+    return ["all", "manual", "automated", "active", "review", "completed", "logs", "scheduled", "imports"].includes(requestedTab) ? requestedTab : "all"
   })
   const [channelFilter, setChannelFilter] = useState("all")
   const [advancedFiltersOpen, setAdvancedFiltersOpen] = useState(false)
@@ -168,7 +169,7 @@ export function JobsPage({
 
       {tab !== "imports" && <div className="grid gap-3 lg:grid-cols-4">
         <MetricCard label="Jobs found" value={totalJobs} icon={History} />
-        <MetricCard label="Needs review" value={jobs.filter(isAttentionJob).length} icon={AlertCircle} />
+        <MetricCard label="Needs review" value={tab === "review" ? totalJobs : jobs.filter(isAttentionJob).length} icon={AlertCircle} />
         <MetricCard label="Active" value={activeJobs.length} icon={Play} />
         <Card>
           <CardContent className="p-4">
@@ -190,7 +191,7 @@ export function JobsPage({
       </div>
 
       }
-      <Tabs value={tab} onValueChange={(value) => { setTab(value); window.history.replaceState({}, "", `/jobs?tab=${value}`); onLoadJobs({ page: 1, runType: runTypeForTab(value), channel: channelFilter }) }}>
+      <Tabs value={tab} onValueChange={(value) => { const nextStatus = statusForTab(value); setTab(value); setStatus(nextStatus); window.history.replaceState({}, "", `/jobs?tab=${value}`); onLoadJobs({ page: 1, status: nextStatus, runType: runTypeForTab(value), channel: channelFilter }) }}>
         <div className="grid gap-3">
           <div className="overflow-x-auto pb-1">
           <TabsList className="w-max">
@@ -198,7 +199,7 @@ export function JobsPage({
             <TabsTrigger value="manual"><Play className="size-3.5" /> Manual</TabsTrigger>
             <TabsTrigger value="automated"><CalendarDays className="size-3.5" /> Automated</TabsTrigger>
             <TabsTrigger value="active">Active <Badge variant={activeJobs.length ? "info" : "secondary"} className="ml-1 px-1.5 py-0 text-[10px]">{activeJobs.length}</Badge></TabsTrigger>
-            <TabsTrigger value="review">Needs review <Badge variant={jobs.filter(isAttentionJob).length ? "destructive" : "secondary"} className="ml-1 px-1.5 py-0 text-[10px]">{jobs.filter(isAttentionJob).length}</Badge></TabsTrigger>
+            <TabsTrigger value="review">Needs review <Badge variant={(tab === "review" ? totalJobs : jobs.filter(isAttentionJob).length) ? "destructive" : "secondary"} className="ml-1 px-1.5 py-0 text-[10px]">{tab === "review" ? totalJobs : jobs.filter(isAttentionJob).length}</Badge></TabsTrigger>
             <TabsTrigger value="completed">Completed</TabsTrigger>
             <TabsTrigger value="logs">Channel logs</TabsTrigger>
             <TabsTrigger value="scheduled">Scheduled</TabsTrigger>
@@ -236,6 +237,9 @@ export function JobsPage({
               <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All statuses</SelectItem>
+                <SelectItem value="active">Active</SelectItem>
+                <SelectItem value="attention">Needs review</SelectItem>
+                <SelectItem value="completed">Completed</SelectItem>
                 <SelectItem value="running">Running</SelectItem>
                 <SelectItem value="queued">Queued</SelectItem>
                 <SelectItem value="failed">Failed</SelectItem>

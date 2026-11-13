@@ -90,6 +90,7 @@ assert.match(dbSource, /queueRecoveryCount[\s\S]*?< 3/, 'automatic recovery must
 assert.match(dbSource, /'phase', 'paused'[\s\S]*?queueRecoveryCount[\s\S]*?>= 3/, 'jobs that exhaust automatic recovery must pause for operator review');
 assert.match(dbSource, /failed_or_paused_last_hour/, 'critical queue telemetry must report recently failed or paused work');
 assert.match(criticalQueueWatchdog, /critical-job-paused/, 'the queue watchdog must notify operators when exhausted work is paused');
+assert.match(dbSource, /status === "attention"[\s\S]*?\('failed', 'warning', 'stopped'\)/, 'Jobs needs-review filtering must run across the full database result set');
 const ratePreparation = source.slice(source.indexOf('async function prepareFulfillmentRateRefresh'), source.indexOf('async function refreshFulfillmentRateRow'));
 assert.match(ratePreparation, /readStateField\("fulfillmentOperationsSettings"\)/, 'rate jobs must read only fulfillment settings before hydrating targeted orders');
 assert.doesNotMatch(ratePreparation, /readFulfillmentOperationsState\(/, 'rate jobs must not hydrate historical label batches');
@@ -120,6 +121,7 @@ const fulfillmentUiSource = fs.readFileSync(path.join(__dirname, '..', 'web', 's
 assert.match(fulfillmentUiSource, /Fulfillment routing health/, 'the fulfillment workspace must display routing health');
 assert.match(fulfillmentUiSource, /Package data needed/, 'package readiness must be distinct from routing status');
 assert.match(fulfillmentUiSource, /FulfillmentRoutingStatus/, 'routed work must show its routing state independently');
+assert.match(fulfillmentUiSource, /jobs\?tab=review/, 'fulfillment health must link paused work to the Jobs review queue');
 const orderDetailUiSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'order-detail-route.tsx'), 'utf8');
 assert.match(orderDetailUiSource, /Fulfillment \(\{fulfillmentRecordCount\}\)/, 'order detail must count active routes before a shipment is purchased');
 assert.match(orderDetailUiSource, /routingState\.hasActiveRoutes \? 1 : 0/, 'order detail must count routed purchase and supplier fulfillment before a shipment is purchased');

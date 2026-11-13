@@ -2202,7 +2202,8 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
   const [workerStatus, setWorkerStatus] = useState<WorkerStatus>({})
   const [jobPageMeta, setJobPageMeta] = useState(() => {
     const jobsTab = new URLSearchParams(window.location.search).get("tab")
-    return { page: 1, limit: 10, total: 0, status: "all", query: "", runType: jobsTab === "manual" || jobsTab === "automated" ? jobsTab : "all", channel: "all" }
+    const status = jobsTab === "active" ? "active" : jobsTab === "review" ? "attention" : jobsTab === "completed" ? "completed" : "all"
+    return { page: 1, limit: 10, total: 0, status, query: "", runType: jobsTab === "manual" || jobsTab === "automated" ? jobsTab : "all", channel: "all" }
   })
   const jobPageMetaRef = useRef(jobPageMeta)
   const jobRequestRef = useRef(0)
