@@ -56,6 +56,9 @@ function jobMemoryBudgetMb(lane, task = "", env = process.env) {
   if (String(task || "") === "product-dump-import") {
     return Math.floor(positiveNumber(env.DATAPLUS_PRODUCT_DUMP_JOB_RSS_MB, 900));
   }
+  if (String(task || "") === "ebay-order-import") {
+    return Math.floor(positiveNumber(env.DATAPLUS_EBAY_ORDER_JOB_RSS_MB, 900));
+  }
   const heavy = HEAVY_TASKS.has(String(task || ""));
   return Math.floor(positiveNumber(
     heavy ? env.DATAPLUS_WORKER_HEAVY_JOB_RSS_MB : env.DATAPLUS_WORKER_JOB_RSS_MB,
@@ -116,7 +119,7 @@ async function markInterruptedJob(claim, incident = {}) {
   const message = memoryStopped
     ? `Worker memory guard stopped ${claim.task || "the job"} at ${observedMb} MB before the ${budgetMb} MB job budget could endanger the worker lane.`
     : `The isolated worker process exited before ${claim.task || "the job"} completion could be confirmed.`;
-  const details = memoryStopped
+  let details = memoryStopped
     ? "No automatic retry was attempted because the job may contain marketplace or carrier side effects. Review the provider status, then retry or use the existing recovery action only when needed."
     : `Exit ${incident.signal || incident.code || "unknown"}. No automatic retry was attempted; review the job before retrying.`;
   const now = new Date().toISOString();
@@ -139,44 +142,55 @@ async function markInterruptedJob(claim, incident = {}) {
   };
   try {
     await client.connect();
-    if (String(claim.task || "") === "product-dump-import") {
+    if (["product-dump-import", "ebay-order-import"].includes(String(claim.task || ""))) {
       const current = await client.query("select raw from operations_jobs where job_id = $1 limit 1", [String(claim.jobId)]);
       const raw = current.rows[0]?.raw && typeof current.rows[0].raw === "object" ? current.rows[0].raw : {};
       const workerPayload = raw.workerPayload && typeof raw.workerPayload === "object" ? raw.workerPayload : {};
       const retryCount = Math.max(0, Number(workerPayload.automaticRetryCount || 0)) + 1;
-      const delayMinutes = [5, 15, 30, 60, 120][Math.min(retryCount - 1, 4)];
-      const scheduledFor = new Date(Date.now() + delayMinutes * 60_000).toISOString();
-      const retryMessage = `Datadump ${workerPayload.importType === "sku-creation" ? "SKU creation" : "price and inventory refresh"} was interrupted and will retry automatically at ${scheduledFor}.`;
-      const retryPatch = {
-        ...patch,
-        status: "queued",
-        phase: "retry_scheduled",
-        scheduledFor,
-        finishedAt: "",
-        workerId: "",
-        workerLastSeenAt: "",
-        message: retryMessage,
-        details: `Automatic retry ${retryCount}. Completed work is retained and the next idempotent pass will skip existing SKUs and unchanged rows. ${message}`,
-        workerPayload: { ...workerPayload, automaticRetryCount: retryCount }
-      };
-      await client.query(`
-        update vendor_feed_runs
-        set status = 'interrupted', finished_at = now(), updated_at = now(),
-            raw = raw || $2::jsonb
-        where job_id = $1 and lower(status) = 'running'
-      `, [String(claim.jobId), JSON.stringify({ interruption: message })]);
-      const retried = await client.query(`
-        update operations_jobs
-        set status = 'queued',
-            message = $3,
-            ended_at = null,
-            updated_at = now(),
-            raw = coalesce(raw, '{}'::jsonb) || $4::jsonb
-        where job_id = $1
-          and lower(status) = 'running'
-          and coalesce(raw ->> 'workerId', '') = $2
-      `, [String(claim.jobId), String(claim.workerId), retryMessage, JSON.stringify(retryPatch)]);
-      return retried.rowCount > 0;
+      const isProductDump = String(claim.task || "") === "product-dump-import";
+      if (isProductDump || retryCount <= 3) {
+        const delays = isProductDump ? [5, 15, 30, 60, 120] : [1, 5, 15];
+        const delayMinutes = delays[Math.min(retryCount - 1, delays.length - 1)];
+        const scheduledFor = new Date(Date.now() + delayMinutes * 60_000).toISOString();
+        const retryMessage = isProductDump
+          ? `Datadump ${workerPayload.importType === "sku-creation" ? "SKU creation" : "price and inventory refresh"} was interrupted and will retry automatically at ${scheduledFor}.`
+          : `eBay order intake was interrupted and will retry automatically at ${scheduledFor}; standard and Live orders remain separate.`;
+        const retryPatch = {
+          ...patch,
+          status: "queued",
+          phase: "retry_scheduled",
+          scheduledFor,
+          finishedAt: "",
+          workerId: "",
+          workerLastSeenAt: "",
+          message: retryMessage,
+          details: `Automatic retry ${retryCount}. Completed work is retained and the next idempotent pass will refresh existing orders without duplicating them. ${message}`,
+          workerPayload: { ...workerPayload, automaticRetryCount: retryCount }
+        };
+        if (isProductDump) {
+          await client.query(`
+            update vendor_feed_runs
+            set status = 'interrupted', finished_at = now(), updated_at = now(),
+                raw = raw || $2::jsonb
+            where job_id = $1 and lower(status) = 'running'
+          `, [String(claim.jobId), JSON.stringify({ interruption: message })]);
+        }
+        const retried = await client.query(`
+          update operations_jobs
+          set status = 'queued',
+              message = $3,
+              ended_at = null,
+              updated_at = now(),
+              raw = coalesce(raw, '{}'::jsonb) || $4::jsonb
+          where job_id = $1
+            and lower(status) = 'running'
+            and coalesce(raw ->> 'workerId', '') = $2
+        `, [String(claim.jobId), String(claim.workerId), retryMessage, JSON.stringify(retryPatch)]);
+        return retried.rowCount > 0;
+      }
+      details = `Three automatic eBay order retries were interrupted. Standard and Live orders remain eligible for the next scheduled reconciliation; review worker memory before retrying this job.`;
+      patch.details = details;
+      patch.workerPayload = { ...workerPayload, automaticRetryCount: retryCount };
     }
     const result = await client.query(`
       update operations_jobs

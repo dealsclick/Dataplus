@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { ebayLiveLineContext, ebayLiveOrderContext, ebayLiveOrderUsesCommittedStock } = require("../lib/ebay-live-order");
+const { ebayLiveLineContext, ebayLiveOrderContext, ebayLiveOrderUsesCommittedStock, preserveEbayLiveOrderIdentity } = require("../lib/ebay-live-order");
 
 const live = ebayLiveLineContext({
   purchaseSource: "EBAY_LIVE",
@@ -34,6 +34,26 @@ assert.equal(ebayLiveOrderUsesCommittedStock({}, { purchaseSource: "EBAY_LIVE" }
 assert.equal(ebayLiveOrderUsesCommittedStock({ isEbayLive: true }, {}), true);
 assert.equal(ebayLiveOrderUsesCommittedStock({ salesOrigin: "ebay" }, { purchaseSource: "EBAY" }), false);
 
+const preservedLiveOrder = preserveEbayLiveOrderIdentity({
+  source: "eBay",
+  salesOrigin: "ebay",
+  isEbayLive: false,
+  ebayLive: { isLive: false, eventIds: [] },
+  external: { salesOrigin: "ebay", isEbayLive: false, ebayLive: {} },
+  items: [{ marketplaceLineItemId: "line-1", purchaseSource: "", isEbayLive: false }],
+}, {
+  source: "eBay",
+  salesOrigin: "ebay_live",
+  isEbayLive: true,
+  ebayLive: { isLive: true, eventIds: ["event-123"], soldFormats: ["AUCTION"] },
+  external: { salesOrigin: "ebay_live", isEbayLive: true, ebayLive: { eventIds: ["event-123"] } },
+  items: [{ marketplaceLineItemId: "line-1", purchaseSource: "EBAY_LIVE", isEbayLive: true, ebayLiveEventId: "event-123", ebayLiveContext: { eventId: "event-123" } }],
+});
+assert.equal(preservedLiveOrder.salesOrigin, "ebay_live");
+assert.equal(preservedLiveOrder.isEbayLive, true);
+assert.equal(preservedLiveOrder.items[0].purchaseSource, "EBAY_LIVE");
+assert.deepEqual(preservedLiveOrder.ebayLive.eventIds, ["event-123"]);
+
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 const dbSource = fs.readFileSync(path.join(__dirname, "..", "db.js"), "utf8");
 const ordersSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "components", "orders-route.tsx"), "utf8");
@@ -53,6 +73,8 @@ assert.match(serverSource, /invalidateFulfillmentConsoleSnapshot\(importableOrde
 assert.match(serverSource, /if \(!payload\.historicalBackfill\) await drainFulfillmentConsoleProjectionPatches\(\)/);
 assert.match(serverSource, /pageSize: 25/);
 assert.match(serverSource, /db\.orders = \(db\.orders \|\| \[\]\)\.filter\(\(order\) => !flushedIds\.has/);
+assert.match(serverSource, /source: "ebay-live-order-import"/);
+assert.match(serverSource, /ebayOrderCounts: ebayOrderCountsSnapshot\(\)/);
 assert.match(serverSource, /skipOperationJobs: true,[\s\S]*?skipOrders: true,[\s\S]*?skipPurchaseOrders: true,[\s\S]*?stateFieldsOnly: true/);
 assert.match(dbSource, /options\.stateFieldsOnly === true/);
 assert.match(dbSource, /options\.skipOperationJobs \? Promise\.resolve\(\[\]\)/);

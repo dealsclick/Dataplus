@@ -184,7 +184,7 @@ const { mergeImportedShipments } = require("./lib/imported-shipment-merge");
 const { normalizeSettings: normalizeFulfillmentSettings, selectRate: selectFulfillmentRate, batchStatus: fulfillmentBatchStatus, legacyPackSkuCandidate, legacyPackSkuMatchesProduct, packageFor: fulfillmentPackageFor, resolvePackage: resolveFulfillmentPackage } = require("./lib/fulfillment-operations");
 const shipmentConsolidation = require("./lib/shipment-consolidation");
 const { normalizeCarrierShippingAddress } = require("./lib/shipping-address");
-const { ebayLiveLineContext, ebayLiveOrderContext, ebayLiveOrderUsesCommittedStock } = require("./lib/ebay-live-order");
+const { ebayLiveLineContext, ebayLiveOrderContext, ebayLiveOrderUsesCommittedStock, preserveEbayLiveOrderIdentity } = require("./lib/ebay-live-order");
 const { packageDimensionsChanged, applyManualPackageDimensions, applyShippingPreferences } = require("./lib/product-dimensions");
 const { canonicalCarrierName, carrierTrackingUrl, inferCarrierFromTracking: detectCarrierFromTracking, isLikelyTrackingNumber, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
 const { buildPrintPreview, attachmentFilePath, restorePurchasedLabelReferences, printJobsByBatchId } = require("./lib/fulfillment-print");
@@ -19971,6 +19971,11 @@ function normalizeImportJob(job = {}) {
     prerequisiteJobNumber: Number(job.prerequisiteJobNumber ?? job.raw?.prerequisiteJobNumber ?? job.workerPayload?.prerequisiteJobNumber ?? 0) || 0,
     ebayActiveListingFeedComplete: job.ebayActiveListingFeedComplete === true || job.raw?.ebayActiveListingFeedComplete === true,
     ebayLiveVerifiedAt: job.ebayLiveVerifiedAt || job.raw?.ebayLiveVerifiedAt || '',
+    ebayOrderCounts: job.ebayOrderCounts && typeof job.ebayOrderCounts === "object"
+      ? job.ebayOrderCounts
+      : job.raw?.ebayOrderCounts && typeof job.raw.ebayOrderCounts === "object"
+        ? job.raw.ebayOrderCounts
+        : {},
     scheduledFor: job.scheduledFor || job.raw?.scheduledFor || job.workerPayload?.scheduledFor || '',
     workerId: job.workerId || '',
     workerLastSeenAt: job.workerLastSeenAt || '',
@@ -26429,19 +26434,31 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
     } : { skipInventory: true }));
     let lastOrderFlushCount = 0;
     const systemCreatedSkus = new Set();
+    const ebayCountSummary = (counts = {}) => {
+      const standard = counts.standard || {};
+      const live = counts.live || {};
+      return `eBay ${Number(standard.fetched || 0).toLocaleString()}; eBay Live ${Number(live.fetched || 0).toLocaleString()}`;
+    };
     const flushEbayOrders = async (orders = [], patch = {}) => {
       const importableOrders = (Array.isArray(orders) ? orders : [])
         .filter((order) => String(order?.source || "").toLowerCase() === "ebay");
       if (!importableOrders.length) return;
       if (postgres.isPostgresEnabled()) {
-        const created = await ensureProductsForImportedOrders(workDb, importableOrders, {
-          channel: "eBay", historicalBackfill: payload.historicalBackfill === true, jobId: job.id
-        });
-        created.attentionSkus.forEach((sku) => systemCreatedSkus.add(sku));
-        await hydrateOrdersLocalCosts(importableOrders);
-        await postgres.upsertOrdersFromState(importableOrders, { replace: false, batchSize: 250 });
-        if (!payload.historicalBackfill) await reconcilePersistedTerminalOrders(importableOrders, { user: "eBay order import" });
-        if (!payload.historicalBackfill) await queuePaidOrderRoutingCandidates(importableOrders.map((order) => order.id), { immediate: true, source: "ebay-order-import", sourceJobId: job.id });
+        const orderGroups = [
+          { orders: importableOrders.filter((order) => !ebayLiveOrderContext(order).isLive), actor: "eBay order import", source: "ebay-order-import" },
+          { orders: importableOrders.filter((order) => ebayLiveOrderContext(order).isLive), actor: "eBay Live order import", source: "ebay-live-order-import" }
+        ];
+        for (const group of orderGroups) {
+          if (!group.orders.length) continue;
+          const created = await ensureProductsForImportedOrders(workDb, group.orders, {
+            channel: "eBay", historicalBackfill: payload.historicalBackfill === true, jobId: job.id
+          });
+          created.attentionSkus.forEach((sku) => systemCreatedSkus.add(sku));
+          await hydrateOrdersLocalCosts(group.orders);
+          await postgres.upsertOrdersFromState(group.orders, { replace: false, batchSize: 250 });
+          if (!payload.historicalBackfill) await reconcilePersistedTerminalOrders(group.orders, { user: group.actor });
+          if (!payload.historicalBackfill) await queuePaidOrderRoutingCandidates(group.orders.map((order) => order.id), { immediate: true, source: group.source, sourceJobId: job.id });
+        }
         clearOrderApiCache();
         invalidateFulfillmentConsoleSnapshot(importableOrders.map((order) => order.id));
       }
@@ -26457,7 +26474,8 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
         created: Number(patch.created || 0),
         missingCount: Number(patch.skipped || 0),
         rowLabel: "eBay rows scanned",
-        progressLabel: `${Number(patch.created || 0).toLocaleString()} imported, ${Number(patch.updated || 0).toLocaleString()} updated, ${Number(patch.skipped || 0).toLocaleString()} skipped; ${lastOrderFlushCount.toLocaleString()} saved during this run${systemCreatedSkus.size ? `; ${systemCreatedSkus.size.toLocaleString()} system-created SKU${systemCreatedSkus.size === 1 ? "" : "s"} need review` : ""}`,
+        progressLabel: `${Number(patch.created || 0).toLocaleString()} imported, ${Number(patch.updated || 0).toLocaleString()} updated, ${Number(patch.skipped || 0).toLocaleString()} skipped; ${ebayCountSummary(patch.ebayOrderCounts)}; ${lastOrderFlushCount.toLocaleString()} saved during this run${systemCreatedSkus.size ? `; ${systemCreatedSkus.size.toLocaleString()} system-created SKU${systemCreatedSkus.size === 1 ? "" : "s"} need review` : ""}`,
+        ebayOrderCounts: patch.ebayOrderCounts || {},
         lastProgressAt: new Date().toISOString()
       });
     };
@@ -26489,7 +26507,8 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
           created: Number(patch.created || 0),
           missingCount: Number(patch.skipped || 0),
           rowLabel: "eBay rows scanned",
-          progressLabel: `${Number(patch.created || 0).toLocaleString()} imported, ${Number(patch.updated || 0).toLocaleString()} updated, ${Number(patch.skipped || 0).toLocaleString()} skipped`,
+          progressLabel: `${Number(patch.created || 0).toLocaleString()} imported, ${Number(patch.updated || 0).toLocaleString()} updated, ${Number(patch.skipped || 0).toLocaleString()} skipped; ${ebayCountSummary(patch.ebayOrderCounts)}`,
+          ebayOrderCounts: patch.ebayOrderCounts || {},
           lastProgressAt: new Date().toISOString()
         });
       }
@@ -26516,6 +26535,7 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
     const message = (payload.historicalBackfill
       ? `Historical eBay backfill checked ${Number(result.fetched || 0).toLocaleString()} orders: ${Number(result.created || 0).toLocaleString()} new reporting records, ${Number(result.skipped || 0).toLocaleString()} already present or skipped.`
       : `Imported or refreshed ${Number(result.fetched || 0).toLocaleString()} eBay order${Number(result.fetched || 0) === 1 ? "" : "s"}: ${Number(result.created || 0).toLocaleString()} new, ${Number(result.updated || 0).toLocaleString()} updated.`)
+      + ` ${ebayCountSummary(result.ebayOrderCounts)}.`
       + (statusSweep.checked ? ` Rechecked ${statusSweep.checked.toLocaleString()} locally open order${statusSweep.checked === 1 ? "" : "s"} against eBay; ${statusSweep.fulfilled.toLocaleString()} ${statusSweep.fulfilled === 1 ? "was" : "were"} already fulfilled.` : "")
       + (systemCreatedSkus.size ? ` ${systemCreatedSkus.size.toLocaleString()} SKU${systemCreatedSkus.size === 1 ? " was" : "s were"} created by DataPlus and need Catalog Readiness review.` : "");
     finishImportJob(job, {
@@ -26526,6 +26546,7 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
       changed: Number(result.created || 0) + Number(result.updated || 0),
       missingCount: Number(result.skipped || 0) + errorRows.length,
       errors: result.errors || [],
+      ebayOrderCounts: result.ebayOrderCounts || {},
       progressPercent: 100,
       estimatedSecondsRemaining: 0,
       message,
@@ -38955,6 +38976,7 @@ function reconcileFulfillmentRouteLineIdentity(order = {}) {
 
 function preserveMarketplaceOrderOperations(incoming = {}, existing = null) {
   if (!existing) return reconcileFulfillmentRouteLineIdentity({ ...incoming });
+  incoming = preserveEbayLiveOrderIdentity(incoming, existing);
   const incomingShipments = Array.isArray(incoming.shipments) ? incoming.shipments : [];
   const preserved = Object.fromEntries(MARKETPLACE_ORDER_OPERATION_KEYS
     .filter((key) => key !== "shipments")
@@ -47127,6 +47149,14 @@ async function importEbayOrders(db, options = {}) {
   let updated = 0;
   let skipped = 0;
   let fetched = 0;
+  const ebayOrderCounts = {
+    standard: { fetched: 0, created: 0, updated: 0, skipped: 0 },
+    live: { fetched: 0, created: 0, updated: 0, skipped: 0 }
+  };
+  const ebayOrderCountsSnapshot = () => ({
+    standard: { ...ebayOrderCounts.standard },
+    live: { ...ebayOrderCounts.live }
+  });
   const errors = [];
   const rows = [];
   const soldSkus = new Set();
@@ -47147,7 +47177,8 @@ async function importEbayOrders(db, options = {}) {
       totalRows: knownTotalRows || (fetched + skipped + pageSize),
       created,
       updated,
-      skipped
+      skipped,
+      ebayOrderCounts: ebayOrderCountsSnapshot()
     });
     if (postgres.isPostgresEnabled()) {
       const flushedIds = new Set(ordersToFlush.map((order) => String(order?.id || "")).filter(Boolean));
@@ -47171,12 +47202,16 @@ async function importEbayOrders(db, options = {}) {
     for (const order of orders) {
       try {
         if (!ebayOrderIsPaid(order)) {
+          const orderType = (Array.isArray(order.lineItems) ? order.lineItems : [])
+            .some((item) => ebayLiveLineContext(item).isLive) ? "live" : "standard";
           skipped += 1;
+          ebayOrderCounts[orderType].skipped += 1;
           rows.push({
             order_id: order.orderId || "",
             created_date: order.creationDate || "",
             status: order.orderFulfillmentStatus || order.orderPaymentStatus || "",
             action: "skipped_unpaid",
+            sales_origin: orderType === "live" ? "ebay_live" : "ebay",
             total: order.pricingSummary?.total?.value || "",
             currency: order.pricingSummary?.total?.currency || "",
             buyer: order.buyer?.username || ""
@@ -47202,22 +47237,26 @@ async function importEbayOrders(db, options = {}) {
           : [];
         const existingOrder = preferredMarketplaceOrder(persistedMatches) || inMemoryOrder;
         rememberMarketplaceOrder(db, existingOrder);
-        if (options.historicalBackfill === true && existingOrder) {
-          skipped += 1;
-          fetched += 1;
-          rows.push({
-            order_id: order.orderId || "",
-            created_date: order.creationDate || "",
-            status: order.orderFulfillmentStatus || order.orderPaymentStatus || "",
-            action: "already_imported"
-          });
-          continue;
-        }
         if (!existingOrder && postgres.isPostgresEnabled()) mappedOrder.internalOrderNumber = await postgres.nextOrderNumberAtomic();
         const incomingOrder = options.historicalBackfill === true
           ? prepareHistoricalBackfillOrder(mappedOrder, { channel: "eBay", jobId: options.jobId })
           : mappedOrder;
         const mergedOrder = preserveMarketplaceOrderOperations(incomingOrder, existingOrder);
+        const orderType = ebayLiveOrderContext(mergedOrder).isLive ? "live" : "standard";
+        fetched += 1;
+        ebayOrderCounts[orderType].fetched += 1;
+        if (options.historicalBackfill === true && existingOrder) {
+          skipped += 1;
+          ebayOrderCounts[orderType].skipped += 1;
+          rows.push({
+            order_id: order.orderId || "",
+            created_date: order.creationDate || "",
+            status: order.orderFulfillmentStatus || order.orderPaymentStatus || "",
+            action: "already_imported",
+            sales_origin: orderType === "live" ? "ebay_live" : "ebay"
+          });
+          continue;
+        }
         const action = upsertOrder(db, mergedOrder);
         if (options.historicalBackfill !== true) reconcileTerminalOrderPurchasing(db, mergedOrder, { user: "eBay order import" });
         for (const line of options.historicalBackfill === true ? [] : orderLineItems(mergedOrder)) {
@@ -47226,19 +47265,28 @@ async function importEbayOrders(db, options = {}) {
             if (sku) soldSkus.add(sku);
           }
         }
-        if (action === "created") created += 1;
-        if (action === "updated") updated += 1;
-        if (action === "skipped") skipped += 1;
+        if (action === "created") {
+          created += 1;
+          ebayOrderCounts[orderType].created += 1;
+        }
+        if (action === "updated") {
+          updated += 1;
+          ebayOrderCounts[orderType].updated += 1;
+        }
+        if (action === "skipped") {
+          skipped += 1;
+          ebayOrderCounts[orderType].skipped += 1;
+        }
         if (action === "created" || action === "updated") {
           const persistedOrder = findExistingMarketplaceOrder(db, mergedOrder) || mergedOrder;
           queueEbayOrderFlush(persistedOrder);
         }
-        fetched += 1;
         rows.push({
           order_id: order.orderId || "",
           created_date: order.creationDate || "",
           status: order.orderFulfillmentStatus || order.orderPaymentStatus || "",
           action,
+          sales_origin: orderType === "live" ? "ebay_live" : "ebay",
           total: order.pricingSummary?.total?.value || "",
           currency: order.pricingSummary?.total?.currency || "",
           buyer: order.buyer?.username || ""
@@ -47258,7 +47306,8 @@ async function importEbayOrders(db, options = {}) {
         phase: "importing_ebay_orders",
         created,
         updated,
-        skipped
+        skipped,
+        ebayOrderCounts: ebayOrderCountsSnapshot()
       });
     }
     if (!orders.length || orders.length < pageSize || !data.next || fetched >= maxOrders) break;
@@ -47270,7 +47319,7 @@ async function importEbayOrders(db, options = {}) {
   if (postgres.isPostgresEnabled() && options.historicalBackfill !== true) {
     writeConnectorStateSync({ ...readConnectorStateSync(), ebayLastOrderSync: db.connectorState.ebayLastOrderSync });
   }
-  return { fetched, created, updated, skipped, errors, rows, soldSkus: [...soldSkus], lookbackDays, startedAt: start.toISOString(), endedAt: now.toISOString() };
+  return { fetched, created, updated, skipped, ebayOrderCounts: ebayOrderCountsSnapshot(), errors, rows, soldSkus: [...soldSkus], lookbackDays, startedAt: start.toISOString(), endedAt: now.toISOString() };
 }
 
 function ebayReturnId(returnRecord = {}) {
