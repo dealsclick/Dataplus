@@ -37,6 +37,58 @@ function matchingLineIndexes(order, values) {
   return matches;
 }
 
+function matchingParentShadowLineIndexes(order, values) {
+  const wanted = new Set(values.map(normalized).filter(Boolean));
+  const matches = [];
+  orderLines(order).forEach((line, index) => {
+    const lineValues = [line.sku, line.parentSku, line.shadowSku, line.merchantSku]
+      .map(normalized)
+      .filter(Boolean);
+    if (lineValues.some((value) => wanted.has(value))) matches.push(index);
+  });
+  return matches;
+}
+
+function numbersDiffer(left, right) {
+  return Math.abs(Number(left || 0) - Number(right || 0)) > 0.00001;
+}
+
+function lineNeedsShadowRepair(line, product, shadow, packCost) {
+  const channelSku = shadow.channelSku || line.channelSku || line.originalSku || '';
+  return normalized(line.sku) !== normalized(product.sku)
+    || normalized(line.parentSku) !== normalized(product.sku)
+    || normalized(line.shadowSku) !== normalized(shadow.shadowSku)
+    || String(line.shadowId || '') !== String(shadow.id)
+    || normalized(line.merchantSku) !== normalized(shadow.merchantSku)
+    || normalized(line.marketplaceSku) !== normalized(shadow.marketplaceSku)
+    || normalized(line.channelSku) !== normalized(channelSku)
+    || Number(line.inventoryMultiplier || 0) !== Number(shadow.unitsPerPack)
+    || Number(line.unitsPerPack || 0) !== Number(shadow.unitsPerPack)
+    || numbersDiffer(line.unitCost ?? line.cost, packCost)
+    || numbersDiffer(line.cost, packCost)
+    || line.costSource !== 'shadow_parent_piece_cost'
+    || line.costStatus !== 'estimated'
+    || normalized(line.costProductSku) !== normalized(product.sku);
+}
+
+function applyShadowToLine(line, product, shadow, packCost, now) {
+  line.sku = product.sku;
+  line.parentSku = product.sku;
+  line.shadowSku = shadow.shadowSku;
+  line.shadowId = shadow.id;
+  line.merchantSku = shadow.merchantSku;
+  line.marketplaceSku = shadow.marketplaceSku;
+  line.channelSku = shadow.channelSku || line.channelSku || line.originalSku || '';
+  line.inventoryMultiplier = shadow.unitsPerPack;
+  line.unitsPerPack = shadow.unitsPerPack;
+  line.unitCost = packCost;
+  line.cost = packCost;
+  line.costSource = 'shadow_parent_piece_cost';
+  line.costStatus = 'estimated';
+  line.costEstimatedAt = now;
+  line.costProductSku = product.sku;
+}
+
 function upsertShadowAlias(product, aliasSku, shadow, marketplace, now) {
   const value = String(aliasSku || '').trim();
   if (!value || normalized(value) === normalized(product.sku)) return;
@@ -83,27 +135,66 @@ async function main() {
     throw new Error('--units must be a whole number of at least 1.');
   }
   input.merchantSku = input.merchantSku || input.shadowSku;
+  const allOrders = process.argv.includes('--all-orders');
+  if (allOrders && input.orderKey) throw new Error('--all-orders and --order cannot be used together.');
   const apply = process.argv.includes('--apply');
   const now = new Date().toISOString();
   const product = await postgres.readProductByKey(input.parentSku);
   if (!product || normalized(product.sku) !== normalized(input.parentSku)) {
     throw new Error(`Parent SKU ${input.parentSku} was not found as a primary product.`);
   }
-  const order = input.orderKey ? await postgres.readOrderByKey(input.orderKey) : null;
-  if (input.orderKey && !order) throw new Error(`Order ${input.orderKey} was not found.`);
+  const requestedOrder = input.orderKey ? await postgres.readOrderByKey(input.orderKey) : null;
+  if (input.orderKey && !requestedOrder) throw new Error(`Order ${input.orderKey} was not found.`);
   const existingShadow = (product.shadowSkus || []).find((shadow) => [
     shadow.shadowSku, shadow.merchantSku, shadow.marketplaceSku, shadow.channelSku
   ].some((value) => [input.shadowSku, input.merchantSku, input.marketplaceSku, input.channelSku]
     .some((candidate) => candidate && normalized(value) === normalized(candidate))));
-  const lineIndexes = order ? matchingLineIndexes(order, [
-    input.parentSku, input.shadowSku, input.merchantSku, input.marketplaceSku, input.channelSku,
-    existingShadow?.shadowSku, existingShadow?.merchantSku, existingShadow?.marketplaceSku, existingShadow?.channelSku
-  ]) : [];
-  if (order && !lineIndexes.length) throw new Error(`Order ${input.orderKey} has no line for ${input.parentSku}.`);
-  const lineIdentifiers = order ? lineIndexes.flatMap((index) => {
+  let orders = requestedOrder ? [requestedOrder] : [];
+  if (allOrders) {
+    const exactIdentifiers = [...new Set([
+      input.parentSku, input.shadowSku, input.merchantSku,
+      existingShadow?.shadowSku, existingShadow?.merchantSku
+    ].map(normalized).filter(Boolean))];
+    const matches = await postgres.getPool().query(`
+      select distinct o.order_id, o.order_number, coalesce(o.order_date, o.created_at) as sort_at
+      from order_records o
+      join order_line_items line on line.order_id = o.order_id
+      where lower(concat_ws(' ', o.source, o.channel_source, o.raw->>'source', o.raw->>'channel', o.raw->>'channelSource')) like $1
+        and (
+          lower(coalesce(line.sku, '')) = any($2::text[])
+          or lower(coalesce(line.mapped_sku, '')) = any($2::text[])
+          or lower(coalesce(line.raw->>'parentSku', '')) = any($2::text[])
+          or lower(coalesce(line.raw->>'shadowSku', '')) = any($2::text[])
+          or lower(coalesce(line.raw->>'merchantSku', '')) = any($2::text[])
+        )
+      order by sort_at, o.order_number, o.order_id
+    `, [`%${normalized(input.marketplace)}%`, exactIdentifiers]);
+    const orderIds = matches.rows.map((row) => row.order_id);
+    const loaded = await postgres.readOrdersByIds(orderIds);
+    const orderRank = new Map(orderIds.map((id, index) => [id, index]));
+    orders = loaded.sort((left, right) => (orderRank.get(left.id) ?? 0) - (orderRank.get(right.id) ?? 0));
+  }
+  const exactLineValues = [
+    input.parentSku, input.shadowSku, input.merchantSku,
+    existingShadow?.shadowSku, existingShadow?.merchantSku
+  ];
+  const broadLineValues = [
+    ...exactLineValues, input.marketplaceSku, input.channelSku,
+    existingShadow?.marketplaceSku, existingShadow?.channelSku
+  ];
+  const lineIndexesByOrderId = new Map(orders.map((order) => [
+    order.id,
+    allOrders
+      ? matchingParentShadowLineIndexes(order, exactLineValues)
+      : matchingLineIndexes(order, broadLineValues)
+  ]));
+  if (requestedOrder && !(lineIndexesByOrderId.get(requestedOrder.id) || []).length) {
+    throw new Error(`Order ${input.orderKey} has no line for ${input.parentSku}.`);
+  }
+  const lineIdentifiers = orders.flatMap((order) => (lineIndexesByOrderId.get(order.id) || []).flatMap((index) => {
     const line = orderLines(order)[index];
     return [line.originalSku, line.sourceSku, line.marketplaceSku, line.channelSku, line.externalSku].filter(Boolean);
-  }) : [];
+  }));
   const channelSku = input.channelSku || lineIdentifiers[0] || existingShadow?.channelSku || '';
   const shadow = normalizeShadowSku({
     ...(existingShadow || {}),
@@ -139,8 +230,24 @@ async function main() {
       parentEachCost: eachCost,
       packCost
     },
-    order: order ? { id: order.id, orderNumber: order.orderNumber, lineIndexes } : null,
+    order: requestedOrder ? {
+      id: requestedOrder.id,
+      orderNumber: requestedOrder.orderNumber,
+      lineIndexes: lineIndexesByOrderId.get(requestedOrder.id) || []
+    } : null,
+    orders: allOrders ? {
+      mode: 'all',
+      count: orders.length,
+      lineCount: [...lineIndexesByOrderId.values()].reduce((sum, indexes) => sum + indexes.length, 0),
+      firstOrderNumber: orders[0]?.orderNumber || '',
+      lastOrderNumber: orders[orders.length - 1]?.orderNumber || ''
+    } : null,
     retainedIdentifiers: [...new Set([existingShadow?.marketplaceSku, existingShadow?.channelSku, ...lineIdentifiers].filter(Boolean))]
+  };
+  const matchingLines = orders.flatMap((order) => (lineIndexesByOrderId.get(order.id) || []).map((index) => orderLines(order)[index]));
+  preview.costs = {
+    correctBefore: matchingLines.filter((line) => !numbersDiffer(line.unitCost ?? line.cost, packCost)).length,
+    needUpdate: matchingLines.filter((line) => numbersDiffer(line.unitCost ?? line.cost, packCost)).length
   };
   if (!apply) {
     console.log(JSON.stringify(preview, null, 2));
@@ -158,34 +265,33 @@ async function main() {
   }
   await postgres.upsertProductsFromState([product]);
 
-  if (order) {
+  const changedOrders = [];
+  let costsUpdated = 0;
+  for (const order of orders) {
+    const lineIndexes = lineIndexesByOrderId.get(order.id) || [];
+    let changed = false;
     for (const index of lineIndexes) {
       const line = orderLines(order)[index];
-      line.sku = product.sku;
-      line.parentSku = product.sku;
-      line.shadowSku = shadow.shadowSku;
-      line.shadowId = shadow.id;
-      line.merchantSku = shadow.merchantSku;
-      line.marketplaceSku = shadow.marketplaceSku;
-      line.channelSku = shadow.channelSku || line.channelSku || line.originalSku || '';
-      line.inventoryMultiplier = shadow.unitsPerPack;
-      line.unitsPerPack = shadow.unitsPerPack;
-      line.unitCost = packCost;
-      line.cost = packCost;
-      line.costSource = 'shadow_parent_piece_cost';
-      line.costStatus = 'estimated';
-      line.costEstimatedAt = now;
-      line.costProductSku = product.sku;
+      if (numbersDiffer(line.unitCost ?? line.cost, packCost)) costsUpdated += 1;
+      if (lineNeedsShadowRepair(line, product, shadow, packCost)) changed = true;
+      applyShadowToLine(line, product, shadow, packCost, now);
     }
     for (const route of Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : []) {
       if (!lineIndexes.includes(Number(route.lineIndex))) continue;
+      const inventoryQty = Number(route.qty || 0) * shadow.unitsPerPack;
+      if (normalized(route.sku) !== normalized(product.sku)
+        || Number(route.inventoryMultiplier || 0) !== Number(shadow.unitsPerPack)
+        || numbersDiffer(route.inventoryQty, inventoryQty)) changed = true;
       route.sku = product.sku;
       route.inventoryMultiplier = shadow.unitsPerPack;
-      route.inventoryQty = Number(route.qty || 0) * shadow.unitsPerPack;
+      route.inventoryQty = inventoryQty;
     }
-    order.productCost = orderLines(order).reduce((sum, line) => (
+    const productCost = orderLines(order).reduce((sum, line) => (
       sum + Math.max(0, Number(line.qty ?? line.quantity ?? 0)) * Math.max(0, Number(line.unitCost ?? line.cost ?? 0))
     ), 0);
+    if (numbersDiffer(order.productCost, productCost) || order.productCostStatus !== 'estimated') changed = true;
+    if (!changed) continue;
+    order.productCost = productCost;
     order.productCostStatus = 'estimated';
     order.productCostEstimatedAt = now;
     order.updatedAt = now;
@@ -198,16 +304,42 @@ async function main() {
       user: input.user,
       createdAt: now
     });
-    await postgres.saveOrder(order);
+    changedOrders.push(order);
   }
+  if (changedOrders.length) await postgres.upsertOrdersFromState(changedOrders, { batchSize: 250 });
 
   const verifiedProduct = await postgres.readProductByKey(input.parentSku);
-  const verifiedOrder = order ? await postgres.readOrderByKey(order.id) : null;
+  const verifiedOrder = requestedOrder ? await postgres.readOrderByKey(requestedOrder.id) : null;
+  let bulkVerification = null;
+  if (allOrders && orders.length) {
+    const orderIds = orders.map((order) => order.id);
+    const verification = await postgres.getPool().query(`
+      select count(*)::int as line_count,
+        count(*) filter (where abs(coalesce(line.cost, 0) - $2::numeric) > 0.00001)::int as incorrect_cost_count,
+        count(*) filter (where lower(coalesce(line.raw->>'merchantSku', '')) = lower($3))::int as merchant_sku_count,
+        count(*) filter (where lower(coalesce(line.raw->>'marketplaceSku', '')) = lower($4))::int as marketplace_sku_count
+      from order_line_items line
+      where line.order_id = any($1::text[])
+        and (
+          lower(coalesce(line.sku, '')) = lower($5)
+          or lower(coalesce(line.mapped_sku, '')) = lower($5)
+          or lower(coalesce(line.raw->>'parentSku', '')) = lower($5)
+          or lower(coalesce(line.raw->>'shadowSku', '')) = lower($6)
+          or lower(coalesce(line.raw->>'merchantSku', '')) = lower($3)
+        )
+    `, [orderIds, packCost, shadow.merchantSku, shadow.marketplaceSku, product.sku, shadow.shadowSku]);
+    bulkVerification = verification.rows[0] || null;
+  }
   console.log(JSON.stringify({
     ...preview,
     applied: true,
+    ordersUpdated: changedOrders.length,
+    costsUpdated,
+    bulkVerification,
     verifiedShadow: (verifiedProduct?.shadowSkus || []).find((entry) => String(entry.id) === String(shadow.id)) || null,
-    verifiedOrderLines: verifiedOrder ? lineIndexes.map((index) => orderLines(verifiedOrder)[index]) : []
+    verifiedOrderLines: verifiedOrder
+      ? (lineIndexesByOrderId.get(verifiedOrder.id) || []).map((index) => orderLines(verifiedOrder)[index])
+      : []
   }, null, 2));
 }
 

@@ -1191,7 +1191,53 @@ export type ProductItem = CatalogItem & {
   systemVariants?: Array<{ sku?: string; optionName?: string; optionValue?: string; uomDisplay?: string; uomQty?: number; inventoryMultiplier?: number; quantity?: number; unitCost?: number; price?: number; status?: string; note?: string; generated?: boolean; source?: string }>
   sellingUnits?: { mode: string; sourceQty?: number; individual: boolean; cases: boolean; explicit: boolean }
   shopifyPurchaseVariants?: Array<{ sku?: string; optionName?: string; optionValue?: string; uomDisplay?: string; uomQty?: number; quantity?: number; unitCost?: number; price?: number; compareAtPrice?: number | string; shopifyVariantSku?: string; shopifyVariantId?: string; shopifyLivePrice?: number | null; shopifyLiveInventoryQuantity?: number | null; shopifyPublished?: boolean; shopifyStatus?: string; note?: string }>
-  shadowSkus?: Array<{ id?: string; parentSku?: string; marketplace?: string; company?: string; shadowSku?: string; merchantSku?: string; marketplaceSku?: string; channelSku?: string; unitsPerPack?: number; inventoryMultiplier?: number; price?: number; status?: string; inventoryPolicy?: string; persistence?: { inventory?: string; cost?: string; content?: string } }>
+  shadowSkus?: Array<{
+    id?: string
+    parentSku?: string
+    marketplace?: string
+    company?: string
+    shadowSku?: string
+    merchantSku?: string
+    marketplaceSku?: string
+    channelSku?: string
+    channels?: string[]
+    channelListings?: Record<string, {
+      enabled?: boolean
+      inventoryEnabled?: boolean
+      price?: number
+      merchantSku?: string
+      marketplaceSku?: string
+      channelSku?: string
+      status?: string
+      listingId?: string
+      listingUrl?: string
+      offerId?: string
+      settings?: Record<string, unknown>
+      [key: string]: unknown
+    }>
+    unitsPerPack?: number
+    inventoryMultiplier?: number
+    price?: number
+    status?: string
+    inventoryEnabled?: boolean
+    handlingTimeDays?: number
+    safetyQty?: number
+    maxSellableQty?: number
+    inventoryPolicy?: string
+    notes?: string
+    inheritedEachCost?: number
+    inheritedPackCost?: number
+    parentOnHand?: number
+    parentReserved?: number
+    parentAvailable?: number
+    sellableQty?: number
+    warehouseId?: string
+    warehouseName?: string
+    warehouseCode?: string
+    createdAt?: string
+    updatedAt?: string
+    persistence?: { inventory?: string; cost?: string; content?: string }
+  }>
   vendorOffers?: Array<{ supplier?: string; vendor?: string; sku?: string; vendorSku?: string; cost?: number; qty?: number; stockQty?: number; category?: string; mainCategory?: string; primary?: boolean; updatedAt?: string }>
   productManagerFields?: Record<string, unknown>
   original?: Record<string, unknown> | null

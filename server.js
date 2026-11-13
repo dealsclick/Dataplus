@@ -4934,7 +4934,15 @@ function normalizeShadowSku(shadow = {}, parent = {}) {
   const createdAt = shadow.createdAt || new Date().toISOString();
   const requestedUnitsPerPack = Number(shadow.unitsPerPack || shadow.inventoryMultiplier || shadow.uomQty || 1);
   const unitsPerPack = Number.isFinite(requestedUnitsPerPack) && requestedUnitsPerPack >= 1 ? requestedUnitsPerPack : 1;
-  const channels = [...new Set((Array.isArray(shadow.channels) ? shadow.channels : [marketplace])
+  const channelListings = shadow.channelListings && typeof shadow.channelListings === "object" && !Array.isArray(shadow.channelListings)
+    ? Object.fromEntries(Object.entries(shadow.channelListings)
+      .filter(([key, value]) => key && !["__proto__", "prototype", "constructor"].includes(key) && value && typeof value === "object" && !Array.isArray(value))
+      .map(([key, value]) => [String(key).trim().toLowerCase(), { ...value }]))
+    : {};
+  const channels = [...new Set([
+    ...(Array.isArray(shadow.channels) ? shadow.channels : [marketplace]),
+    ...Object.entries(channelListings).filter(([, listing]) => listing.enabled !== false).map(([key]) => key)
+  ]
     .map((value) => String(value || "").trim())
     .filter(Boolean))];
   const shadowSku = String(shadow.shadowSku || shadow.sku || "").trim();
@@ -4960,13 +4968,12 @@ function normalizeShadowSku(shadow = {}, parent = {}) {
     sourceAuditIds: [...new Set((Array.isArray(shadow.sourceAuditIds) ? shadow.sourceAuditIds : [shadow.sourceAuditId])
       .map((value) => String(value || "").trim())
       .filter(Boolean))],
-    channelListings: shadow.channelListings && typeof shadow.channelListings === "object" && !Array.isArray(shadow.channelListings)
-      ? shadow.channelListings
-      : {},
+    channelListings,
     price: Number(shadow.price ?? parent.price ?? 0),
     handlingTimeDays: Number(shadow.handlingTimeDays ?? shadow.handlingTime ?? 2),
     safetyQty: Number(shadow.safetyQty ?? 0),
     maxSellableQty: Number(shadow.maxSellableQty ?? 0),
+    inventoryEnabled: shadow.inventoryEnabled !== false,
     inventoryPolicy: shadow.inventoryPolicy || "Share parent inventory",
     persistence: {
       inventory: "parent",
@@ -27164,9 +27171,16 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
       const context = shadowContexts.get(item);
       if (context) {
         context.shadow.channelListings = context.shadow.channelListings && typeof context.shadow.channelListings === "object" ? context.shadow.channelListings : {};
-        context.shadow.channelListings.ebay = { ...(item.ebayListing || {}), merchantSku: context.shadow.shadowSku };
+        const existingEbayListing = context.shadow.channelListings.ebay || {};
+        context.shadow.channelListings.ebay = {
+          ...existingEbayListing,
+          ...(item.ebayListing || {}),
+          merchantSku: item.ebayListing?.merchantSku || context.shadow.merchantSku || context.shadow.shadowSku,
+          enabled: lifecycleAction === "end" ? false : existingEbayListing.enabled !== false,
+          inventoryEnabled: lifecycleAction === "end" ? false : existingEbayListing.inventoryEnabled !== false
+        };
         context.shadow.channels = [...new Set([...(Array.isArray(context.shadow.channels) ? context.shadow.channels : []), "eBay"])];
-        context.shadow.status = item.ebayListing?.listingId ? "Live" : item.ebayListing?.offerId ? "Prepared" : context.shadow.status || "Draft";
+        context.shadow.status = lifecycleAction === "end" ? "Inactive" : item.ebayListing?.listingId ? "Live" : item.ebayListing?.offerId ? "Prepared" : context.shadow.status || "Draft";
         context.shadow.updatedAt = new Date().toISOString();
         context.parent.updatedAt = context.shadow.updatedAt;
         if (!pendingTouched.includes(context.parent)) pendingTouched.push(context.parent);
@@ -27227,29 +27241,62 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
         ? (parentItem.shadowSkus || []).find((candidate) => String(candidate.id || "") === String(shadowLaunch.shadowId || "")
           || String(candidate.shadowSku || "").toLowerCase() === String(shadowLaunch.shadowSku || "").toLowerCase())
         : null;
-      const warehouseRows = shadow ? (parentItem.warehouseStock || []).filter((row) => String(row.warehouseId || "") === String(shadow.warehouseId || shadowLaunch.warehouseId || "")) : [];
-      const shadowQuantity = shadow ? Math.max(0, Math.floor(warehouseRows.reduce((sum, row) => sum + Number(row.qty || 0) - Number(row.reserved || 0), 0))) : null;
+      const shadowUnitsPerPack = shadow ? Math.max(1, Number(shadow.unitsPerPack || shadow.inventoryMultiplier || 1)) : 1;
+      const shadowWarehouseId = String(shadow?.warehouseId || shadowLaunch?.warehouseId || "");
+      const warehouseRows = shadow ? (parentItem.warehouseStock || []).filter((row) => {
+        if (shadowWarehouseId) return String(row.warehouseId || "") === shadowWarehouseId;
+        return row.isPhysical !== false && row.inventorySourceType !== "supplier_feed" && row.aggregate !== true;
+      }) : [];
+      const shadowAvailablePieces = shadow
+        ? Math.max(0, warehouseRows.length
+          ? warehouseRows.reduce((sum, row) => sum + Number(row.qty || 0) - Number(row.reserved || 0), 0)
+          : productAvailableQty(parentItem))
+        : 0;
+      const shadowSafetyQty = Math.max(0, Number(shadow?.safetyQty || 0));
+      const shadowUncappedQuantity = shadow?.inventoryEnabled === false
+        ? 0
+        : Math.floor(Math.max(0, shadowAvailablePieces - shadowSafetyQty) / shadowUnitsPerPack);
+      const shadowMaxSellableQty = Math.max(0, Number(shadow?.maxSellableQty || 0));
+      const shadowQuantity = shadow
+        ? (shadowMaxSellableQty > 0 ? Math.min(shadowUncappedQuantity, shadowMaxSellableQty) : shadowUncappedQuantity)
+        : null;
+      const shadowPackCost = shadow ? Math.round(productEachUnitCost(parentItem, workDb) * shadowUnitsPerPack * 10000) / 10000 : 0;
+      const shadowEbayListing = shadow?.channelListings?.ebay || {};
+      const shadowPrice = shadow ? Number(shadowEbayListing.price ?? shadow.price ?? marketplaceBaseSellPrice(parentItem) ?? 0) : 0;
       const item = shadow ? {
         ...parentItem,
         sku: shadow.shadowSku,
         qty: shadowQuantity,
         stockQty: shadowQuantity,
         reserved: 0,
+        cost: shadowPackCost,
+        sourceCost: shadowPackCost,
+        sellUnitCost: shadowPackCost,
+        price: shadowPrice,
+        websitePrice: shadowPrice,
+        pricingCalculation: {
+          ...(parentItem.pricingCalculation || {}),
+          sourceCost: shadowPackCost,
+          sellUnitCost: shadowPackCost,
+          primarySellUnitCost: shadowPackCost,
+          finalPrice: shadowPrice
+        },
         shadowSkus: [],
-        ebayListing: { ...(shadow.channelListings?.ebay || {}), merchantSku: shadow.shadowSku }
+        ebayListing: { ...shadowEbayListing, merchantSku: shadowEbayListing.merchantSku || shadow.merchantSku || shadow.shadowSku }
       } : parentItem;
       if (shadow) shadowContexts.set(item, { parent: parentItem, shadow });
       const itemPayload = shadow ? {
         ...payload,
         shadowLaunch: true,
-        merchantSku: shadow.shadowSku,
+        merchantSku: shadowEbayListing.merchantSku || shadow.merchantSku || shadow.shadowSku,
         quantity: shadowQuantity,
         ebaySettings: {
-          ...(shadow.channelListings?.ebay?.settings || {}),
-          useChannelDefaults: shadow.channelListings?.ebay?.settings?.useChannelDefaults !== false,
+          ...(shadowEbayListing.settings || {}),
+          useChannelDefaults: shadowEbayListing.settings?.useChannelDefaults !== false,
           ebayInventoryConnected: false,
           ebayUseChannelDefaultQuantity: false,
-          ebayQuantityOverride: shadowQuantity
+          ebayQuantityOverride: shadowQuantity,
+          ...(shadowPrice > 0 ? { ebayUseDefaultPricingFormula: false, ebayPrice: shadowPrice } : {})
         }
       } : payload;
       const sku = String(item.sku || item.id || "");
@@ -27269,9 +27316,12 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
         processed_at: new Date().toISOString()
       };
       try {
-        const launchBlockReason = item.__ebaySelectionMismatch
+        const shadowLaunchBlockReason = shadow && lifecycleAction !== "end" && (shadow.inventoryEnabled === false || shadowEbayListing.enabled === false || shadowEbayListing.inventoryEnabled === false)
+          ? "This shadow SKU is disabled for eBay inventory. Enable eBay on the shadow before reviewing or launching it."
+          : "";
+        const launchBlockReason = shadowLaunchBlockReason || (item.__ebaySelectionMismatch
           ? "Product no longer matches the catalog filters used for this selection. Refresh the catalog and review this SKU."
-          : lifecycleAction !== "end" ? productEbayLaunchBlockReason(item, workDb) : "";
+          : lifecycleAction !== "end" ? productEbayLaunchBlockReason(item, workDb) : "");
         const launchInventoryWarning = lifecycleAction !== "end" ? productEbayLaunchInventoryWarning(item, workDb) : "";
         if (launchBlockReason) {
           saveReadiness(item, "not_ready", [launchBlockReason], { lifecycleAction });
@@ -28546,6 +28596,10 @@ function publicInventoryItem(item = {}, context = {}) {
   const websitePrice = shopifyVariantWebsitePrice(pricedItem, primaryVariant, SHOPIFY_PRICE_MARKUP_PERCENT, rulesDb);
   const shopifyPrice = shopifyPriceComparison(pricedItem, rulesDb);
   const compatibilityAliases = productCompatibilityAliases(pricedItem, rulesDb);
+  const shadowEachCost = productEachUnitCost(pricedItem, rulesDb);
+  const shadowParentOnHand = Number(item.qty ?? item.stockQty ?? 0);
+  const shadowParentReserved = Number(item.reserved || 0);
+  const shadowParentAvailable = Math.max(0, shadowParentOnHand - shadowParentReserved);
   return {
     id: item.id,
     sku: item.sku,
@@ -28703,7 +28757,23 @@ function publicInventoryItem(item = {}, context = {}) {
     original: item.original || null,
     attributes: item.attributes && typeof item.attributes === "object" ? item.attributes : {},
     aliases: compatibilityAliases,
-    shadowSkus: Array.isArray(item.shadowSkus) ? item.shadowSkus : [],
+    shadowSkus: Array.isArray(item.shadowSkus) ? item.shadowSkus.map((rawShadow) => {
+      const shadow = normalizeShadowSku(rawShadow, item);
+      const unitsPerPack = Math.max(1, Number(shadow.unitsPerPack || shadow.inventoryMultiplier || 1));
+      const safetyQty = Math.max(0, Number(shadow.safetyQty || 0));
+      const availableAfterSafety = Math.max(0, shadowParentAvailable - safetyQty);
+      const uncappedSellableQty = shadow.inventoryEnabled === false ? 0 : Math.floor(availableAfterSafety / unitsPerPack);
+      const maxSellableQty = Math.max(0, Number(shadow.maxSellableQty || 0));
+      return {
+        ...shadow,
+        inheritedEachCost: shadowEachCost,
+        inheritedPackCost: Math.round(shadowEachCost * unitsPerPack * 10000) / 10000,
+        parentOnHand: shadowParentOnHand,
+        parentReserved: shadowParentReserved,
+        parentAvailable: shadowParentAvailable,
+        sellableQty: maxSellableQty > 0 ? Math.min(uncappedSellableQty, maxSellableQty) : uncappedSellableQty
+      };
+    }) : [],
     identifiers: Array.isArray(item.identifiers) ? item.identifiers : [],
     vendorOffers: Array.isArray(item.vendorOffers) ? item.vendorOffers : [],
     warehouseStock: Array.isArray(item.warehouseStock) ? item.warehouseStock : [],
@@ -48548,6 +48618,32 @@ function applyShadowSkuPatch(shadow, body) {
   }
   if (body.handlingTime !== undefined && Number.isFinite(Number(body.handlingTime))) shadow.handlingTimeDays = Number(body.handlingTime);
   if (body.freeShipping !== undefined) shadow.freeShipping = body.freeShipping === true || String(body.freeShipping).toLowerCase() === "true";
+  if (body.inventoryEnabled !== undefined) shadow.inventoryEnabled = body.inventoryEnabled === true || String(body.inventoryEnabled).toLowerCase() === "true";
+  if (body.channels !== undefined) {
+    shadow.channels = [...new Set((Array.isArray(body.channels) ? body.channels : parseList(body.channels))
+      .map((value) => String(value || "").trim())
+      .filter(Boolean))];
+  }
+  if (body.channelListings && typeof body.channelListings === "object" && !Array.isArray(body.channelListings)) {
+    shadow.channelListings = shadow.channelListings && typeof shadow.channelListings === "object" && !Array.isArray(shadow.channelListings)
+      ? shadow.channelListings
+      : {};
+    for (const [rawKey, rawListing] of Object.entries(body.channelListings)) {
+      const key = String(rawKey || "").trim().toLowerCase();
+      if (!key || ["__proto__", "prototype", "constructor"].includes(key) || !rawListing || typeof rawListing !== "object" || Array.isArray(rawListing)) continue;
+      const listing = { ...(shadow.channelListings[key] || {}), ...rawListing };
+      for (const field of ["merchantSku", "marketplaceSku", "channelSku", "status", "listingId", "listingUrl", "offerId"]) {
+        if (listing[field] !== undefined) listing[field] = String(listing[field] || "").trim();
+      }
+      for (const field of ["price", "handlingTimeDays", "safetyQty", "maxSellableQty"]) {
+        if (listing[field] !== undefined && listing[field] !== "") listing[field] = Number(listing[field]);
+        else if (listing[field] === "") delete listing[field];
+      }
+      if (listing.enabled !== undefined) listing.enabled = listing.enabled === true || String(listing.enabled).toLowerCase() === "true";
+      if (listing.inventoryEnabled !== undefined) listing.inventoryEnabled = listing.inventoryEnabled === true || String(listing.inventoryEnabled).toLowerCase() === "true";
+      shadow.channelListings[key] = listing;
+    }
+  }
   if (body.attributeKey && body.attributeValue !== undefined) {
     shadow.marketplaceAttributes = shadow.marketplaceAttributes || {};
     shadow.marketplaceAttributes[String(body.attributeKey)] = body.attributeValue;
@@ -66322,7 +66418,10 @@ async function handleApi(req, res) {
       handlingTimeDays: body.handlingTimeDays,
       safetyQty: body.safetyQty,
       maxSellableQty: body.maxSellableQty,
+      inventoryEnabled: body.inventoryEnabled,
       inventoryPolicy: body.inventoryPolicy,
+      channels: body.channels,
+      channelListings: body.channelListings,
       persistence: body.persistence,
       shippingProfile: body.shippingProfile,
       shippingService: body.shippingService,
@@ -66411,7 +66510,10 @@ async function handleApi(req, res) {
     item.updatedAt = new Date().toISOString();
     await postgres.upsertProductsFromState([item]);
     const stateDb = await withOperationalSummary(await readDbFast({ skipInventory: true }));
-    return sendJson(res, 200, { item, shadow, state: publicState(stateDb, { lite: true }) });
+    const refreshedItem = await postgres.readProductByKey(item.id || item.sku);
+    const publicItem = publicInventoryItem(refreshedItem);
+    const refreshedShadow = (publicItem.shadowSkus || []).find((row) => String(row.id || "") === String(shadow.id || "")) || shadow;
+    return sendJson(res, 200, { item: publicItem, shadow: refreshedShadow, state: publicState(stateDb, { lite: true }) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[3] === "reserve" && postgres.isPostgresEnabled()) {
@@ -77226,7 +77328,10 @@ async function handleApi(req, res) {
       handlingTimeDays: body.handlingTimeDays,
       safetyQty: body.safetyQty,
       maxSellableQty: body.maxSellableQty,
+      inventoryEnabled: body.inventoryEnabled,
       inventoryPolicy: body.inventoryPolicy,
+      channels: body.channels,
+      channelListings: body.channelListings,
       persistence: body.persistence,
       shippingProfile: body.shippingProfile,
       shippingService: body.shippingService,
@@ -77308,7 +77413,9 @@ async function handleApi(req, res) {
     applyShadowSkuPatch(shadow, body);
     item.updatedAt = new Date().toISOString();
     await writeDb(db);
-    return sendJson(res, 200, { item, shadow, state: publicState(db) });
+    const publicItem = publicInventoryItem(item, { db });
+    const refreshedShadow = (publicItem.shadowSkus || []).find((row) => String(row.id || "") === String(shadow.id || "")) || shadow;
+    return sendJson(res, 200, { item: publicItem, shadow: refreshedShadow, state: publicState(db) });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "marketplace-templates" && parts[2]) {
