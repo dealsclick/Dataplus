@@ -87,6 +87,9 @@ assert.match(dbSource, /async function readCriticalOperationQueueHealth/, 'criti
 assert.match(dbSource, /async function recoverStaleCriticalOperationJobs/, 'critical queued jobs must have bounded priority recovery');
 assert.match(dbSource, /async function compactQueuedOperationJobCandidates/, 'queued routing candidates must be compacted and deduplicated');
 assert.match(dbSource, /queueRecoveryCount[\s\S]*?< 3/, 'automatic recovery must be bounded to prevent endless queue churn');
+assert.match(dbSource, /'phase', 'paused'[\s\S]*?queueRecoveryCount[\s\S]*?>= 3/, 'jobs that exhaust automatic recovery must pause for operator review');
+assert.match(dbSource, /failed_or_paused_last_hour/, 'critical queue telemetry must report recently failed or paused work');
+assert.match(criticalQueueWatchdog, /critical-job-paused/, 'the queue watchdog must notify operators when exhausted work is paused');
 const ratePreparation = source.slice(source.indexOf('async function prepareFulfillmentRateRefresh'), source.indexOf('async function refreshFulfillmentRateRow'));
 assert.match(ratePreparation, /readStateField\("fulfillmentOperationsSettings"\)/, 'rate jobs must read only fulfillment settings before hydrating targeted orders');
 assert.doesNotMatch(ratePreparation, /readFulfillmentOperationsState\(/, 'rate jobs must not hydrate historical label batches');

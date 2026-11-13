@@ -5158,7 +5158,14 @@ async function readCriticalOperationQueueHealth() {
     ), hourly as (
       select
         raw->>'workerTask' as task,
-        count(*) filter (where lower(status) in ('success', 'warning'))::int as completed_last_hour,
+        count(*) filter (
+          where lower(status) in ('success', 'warning')
+            and coalesce(raw->>'phase', '') <> 'paused'
+        )::int as completed_last_hour,
+        count(*) filter (
+          where lower(status) = 'failed'
+            or (lower(status) = 'warning' and coalesce(raw->>'phase', '') = 'paused')
+        )::int as failed_or_paused_last_hour,
         coalesce(sum(coalesce(changed_rows, case when raw->>'changedCount' ~ '^-?[0-9]+$' then (raw->>'changedCount')::int else 0 end, 0)), 0)::int as changed_last_hour
       from operations_jobs
       where raw->>'workerTask' = any($1::text[])
@@ -5178,6 +5185,7 @@ async function readCriticalOperationQueueHealth() {
       from operations_jobs
       where raw->>'workerTask' = any($1::text[])
         and lower(status) in ('success', 'warning')
+        and coalesce(raw->>'phase', '') <> 'paused'
       group by raw->>'workerTask'
     )
     select
@@ -5189,6 +5197,7 @@ async function readCriticalOperationQueueHealth() {
       active.last_recovered_at,
       coalesce(active.recovery_count, 0)::int as recovery_count,
       coalesce(hourly.completed_last_hour, 0)::int as completed_last_hour,
+      coalesce(hourly.failed_or_paused_last_hour, 0)::int as failed_or_paused_last_hour,
       coalesce(hourly.changed_last_hour, 0)::int as changed_last_hour,
       latest.latest_status,
       latest.latest_at,
@@ -5224,6 +5233,7 @@ async function readCriticalOperationQueueHealth() {
       lastRecoveredAt: row.last_recovered_at?.toISOString?.() || row.last_recovered_at || "",
       recoveryCount: Number(row.recovery_count || 0),
       completedLastHour: Number(row.completed_last_hour || 0),
+      failedOrPausedLastHour: Number(row.failed_or_paused_last_hour || 0),
       changedLastHour: Number(row.changed_last_hour || 0),
       latestStatus: row.latest_status || "",
       latestAt: row.latest_at?.toISOString?.() || row.latest_at || "",
@@ -5260,7 +5270,30 @@ async function recoverStaleCriticalOperationJobs() {
         )
       returning job_id
     `, [task, Number(policy.maxQueueAgeMinutes || 5), Number(policy.recoveryPriority || 100)]);
-    recovered.push(...result.rows.map((row) => ({ task, jobId: row.job_id, lane: policy.lane || "background" })));
+    recovered.push(...result.rows.map((row) => ({ task, jobId: row.job_id, lane: policy.lane || "background", action: "reprioritized" })));
+    const paused = await client.query(`
+      update operations_jobs
+      set status = 'warning',
+        message = 'Paused after three automatic queue recovery attempts. Review and retry when the assigned worker lane is available.',
+        ended_at = coalesce(ended_at, now()),
+        raw = coalesce(raw, '{}'::jsonb) || jsonb_build_object(
+          'status', 'warning',
+          'phase', 'paused',
+          'queuePausedAt', to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+          'queuePausedReason', 'Critical job remained queued after three automatic priority recoveries. Operator review is required before retrying.'
+        ),
+        updated_at = now()
+      where lower(status) = 'queued'
+        and raw->>'workerTask' = $1
+        and created_at <= now() - ($2::text || ' minutes')::interval
+        and coalesce(case when raw->>'queueRecoveryCount' ~ '^[0-9]+$' then (raw->>'queueRecoveryCount')::int end, 0) >= 3
+        and (
+          nullif(raw->>'queueRecoveredAt', '') is null
+          or nullif(raw->>'queueRecoveredAt', '')::timestamptz <= now() - interval '5 minutes'
+        )
+      returning job_id
+    `, [task, Number(policy.maxQueueAgeMinutes || 5)]);
+    recovered.push(...paused.rows.map((row) => ({ task, jobId: row.job_id, lane: policy.lane || "background", action: "paused" })));
   }
   return recovered;
 }

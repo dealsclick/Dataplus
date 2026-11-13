@@ -79525,6 +79525,23 @@ async function auditCriticalOperationQueues() {
     const queues = await postgres.readCriticalOperationQueueHealth();
     const criticalQueues = queues.filter((queue) => queue.stale);
     const checkedAt = new Date().toISOString();
+    for (const recovery of recoveredJobs.filter((row) => row.action === "paused")) {
+      const policy = CRITICAL_JOB_POLICIES[recovery.task] || {};
+      await postgres.createSystemNotification({
+        tenantId: LEGACY_TENANT,
+        companyId: LEGACY_COMPANY,
+        severity: "warning",
+        category: "job",
+        title: `${policy.label || recovery.task} paused for review`,
+        message: `${policy.label || recovery.task} remained queued after three automatic recoveries. Review and retry the job when the ${recovery.lane} worker lane is available.`,
+        source: "critical-job-watchdog",
+        entityType: "job",
+        entityId: recovery.jobId,
+        actionUrl: "/jobs?tab=review",
+        dedupeKey: `critical-job-paused:${recovery.jobId}`,
+        raw: { checkedAt, recovery }
+      });
+    }
     for (const queue of criticalQueues) {
       const episodeId = String(queue.latestJobId || queue.oldestQueuedAt || queue.oldestRunningAt || "unknown");
       await postgres.createSystemNotification({
@@ -79574,6 +79591,7 @@ async function refreshFulfillmentRoutingHealth() {
     const workerOnline = workerStatus.configured === false ? true : carrierWorker?.online === true;
     const backlogLate = backlog.oldestUnroutedAgeMinutes > FULFILLMENT_ROUTING_BACKLOG_ALERT_MINUTES;
     const queueAuditError = String(queueAudit.error || "");
+    const criticalAttentionLastHour = queueHealth.reduce((total, row) => total + Number(row.failedOrPausedLastHour || 0), 0);
     const status = queueAuditError || !workerOnline || backlogLate || criticalQueues.length ? "critical" : backlog.unroutedPaidCount ? "warning" : "healthy";
     const checkedAt = new Date().toISOString();
     fulfillmentRoutingHealthCache = {
@@ -79582,7 +79600,7 @@ async function refreshFulfillmentRoutingHealth() {
       lastSuccessfulPassAt: checkedAt,
       lastRoutingSuccessAt: routingQueue.latestSuccessAt || "",
       unroutedPaidCount: backlog.unroutedPaidCount,
-      pausedCount: backlog.pausedCount,
+      pausedCount: backlog.pausedCount + criticalAttentionLastHour,
       oldestUnroutedAt: backlog.oldestUnroutedAt,
       oldestUnroutedAgeMinutes: backlog.oldestUnroutedAgeMinutes,
       routedLastHour: Number(routingQueue.changedLastHour || 0),
