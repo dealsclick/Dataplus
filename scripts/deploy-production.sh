@@ -33,12 +33,18 @@ DEPLOY_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 record_deployment_status() {
   local status="$1"
-  docker compose run --rm --no-deps \
+  run_with_timeout "${DATAPLUS_DEPLOY_STATUS_TIMEOUT_SECONDS:-90}" docker compose run --rm --no-deps \
     dataplus node scripts/write-deployment-status.js "$status" "$DEPLOY_REVISION" "$DEPLOY_STARTED_AT"
 }
 
+run_with_timeout() {
+  local timeout_seconds="$1"
+  shift
+  timeout --signal=TERM --kill-after=15s "${timeout_seconds}s" "$@"
+}
+
 resume_label_purchases() {
-  docker compose run --rm --no-deps \
+  run_with_timeout "${DATAPLUS_LABEL_GATE_TIMEOUT_SECONDS:-90}" docker compose run --rm --no-deps \
     dataplus node scripts/wait-for-label-purchases.cjs --resume
 }
 
@@ -67,8 +73,8 @@ docker compose stop worker-orders-tiktok worker-walmart || true
 docker compose rm -f worker-orders-tiktok worker-walmart || true
 
 echo "Pausing new label purchases and draining active purchase jobs..."
-docker compose run --rm --no-deps \
-  dataplus node scripts/wait-for-label-purchases.cjs --pause --timeout-seconds "${DATAPLUS_LABEL_DRAIN_TIMEOUT_SECONDS:-1800}"
+run_with_timeout "${DATAPLUS_LABEL_GATE_TIMEOUT_SECONDS:-360}" docker compose run --rm --no-deps \
+  dataplus node scripts/wait-for-label-purchases.cjs --pause --timeout-seconds "${DATAPLUS_LABEL_DRAIN_TIMEOUT_SECONDS:-300}"
 
 echo "Generating release history from the checked-out repository..."
 docker compose run --rm --no-deps \

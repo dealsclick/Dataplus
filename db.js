@@ -15501,6 +15501,133 @@ async function readLatestOperationJobByWorkerTask(workerTask = "") {
   return result.rows[0] ? operationJobFromRow(result.rows[0]) : null;
 }
 
+async function compactQueuedOperationJobCandidates(options = {}) {
+  const pool = getPool();
+  const workerTask = nullableString(options.workerTask) || "paid-order-routing";
+  const maxCandidates = Math.max(1, Math.min(250, Number(options.maxCandidates || 25) || 25));
+  if (!pool) return { enabled: false, workerTask, jobsBefore: 0, jobsAfter: 0, candidates: 0, compacted: 0 };
+  await initRelationalSchema();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("set local statement_timeout = '20s'");
+    await client.query("set local lock_timeout = '5s'");
+    await client.query("select pg_advisory_xact_lock(hashtext($1))", [`dataplus-operation-job-candidates:${workerTask}`]);
+    const running = await client.query(`
+      select raw
+      from operations_jobs
+      where lower(status) = 'running'
+        and raw ->> 'workerTask' = $1
+    `, [workerTask]);
+    const queued = await client.query(`
+      select job_id, raw
+      from operations_jobs
+      where lower(status) = 'queued'
+        and raw ->> 'workerTask' = $1
+      order by
+        case when raw ->> 'queuePriority' ~ '^-?[0-9]+$' then (raw ->> 'queuePriority')::integer else 0 end desc,
+        created_at asc,
+        job_id asc
+      for update
+    `, [workerTask]);
+    if (!queued.rows.length) {
+      await client.query("commit");
+      return { enabled: true, workerTask, jobsBefore: 0, jobsAfter: 0, candidates: 0, compacted: 0 };
+    }
+    const activeCandidates = new Set(running.rows.flatMap((row) => {
+      const values = row.raw?.workerPayload?.candidateIds;
+      return Array.isArray(values) ? values.map(String) : [];
+    }));
+    const candidates = [];
+    const seen = new Set(activeCandidates);
+    let queuePriority = 0;
+    for (const row of queued.rows) {
+      queuePriority = Math.max(queuePriority, Number(row.raw?.queuePriority || 0) || 0);
+      const values = row.raw?.workerPayload?.candidateIds;
+      for (const value of Array.isArray(values) ? values : []) {
+        const candidateId = String(value || "").trim();
+        if (!candidateId || seen.has(candidateId)) continue;
+        seen.add(candidateId);
+        candidates.push(candidateId);
+      }
+    }
+    const chunks = [];
+    for (let offset = 0; offset < candidates.length; offset += maxCandidates) {
+      chunks.push(candidates.slice(offset, offset + maxCandidates));
+    }
+    const keptJobIds = queued.rows.slice(0, chunks.length).map((row) => row.job_id);
+    for (let index = 0; index < chunks.length; index += 1) {
+      const row = queued.rows[index];
+      const chunk = chunks[index];
+      const message = `${chunk.length} paid order${chunk.length === 1 ? " is" : "s are"} queued for fulfillment routing.`;
+      const raw = row.raw && typeof row.raw === "object" ? row.raw : {};
+      const workerPayload = raw.workerPayload && typeof raw.workerPayload === "object" ? raw.workerPayload : {};
+      const nextRaw = {
+        ...raw,
+        status: "queued",
+        phase: "queued",
+        message,
+        totalRows: chunk.length,
+        processedRows: 0,
+        queuePriority: Math.max(queuePriority, Number(raw.queuePriority || 0) || 0),
+        workerPayload: {
+          ...workerPayload,
+          candidateIds: chunk,
+          candidateFingerprint: [...chunk].sort().join("|"),
+          coalesced: true,
+          coalescedAt: new Date().toISOString()
+        }
+      };
+      await client.query(`
+        update operations_jobs
+        set total_rows = $2::int,
+            processed_rows = 0,
+            message = $3,
+            raw = $4::jsonb,
+            updated_at = now()
+        where job_id = $1
+      `, [row.job_id, chunk.length, message, JSON.stringify(nextRaw)]);
+    }
+    const supersededRows = queued.rows.slice(chunks.length);
+    const supersededMessage = keptJobIds.length
+      ? `Consolidated into ${keptJobIds.length} bounded ${workerTask} job${keptJobIds.length === 1 ? "" : "s"}.`
+      : `Stopped because every candidate is already running in another ${workerTask} job.`;
+    for (const row of supersededRows) {
+      const raw = row.raw && typeof row.raw === "object" ? row.raw : {};
+      await client.query(`
+        update operations_jobs
+        set status = 'stopped',
+            message = $2,
+            ended_at = now(),
+            updated_at = now(),
+            raw = $3::jsonb
+        where job_id = $1
+      `, [row.job_id, supersededMessage, JSON.stringify({
+        ...raw,
+        status: "stopped",
+        phase: "queue_compacted",
+        message: supersededMessage,
+        supersededByJobIds: keptJobIds,
+        finishedAt: new Date().toISOString()
+      })]);
+    }
+    await client.query("commit");
+    return {
+      enabled: true,
+      workerTask,
+      jobsBefore: queued.rows.length,
+      jobsAfter: chunks.length,
+      candidates: candidates.length,
+      compacted: supersededRows.length
+    };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function pruneRedundantNoopOperationJobs(options = {}) {
   const client = getPool();
   if (!client) return 0;
@@ -21480,6 +21607,7 @@ module.exports = {
   upsertProductSourceEnrichmentMap,
   upsertOperationArtifact,
   upsertOperationJob,
+  compactQueuedOperationJobCandidates,
   insertChannelApiLog,
   upsertInventoryLevelsFromProducts,
   upsertProductAliasesFromState,

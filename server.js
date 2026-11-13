@@ -79387,6 +79387,10 @@ async function queuePaidOrderRoutingCandidates(candidateIds = [], options = {}) 
   if (!postgres.isPostgresEnabled()) return [];
   const requestedIds = [...new Set(candidateIds.map(String).filter(Boolean))];
   if (!requestedIds.length) return [];
+  await postgres.compactQueuedOperationJobCandidates({
+    workerTask: "paid-order-routing",
+    maxCandidates: SCHEDULED_ORDER_ROUTING_LIMIT
+  });
   const active = await postgres.getPool().query(`
     select raw->'workerPayload'->'candidateIds' as candidate_ids
     from operations_jobs
@@ -79428,6 +79432,10 @@ async function queuePaidOrderRoutingCandidates(candidateIds = [], options = {}) 
     await postgres.upsertOperationJob(job);
     jobs.push(job);
   }
+  await postgres.compactQueuedOperationJobCandidates({
+    workerTask: "paid-order-routing",
+    maxCandidates: SCHEDULED_ORDER_ROUTING_LIMIT
+  });
   return jobs;
 }
 
@@ -79509,6 +79517,10 @@ async function auditCriticalOperationQueues() {
   }
   criticalQueueWatchdogProcessing = true;
   try {
+    await postgres.compactQueuedOperationJobCandidates({
+      workerTask: "paid-order-routing",
+      maxCandidates: SCHEDULED_ORDER_ROUTING_LIMIT
+    });
     const recoveredJobs = await postgres.recoverStaleCriticalOperationJobs();
     const queues = await postgres.readCriticalOperationQueueHealth();
     const criticalQueues = queues.filter((queue) => queue.stale);

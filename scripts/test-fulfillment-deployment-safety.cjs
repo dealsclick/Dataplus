@@ -8,6 +8,7 @@ const dbSource = fs.readFileSync(path.join(root, "db.js"), "utf8");
 const serverSource = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const appSource = ["App.tsx", "components/fulfillment-route.tsx"].map((file) => fs.readFileSync(path.join(root, "web", "src", ...file.split("/")), "utf8")).join("\n");
 const deploySource = fs.readFileSync(path.join(root, "scripts", "deploy-production.sh"), "utf8");
+const drainSource = fs.readFileSync(path.join(root, "scripts", "wait-for-label-purchases.cjs"), "utf8");
 
 test("fulfillment batch and print numbers use database advisory locks", () => {
   assert.match(dbSource, /async function nextFulfillmentBatchNumberAtomic/);
@@ -31,6 +32,13 @@ test("production deploy drains label purchases before restarting services", () =
   const restart = deploySource.indexOf("docker compose up -d");
   assert.ok(drain >= 0 && drain < restart);
   assert.match(deploySource, /wait-for-label-purchases\.cjs --resume/);
+  assert.match(deploySource, /run_with_timeout/);
+  assert.match(deploySource, /DATAPLUS_LABEL_GATE_TIMEOUT_SECONDS:-360/);
+  assert.match(deploySource, /DATAPLUS_LABEL_DRAIN_TIMEOUT_SECONDS:-300/);
+  assert.match(deploySource, /DATAPLUS_DEPLOY_STATUS_TIMEOUT_SECONDS:-90/);
+  assert.match(drainSource, /from operations_jobs[\s\S]*?workerTask' = 'fulfillment-label-purchase'/);
+  assert.doesNotMatch(drainSource, /readOperationJobs\(/);
+  assert.doesNotMatch(drainSource, /writeStateDocuments\(/);
   assert.match(serverSource, /reason: "deployment_drain"/);
 });
 

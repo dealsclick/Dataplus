@@ -37,6 +37,7 @@ const immediateRoutingQueue = functionBody('queuePaidOrderRoutingCandidates');
 assert.match(immediateRoutingQueue, /lower\(status\) in \('queued', 'running'\)/, 'immediate routing must deduplicate active routing work');
 assert.match(immediateRoutingQueue, /queuePriority: options\.immediate === true \? 150 : 110/, 'import-triggered routing must outrank the periodic recovery pass');
 assert.match(immediateRoutingQueue, /pendingIds\.length; offset \+= SCHEDULED_ORDER_ROUTING_LIMIT/, 'immediate routing must preserve bounded worker payloads');
+assert.match(immediateRoutingQueue, /compactQueuedOperationJobCandidates/, 'immediate routing must coalesce per-order import hooks into bounded jobs');
 for (const importSource of ['ebay-order-import', 'temu-order-import', 'shopify-order-import', 'walmart-order-import', 'tiktok-orders']) {
   assert.match(source, new RegExp(`queuePaidOrderRoutingCandidates\\([^\\n]+source: ['\"]${importSource}['\"]`), `${importSource} must enqueue fulfillment routing immediately after a live import`);
 }
@@ -84,6 +85,7 @@ assert.match(dbSource, /async function listFulfillmentLabelBatchProjectionRows/,
 assert.match(dbSource, /async function pruneRedundantNoopOperationJobs/, 'retention cleanup must compact redundant no-change routing history');
 assert.match(dbSource, /async function readCriticalOperationQueueHealth/, 'critical queue telemetry must report queue age and worker progress');
 assert.match(dbSource, /async function recoverStaleCriticalOperationJobs/, 'critical queued jobs must have bounded priority recovery');
+assert.match(dbSource, /async function compactQueuedOperationJobCandidates/, 'queued routing candidates must be compacted and deduplicated');
 assert.match(dbSource, /queueRecoveryCount[\s\S]*?< 3/, 'automatic recovery must be bounded to prevent endless queue churn');
 const ratePreparation = source.slice(source.indexOf('async function prepareFulfillmentRateRefresh'), source.indexOf('async function refreshFulfillmentRateRow'));
 assert.match(ratePreparation, /readStateField\("fulfillmentOperationsSettings"\)/, 'rate jobs must read only fulfillment settings before hydrating targeted orders');

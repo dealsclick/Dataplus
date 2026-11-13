@@ -24,7 +24,7 @@ function positiveNumber(value, fallback) {
 }
 
 function laneDefaultBudgetMb(lane = "manual") {
-  if (lane === "carrier") return 480;
+  if (lane === "carrier") return 640;
   if (["orders-shopify", "orders-ebay"].includes(lane)) return 480;
   if (lane === "orders-temu") return 1000;
   if (["background", "walmart"].includes(lane)) return 680;
@@ -32,12 +32,24 @@ function laneDefaultBudgetMb(lane = "manual") {
 }
 
 function laneHeavyBudgetMb(lane = "manual") {
-  if (lane === "carrier") return 560;
+  if (lane === "carrier") return 700;
   if (lane === "orders-shopify") return 560;
   if (lane === "orders-ebay") return 600;
   if (lane === "orders-temu") return 1200;
   if (["background", "walmart"].includes(lane)) return 820;
   return 1280;
+}
+
+function laneStartupBudgetMb(lane = "manual") {
+  if (lane === "carrier") return 700;
+  if (["orders-shopify", "orders-ebay"].includes(lane)) return 680;
+  if (lane === "orders-temu") return 1350;
+  if (["background", "walmart"].includes(lane)) return 900;
+  return 1400;
+}
+
+function startupMemoryBudgetMb(lane, env = process.env) {
+  return Math.floor(positiveNumber(env.DATAPLUS_WORKER_STARTUP_RSS_MB, laneStartupBudgetMb(lane)));
 }
 
 function jobMemoryBudgetMb(lane, task = "", env = process.env) {
@@ -261,7 +273,9 @@ async function supervise() {
     const memoryTimer = process.platform === "linux" ? setInterval(() => {
       if (memoryIncident || !child?.pid || child.exitCode !== null || child.signalCode) return;
       const observedBytes = processTreeRssBytes(child.pid);
-      const budgetMb = jobMemoryBudgetMb(lane, claim?.task || "");
+      const budgetMb = claim?.task
+        ? jobMemoryBudgetMb(lane, claim.task)
+        : startupMemoryBudgetMb(lane);
       if (observedBytes < budgetMb * MIB) return;
       memoryIncident = { reason: "memory_limit", observedBytes, budgetMb };
       console.error(`[worker-supervisor] stopping ${claim?.task || "worker startup"} in ${lane}: process tree RSS ${Math.ceil(observedBytes / MIB)} MB reached the ${budgetMb} MB budget.`);
@@ -300,9 +314,11 @@ module.exports = {
   jobMemoryBudgetMb,
   laneDefaultBudgetMb,
   laneHeavyBudgetMb,
+  laneStartupBudgetMb,
   markInterruptedJob,
   processTreeRssBytes,
   readChildPids,
   readProcessRssBytes,
+  startupMemoryBudgetMb,
   terminateProcessTree
 };
