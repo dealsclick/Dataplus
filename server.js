@@ -4937,11 +4937,17 @@ function normalizeShadowSku(shadow = {}, parent = {}) {
   const channels = [...new Set((Array.isArray(shadow.channels) ? shadow.channels : [marketplace])
     .map((value) => String(value || "").trim())
     .filter(Boolean))];
+  const shadowSku = String(shadow.shadowSku || shadow.sku || "").trim();
+  const persistence = shadow.persistence && typeof shadow.persistence === "object" && !Array.isArray(shadow.persistence)
+    ? shadow.persistence
+    : {};
   return {
     id: shadow.id || crypto.randomUUID(),
     parentSku: shadow.parentSku || parent.sku || "",
-    shadowSku: String(shadow.shadowSku || shadow.sku || "").trim(),
-    marketplaceSku: String(shadow.marketplaceSku || shadow.channelSku || shadow.externalSku || "").trim(),
+    shadowSku,
+    merchantSku: String(shadow.merchantSku || shadow.merchant_sku || shadowSku).trim(),
+    marketplaceSku: String(shadow.marketplaceSku || shadow.marketplace_sku || shadow.externalSku || shadow.channelSku || shadow.channel_sku || "").trim(),
+    channelSku: String(shadow.channelSku || shadow.channel_sku || "").trim(),
     unitsPerPack,
     inventoryMultiplier: unitsPerPack,
     marketplace,
@@ -4962,6 +4968,11 @@ function normalizeShadowSku(shadow = {}, parent = {}) {
     safetyQty: Number(shadow.safetyQty ?? 0),
     maxSellableQty: Number(shadow.maxSellableQty ?? 0),
     inventoryPolicy: shadow.inventoryPolicy || "Share parent inventory",
+    persistence: {
+      inventory: "parent",
+      cost: persistence.cost === "override" || shadow.inheritParentCost === false ? "override" : "parent-piece",
+      content: persistence.content === "override" || shadow.inheritParentContent === false ? "override" : "parent"
+    },
     shippingProfile: shadow.shippingProfile || "",
     shippingService: shadow.shippingService || "",
     shippingTemplateId: shadow.shippingTemplateId || "",
@@ -5055,7 +5066,7 @@ function skuMatchesProduct(product = {}, sku = "") {
   if (String(product.sku || "").trim().toLowerCase() === key) return true;
   if (product.ebayListing?.variants?.some(row => String(row.sku || '').toLowerCase() === key)) return true;
   if ((product.aliases || []).some((alias) => alias.active !== false && String(alias.aliasSku || "").trim().toLowerCase() === key)) return true;
-  if ((product.shadowSkus || []).some((shadow) => [shadow.shadowSku, shadow.marketplaceSku, shadow.channelSku]
+  if ((product.shadowSkus || []).some((shadow) => [shadow.shadowSku, shadow.merchantSku, shadow.marketplaceSku, shadow.channelSku]
     .some((value) => String(value || "").trim().toLowerCase() === key))) return true;
   return Object.values(product.sources || {}).some((value) => String(value || "").trim().toLowerCase() === key);
 }
@@ -7868,14 +7879,14 @@ function productSkuKeys(item = {}) {
     item.internalSku,
     item.mfrPartNumber,
     ...(Array.isArray(item.aliases) ? item.aliases.flatMap((alias) => [alias.aliasSku, alias.sku, alias.alias, alias.value]) : []),
-    ...(Array.isArray(item.shadowSkus) ? item.shadowSkus.flatMap((shadow) => [shadow.shadowSku, shadow.marketplaceSku, shadow.channelSku, shadow.sku, shadow.value]) : [])
+    ...(Array.isArray(item.shadowSkus) ? item.shadowSkus.flatMap((shadow) => [shadow.shadowSku, shadow.merchantSku, shadow.marketplaceSku, shadow.channelSku, shadow.sku, shadow.value]) : [])
   ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean));
 }
 
 function lineMatchesProduct(line = {}, item = {}) {
   const keys = productSkuKeys(item);
   if (!keys.size) return false;
-  return [line.sku, line.internalSku, line.mappedSku, line.productSku, line.vendorSku, line.shadowSku, line.marketplaceSku, line.channelSku]
+  return [line.sku, line.internalSku, line.mappedSku, line.productSku, line.vendorSku, line.shadowSku, line.merchantSku, line.marketplaceSku, line.channelSku]
     .map((value) => String(value || "").trim().toLowerCase())
     .some((value) => value && keys.has(value));
 }
@@ -13078,7 +13089,9 @@ function inventorySkuCandidates(item = {}) {
     ]),
     ...(Array.isArray(item.shadowSkus) ? item.shadowSkus : []).flatMap((row) => [
       { value: row.shadowSku, matchedBy: "marketplace shadow", multiplier: Number(row.inventoryMultiplier || row.unitsPerPack || 1) },
-      { value: row.marketplaceSku, matchedBy: "marketplace shadow", multiplier: Number(row.inventoryMultiplier || row.unitsPerPack || 1) }
+      { value: row.merchantSku, matchedBy: "marketplace merchant SKU", multiplier: Number(row.inventoryMultiplier || row.unitsPerPack || 1) },
+      { value: row.marketplaceSku, matchedBy: "marketplace shadow", multiplier: Number(row.inventoryMultiplier || row.unitsPerPack || 1) },
+      { value: row.channelSku, matchedBy: "marketplace channel SKU", multiplier: Number(row.inventoryMultiplier || row.unitsPerPack || 1) }
     ]),
     ...(Array.isArray(item.systemVariants) ? item.systemVariants : []).map((row) => ({ value: row.sku, matchedBy: "system variant", multiplier: Number(row.uomQty || 1) })),
     ...(Array.isArray(item.shopifyPurchaseVariants) ? item.shopifyPurchaseVariants : []).map((row) => ({ value: row.sku, matchedBy: "channel variant", multiplier: Number(row.uomQty || row.quantity || 1) }))
@@ -13114,7 +13127,7 @@ function productSellUnitInventoryMultiplier(item = {}) {
 function orderLineInventoryMultiplier(line = {}, item = {}) {
   const saved = Number(line.inventoryMultiplier || line.unitsPerPack || 0);
   if (Number.isFinite(saved) && saved > 0) return Math.max(1, saved);
-  const candidates = [line.shadowSku, line.marketplaceSku, line.channelSku, line.originalSku, line.mappedFromSku, line.variantSku, line.sku];
+  const candidates = [line.shadowSku, line.merchantSku, line.marketplaceSku, line.channelSku, line.originalSku, line.mappedFromSku, line.variantSku, line.sku];
   for (const candidate of candidates) {
     const match = inventorySkuMatch(candidate, item);
     if (match.matches && match.multiplier > 1) return match.multiplier;
@@ -37801,7 +37814,9 @@ function updateOrderLineSku(order, lineIndex, nextSku, body = {}) {
   else delete line.parentSku;
   if (Number(body.inventoryMultiplier) > 0) line.inventoryMultiplier = Math.max(1, Number(body.inventoryMultiplier));
   else delete line.inventoryMultiplier;
+  if (body.merchantSku) line.merchantSku = String(body.merchantSku).trim();
   if (body.marketplaceSku) line.marketplaceSku = String(body.marketplaceSku).trim();
+  if (body.channelSku) line.channelSku = String(body.channelSku).trim();
   if (body.shadowWarehouseId) line.shadowWarehouseId = String(body.shadowWarehouseId).trim();
   else delete line.shadowWarehouseId;
   if (body.shadowWarehouseCode) line.shadowWarehouseCode = String(body.shadowWarehouseCode).trim();
@@ -37876,7 +37891,7 @@ function findShadowSkuOwner(db, shadowSku) {
   const key = String(shadowSku || "").trim().toLowerCase();
   if (!key) return null;
   for (const product of db.inventory || []) {
-    const shadow = (product.shadowSkus || []).find((row) => [row.shadowSku, row.marketplaceSku, row.channelSku]
+    const shadow = (product.shadowSkus || []).find((row) => [row.shadowSku, row.merchantSku, row.marketplaceSku, row.channelSku]
       .some((value) => String(value || "").trim().toLowerCase() === key));
     if (shadow) return { product, shadow };
   }
@@ -37884,13 +37899,16 @@ function findShadowSkuOwner(db, shadowSku) {
 }
 
 function createShadowSkuFromOrderLine(db, product, order, line, body = {}) {
-  const marketplaceSku = String(body.marketplaceSku || body.sourceSku || line.originalSku || line.mappedFromSku || line.sku || "").trim();
+  const sourceSku = String(body.sourceSku || line.originalSku || line.mappedFromSku || line.channelSku || line.sku || "").trim();
+  const marketplaceSku = String(body.marketplaceSku || sourceSku).trim();
   const requestedUnitsPerPack = Number(body.unitsPerPack || body.inventoryMultiplier || 1);
   if (!Number.isInteger(requestedUnitsPerPack) || requestedUnitsPerPack < 1) throw new Error("Pieces per pack must be a whole number of at least 1.");
   const unitsPerPack = requestedUnitsPerPack;
   const shadowSku = String(body.shadowSku || (unitsPerPack > 1 ? `${product.sku}-${unitsPerPack}PK` : marketplaceSku)).trim();
+  const merchantSku = String(body.merchantSku || shadowSku).trim();
+  const channelSku = String(body.channelSku || line.channelSku || line.originalSku || "").trim();
   if (!shadowSku) throw new Error("Source SKU is required for a shadow SKU.");
-  const existingOwner = findShadowSkuOwner(db, marketplaceSku || shadowSku) || findShadowSkuOwner(db, shadowSku);
+  const existingOwner = [shadowSku, merchantSku, marketplaceSku, channelSku].map((value) => findShadowSkuOwner(db, value)).find(Boolean);
   if (existingOwner && existingOwner.product.id !== product.id) {
     throw new Error(`Shadow SKU ${shadowSku} already belongs to ${existingOwner.product.sku}.`);
   }
@@ -37899,9 +37917,12 @@ function createShadowSkuFromOrderLine(db, product, order, line, body = {}) {
   const marketplace = String(body.marketplace || order.source || "Marketplace").trim();
   const shadow = normalizeShadowSku(applyChannelDefaultsToShadow(db, {
     shadowSku,
+    merchantSku,
     marketplaceSku,
+    channelSku,
     unitsPerPack,
     inventoryMultiplier: unitsPerPack,
+    persistence: body.persistence,
     marketplace,
     price: Number(line.price ?? product.price ?? 0),
     status: "Draft",
@@ -38038,7 +38059,7 @@ function importedOrderProductMatch(product = {}, importedSku = "", line = {}) {
     .filter(Boolean);
   const aliasValues = [
     ...(product.aliases || []).map((alias) => alias.aliasSku || alias.sku || alias.value),
-    ...(product.shadowSkus || []).flatMap((shadow) => [shadow.shadowSku, shadow.marketplaceSku, shadow.channelSku])
+    ...(product.shadowSkus || []).flatMap((shadow) => [shadow.shadowSku, shadow.merchantSku, shadow.marketplaceSku, shadow.channelSku])
   ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
   const supplierValues = (product.supplierSourceSkus || [])
     .map((entry) => String(entry.sourceSku || entry.sku || "").trim().toLowerCase())
@@ -40819,7 +40840,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
     }
     if (product && importedSku && String(product.sku || "").toLowerCase() !== importedSku.toLowerCase()) {
       const matchedAlias = (product.aliases || []).find((alias) => alias.active !== false && String(alias.aliasSku || "").toLowerCase() === importedSku.toLowerCase());
-      const matchedShadow = (product.shadowSkus || []).find((shadow) => [shadow.shadowSku, shadow.marketplaceSku, shadow.channelSku]
+      const matchedShadow = (product.shadowSkus || []).find((shadow) => [shadow.shadowSku, shadow.merchantSku, shadow.marketplaceSku, shadow.channelSku]
         .some((value) => String(value || "").toLowerCase() === importedSku.toLowerCase()));
       const inventoryMultiplier = Math.max(1, Number(matchedShadow?.inventoryMultiplier || matchedShadow?.unitsPerPack || matchedAlias?.inventoryMultiplier || matchedAlias?.uomQty || 1));
       updateOrderLineSku(order, lineIndex, product.sku, {
@@ -40828,7 +40849,9 @@ async function routeOrderForFulfillment(db, order, body = {}) {
         parentSku: product.sku,
         shadowSku: matchedShadow?.shadowSku || (matchedAlias?.type === "shadow" ? importedSku : ""),
         shadowId: matchedShadow?.id || "",
+        merchantSku: matchedShadow?.merchantSku || matchedShadow?.shadowSku || "",
         marketplaceSku: matchedShadow?.marketplaceSku || importedSku,
+        channelSku: matchedShadow?.channelSku || "",
         inventoryMultiplier,
         shadowWarehouseId: matchedShadow?.warehouseId || "",
         shadowWarehouseCode: matchedShadow?.warehouseCode || "",
@@ -41239,12 +41262,14 @@ function applyOrderSkuAliases(db, order = {}) {
     line.sku = product.sku;
     line.parentSku = product.sku;
     const alias = (product.aliases || []).find((row) => row.active !== false && String(row.aliasSku || "").toLowerCase() === importedSku.toLowerCase());
-    const shadow = (product.shadowSkus || []).find((row) => [row.shadowSku, row.marketplaceSku, row.channelSku]
+    const shadow = (product.shadowSkus || []).find((row) => [row.shadowSku, row.merchantSku, row.marketplaceSku, row.channelSku]
       .some((value) => String(value || "").toLowerCase() === importedSku.toLowerCase()));
     if (shadow) {
       line.shadowSku = shadow.shadowSku;
       line.shadowId = shadow.id;
+      line.merchantSku = shadow.merchantSku || shadow.shadowSku;
       line.marketplaceSku = shadow.marketplaceSku || importedSku;
+      line.channelSku = shadow.channelSku || line.channelSku || line.originalSku || "";
       line.inventoryMultiplier = Math.max(1, Number(shadow.inventoryMultiplier || shadow.unitsPerPack || 1));
       line.shadowWarehouseId = String(shadow.warehouseId || "");
       line.shadowWarehouseCode = String(shadow.warehouseCode || "");
@@ -46135,7 +46160,9 @@ async function loadEbayCatalogProductMatches(rows = []) {
   for (const item of inventory) {
     add(bySku, item.sku, item, "sku");
     for (const alias of item.aliases || []) add(bySku, alias.aliasSku, item, "sku");
-    for (const shadow of item.shadowSkus || []) add(bySku, shadow.shadowSku, item, "sku");
+    for (const shadow of item.shadowSkus || []) {
+      for (const value of [shadow.shadowSku, shadow.merchantSku, shadow.marketplaceSku, shadow.channelSku]) add(bySku, value, item, "sku");
+    }
     const saved = item.ebayListing || {};
     add(byListingId, saved.listingId, item, "listingId");
     add(byListingId, item.ebayId, item, "listingId");
@@ -48505,13 +48532,19 @@ function defaultWarehouseBinCode(warehouse) {
 }
 
 function applyShadowSkuPatch(shadow, body) {
-  const textFields = ["shadowSku", "marketplace", "company", "status", "notes", "inventoryPolicy", "shippingProfile", "shippingService", "shippingTemplateId"];
+  const textFields = ["shadowSku", "merchantSku", "marketplaceSku", "channelSku", "marketplace", "company", "status", "notes", "inventoryPolicy", "shippingProfile", "shippingService", "shippingTemplateId"];
   for (const field of textFields) {
     if (body[field] !== undefined) shadow[field] = String(body[field]).trim();
   }
-  const numberFields = ["price", "handlingTimeDays", "safetyQty", "maxSellableQty"];
+  const numberFields = ["price", "handlingTimeDays", "safetyQty", "maxSellableQty", "unitsPerPack", "inventoryMultiplier"];
   for (const field of numberFields) {
     if (body[field] !== undefined && Number.isFinite(Number(body[field]))) shadow[field] = Number(body[field]);
+  }
+  if (body.unitsPerPack !== undefined || body.inventoryMultiplier !== undefined) {
+    const unitsPerPack = Number(body.unitsPerPack ?? body.inventoryMultiplier);
+    if (!Number.isInteger(unitsPerPack) || unitsPerPack < 1) throw new Error("Pieces per pack must be a whole number of at least 1.");
+    shadow.unitsPerPack = unitsPerPack;
+    shadow.inventoryMultiplier = unitsPerPack;
   }
   if (body.handlingTime !== undefined && Number.isFinite(Number(body.handlingTime))) shadow.handlingTimeDays = Number(body.handlingTime);
   if (body.freeShipping !== undefined) shadow.freeShipping = body.freeShipping === true || String(body.freeShipping).toLowerCase() === "true";
@@ -48528,6 +48561,13 @@ function applyShadowSkuPatch(shadow, body) {
       ...body.contentOverrides
     };
     if (body.contentOverrides.imageUrls !== undefined) shadow.contentOverrides.imageUrls = parseList(body.contentOverrides.imageUrls);
+  }
+  if (body.persistence && typeof body.persistence === "object" && !Array.isArray(body.persistence)) {
+    shadow.persistence = {
+      inventory: "parent",
+      cost: body.persistence.cost === "override" ? "override" : "parent-piece",
+      content: body.persistence.content === "override" ? "override" : "parent"
+    };
   }
   if (body.overrideField) {
     shadow.contentOverrides = shadow.contentOverrides || {};
@@ -53604,7 +53644,7 @@ function orderLineSkuLookupKeys(lines = [], options = {}) {
     const preferred = line.mappedSku || line.catalogSku || line.localSku || line.sku || "";
     const values = options.preferredOnly && preferred
       ? [preferred]
-      : [line.sku, line.mappedSku, line.originalSku, line.channelSku, line.channelVariantSku, line.channelVariantId];
+      : [line.sku, line.mappedSku, line.originalSku, line.shadowSku, line.merchantSku, line.marketplaceSku, line.channelSku, line.channelVariantSku, line.channelVariantId];
     for (const value of values) {
       const sku = String(value || "").trim();
       if (!sku) continue;
@@ -53656,6 +53696,7 @@ function orderProductLookup(products = []) {
       ...(product.systemVariants || []).map((variant) => variant.sku),
       ...(product.ebayListing?.variants || []).map((variant) => variant.sku),
       ...(product.aliases || []).filter((alias) => alias.active !== false).map((alias) => alias.aliasSku),
+      ...(product.shadowSkus || []).flatMap((shadow) => [shadow.shadowSku, shadow.merchantSku, shadow.marketplaceSku, shadow.channelSku]),
       ...(product.shopifyVariantSkus || []),
       ...(product.shopifyVariantIds || [])
     ]) {
@@ -53666,7 +53707,7 @@ function orderProductLookup(products = []) {
 }
 
 function resolveOrderLineCatalogCost(order = {}, line = {}, localByKey = new Map()) {
-  const lineKeys = [line.sku, line.mappedSku, line.originalSku, line.channelSku, line.channelVariantSku, line.channelVariantId]
+  const lineKeys = [line.sku, line.mappedSku, line.originalSku, line.shadowSku, line.merchantSku, line.marketplaceSku, line.channelSku, line.channelVariantSku, line.channelVariantId]
     .filter(Boolean)
     .map((value) => String(value).toLowerCase());
   const fallbackKeys = lineKeys
@@ -53680,8 +53721,16 @@ function resolveOrderLineCatalogCost(order = {}, line = {}, localByKey = new Map
   const matchedVariant = ebayVariant
     || product?.systemVariants?.find((variant) => lineKeys.includes(String(variant.sku || "").toLowerCase()))
     || null;
+  const matchedShadow = product?.shadowSkus?.find((shadow) => (
+    (line.shadowId && String(shadow.id || "") === String(line.shadowId))
+    || [shadow.shadowSku, shadow.merchantSku, shadow.marketplaceSku, shadow.channelSku]
+      .some((value) => value && lineKeys.includes(String(value).toLowerCase()))
+  )) || null;
+  const shadowUnitsPerPack = Math.max(1, Number(matchedShadow?.unitsPerPack || matchedShadow?.inventoryMultiplier || line.inventoryMultiplier || 1));
   const catalogCost = product
-    ? matchedVariant
+    ? matchedShadow
+      ? productEachUnitCost(product, null) * shadowUnitsPerPack
+      : matchedVariant
       ? ebayVariant?.cost ?? shopifyVariantPriceBasis(product, matchedVariant, null)
       : productUsesSellUnitPricing(product, null)
         ? productSellUnitCost(product, null)
@@ -53691,9 +53740,11 @@ function resolveOrderLineCatalogCost(order = {}, line = {}, localByKey = new Map
     product,
     directProduct,
     matchedVariant,
+    matchedShadow,
+    shadowUnitsPerPack,
     ebayVariant,
     lineKeys,
-    unitCost: Number(catalogCost || 0)
+    unitCost: Math.round(Number(catalogCost || 0) * 10000) / 10000
   };
 }
 
@@ -53749,8 +53800,8 @@ async function enrichOrderDetail(order = {}) {
   const preserveHistoricalOrderCost = isTerminalCustomerDemand(order);
   const enrichedLines = lines.map((line) => {
     const resolved = resolveOrderLineCatalogCost(order, line, localByKey);
-    const { lineKeys, directProduct, product, ebayVariant, matchedVariant } = resolved;
-    const sellUnitQty = Number(matchedVariant?.uomQty || 1) || 1;
+    const { lineKeys, directProduct, product, ebayVariant, matchedVariant, matchedShadow, shadowUnitsPerPack } = resolved;
+    const sellUnitQty = Number(matchedShadow ? shadowUnitsPerPack : matchedVariant?.uomQty || 1) || 1;
     const hasStoredLineCost = orderLineHasAuthoritativeStoredCost(line);
     const sourceUnitCost = preserveHistoricalOrderCost && hasStoredLineCost
       ? Number(line.unitCost ?? line.cost ?? 0)
@@ -53763,7 +53814,7 @@ async function enrichOrderDetail(order = {}) {
     estimatedCogs += cogs;
     return {
       ...line,
-      skuMatchMode: matchedVariant ? "channel-variant" : directProduct ? "direct" : product ? "uom-parent" : "unmatched",
+      skuMatchMode: matchedShadow ? "marketplace-shadow" : matchedVariant ? "channel-variant" : directProduct ? "direct" : product ? "uom-parent" : "unmatched",
       localSku: product?.sku || "",
       parentSku: product?.sku || line.mappedSku || "",
       localProduct: product ? {
@@ -53787,6 +53838,17 @@ async function enrichOrderDetail(order = {}) {
         shippingClass: productShippingClassification(product).shippingClass || ""
       } : null,
       variant: matchedVariant ? { sku: matchedVariant.sku, parentSku: matchedVariant.parentSku || product?.sku || "", label: matchedVariant.optionValue || matchedVariant.uomName || "", uomQty: Number(matchedVariant.uomQty || 1) } : null,
+      shadow: matchedShadow ? {
+        id: matchedShadow.id || "",
+        shadowSku: matchedShadow.shadowSku || "",
+        merchantSku: matchedShadow.merchantSku || matchedShadow.shadowSku || "",
+        marketplaceSku: matchedShadow.marketplaceSku || "",
+        channelSku: matchedShadow.channelSku || "",
+        marketplace: matchedShadow.marketplace || matchedShadow.company || "",
+        parentSku: matchedShadow.parentSku || product?.sku || "",
+        unitsPerPack: shadowUnitsPerPack,
+        persistence: matchedShadow.persistence || { inventory: "parent", cost: "parent-piece", content: "parent" }
+      } : null,
       sellUnitQty,
       unitCost,
       revenue,
@@ -66233,23 +66295,26 @@ async function handleApi(req, res) {
     if (!item) return notFound(res);
     const db = await readDbFast({ skipInventory: true });
     const shadowSku = String(body.shadowSku || "").trim();
-    const marketplaceSku = String(body.marketplaceSku || body.channelSku || "").trim();
+    const merchantSku = String(body.merchantSku || shadowSku).trim();
+    const marketplaceSku = String(body.marketplaceSku || "").trim();
+    const channelSku = String(body.channelSku || "").trim();
     const requestedUnitsPerPack = Number(body.unitsPerPack || body.inventoryMultiplier || 1);
     if (!Number.isInteger(requestedUnitsPerPack) || requestedUnitsPerPack < 1) return sendJson(res, 400, { error: "Pieces per pack must be a whole number of at least 1." });
     const unitsPerPack = requestedUnitsPerPack;
     const marketplace = String(body.marketplace || body.company || "").trim();
     if (!shadowSku) return sendJson(res, 400, { error: "Shadow SKU is required." });
     if (!marketplace) return sendJson(res, 400, { error: "Marketplace is required." });
-    if ((item.shadowSkus || []).some((shadow) => String(shadow.shadowSku || "").toLowerCase() === shadowSku.toLowerCase())) {
-      return sendJson(res, 400, { error: "Shadow SKU already exists on this product." });
-    }
-    if (marketplaceSku && (item.shadowSkus || []).some((shadow) => String(shadow.marketplaceSku || "").toLowerCase() === marketplaceSku.toLowerCase())) {
-      return sendJson(res, 400, { error: "Marketplace SKU already exists on this product." });
+    const requestedIdentifiers = [shadowSku, merchantSku, marketplaceSku, channelSku].map((value) => value.toLowerCase()).filter(Boolean);
+    if ((item.shadowSkus || []).some((shadow) => [shadow.shadowSku, shadow.merchantSku, shadow.marketplaceSku, shadow.channelSku]
+      .some((value) => requestedIdentifiers.includes(String(value || "").toLowerCase())))) {
+      return sendJson(res, 400, { error: "One of these shadow identifiers already exists on this product." });
     }
     item.shadowSkus = Array.isArray(item.shadowSkus) ? item.shadowSkus : [];
     const shadow = normalizeShadowSku(applyChannelDefaultsToShadow(db, {
       shadowSku,
+      merchantSku,
       marketplaceSku,
+      channelSku,
       unitsPerPack,
       inventoryMultiplier: unitsPerPack,
       marketplace,
@@ -66258,6 +66323,7 @@ async function handleApi(req, res) {
       safetyQty: body.safetyQty,
       maxSellableQty: body.maxSellableQty,
       inventoryPolicy: body.inventoryPolicy,
+      persistence: body.persistence,
       shippingProfile: body.shippingProfile,
       shippingService: body.shippingService,
       shippingTemplateId: body.shippingTemplateId,
@@ -67145,7 +67211,9 @@ async function handleApi(req, res) {
       parentSku: product.sku,
       shadowSku: shadow?.shadowSku || "",
       shadowId: shadow?.id || "",
+      merchantSku: shadow?.merchantSku || shadow?.shadowSku || "",
       marketplaceSku: shadow?.marketplaceSku || sourceSku,
+      channelSku: shadow?.channelSku || currentLine.channelSku || currentLine.originalSku || "",
       inventoryMultiplier: shadow?.inventoryMultiplier || shadow?.unitsPerPack || alias?.inventoryMultiplier || alias?.uomQty || 1
     });
     line.title = line.title || product.title || product.sku;
@@ -77132,21 +77200,34 @@ async function handleApi(req, res) {
     const item = db.inventory.find((row) => row.id === parts[2]);
     if (!item) return notFound(res);
     const shadowSku = String(body.shadowSku || "").trim();
+    const merchantSku = String(body.merchantSku || shadowSku).trim();
+    const marketplaceSku = String(body.marketplaceSku || "").trim();
+    const channelSku = String(body.channelSku || "").trim();
+    const requestedUnitsPerPack = Number(body.unitsPerPack || body.inventoryMultiplier || 1);
+    if (!Number.isInteger(requestedUnitsPerPack) || requestedUnitsPerPack < 1) return sendJson(res, 400, { error: "Pieces per pack must be a whole number of at least 1." });
     const marketplace = String(body.marketplace || body.company || "").trim();
     if (!shadowSku) return sendJson(res, 400, { error: "Shadow SKU is required." });
     if (!marketplace) return sendJson(res, 400, { error: "Marketplace is required." });
-    const exists = db.inventory.some((product) => (product.shadowSkus || []).some((shadow) => String(shadow.shadowSku || "").toLowerCase() === shadowSku.toLowerCase()));
+    const requestedIdentifiers = [shadowSku, merchantSku, marketplaceSku, channelSku].map((value) => value.toLowerCase()).filter(Boolean);
+    const exists = db.inventory.some((product) => (product.shadowSkus || []).some((shadow) => [shadow.shadowSku, shadow.merchantSku, shadow.marketplaceSku, shadow.channelSku]
+      .some((value) => requestedIdentifiers.includes(String(value || "").toLowerCase()))));
     if (exists) return sendJson(res, 400, { error: "Shadow SKU already exists." });
 
     item.shadowSkus = Array.isArray(item.shadowSkus) ? item.shadowSkus : [];
     const shadow = normalizeShadowSku(applyChannelDefaultsToShadow(db, {
       shadowSku,
+      merchantSku,
+      marketplaceSku,
+      channelSku,
+      unitsPerPack: requestedUnitsPerPack,
+      inventoryMultiplier: requestedUnitsPerPack,
       marketplace,
       price: body.price,
       handlingTimeDays: body.handlingTimeDays,
       safetyQty: body.safetyQty,
       maxSellableQty: body.maxSellableQty,
       inventoryPolicy: body.inventoryPolicy,
+      persistence: body.persistence,
       shippingProfile: body.shippingProfile,
       shippingService: body.shippingService,
       shippingTemplateId: body.shippingTemplateId,
@@ -77157,6 +77238,10 @@ async function handleApi(req, res) {
       notes: body.notes || ""
     }, marketplace), item);
     item.shadowSkus.push(shadow);
+    if (requestedUnitsPerPack > 1) {
+      item.inventoryTrackingMode = "piece";
+      item.inventoryBaseUnit = "each";
+    }
     item.updatedAt = new Date().toISOString();
     await writeDb(db);
     return sendJson(res, 200, { item, shadow, state: publicState(db) });
@@ -80761,6 +80846,8 @@ module.exports = {
   temuPackageRows,
   websitePriceFromRule,
   normalizeCatalogProductForInventory,
+  normalizeShadowSku,
+  productEachUnitCost,
   exactEligibleOrderSourceProduct,
   normalizeChannel,
   publicChannelSettings,

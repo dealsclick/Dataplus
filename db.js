@@ -165,6 +165,7 @@ async function ensureProductShadowSkuSchema(client) {
       shadow_id text primary key,
       product_id text not null references products(product_id) on delete cascade,
       shadow_sku text not null,
+      merchant_sku text,
       marketplace_sku text,
       channel_sku text,
       marketplace text,
@@ -173,8 +174,10 @@ async function ensureProductShadowSkuSchema(client) {
       created_at timestamptz not null default now(),
       updated_at timestamptz not null default now()
     );
+    alter table product_shadow_skus add column if not exists merchant_sku text;
     create index if not exists product_shadow_skus_product_idx on product_shadow_skus (product_id);
     create index if not exists product_shadow_skus_shadow_lookup_idx on product_shadow_skus (lower(shadow_sku)) where active = true;
+    create index if not exists product_shadow_skus_merchant_lookup_idx on product_shadow_skus (lower(merchant_sku)) where active = true;
     create index if not exists product_shadow_skus_marketplace_lookup_idx on product_shadow_skus (lower(marketplace_sku)) where active = true;
     create index if not exists product_shadow_skus_channel_lookup_idx on product_shadow_skus (lower(channel_sku)) where active = true;
   `);
@@ -772,6 +775,7 @@ async function initRelationalSchema() {
       shadow_id text primary key,
       product_id text not null references products(product_id) on delete cascade,
       shadow_sku text not null,
+      merchant_sku text,
       marketplace_sku text,
       channel_sku text,
       marketplace text,
@@ -780,8 +784,10 @@ async function initRelationalSchema() {
       created_at timestamptz not null default now(),
       updated_at timestamptz not null default now()
     );
+    alter table product_shadow_skus add column if not exists merchant_sku text;
     create index if not exists product_shadow_skus_product_idx on product_shadow_skus (product_id);
     create index if not exists product_shadow_skus_shadow_lookup_idx on product_shadow_skus (lower(shadow_sku)) where active = true;
+    create index if not exists product_shadow_skus_merchant_lookup_idx on product_shadow_skus (lower(merchant_sku)) where active = true;
     create index if not exists product_shadow_skus_marketplace_lookup_idx on product_shadow_skus (lower(marketplace_sku)) where active = true;
     create index if not exists product_shadow_skus_channel_lookup_idx on product_shadow_skus (lower(channel_sku)) where active = true;
 
@@ -9738,6 +9744,7 @@ function shadowSkuRecordsFromState(item = {}) {
         shadow_id: nullableString(shadow.id) || crypto.createHash("sha1").update(`${productId}:${shadowSku}:${marketplace || ""}:${index}`).digest("hex"),
         product_id: productId,
         shadow_sku: shadowSku,
+        merchant_sku: nullableString(shadow.merchantSku || shadow.shadowSku || shadow.sku),
         marketplace_sku: nullableString(shadow.marketplaceSku || shadow.externalSku),
         channel_sku: nullableString(shadow.channelSku),
         marketplace,
@@ -14966,19 +14973,20 @@ async function upsertProductsFromState(items = [], options = {}) {
     for (let i = 0; i < shadowSkus.length; i += batchSize) {
       await client.query(`
         insert into product_shadow_skus (
-          shadow_id, product_id, shadow_sku, marketplace_sku, channel_sku, marketplace,
+          shadow_id, product_id, shadow_sku, merchant_sku, marketplace_sku, channel_sku, marketplace,
           active, raw, created_at, updated_at
         )
-        select shadow_id, product_id, shadow_sku, marketplace_sku, channel_sku, marketplace,
+        select shadow_id, product_id, shadow_sku, merchant_sku, marketplace_sku, channel_sku, marketplace,
           active, raw, coalesce(created_at, now()), coalesce(updated_at, now())
         from jsonb_to_recordset($1::jsonb) as x(
-          shadow_id text, product_id text, shadow_sku text, marketplace_sku text,
+          shadow_id text, product_id text, shadow_sku text, merchant_sku text, marketplace_sku text,
           channel_sku text, marketplace text, active boolean, raw jsonb,
           created_at timestamptz, updated_at timestamptz
         )
         on conflict (shadow_id) do update set
           product_id = excluded.product_id,
           shadow_sku = excluded.shadow_sku,
+          merchant_sku = excluded.merchant_sku,
           marketplace_sku = excluded.marketplace_sku,
           channel_sku = excluded.channel_sku,
           marketplace = excluded.marketplace,
@@ -16582,6 +16590,7 @@ async function readProductByKey(key) {
       where shadow.active = true
         and (
           lower(shadow.shadow_sku) = lower($1)
+          or lower(coalesce(shadow.merchant_sku, '')) = lower($1)
           or lower(coalesce(shadow.marketplace_sku, '')) = lower($1)
           or lower(coalesce(shadow.channel_sku, '')) = lower($1)
         )
@@ -16789,6 +16798,7 @@ async function readProductsByKeys(keys = [], options = {}) {
       where active = true
         and (
           lower(shadow_sku) = any($1)
+          or lower(coalesce(merchant_sku, '')) = any($1)
           or lower(coalesce(marketplace_sku, '')) = any($1)
           or lower(coalesce(channel_sku, '')) = any($1)
         )
@@ -16959,6 +16969,7 @@ async function readProductsForOrderSkus(keys = [], options = {}) {
           where active = true
             and (
               lower(shadow_sku) = any($1)
+              or lower(coalesce(merchant_sku, '')) = any($1)
               or lower(coalesce(marketplace_sku, '')) = any($1)
               or lower(coalesce(channel_sku, '')) = any($1)
             )
@@ -17004,6 +17015,7 @@ async function readProductsForOrderSkus(keys = [], options = {}) {
       where active = true
         and (
           lower(shadow_sku) = any($1)
+          or lower(coalesce(merchant_sku, '')) = any($1)
           or lower(coalesce(marketplace_sku, '')) = any($1)
           or lower(coalesce(channel_sku, '')) = any($1)
         )

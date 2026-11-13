@@ -22,16 +22,38 @@ const product = {
     { aliasSku: 'BUS76655RJS-3PK', inventoryMultiplier: 3 },
     { aliasSku: 'B084P9759D', inventoryMultiplier: 3 }
   ],
-  shadowSkus: [{ shadowSku: 'BUS76655RJS-3PK', marketplaceSku: 'B084P9759D', unitsPerPack: 3 }]
+  shadowSkus: [{ id: 'shadow-3pk', shadowSku: 'BUS76655RJS-3PK', merchantSku: 'BUS76655RJS-3PK', marketplaceSku: 'BUS76655RJS', channelSku: '44129312577504', unitsPerPack: 3 }]
 };
 
 assert.equal(context.inventorySkuMatch('BUS76655RJS-3PK', product).multiplier, 3);
-assert.equal(context.inventorySkuMatch('B084P9759D', product).multiplier, 3);
-assert.equal(context.orderLineInventoryMultiplier({ sku: 'BUS76655RJS', originalSku: 'B084P9759D' }, product), 3);
+assert.equal(context.inventorySkuMatch('44129312577504', product).multiplier, 3);
+assert.equal(context.orderLineInventoryMultiplier({ sku: 'BUS76655RJS', merchantSku: 'BUS76655RJS-3PK' }, product), 3);
 assert.equal(context.orderLineInventoryMultiplier({ sku: 'BUS76655RJS' }, product), 12);
 assert.equal(context.purchaseReceiptInventoryMultiplier(product), 12);
 assert.equal(context.purchaseReceiptInventoryMultiplier({ ...product, inventoryTrackingMode: '' }), 1);
 assert.match(source, /type: "drop_ship"[\s\S]{0,500}inventoryQty: remaining \* inventoryMultiplier, inventoryMultiplier/);
 assert.match(source, /type: "purchase"[\s\S]{0,500}inventoryQty: remaining \* inventoryMultiplier, inventoryMultiplier/);
+
+const costContext = {
+  orderSkuBaseFromUomVariant: value => String(value || ''),
+  productEachUnitCost: () => 16.15 / 12,
+  productUsesSellUnitPricing: () => true,
+  productSellUnitCost: () => 16.15,
+  shopifyVariantPriceBasis: () => 0
+};
+vm.createContext(costContext);
+const costStart = source.indexOf('function orderProductLookup(');
+const costEnd = source.indexOf('async function hydrateOrdersLocalCosts', costStart);
+vm.runInContext(source.slice(costStart, costEnd), costContext);
+const productLookup = costContext.orderProductLookup([product]);
+const resolvedCost = costContext.resolveOrderLineCatalogCost({}, {
+  sku: product.sku,
+  shadowId: 'shadow-3pk',
+  merchantSku: 'BUS76655RJS-3PK',
+  inventoryMultiplier: 3
+}, productLookup);
+assert.equal(resolvedCost.matchedShadow.shadowSku, 'BUS76655RJS-3PK');
+assert.equal(resolvedCost.shadowUnitsPerPack, 3);
+assert.equal(resolvedCost.unitCost, 4.0375);
 
 console.log('Shadow pack inventory tests passed.');
