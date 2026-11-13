@@ -37979,18 +37979,60 @@ function compactCatalogIdentifier(value) {
 function supplierSourcingPriority(db = {}, value = {}) {
   const vendor = findVendorById(db, value.vendorId || value.id)
     || findVendorByName(db, String(value.vendorName || value.supplier || value.vendor || "").trim());
+  const vendorName = String(vendor?.name || value.vendorName || value.supplier || value.vendor || "").trim().toLowerCase();
+  const defaultPriority = vendorName === "true value"
+    ? 10
+    : vendorName === "rjs"
+      ? 20
+      : ["do it best", "doitbest", "dib"].includes(vendorName)
+        ? 30
+        : 1000;
   const configured = Number(
     vendor?.purchaseOrderRules?.sourcingPriority
     ?? vendor?.purchaseOrderRules?.fulfillmentPriority
-    ?? 1000
+    ?? defaultPriority
   );
-  return Number.isFinite(configured) && configured > 0 ? configured : 1000;
+  return Number.isFinite(configured) && configured > 0 ? configured : defaultPriority;
 }
 
-function importedOrderProductMatch(product = {}, importedSku = "") {
+function orderIdentityPriority(value = {}) {
+  const mode = String(value?.mode || value?.matchType || value || "").trim().toLowerCase();
+  if (["upc", "gtin", "barcode", "ean"].some((token) => mode.includes(token))) return 1;
+  if (mode.includes("manufacturer") || mode === "mpn") return 2;
+  if (mode.includes("supplier") || mode.includes("vendor") || mode.includes("source") || mode.includes("catalog") || mode.includes("alias") || mode === "current") return 3;
+  return 9;
+}
+
+function importedOrderLineLookupValues(importedSku = "", line = {}) {
+  const clean = (values) => [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
+  return {
+    upcs: clean([line.upc, line.upcCode, line.barcode, line.gtin, line.ean, line.productBarcode, line.variantBarcode]),
+    manufacturerSkus: clean([line.mfrPartNumber, line.manufacturerPartNumber, line.mpn, line.manufacturerSku, line.manufacturerSKU]),
+    supplierSkus: clean([importedSku, line.originalSku, line.channelSku, line.channelVariantSku, line.vendorSku, line.supplierSku, line.sourceSku])
+  };
+}
+
+function importedOrderLineLookupKey(importedSku = "", line = {}) {
+  const values = importedOrderLineLookupValues(importedSku, line);
+  return [
+    String(importedSku || "").trim().toLowerCase(),
+    compactCatalogIdentifier(values.upcs[0]),
+    compactCatalogIdentifier(values.manufacturerSkus[0])
+  ].join("|");
+}
+
+function importedOrderProductMatch(product = {}, importedSku = "", line = {}) {
   const literal = String(importedSku || "").trim().toLowerCase();
   const compact = compactCatalogIdentifier(importedSku);
-  if (!literal) return null;
+  const lineValues = importedOrderLineLookupValues(importedSku, line);
+  if (!literal && !lineValues.upcs.length && !lineValues.manufacturerSkus.length && !lineValues.supplierSkus.length) return null;
+  const matchesAny = (productValues, importedValues, allowLiteral = true) => {
+    const normalizedProducts = productValues.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+    const normalizedImported = importedValues.map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+    return normalizedProducts.some((productValue) => normalizedImported.some((importedValue) => productValue === importedValue
+      || (compactCatalogIdentifier(productValue).length >= 4 && compactCatalogIdentifier(productValue) === compactCatalogIdentifier(importedValue))))
+      || (allowLiteral && normalizedProducts.some((value) => value === literal || (compact.length >= 4 && compactCatalogIdentifier(value) === compact)));
+  };
   const directValues = [product.sku, product.id]
     .map((value) => String(value || "").trim().toLowerCase())
     .filter(Boolean);
@@ -38001,29 +38043,26 @@ function importedOrderProductMatch(product = {}, importedSku = "") {
   const supplierValues = (product.supplierSourceSkus || [])
     .map((entry) => String(entry.sourceSku || entry.sku || "").trim().toLowerCase())
     .filter(Boolean);
-  const identifiers = [
-    ...(product.orderIdentifiers || []).map((entry) => ({ type: entry.type || "identifier", value: entry.value })),
-    { type: "vendor-sku", value: product.vendorSku },
-    { type: "manufacturer-part-number", value: product.mfrPartNumber || product.manufacturerPartNumber || product.mpn },
-    { type: "upc", value: product.barcode || product.upc || product.gtin || product.upcCode }
+  const orderIdentifiers = product.orderIdentifiers || [];
+  const productUpcs = [
+    product.barcode, product.upc, product.gtin, product.upcCode,
+    ...orderIdentifiers.filter((entry) => /upc|gtin|barcode|ean/i.test(String(entry.type || ""))).map((entry) => entry.value)
+  ];
+  const productManufacturerSkus = [
+    product.mfrPartNumber, product.manufacturerPartNumber, product.mpn,
+    ...orderIdentifiers.filter((entry) => /manufacturer|mpn/i.test(String(entry.type || ""))).map((entry) => entry.value)
+  ];
+  const productSupplierSkus = [
+    product.vendorSku, product.sourceSku,
+    ...supplierValues,
+    ...orderIdentifiers.filter((entry) => /supplier|vendor|source/i.test(String(entry.type || ""))).map((entry) => entry.value)
   ];
   let result = null;
-  if (directValues.includes(literal)) result = { mode: "catalog-sku", score: 100 };
-  else if (aliasValues.includes(literal)) result = { mode: "catalog-alias", score: 98 };
-  else if (supplierValues.includes(literal) || supplierValues.some((value) => compact && compactCatalogIdentifier(value) === compact)) result = { mode: "supplier-sku", score: 94 };
-  else {
-    const identifier = identifiers.find((entry) => {
-      const value = String(entry.value || "").trim().toLowerCase();
-      return value && (value === literal || (compact.length >= 4 && compactCatalogIdentifier(value) === compact));
-    });
-    if (identifier) {
-      const type = String(identifier.type || "identifier").toLowerCase();
-      result = {
-        mode: type.includes("manufacturer") || type === "mpn" ? "manufacturer-part-number" : type.includes("upc") || type.includes("gtin") || type.includes("barcode") ? "upc" : type.includes("vendor") || type.includes("supplier") ? "supplier-sku" : "catalog-identifier",
-        score: type.includes("manufacturer") || type === "mpn" ? 90 : 92
-      };
-    }
-  }
+  if (matchesAny(productUpcs, lineValues.upcs)) result = { mode: "upc", score: 300 };
+  else if (directValues.includes(literal)) result = { mode: "catalog-sku", score: 250 };
+  else if (aliasValues.includes(literal)) result = { mode: "catalog-alias", score: 240 };
+  else if (matchesAny(productSupplierSkus, lineValues.supplierSkus)) result = { mode: "supplier-sku", score: 230 };
+  else if (matchesAny(productManufacturerSkus, lineValues.manufacturerSkus)) result = { mode: "manufacturer-part-number", score: 200 };
   if (!result) return null;
   if (product.systemCreatedFromOrderImport === true && product.catalogAttentionRequired === true) {
     result.score -= 80;
@@ -38032,8 +38071,8 @@ function importedOrderProductMatch(product = {}, importedSku = "") {
   return result;
 }
 
-function selectImportedOrderProduct(db = {}, products = [], importedSku = "") {
-  return (products || []).map((product) => ({ product, match: importedOrderProductMatch(product, importedSku) }))
+function selectImportedOrderProduct(db = {}, products = [], importedSku = "", line = {}) {
+  return (products || []).map((product) => ({ product, match: importedOrderProductMatch(product, importedSku, line) }))
     .filter((entry) => entry.match)
     .sort((left, right) => {
       const score = Number(right.match.score || 0) - Number(left.match.score || 0);
@@ -38060,19 +38099,27 @@ async function ensureProductsForImportedOrders(db = {}, orders = [], options = {
   for (const order of Array.isArray(orders) ? orders : []) {
     for (const line of orderLineItems(order)) {
       const sku = String(line.sku || line.originalSku || line.channelSku || line.channelVariantSku || "").trim();
-      if (!sku || firstLineBySku.has(sku.toLowerCase())) continue;
-      firstLineBySku.set(sku.toLowerCase(), { sku, line, order });
+      const lookupValues = importedOrderLineLookupValues(sku, line);
+      const lookupKey = importedOrderLineLookupKey(sku, line);
+      if ((!sku && !lookupValues.upcs.length && !lookupValues.manufacturerSkus.length) || firstLineBySku.has(lookupKey)) continue;
+      firstLineBySku.set(lookupKey, { sku, line, order });
     }
   }
   if (!firstLineBySku.size) return { createdProducts: [], attentionSkus: [] };
 
-  const existing = await postgres.readProductsForOrderSkus([...firstLineBySku.values()].map((entry) => entry.sku));
+  const productLookupValues = [...new Set([...firstLineBySku.values()].flatMap((entry) => {
+    const values = importedOrderLineLookupValues(entry.sku, entry.line);
+    return [...values.upcs, ...values.manufacturerSkus, ...values.supplierSkus];
+  }))];
+  const existing = await postgres.readProductsForOrderSkus(productLookupValues);
   const resolved = new Set();
   const selectedByImportedSku = new Map();
   for (const [key, entry] of firstLineBySku) {
-    const selected = selectImportedOrderProduct(db, existing, entry.sku);
+    const selected = selectImportedOrderProduct(db, existing, entry.sku, entry.line);
     if (!selected) continue;
-    const family = (existing || []).filter((product) => importedOrderProductMatch(product, entry.sku));
+    const family = (existing || [])
+      .map((product) => ({ product, match: importedOrderProductMatch(product, entry.sku, entry.line) }))
+      .filter((candidate) => candidate.match);
     selectedByImportedSku.set(key, { ...selected, family });
     resolved.add(key);
   }
@@ -38081,26 +38128,34 @@ async function ensureProductsForImportedOrders(db = {}, orders = [], options = {
     const mapped = [];
     for (const line of orderLineItems(order)) {
       const importedSku = String(line.sku || line.originalSku || line.channelSku || line.channelVariantSku || "").trim();
-      const selected = selectedByImportedSku.get(importedSku.toLowerCase());
+      const selected = selectedByImportedSku.get(importedOrderLineLookupKey(importedSku, line));
       if (!selected) continue;
       const product = selected.product;
+      const lookupValues = importedOrderLineLookupValues(importedSku, line);
+      const importedIdentity = importedSku || lookupValues.upcs[0] || lookupValues.manufacturerSkus[0] || "catalog identifier";
       line.productId = product.id || line.productId || "";
       line.catalogIdentityMatch = {
         mode: selected.match.mode,
-        importedSku,
+        importedSku: importedIdentity,
         catalogSku: product.sku,
         productId: product.id || "",
         matchedAt: new Date().toISOString()
       };
-      line.catalogFamilyProductIds = [...new Set(selected.family.map((member) => member.id).filter(Boolean))];
-      line.catalogFamilySkus = [...new Set(selected.family.map((member) => member.sku).filter(Boolean))];
+      line.catalogFamilyMatches = selected.family.map((member) => ({
+        productId: member.product.id || "",
+        sku: member.product.sku || "",
+        mode: member.match.mode,
+        priority: orderIdentityPriority(member.match)
+      }));
+      line.catalogFamilyProductIds = [...new Set(selected.family.map((member) => member.product.id).filter(Boolean))];
+      line.catalogFamilySkus = [...new Set(selected.family.map((member) => member.product.sku).filter(Boolean))];
       if (String(product.sku || "").toLowerCase() !== importedSku.toLowerCase()) {
         line.originalSku = line.originalSku || importedSku;
         line.marketplaceSku = line.marketplaceSku || line.channelSku || importedSku;
-        line.mappedFromSku = importedSku;
+        line.mappedFromSku = importedIdentity;
         line.sku = product.sku;
         line.skuMappingMode = selected.match.mode;
-        mapped.push(`${importedSku} -> ${product.sku}`);
+        mapped.push(`${importedIdentity} -> ${product.sku}`);
       }
     }
     if (mapped.length) {
@@ -38118,7 +38173,7 @@ async function ensureProductsForImportedOrders(db = {}, orders = [], options = {
   if (!createMissingOrderSkus) return { createdProducts, attentionSkus: [], matchedProducts: selectedByImportedSku.size, touchedOrders: touchedOrders.size };
   db.inventory = Array.isArray(db.inventory) ? db.inventory : [];
   for (const [key, entry] of firstLineBySku) {
-    if (resolved.has(key)) continue;
+    if (resolved.has(key) || !entry.sku) continue;
     const product = createInventoryFromOrderLine(db, entry.order, entry.line, entry.sku, {
       title: entry.line.title || entry.line.name || entry.sku,
       cost: entry.line.cost || entry.line.unitCost || 0,
@@ -40349,18 +40404,25 @@ function routingSupplierOffers(db, product = {}, line = {}) {
   });
 }
 
-function routingSupplierOffersForFamily(db, products = [], line = {}) {
+function routingSupplierOffersForFamily(db, products = [], line = {}, identityMatches = new Map()) {
   const offers = new Map();
   for (const product of products || []) {
-    for (const offer of routingSupplierOffers(db, product, line)) {
+    const identityMatch = identityMatches?.get?.(String(product.id || "")) || { mode: "supplier-sku", priority: 3 };
+    for (const rawOffer of routingSupplierOffers(db, product, line)) {
+      const offer = {
+        ...rawOffer,
+        identityMatchMode: String(identityMatch.mode || identityMatch.matchType || "supplier-sku"),
+        identityPriority: Number(identityMatch.priority || orderIdentityPriority(identityMatch))
+      };
       const key = String(offer.vendorId || offer.vendorName || "").toLowerCase();
       const existing = offers.get(key);
       const offerStock = offer.availabilityKnown && offer.availableQty > 0 ? 0 : 1;
       const existingStock = existing?.availabilityKnown && existing.availableQty > 0 ? 0 : 1;
       const shouldReplace = !existing
         || offerStock < existingStock
-        || (offerStock === existingStock && offer.sourcingPriority < existing.sourcingPriority)
-        || (offerStock === existingStock && offer.sourcingPriority === existing.sourcingPriority && offer.unitCost < existing.unitCost);
+        || (offerStock === existingStock && offer.identityPriority < existing.identityPriority)
+        || (offerStock === existingStock && offer.identityPriority === existing.identityPriority && offer.sourcingPriority < existing.sourcingPriority)
+        || (offerStock === existingStock && offer.identityPriority === existing.identityPriority && offer.sourcingPriority === existing.sourcingPriority && offer.unitCost < existing.unitCost);
       if (shouldReplace) offers.set(key, offer);
     }
   }
@@ -40368,6 +40430,7 @@ function routingSupplierOffersForFamily(db, products = [], line = {}) {
     const leftStock = left.availabilityKnown && left.availableQty > 0 ? 0 : 1;
     const rightStock = right.availabilityKnown && right.availableQty > 0 ? 0 : 1;
     return leftStock - rightStock
+      || left.identityPriority - right.identityPriority
       || left.sourcingPriority - right.sourcingPriority
       || left.unitCost - right.unitCost
       || left.vendorName.localeCompare(right.vendorName);
@@ -40570,11 +40633,16 @@ function fulfillmentWarehousePlan(db = {}, order = {}, line = {}, product = {}, 
   return { channel, settings, mappings, mappingByWarehouse, matchedRule, warehouses, restrict: restrict || Boolean(shadowWarehouseId), shadowWarehouseId };
 }
 
-async function fulfillmentProductFamilyForOrderedSku(importedSku = "", db = {}) {
+async function fulfillmentProductFamilyForOrderedSku(importedSku = "", db = {}, line = {}) {
   const orderedSku = String(importedSku || "").trim();
   if (!orderedSku) return { product: null, products: [], match: null, similarity: null };
-  const candidates = await postgres.readProductsForOrderSkus([orderedSku]);
-  const selected = selectImportedOrderProduct(db, candidates, orderedSku);
+  const lineLookupValues = importedOrderLineLookupValues(orderedSku, line);
+  const candidates = await postgres.readProductsForOrderSkus([...new Set([
+    ...lineLookupValues.upcs,
+    ...lineLookupValues.manufacturerSkus,
+    ...lineLookupValues.supplierSkus
+  ])]);
+  const selected = selectImportedOrderProduct(db, candidates, orderedSku, line);
   let product = selected ? await postgres.readProductByKey(selected.product.id || selected.product.sku) : null;
   if (!product) {
     const direct = await postgres.readProductByKey(orderedSku);
@@ -40597,6 +40665,7 @@ async function fulfillmentProductFamilyForOrderedSku(importedSku = "", db = {}) 
   const familyKeys = [...new Set([
     product.id,
     ...candidates.map((candidate) => candidate.id),
+    ...(Array.isArray(line.catalogFamilyProductIds) ? line.catalogFamilyProductIds : []),
     ...(similarity?.members || []).map((member) => member.productId)
   ].filter(Boolean))];
   const hydrated = familyKeys.length
@@ -40607,20 +40676,39 @@ async function fulfillmentProductFamilyForOrderedSku(importedSku = "", db = {}) 
     .map((member) => byId.get(String(member.id || "")) || member)
     .filter((member, index, all) => member?.id && all.findIndex((candidate) => String(candidate.id || "") === String(member.id || "")) === index);
   const primary = products.find((member) => String(member.id || "") === String(product.id || "")) || product;
-  return { product: primary, products: products.length ? products : [primary], match: selected?.match || importedOrderProductMatch(primary, orderedSku), similarity };
+  const savedFamilyMatches = new Map((Array.isArray(line.catalogFamilyMatches) ? line.catalogFamilyMatches : [])
+    .map((entry) => [String(entry.productId || ""), entry]));
+  const similarityMembers = new Map((similarity?.members || []).map((member) => [String(member.productId || ""), member]));
+  const primaryMatch = String(line.catalogIdentityMatch?.productId || "") === String(primary.id || "")
+    ? line.catalogIdentityMatch
+    : selected?.match || importedOrderProductMatch(primary, orderedSku, line);
+  const identityMatches = new Map();
+  for (const member of products.length ? products : [primary]) {
+    const saved = savedFamilyMatches.get(String(member.id || ""));
+    const similarityMember = similarityMembers.get(String(member.id || ""));
+    const match = saved
+      || (String(member.id || "") === String(primary.id || "") ? primaryMatch : null)
+      || (similarityMember ? { mode: similarityMember.matchType, matchTypes: similarityMember.matchTypes } : null)
+      || { mode: "supplier-sku" };
+    identityMatches.set(String(member.id || ""), { ...match, priority: orderIdentityPriority(match) });
+  }
+  return { product: primary, products: products.length ? products : [primary], match: primaryMatch, similarity, identityMatches };
 }
 
 async function fulfillmentProductForOrderedSku(importedSku = "", db = {}) {
   return (await fulfillmentProductFamilyForOrderedSku(importedSku, db)).product;
 }
 
-function familyProductsForWarehouse(db = {}, products = [], warehouse = {}, systemSettings = {}) {
+function familyProductsForWarehouse(db = {}, products = [], warehouse = {}, systemSettings = {}, identityMatches = new Map()) {
   return (products || []).map((product) => {
     const stock = ensureInventoryWarehouseStock(product, warehouse);
+    const identityMatch = identityMatches?.get?.(String(product.id || "")) || { mode: "supplier-sku", priority: 3 };
     return {
       product,
       stock,
       available: physicalAvailableQuantity(stock, systemSettings),
+      identityMatch,
+      identityPriority: Number(identityMatch.priority || orderIdentityPriority(identityMatch)),
       priority: supplierSourcingPriority(db, product),
       cost: Number(product.sellUnitCost ?? product.unitCost ?? product.cost ?? Number.MAX_SAFE_INTEGER)
     };
@@ -40628,6 +40716,7 @@ function familyProductsForWarehouse(db = {}, products = [], warehouse = {}, syst
     const leftStock = left.available > 0 ? 0 : 1;
     const rightStock = right.available > 0 ? 0 : 1;
     return leftStock - rightStock
+      || left.identityPriority - right.identityPriority
       || left.priority - right.priority
       || left.cost - right.cost
       || right.available - left.available
@@ -40671,7 +40760,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
       });
       continue;
     }
-    let familyResolution = await fulfillmentProductFamilyForOrderedSku(importedSku, db);
+    let familyResolution = await fulfillmentProductFamilyForOrderedSku(importedSku, db, line);
     let product = familyResolution.product;
     let familyProducts = familyResolution.products;
     if (!product) {
@@ -40697,7 +40786,13 @@ async function routeOrderForFulfillment(db, order, body = {}) {
           await postgres.upsertInventoryLevelsFromProducts([product]);
         }
         familyProducts = [product];
-        familyResolution = { product, products: familyProducts, match: importedOrderProductMatch(product, importedSku), similarity: null };
+        familyResolution = {
+          product,
+          products: familyProducts,
+          match: importedOrderProductMatch(product, importedSku, line),
+          similarity: null,
+          identityMatches: new Map([[String(product.id || ""), { mode: "supplier-sku", priority: 3 }]])
+        };
         touchedProducts.push(product);
         resolveOrderRoutingExceptions(order, lineIndex, ["missing_catalog_product"]);
         addOrderWorkflowEvent(order, {
@@ -40759,7 +40854,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
     const warehouses = plan.warehouses.filter(isPhysicalFulfillmentWarehouse);
     for (const warehouse of warehouses) {
       if (!product || remaining <= 0) break;
-      const inventoryCandidates = familyProductsForWarehouse(db, familyProducts, warehouse, systemSettings);
+      const inventoryCandidates = familyProductsForWarehouse(db, familyProducts, warehouse, systemSettings, familyResolution.identityMatches);
       let warehouseAllocated = 0;
       for (const candidate of inventoryCandidates) {
         if (remaining <= 0) break;
@@ -40779,6 +40874,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
           inventorySku: candidate.product.sku,
           listingSku: line.marketplaceSku || line.originalSku || importedSku,
           supplierPriority: candidate.priority,
+          catalogIdentityMatch: candidate.identityMatch,
           ...(body.sourceReceiptId ? { sourceReceiptId: body.sourceReceiptId, sourceReceiptNumber: body.sourceReceiptNumber || "" } : {}),
           reservationExpiresAt: warehouseReservationExpiryAt(systemSettings)
         }));
@@ -40857,13 +40953,29 @@ async function routeOrderForFulfillment(db, order, body = {}) {
       continue;
     }
     if (remaining > 0) {
-      const supplierOffers = routingSupplierOffersForFamily(db, familyProducts.length ? familyProducts : [product].filter(Boolean), line);
+      const supplierOffers = routingSupplierOffersForFamily(db, familyProducts.length ? familyProducts : [product].filter(Boolean), line, familyResolution.identityMatches);
       const blockedSupplierOffers = supplierOffers.length ? [] : routingBlockedSupplierOffers(db, product || {}, line);
       const supplierOffer = supplierOffers.find((offer) => offer.availabilityKnown && offer.availableQty >= remaining)
         || supplierOffers.find((offer) => offer.availabilityKnown && offer.availableQty > 0)
         || supplierOffers.find((offer) => !offer.availabilityKnown)
         || supplierOffers[0]
         || null;
+      const cheapestAvailableSupplier = supplierOffers
+        .filter((offer) => offer.availabilityKnown && offer.availableQty > 0 && offer.unitCost > 0)
+        .sort((left, right) => left.unitCost - right.unitCost || left.sourcingPriority - right.sourcingPriority)[0] || null;
+      const cheaperSupplierAlternative = supplierOffer && cheapestAvailableSupplier
+        && cheapestAvailableSupplier.vendorId !== supplierOffer.vendorId
+        && cheapestAvailableSupplier.unitCost < supplierOffer.unitCost
+        ? {
+          vendorId: cheapestAvailableSupplier.vendorId,
+          vendorName: cheapestAvailableSupplier.vendorName,
+          vendorSku: cheapestAvailableSupplier.vendorSku,
+          unitCost: cheapestAvailableSupplier.unitCost,
+          selectedUnitCost: supplierOffer.unitCost,
+          savingsPerUnit: supplierOffer.unitCost - cheapestAvailableSupplier.unitCost,
+          availableQty: cheapestAvailableSupplier.availableQty
+        }
+        : null;
       const vendor = supplierOffer ? findVendorById(db, supplierOffer.vendorId) : null;
       const sourceWarehouse = supplierOffer ? supplierSourceWarehouseForOffer(db, supplierOffer, plan) : null;
       const supplierHasEnough = Boolean(supplierOffer && (!supplierOffer.availabilityKnown || supplierOffer.availableQty >= remaining));
@@ -40872,12 +40984,15 @@ async function routeOrderForFulfillment(db, order, body = {}) {
         vendorName: offer.vendorName,
         vendorSku: offer.vendorSku,
         sourceProductSku: offer.sourceProductSku,
+        identityMatchMode: offer.identityMatchMode,
+        identityPriority: offer.identityPriority,
         sourcingPriority: offer.sourcingPriority,
         availabilityKnown: offer.availabilityKnown,
         availableQty: offer.availableQty,
         unitCost: offer.unitCost,
         selected: offer === supplierOffer
       }));
+      explanation.cheaperSupplierAlternative = cheaperSupplierAlternative;
       const reviewReason = !supplierOffer
         ? blockedSupplierOffers.length
           ? `${blockedSupplierOffers[0].vendorName} is ${blockedSupplierOffers[0].vendorStatus || "inactive"}; activate the supplier profile or choose another active supplier before creating the purchase order.`
@@ -40901,6 +41016,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
           availabilityKnown: supplierOffer?.availabilityKnown === true, sourceWarehouseId: sourceWarehouse?.id || "",
           sourceWarehouseName: sourceWarehouse?.name || "", supplierMatchMethod: supplierOffer?.matchMethod || "",
           supplierPriority: supplierOffer?.sourcingPriority || 1000,
+          cheaperSupplierAlternative,
           supplierManagedProductId: supplierOffer?.sourceProductId || "",
           supplierManagedSku: supplierOffer?.sourceProductSku || ""
         }));
@@ -40922,6 +41038,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
           sourceWarehouseId: sourceWarehouse?.id || "", sourceWarehouseName: sourceWarehouse?.name || "",
           supplierMatchMethod: supplierOffer?.matchMethod || "", reviewReason,
           supplierPriority: supplierOffer?.sourcingPriority || 1000,
+          cheaperSupplierAlternative,
           supplierManagedProductId: supplierOffer?.sourceProductId || "",
           supplierManagedSku: supplierOffer?.sourceProductSku || ""
         });
@@ -43318,21 +43435,25 @@ async function outboundInventoryProductForWarehouse(db = {}, scannedProduct = {}
       const reserved = Math.max(0, Number(stock.reserved || 0));
       const consumesReservation = reserved > 0 && reservedProductIds.has(String(product.id || ""));
       const available = consumesReservation ? Math.min(qty, reserved) : Math.max(0, qty - reserved);
+      const direct = String(product.id || "") === String(scannedProduct.id || "");
+      const similarityMember = memberById.get(String(product.id || "")) || null;
       return {
         product,
         stock,
         available,
         consumesReservation,
+        identityPriority: direct ? 0 : orderIdentityPriority(similarityMember || {}),
         priority: supplierSourcingPriority(db, product),
         cost: Number(product.sellUnitCost ?? product.unitCost ?? product.cost ?? Number.MAX_SAFE_INTEGER),
-        direct: String(product.id || "") === String(scannedProduct.id || ""),
-        similarityMember: memberById.get(String(product.id || "")) || null
+        direct,
+        similarityMember
       };
     })
     .sort((left, right) => {
       const leftStock = left.available > 0 ? 0 : 1;
       const rightStock = right.available > 0 ? 0 : 1;
       return leftStock - rightStock
+        || left.identityPriority - right.identityPriority
         || left.priority - right.priority
         || Number(right.direct) - Number(left.direct)
         || left.cost - right.cost
@@ -68344,9 +68465,9 @@ async function handleApi(req, res) {
     const inventoryRuleFields = new Set(["replenishableEnabled", "replenishableQty", "safetyQtyEnabled", "safetyQty", "note"]);
     const numericInventoryRuleFields = new Set(["replenishableQty"]);
     const booleanInventoryRuleFields = new Set(["replenishableEnabled", "safetyQtyEnabled"]);
-    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "fulfillmentMode", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "dropShipAllOrders", "dropShipFeePercent", "dropShipFeeFixedAmount", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "note"]);
+    const purchaseOrderRuleFields = new Set(["autoCreateDrafts", "fulfillmentMode", "poolUntilCutoff", "cutoffTime", "cutoffTimezone", "weeklyScheduleEnabled", "deliverySchedule", "scheduleExceptions", "temporaryCutoffOverride", "cutoffAlertsEnabled", "cutoffAlertLeadMinutes", "dropShipEnabled", "dropShipAllOrders", "dropShipFeePercent", "dropShipFeeFixedAmount", "requireBuyerApproval", "approvalThreshold", "budgetLimit", "overdueReminderEnabled", "overdueReminderSubject", "overdueReminderBody", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "defaultWarehouseId", "sourcingPriority", "note"]);
     const booleanPurchaseOrderRuleFields = new Set(["autoCreateDrafts", "poolUntilCutoff", "weeklyScheduleEnabled", "cutoffAlertsEnabled", "dropShipEnabled", "dropShipAllOrders", "requireBuyerApproval", "overdueReminderEnabled"]);
-    const numericPurchaseOrderRuleFields = new Set(["cutoffAlertLeadMinutes", "dropShipFeePercent", "dropShipFeeFixedAmount", "approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps"]);
+    const numericPurchaseOrderRuleFields = new Set(["cutoffAlertLeadMinutes", "dropShipFeePercent", "dropShipFeeFixedAmount", "approvalThreshold", "budgetLimit", "overdueReminderFollowUpDays", "overdueReminderMaxFollowUps", "sourcingPriority"]);
     const catalogSettingsFields = new Set(["enabled", "sourceCodes", "note"]);
     const booleanCatalogSettingsFields = new Set(["enabled"]);
     const addressFields = new Set(["line1", "line2", "city", "state", "postalCode", "country"]);
@@ -68467,7 +68588,9 @@ async function handleApi(req, res) {
           : booleanPurchaseOrderRuleFields.has(key)
             ? Boolean(rawValue)
             : numericPurchaseOrderRuleFields.has(key)
-              ? Math.max(0, Number(rawValue || 0))
+              ? key === "sourcingPriority"
+                ? Math.max(1, Number(rawValue || 1000))
+                : Math.max(0, Number(rawValue || 0))
               : String(rawValue ?? "");
         if (JSON.stringify(vendor.purchaseOrderRules[key]) !== JSON.stringify(value)) {
           changes.push(`${field} changed`);
@@ -80735,10 +80858,12 @@ module.exports = {
   consolidateDropshipPurchaseOrders,
   importedOrderProductMatch,
   selectImportedOrderProduct,
+  orderIdentityPriority,
   supplierSourcingPriority,
   familyProductsForWarehouse,
   outboundInventoryProductForWarehouse,
   routingSupplierOffers,
+  routingSupplierOffersForFamily,
   readOrderRoutingContext,
   routeOrderForFulfillment,
   updateOrderLineSku,

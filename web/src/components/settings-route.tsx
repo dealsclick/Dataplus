@@ -26,7 +26,7 @@ import { SuperuserActivity } from "./superuser-activity"
 import { CarrierProviderSettings } from "./carrier-provider-settings"
 import { QuoteTermsSettings } from "./quote-terms-settings"
 import { api, dateLabel, numberLabel } from "../lib/client-api"
-import { loadAppReferences } from "../lib/app-state"
+import { loadAppReferences, updateAppReference } from "../lib/app-state"
 import { Detail, Field, PageHeader, ToggleField } from "./app-ui"
 import {
   permissionActionLabel, userCan,
@@ -79,6 +79,10 @@ function SettingsPage({
   const [runtime, setRuntime] = useState<Record<string, number> | null>(null)
   const [fulfillmentDiagnostics, setFulfillmentDiagnostics] = useState<Record<string, any> | null>(null)
   const [fulfillmentDiagnosticsLoading, setFulfillmentDiagnosticsLoading] = useState(false)
+  const [supplierPriorityVendors, setSupplierPriorityVendors] = useState<Array<Record<string, unknown>>>([])
+  const [supplierPriorityDraft, setSupplierPriorityDraft] = useState<Record<string, number>>({})
+  const [supplierPriorityLoading, setSupplierPriorityLoading] = useState(false)
+  const [supplierPrioritySaving, setSupplierPrioritySaving] = useState(false)
   const [performanceDiagnostics, setPerformanceDiagnostics] = useState<Record<string, any> | null>(null)
   const [performanceDiagnosticsLoading, setPerformanceDiagnosticsLoading] = useState(false)
   const [orderWorkflowSettings, setOrderWorkflowSettings] = useState<Record<string, unknown>>({})
@@ -149,6 +153,7 @@ function SettingsPage({
   const canDeactivateUsers = userCan(authUser, "users.accounts", "deactivate")
   const canEditUserPermissions = userCan(authUser, "users.permissions", "permissions")
   const canManageCarrierCredentials = userCan(authUser, "settings.security", "credentials")
+  const canEditSupplierPriorities = userCan(authUser, "vendors", "edit")
   const userAreas = permissionAreas.length ? permissionAreas : ((Array.isArray(settings.authPermissionAreas) ? settings.authPermissionAreas : []) as AuthPermissionArea[])
   const selectedUser = users.find((user) => user.id === selectedUserId) || users[0]
   const savedSelectedUser = savedUsers.find((user) => user.id === selectedUser?.id)
@@ -233,8 +238,66 @@ function SettingsPage({
     }
   }
 
+  const defaultSupplierPriority = (vendor: Record<string, unknown>) => {
+    const name = String(vendor.name || "").trim().toLowerCase()
+    if (name === "true value") return 10
+    if (name === "rjs") return 20
+    if (["do it best", "doitbest", "dib"].includes(name)) return 30
+    return 1000
+  }
+
+  const loadSupplierPriorities = async () => {
+    setSupplierPriorityLoading(true)
+    try {
+      const state = await loadAppReferences(["vendorDetails"], true)
+      const vendors = (state.vendorDetails || []) as Array<Record<string, unknown>>
+      setSupplierPriorityVendors(vendors)
+      setSupplierPriorityDraft(Object.fromEntries(vendors.map((vendor) => {
+        const rules = (vendor.purchaseOrderRules || {}) as Record<string, unknown>
+        return [String(vendor.id || ""), Math.max(1, Number(rules.sourcingPriority || defaultSupplierPriority(vendor)))]
+      })))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to load supplier sourcing priorities.")
+    } finally {
+      setSupplierPriorityLoading(false)
+    }
+  }
+
+  const saveSupplierPriorities = async () => {
+    if (!canEditSupplierPriorities) return
+    const changed = supplierPriorityVendors.filter((vendor) => {
+      const rules = (vendor.purchaseOrderRules || {}) as Record<string, unknown>
+      return Math.max(1, Number(rules.sourcingPriority || defaultSupplierPriority(vendor))) !== Math.max(1, Number(supplierPriorityDraft[String(vendor.id || "")] || 1000))
+    })
+    if (!changed.length) return toast.success("Supplier priorities are already current.")
+    setSupplierPrioritySaving(true)
+    try {
+      let latestVendors = supplierPriorityVendors
+      for (const vendor of changed) {
+        const priority = Math.max(1, Number(supplierPriorityDraft[String(vendor.id || "")] || 1000))
+        const result = await api<{ vendor?: Record<string, unknown>; vendors?: Array<Record<string, unknown>> }>(`/api/vendors/${encodeURIComponent(String(vendor.id || ""))}`, {
+          method: "PATCH",
+          body: JSON.stringify({ "purchaseOrderRules.sourcingPriority": priority, user: authUser.name || authUser.username || "DataPlus user" }),
+        })
+        latestVendors = result.vendors?.length
+          ? result.vendors
+          : latestVendors.map((row) => String(row.id || "") === String(vendor.id || "") ? (result.vendor || row) : row)
+      }
+      setSupplierPriorityVendors(latestVendors)
+      updateAppReference("vendorDetails", latestVendors)
+      toast.success(`${changed.length} supplier priorit${changed.length === 1 ? "y" : "ies"} saved. Refresh routing on open orders to apply the new order.`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save supplier sourcing priorities.")
+    } finally {
+      setSupplierPrioritySaving(false)
+    }
+  }
+
   useEffect(() => {
-    if (activeTab === "fulfillment") void loadFulfillmentDiagnostics()
+    if (activeTab === "fulfillment") {
+      void loadFulfillmentDiagnostics()
+      void loadSupplierPriorities()
+    }
   }, [activeTab])
 
   const loadPerformanceDiagnostics = async () => {
@@ -905,6 +968,14 @@ function SettingsPage({
     } finally { setTestingScrapeGraph(false) }
   }
 
+  const supplierPriorityRows = supplierPriorityVendors
+    .filter((vendor) => !((vendor.retirement || {}) as Record<string, unknown>).retiredAt && !["deleted", "retired"].includes(String(vendor.status || "").toLowerCase()))
+    .sort((left, right) => {
+      const leftPriority = Number(((left.purchaseOrderRules || {}) as Record<string, unknown>).sourcingPriority || defaultSupplierPriority(left))
+      const rightPriority = Number(((right.purchaseOrderRules || {}) as Record<string, unknown>).sourcingPriority || defaultSupplierPriority(right))
+      return leftPriority - rightPriority || String(left.name || "").localeCompare(String(right.name || ""))
+    })
+
   return (
     <div className="grid gap-5">
       <PageHeader
@@ -1082,6 +1153,26 @@ function SettingsPage({
           </Card>
         </TabsContent>
         <TabsContent value="fulfillment" className="grid gap-4">
+          <Card>
+            <CardHeader className="gap-3 border-b sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <CardTitle className="text-base">Inventory supply priority management</CardTitle>
+                <CardDescription>DataPlus uses physical stock first. Related catalog records are ranked by UPC, manufacturer part number, then supplier SKU; supplier priority and cost break the remaining ties.</CardDescription>
+              </div>
+              <Button type="button" size="sm" disabled={!canEditSupplierPriorities || supplierPriorityLoading || supplierPrioritySaving} onClick={() => void saveSupplierPriorities()}>
+                {supplierPrioritySaving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save priorities
+              </Button>
+            </CardHeader>
+            <CardContent className="grid gap-4 pt-6">
+              <Alert>
+                <Warehouse className="size-4" />
+                <AlertTitle>Physical warehouse stock is always first</AlertTitle>
+                <AlertDescription>Supplier rankings are used only when no eligible physical quantity remains. Lower numbers are preferred; known supplier availability is checked before price.</AlertDescription>
+              </Alert>
+              {supplierPriorityLoading && !supplierPriorityRows.length ? <div className="flex min-h-24 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading supplier priorities...</div> : <div className="max-h-[28rem] overflow-auto rounded-md border"><Table><TableHeader><TableRow><TableHead>Supply source</TableHead><TableHead>Status</TableHead><TableHead className="w-40">Priority</TableHead></TableRow></TableHeader><TableBody><TableRow className="bg-emerald-500/10"><TableCell><div className="flex items-center gap-2 font-medium"><Warehouse className="size-4 text-emerald-600" /> Physical warehouse stock</div></TableCell><TableCell><Badge variant="success">Always first</Badge></TableCell><TableCell className="font-medium tabular-nums">0</TableCell></TableRow>{supplierPriorityRows.map((vendor) => { const vendorId = String(vendor.id || ""); return <TableRow key={vendorId}><TableCell><a className="font-medium text-primary hover:underline" href={`/vendors/${encodeURIComponent(vendorId)}`}>{String(vendor.name || "Supplier")}</a></TableCell><TableCell><Badge variant={String(vendor.status || "active").toLowerCase() === "active" ? "outline" : "secondary"}>{String(vendor.status || "active")}</Badge></TableCell><TableCell><Input aria-label={`${String(vendor.name || "Supplier")} sourcing priority`} disabled={!canEditSupplierPriorities || supplierPrioritySaving} className="w-28" type="number" min="1" step="1" value={String(supplierPriorityDraft[vendorId] || defaultSupplierPriority(vendor))} onChange={(event) => setSupplierPriorityDraft((current) => ({ ...current, [vendorId]: Math.max(1, Number(event.target.value || 1000)) }))} /></TableCell></TableRow> })}{!supplierPriorityRows.length && !supplierPriorityLoading ? <TableRow><TableCell colSpan={3} className="h-24 text-center text-muted-foreground">No supplier profiles are available.</TableCell></TableRow> : null}</TableBody></Table></div>}
+              <p className="text-xs text-muted-foreground">Defaults: True Value 10, RJS 20, Do It Best 30, all other suppliers 1000. Open orders keep their current allocation until routing is refreshed.</p>
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader className="gap-3 border-b sm:flex-row sm:items-center sm:justify-between">
               <div>

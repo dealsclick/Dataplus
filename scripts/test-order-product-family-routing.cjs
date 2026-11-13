@@ -5,7 +5,9 @@ const postgres = require("../db");
 const {
   familyProductsForWarehouse,
   importedOrderProductMatch,
+  orderIdentityPriority,
   outboundInventoryProductForWarehouse,
+  routingSupplierOffersForFamily,
   selectImportedOrderProduct,
   supplierSourcingPriority,
 } = require("../server");
@@ -44,6 +46,42 @@ test("manufacturer SKU resolves to a managed supplier SKU instead of an order-cr
   const selected = selectImportedOrderProduct({ vendors }, [draft, rjs, trueValue], importedSku);
   assert.equal(selected.product.id, "tv-product");
   assert.equal(selected.match.mode, "manufacturer-part-number");
+});
+
+test("an explicit order UPC wins over a literal supplier SKU", () => {
+  const supplierSku = {
+    id: "supplier-product",
+    sku: "SUPPLIER-123",
+    supplier: "RJS",
+    barcode: "000111222333",
+    active: true,
+  };
+  const upcMatch = {
+    id: "upc-product",
+    sku: "BUS-UPC-MATCH",
+    supplier: "True Value",
+    barcode: "0045242000001",
+    active: true,
+  };
+
+  const selected = selectImportedOrderProduct({ vendors }, [supplierSku, upcMatch], "SUPPLIER-123", { upc: "0045242000001" });
+  assert.equal(selected.product.id, "upc-product");
+  assert.equal(selected.match.mode, "upc");
+  assert.equal(orderIdentityPriority(selected.match), 1);
+});
+
+test("an order line can resolve by UPC when the channel omitted its SKU", () => {
+  const upcMatch = {
+    id: "upc-product",
+    sku: "BUS-UPC-MATCH",
+    supplier: "True Value",
+    barcode: "0045242000001",
+    active: true,
+  };
+
+  const selected = selectImportedOrderProduct({ vendors }, [upcMatch], "", { upc: "0045242000001" });
+  assert.equal(selected.product.id, "upc-product");
+  assert.equal(selected.match.mode, "upc");
 });
 
 test("physical family allocation skips an empty preferred supplier and uses stocked related inventory", () => {
@@ -89,6 +127,59 @@ test("supplier priority wins before cost when related suppliers are both in stoc
   const ranked = familyProductsForWarehouse({ vendors }, [rjs, trueValue], warehouse, {});
   assert.equal(ranked[0].product.id, "tv-product");
   assert.equal(ranked[0].priority, 1);
+});
+
+test("UPC-related physical stock wins before MFR-related stock and supplier priority", () => {
+  const warehouse = { id: "si2", name: "Staten Island 2" };
+  const trueValue = {
+    id: "tv-product",
+    sku: "BUS142423TRV",
+    supplier: "True Value",
+    cost: 30,
+    warehouseStock: [{ warehouseId: "si2", warehouseName: "Staten Island 2", qty: 2, reserved: 0 }],
+  };
+  const rjs = {
+    id: "rjs-product",
+    sku: "BUS48324013RJS",
+    supplier: "RJS",
+    cost: 20,
+    warehouseStock: [{ warehouseId: "si2", warehouseName: "Staten Island 2", qty: 2, reserved: 0 }],
+  };
+  const identityMatches = new Map([
+    ["tv-product", { mode: "manufacturer-part-number", priority: 2 }],
+    ["rjs-product", { mode: "upc", priority: 1 }],
+  ]);
+
+  const ranked = familyProductsForWarehouse({ vendors }, [trueValue, rjs], warehouse, {}, identityMatches);
+  assert.equal(ranked[0].product.id, "rjs-product");
+  assert.equal(ranked[0].identityPriority, 1);
+});
+
+test("supplier routing keeps identifier confidence ahead of configured supplier priority", () => {
+  const trueValue = {
+    id: "tv-product",
+    sku: "BUS142423TRV",
+    supplier: "True Value",
+    vendorSku: "142423",
+    cost: 20,
+    qty: 10,
+  };
+  const rjs = {
+    id: "rjs-product",
+    sku: "BUS48324013RJS",
+    supplier: "RJS",
+    vendorSku: "48324013",
+    cost: 22,
+    qty: 10,
+  };
+  const identityMatches = new Map([
+    ["tv-product", { mode: "manufacturer-part-number", priority: 2 }],
+    ["rjs-product", { mode: "upc", priority: 1 }],
+  ]);
+
+  const offers = routingSupplierOffersForFamily({ vendors }, [trueValue, rjs], { sku: "48-32-4013" }, identityMatches);
+  assert.equal(offers[0].vendorName, "RJS");
+  assert.equal(offers[0].identityMatchMode, "upc");
 });
 
 test("outbound can consume stock reserved for the same order line", async () => {
