@@ -42,6 +42,10 @@ test("production deploy drains label purchases before restarting services", () =
   const schemaReady = deploySource.indexOf("prepare-runtime-schema.cjs");
   assert.ok(schemaReady >= 0 && schemaReady < restart);
   assert.match(deploySource, /PGAPPNAME=dataplus-deploy-schema/);
+  assert.match(deploySource, /runtime_schema_is_ready/);
+  assert.match(deploySource, /2026-11-13-runtime-schema-ensures-v1/);
+  assert.match(deploySource, /stopping blocked runtime services before the one-time preparation/);
+  assert.match(deploySource, /docker compose stop dataplus worker worker-orders-shopify worker-carrier worker-orders-ebay worker-orders-temu/);
   assert.match(deploySource, /cleanup_stale_deployment_helpers/);
   assert.match(deploySource, /com\.docker\.compose\.oneoff=True/);
   assert.match(deploySource, /prepare-runtime-schema\.cjs/);

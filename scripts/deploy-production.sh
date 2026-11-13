@@ -107,16 +107,33 @@ wait_for_carrier_worker() {
   return 1
 }
 
+runtime_schema_is_ready() {
+  local ready
+  ready="$(run_with_timeout 10 docker exec dataplus-postgres psql -U postgres -d dataplus -Atqc \
+    "select case when exists(select 1 from schema_migrations where name='2026-11-13-runtime-schema-ensures-v1') then 1 else 0 end" \
+    2>/dev/null || true)"
+  [[ "$ready" == "1" ]]
+}
+
+prepare_runtime_schema() {
+  run_with_timeout "${DATAPLUS_SCHEMA_READY_TIMEOUT_SECONDS:-300}" docker compose run --rm --no-deps \
+    -e PGAPPNAME=dataplus-deploy-schema \
+    dataplus node scripts/prepare-runtime-schema.cjs
+}
+
 echo "Cleaning abandoned deployment helpers from earlier interrupted releases..."
 cleanup_stale_deployment_helpers
 
 echo "Building DataPlus application images..."
 docker compose build
 
-echo "Preparing the runtime database schema once before the service fleet restarts..."
-run_with_timeout "${DATAPLUS_SCHEMA_READY_TIMEOUT_SECONDS:-300}" docker compose run --rm --no-deps \
-  -e PGAPPNAME=dataplus-deploy-schema \
-  dataplus node scripts/prepare-runtime-schema.cjs
+if runtime_schema_is_ready; then
+  echo "Runtime database schema marker is current."
+else
+  echo "Runtime schema marker is missing; stopping blocked runtime services before the one-time preparation..."
+  docker compose stop dataplus worker worker-orders-shopify worker-carrier worker-orders-ebay worker-orders-temu || true
+  prepare_runtime_schema
+fi
 
 PRESERVE_BACKGROUND_WORKER=false
 if [[ "$(docker inspect -f '{{.State.Running}}' dataplus-worker-background 2>/dev/null || true)" == "true" ]]; then
