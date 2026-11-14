@@ -24,6 +24,31 @@ function aliasValue(alias = {}) {
   return String(alias.aliasSku || alias.sku || '').trim();
 }
 
+function shadowAliasValues(product = {}, shadow = {}, marketplace = '', unitsPerPack = 1) {
+  const shadowId = String(shadow.id || '').trim();
+  const channel = normalized(marketplace);
+  const packQty = Math.max(1, Math.floor(Number(unitsPerPack || 1)));
+  return [...new Set((Array.isArray(product.aliases) ? product.aliases : [])
+    .filter((alias) => alias.active !== false)
+    .filter((alias) => {
+      const linkedShadowId = String(alias.shadowId || '').trim();
+      if (shadowId && linkedShadowId) return linkedShadowId === shadowId;
+      return normalized(alias.type) === 'shadow'
+        && (!channel || normalized(alias.marketplace || alias.source) === channel)
+        && Math.max(1, Math.floor(Number(alias.unitsPerPack || alias.inventoryMultiplier || alias.uomQty || 1))) === packQty;
+    })
+    .map(aliasValue)
+    .filter(Boolean))];
+}
+
+function shadowIdentityValues(product = {}, shadow = {}, input = {}) {
+  return [...new Set([
+    input.parentSku, input.shadowSku, input.merchantSku, input.marketplaceSku, input.channelSku,
+    shadow.shadowSku, shadow.merchantSku, shadow.marketplaceSku, shadow.channelSku,
+    ...shadowAliasValues(product, shadow, input.marketplace, input.unitsPerPack)
+  ].map((value) => String(value || '').trim()).filter(Boolean))];
+}
+
 function matchingLineIndexes(order, values) {
   const wanted = new Set(values.map(normalized).filter(Boolean));
   const matches = [];
@@ -125,6 +150,7 @@ async function main() {
     marketplace: option('marketplace', 'Temu'),
     unitsPerPack: Number(option('units', '1')),
     orderKey: option('order'),
+    from: option('from'),
     note: option('note', 'Marketplace multipack shares the parent piece inventory and inherited piece cost.'),
     user: option('user', 'Channel pack shadow repair')
   };
@@ -133,6 +159,9 @@ async function main() {
   }
   if (!Number.isInteger(input.unitsPerPack) || input.unitsPerPack < 1) {
     throw new Error('--units must be a whole number of at least 1.');
+  }
+  if (input.from && !/^\d{4}-\d{2}-\d{2}$/.test(input.from)) {
+    throw new Error('--from must use YYYY-MM-DD format.');
   }
   input.merchantSku = input.merchantSku || input.shadowSku;
   const allOrders = process.argv.includes('--all-orders');
@@ -151,33 +180,33 @@ async function main() {
     .some((candidate) => candidate && normalized(value) === normalized(candidate))));
   let orders = requestedOrder ? [requestedOrder] : [];
   if (allOrders) {
-    const exactIdentifiers = [...new Set([
-      input.parentSku, input.shadowSku, input.merchantSku,
-      existingShadow?.shadowSku, existingShadow?.merchantSku
-    ].map(normalized).filter(Boolean))];
+    const exactIdentifiers = shadowIdentityValues(product, existingShadow || {}, input).map(normalized);
     const matches = await postgres.getPool().query(`
       select distinct o.order_id, o.order_number, coalesce(o.order_date, o.created_at) as sort_at
       from order_records o
       join order_line_items line on line.order_id = o.order_id
       where lower(concat_ws(' ', o.source, o.channel_source, o.raw->>'source', o.raw->>'channel', o.raw->>'channelSource')) like $1
+        and ($3::date is null or coalesce(o.order_date, o.created_at) >= $3::date)
         and (
           lower(coalesce(line.sku, '')) = any($2::text[])
           or lower(coalesce(line.mapped_sku, '')) = any($2::text[])
           or lower(coalesce(line.raw->>'parentSku', '')) = any($2::text[])
           or lower(coalesce(line.raw->>'shadowSku', '')) = any($2::text[])
           or lower(coalesce(line.raw->>'merchantSku', '')) = any($2::text[])
+          or lower(coalesce(line.raw->>'marketplaceSku', '')) = any($2::text[])
+          or lower(coalesce(line.raw->>'channelSku', '')) = any($2::text[])
+          or lower(coalesce(line.raw->>'originalSku', '')) = any($2::text[])
+          or lower(coalesce(line.raw->>'sourceSku', '')) = any($2::text[])
+          or lower(coalesce(line.raw->>'externalSku', '')) = any($2::text[])
         )
       order by sort_at, o.order_number, o.order_id
-    `, [`%${normalized(input.marketplace)}%`, exactIdentifiers]);
+    `, [`%${normalized(input.marketplace)}%`, exactIdentifiers, input.from || null]);
     const orderIds = matches.rows.map((row) => row.order_id);
     const loaded = await postgres.readOrdersByIds(orderIds);
     const orderRank = new Map(orderIds.map((id, index) => [id, index]));
     orders = loaded.sort((left, right) => (orderRank.get(left.id) ?? 0) - (orderRank.get(right.id) ?? 0));
   }
-  const exactLineValues = [
-    input.parentSku, input.shadowSku, input.merchantSku,
-    existingShadow?.shadowSku, existingShadow?.merchantSku
-  ];
+  const exactLineValues = shadowIdentityValues(product, existingShadow || {}, input);
   const broadLineValues = [
     ...exactLineValues, input.marketplaceSku, input.channelSku,
     existingShadow?.marketplaceSku, existingShadow?.channelSku
@@ -185,7 +214,7 @@ async function main() {
   const lineIndexesByOrderId = new Map(orders.map((order) => [
     order.id,
     allOrders
-      ? matchingParentShadowLineIndexes(order, exactLineValues)
+      ? matchingLineIndexes(order, exactLineValues)
       : matchingLineIndexes(order, broadLineValues)
   ]));
   if (requestedOrder && !(lineIndexesByOrderId.get(requestedOrder.id) || []).length) {
@@ -237,6 +266,8 @@ async function main() {
     } : null,
     orders: allOrders ? {
       mode: 'all',
+      from: input.from || null,
+      identifiers: exactLineValues,
       count: orders.length,
       lineCount: [...lineIndexesByOrderId.values()].reduce((sum, indexes) => sum + indexes.length, 0),
       firstOrderNumber: orders[0]?.orderNumber || '',
@@ -343,10 +374,18 @@ async function main() {
   }, null, 2));
 }
 
-main()
-  .then(() => postgres.closePool())
-  .catch(async (error) => {
-    console.error(error.stack || error.message || error);
-    await postgres.closePool().catch(() => {});
-    process.exitCode = 1;
-  });
+if (require.main === module) {
+  main()
+    .then(() => postgres.closePool())
+    .catch(async (error) => {
+      console.error(error.stack || error.message || error);
+      await postgres.closePool().catch(() => {});
+      process.exitCode = 1;
+    });
+}
+
+module.exports = {
+  matchingLineIndexes,
+  shadowAliasValues,
+  shadowIdentityValues
+};
