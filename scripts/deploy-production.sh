@@ -177,6 +177,12 @@ record_deployment_status healthy
 resume_label_purchases
 if [[ "$PRESERVE_BACKGROUND_WORKER" == "true" ]]; then
   HANDOFF_LOG="/tmp/dataplus-background-handoff-${ACTIVE_PRODUCT_DUMP_JOB_ID}.log"
+  while IFS= read -r handoff_pid; do
+    [[ -n "$handoff_pid" ]] || continue
+    echo "Replacing older background-worker handoff watcher $handoff_pid for the active datadump."
+    kill "$handoff_pid" 2>/dev/null || true
+  done < <(pgrep -f "[b]ash scripts/handoff-preserved-background-worker.sh ${ACTIVE_PRODUCT_DUMP_JOB_ID} " || true)
+  sleep 3
   nohup bash scripts/handoff-preserved-background-worker.sh \
     "$ACTIVE_PRODUCT_DUMP_JOB_ID" "$ACTIVE_PRODUCT_DUMP_WORKER_ID" \
     >"$HANDOFF_LOG" 2>&1 < /dev/null &

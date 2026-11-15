@@ -70,8 +70,14 @@ assert(
   "restart-sensitive temporary supplier rebuild tables are not used"
 );
 assert(
-  workerSource.includes("queueSupplierCoverageRefreshJob(current)"),
-  "the product datadump queues coverage as an independent follow-on job"
+  workerSource.includes('payload.refreshSupplierCoverage === true')
+    && workerSource.includes('trigger: "explicit-product-dump-reconciliation"'),
+  "a product datadump queues full coverage only when reconciliation is explicitly requested"
+);
+assert(
+  workerSource.includes("checkScheduledSupplierCoverageRefresh")
+    && workerSource.includes('trigger: "weekly-full-reconciliation"'),
+  "the full supplier reconciliation is owned by the weekly scheduler"
 );
 assert(
   !workerSource.includes("supplierCoverageResult = await postgres.refreshVendorSupplierCoverage"),

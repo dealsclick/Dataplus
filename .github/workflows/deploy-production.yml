@@ -63,6 +63,8 @@ jobs:
         run: |
           createdb --host=127.0.0.1 --username=postgres dataplus_supplier_test
           node scripts/test-supplier-coverage-resume.cjs
+          node scripts/test-product-identifier-fill-postgres.cjs
+          node scripts/test-supplier-coverage-schedule.cjs
 
   deploy:
     name: Deploy to DigitalOcean Droplet

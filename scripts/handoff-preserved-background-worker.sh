@@ -36,25 +36,27 @@ if (( SECONDS >= deadline )); then
 fi
 
 docker compose stop worker-background
-docker exec dataplus-postgres psql -U postgres -d dataplus -v worker_id="$PRESERVED_WORKER_ID" -c "
+docker exec dataplus-postgres psql -U postgres -d dataplus \
+  -v worker_id="$PRESERVED_WORKER_ID" \
+  -v source_job_id="$PRODUCT_DUMP_JOB_ID" -c "
   update operations_jobs
-  set status = 'queued',
-      started_at = null,
-      ended_at = null,
-      message = 'Supplier coverage rebuild queued for the updated resumable worker.',
+  set status = 'stopped',
+      ended_at = now(),
+      message = 'Daily full supplier reconciliation retired; the Friday reconciliation remains scheduled.',
       raw = raw || jsonb_build_object(
-        'status', 'queued',
-        'phase', 'queued',
-        'message', 'Supplier coverage rebuild queued for the updated resumable worker.',
+        'status', 'stopped',
+        'phase', 'stopped',
+        'message', 'Daily full supplier reconciliation retired; the Friday reconciliation remains scheduled.',
         'workerId', '',
         'workerClaimedAt', '',
         'workerLastSeenAt', '',
-        'finishedAt', ''
+        'finishedAt', now()
       ),
       updated_at = now()
-  where lower(status) = 'running'
+  where lower(status) in ('queued', 'running')
     and raw ->> 'workerTask' = 'supplier-coverage-refresh'
-    and raw ->> 'workerId' = :'worker_id';
+    and raw -> 'workerPayload' ->> 'trigger' = 'product-dump-import'
+    and raw -> 'workerPayload' ->> 'sourceJobId' = :'source_job_id';
 "
 docker compose up -d --force-recreate worker-background
 echo "Background worker handoff completed."

@@ -6729,20 +6729,39 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
       }
       const mainConflictClause = catalogOnly
         ? "on conflict (vendor_id, source_sku) do nothing"
-        // Split imports still own the current supplier-source row. Refresh its
-        // identifiers and descriptive evidence while change events remain
-        // limited to commercial fields. Reconciliation is the only mode that
-        // deliberately updates commercial values without replacing source
-        // identity data.
+        // Supplier identifiers are fill-only. A later feed may complete a
+        // missing value, but it must not rewrite established product identity.
+        // A changed source SKU is a different conflict key and remains its own
+        // supplier record so discovery can create a separate managed SKU.
         : !reconciliationOnly
           ? `on conflict (vendor_id, source_sku) do update set
-          internal_sku = excluded.internal_sku,
-          vendor_sku = excluded.vendor_sku,
+          internal_sku = case
+            when (coalesce(trim(vendor_catalog_items.internal_sku), '') = '' or trim(vendor_catalog_items.internal_sku) ~ '^0+([.]0+)?$')
+              and coalesce(trim(excluded.internal_sku), '') <> '' and trim(excluded.internal_sku) !~ '^0+([.]0+)?$'
+              then excluded.internal_sku
+            else vendor_catalog_items.internal_sku
+          end,
+          vendor_sku = case
+            when (coalesce(trim(vendor_catalog_items.vendor_sku), '') = '' or trim(vendor_catalog_items.vendor_sku) ~ '^0+([.]0+)?$')
+              and coalesce(trim(excluded.vendor_sku), '') <> '' and trim(excluded.vendor_sku) !~ '^0+([.]0+)?$'
+              then excluded.vendor_sku
+            else vendor_catalog_items.vendor_sku
+          end,
           title = excluded.title,
           brand = excluded.brand,
           manufacturer = excluded.manufacturer,
-          mfr_part_number = excluded.mfr_part_number,
-          barcode = excluded.barcode,
+          mfr_part_number = case
+            when (coalesce(trim(vendor_catalog_items.mfr_part_number), '') = '' or trim(vendor_catalog_items.mfr_part_number) ~ '^0+([.]0+)?$')
+              and coalesce(trim(excluded.mfr_part_number), '') <> '' and trim(excluded.mfr_part_number) !~ '^0+([.]0+)?$'
+              then excluded.mfr_part_number
+            else vendor_catalog_items.mfr_part_number
+          end,
+          barcode = case
+            when (coalesce(trim(vendor_catalog_items.barcode), '') = '' or trim(vendor_catalog_items.barcode) ~ '^0+([.]0+)?$')
+              and coalesce(trim(excluded.barcode), '') <> '' and trim(excluded.barcode) !~ '^0+([.]0+)?$'
+              then excluded.barcode
+            else vendor_catalog_items.barcode
+          end,
           category = excluded.category,
           source_category = excluded.source_category,
           cost = excluded.cost,
@@ -6956,6 +6975,146 @@ async function upsertVendorCatalogItemsFromProducts(feedRunId, products = [], op
     client.release();
   }
   return { enabled: true, items: records.length, changes };
+}
+
+async function fillMissingProductIdentifiersFromVendorCatalog(feedRunId = "") {
+  const pool = getPool();
+  const normalizedFeedRunId = nullableString(feedRunId);
+  if (!pool || !normalizedFeedRunId) return { enabled: Boolean(pool), productsUpdated: 0, upcsFilled: 0, mpnsFilled: 0 };
+  await initRelationalSchema();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const updated = await client.query(`
+      with missing_products as materialized (
+        select product_id, sku
+        from products
+        where (
+          coalesce(trim(barcode), '') = '' or trim(barcode) ~ '^0+([.]0+)?$'
+          or coalesce(trim(mfr_part_number), '') = '' or trim(mfr_part_number) ~ '^0+([.]0+)?$'
+        )
+      ), candidates as materialized (
+        select product.product_id, item.vendor_id, item.source_sku,
+          item.barcode, item.mfr_part_number, 0 as priority, item.updated_at
+        from missing_products product
+        join vendor_catalog_items item
+          on item.last_feed_run_id = $1
+         and lower(trim(item.source_sku)) = lower(trim(product.sku))
+        union all
+        select product.product_id, item.vendor_id, item.source_sku,
+          item.barcode, item.mfr_part_number, 1 as priority, item.updated_at
+        from missing_products product
+        join vendor_catalog_items item
+          on item.last_feed_run_id = $1
+         and lower(trim(coalesce(item.internal_sku, ''))) = lower(trim(product.sku))
+        union all
+        select product.product_id, item.vendor_id, item.source_sku,
+          item.barcode, item.mfr_part_number, 2 as priority, item.updated_at
+        from missing_products product
+        join vendor_catalog_items item
+          on item.last_feed_run_id = $1
+         and lower(trim(coalesce(item.vendor_sku, ''))) = lower(trim(product.sku))
+      ), barcode_choice as (
+        select distinct on (product_id) product_id, barcode
+        from candidates
+        where coalesce(trim(barcode), '') <> ''
+          and trim(barcode) !~ '^0+([.]0+)?$'
+          and lower(trim(barcode)) not in ('n', 'na', 'n/a', 'none', 'null', 'unknown')
+        order by product_id, priority, updated_at desc, vendor_id, source_sku
+      ), mpn_choice as (
+        select distinct on (product_id) product_id, mfr_part_number
+        from candidates
+        where coalesce(trim(mfr_part_number), '') <> ''
+          and trim(mfr_part_number) !~ '^0+([.]0+)?$'
+          and lower(trim(mfr_part_number)) not in ('n', 'na', 'n/a', 'none', 'null', 'unknown', 'misc')
+        order by product_id, priority, updated_at desc, vendor_id, source_sku
+      ), choices as (
+        select
+          coalesce(barcode_choice.product_id, mpn_choice.product_id) as product_id,
+          barcode_choice.barcode,
+          mpn_choice.mfr_part_number
+        from barcode_choice
+        full join mpn_choice using (product_id)
+      ), targets as (
+        select
+          product.product_id,
+          product.sku,
+          product.barcode as old_barcode,
+          product.mfr_part_number as old_mfr_part_number,
+          case
+            when (coalesce(trim(product.barcode), '') = '' or trim(product.barcode) ~ '^0+([.]0+)?$')
+              then choices.barcode
+            else product.barcode
+          end as next_barcode,
+          case
+            when (coalesce(trim(product.mfr_part_number), '') = '' or trim(product.mfr_part_number) ~ '^0+([.]0+)?$')
+              then choices.mfr_part_number
+            else product.mfr_part_number
+          end as next_mfr_part_number
+        from products product
+        join choices on choices.product_id = product.product_id
+      )
+      update products product
+      set barcode = targets.next_barcode,
+          mfr_part_number = targets.next_mfr_part_number,
+          updated_at = now()
+      from targets
+      where product.product_id = targets.product_id
+        and (
+          product.barcode is distinct from targets.next_barcode
+          or product.mfr_part_number is distinct from targets.next_mfr_part_number
+        )
+      returning
+        product.product_id,
+        product.sku,
+        targets.old_barcode,
+        product.barcode as new_barcode,
+        targets.old_mfr_part_number,
+        product.mfr_part_number as new_mfr_part_number
+    `, [normalizedFeedRunId]);
+    const events = updated.rows.flatMap((row) => [
+      row.old_barcode !== row.new_barcode ? {
+        product_id: row.product_id,
+        sku: row.sku,
+        field_name: "barcode",
+        old_value: row.old_barcode,
+        new_value: row.new_barcode
+      } : null,
+      row.old_mfr_part_number !== row.new_mfr_part_number ? {
+        product_id: row.product_id,
+        sku: row.sku,
+        field_name: "mfr_part_number",
+        old_value: row.old_mfr_part_number,
+        new_value: row.new_mfr_part_number
+      } : null
+    ].filter(Boolean));
+    if (events.length) {
+      await client.query(`
+        insert into product_change_events (
+          product_id, sku, field_name, old_value, new_value, source, job_id, raw
+        )
+        select
+          product_id, sku, field_name, old_value, new_value,
+          'product_dump_identifier_fill', $2::text,
+          jsonb_build_object('policy', 'fill-missing-only', 'feedRunId', $2::text)
+        from jsonb_to_recordset($1::jsonb) as event(
+          product_id text, sku text, field_name text, old_value text, new_value text
+        )
+      `, [JSON.stringify(events), normalizedFeedRunId]);
+    }
+    await client.query("commit");
+    return {
+      enabled: true,
+      productsUpdated: updated.rowCount || 0,
+      upcsFilled: events.filter((event) => event.field_name === "barcode").length,
+      mpnsFilled: events.filter((event) => event.field_name === "mfr_part_number").length
+    };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 function vendorCatalogRowToState(row = {}) {
@@ -21989,6 +22148,7 @@ module.exports = {
   buildSourceCatalogPerformanceIndexes,
   buildSourceCatalogSearchIndex,
   collectVendorCatalogItems,
+  fillMissingProductIdentifiersFromVendorCatalog,
   exportProductChangeEventsCsv,
   listProductChangeEvents,
   readCategoryState,

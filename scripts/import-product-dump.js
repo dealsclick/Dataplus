@@ -12,6 +12,7 @@ const { sourcePriceFloors } = require("../lib/product-price-floors");
 const {
   closePool,
   createVendorFeedRun,
+  fillMissingProductIdentifiersFromVendorCatalog,
   finishVendorFeedRun,
   readState,
   upsertVendorCatalogItemsFromProducts,
@@ -1245,6 +1246,14 @@ async function importCatalogStore(dumpPath, options) {
       }
     });
     await flushVendorCatalogBatch();
+    if (!options.dryRun) {
+      try {
+        stats.identifierFill = await fillMissingProductIdentifiersFromVendorCatalog(importId);
+      } catch (error) {
+        stats.identifierFillError = error.message || String(error);
+        console.error(`Managed product identifier fill needs review: ${stats.identifierFillError}`);
+      }
+    }
   } catch (error) {
     if (!options.dryRun) {
       await finishVendorFeedRun(importId, {
@@ -1342,6 +1351,9 @@ async function importCatalogStore(dumpPath, options) {
       closeouts: stats.closeouts,
       previousSnapshotCount: previousSnapshot.size
     });
+  }
+  if (stats.identifierFill) {
+    console.log(`Identifier fill: ${Number(stats.identifierFill.upcsFilled || 0).toLocaleString()} missing UPCs and ${Number(stats.identifierFill.mpnsFilled || 0).toLocaleString()} missing MPNs completed; existing identifiers and SKUs were preserved.`);
   }
   console.log(`${options.dryRun ? "Dry run:" : options.postgresOnly ? "Normalized" : "Imported"} ${stats.importable} catalog products (${stats.skipped} skipped) from ${path.basename(dumpPath)}${options.dryRun ? "" : options.postgresOnly ? " into PostgreSQL" : ` into ${path.relative(ROOT, effectiveCatalogPath)}`}.`);
 }

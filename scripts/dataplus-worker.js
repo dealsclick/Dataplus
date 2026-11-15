@@ -26,6 +26,7 @@ const postgres = require("../db");
 const { createDataQualityEngine } = require("../lib/data-quality");
 const redisCache = require("../lib/redis-cache");
 const dataplus = require("../server");
+const { supplierCoverageScheduleSlot } = require("../lib/supplier-coverage-schedule");
 
 const { validateLane, supportsTask } = require('../lib/worker-lanes');
 const WORKER_LANE = validateLane(process.env.DATAPLUS_WORKER_LANE || 'all');
@@ -124,6 +125,8 @@ let lastSupplierReminderScheduleCheckAt = 0;
 let lastVendorFeedScheduleCheckAt = 0;
 let lastFulfillmentRateScheduleCheckAt = 0;
 let fulfillmentRateScheduleRunning = false;
+let lastSupplierCoverageScheduleCheckAt = 0;
+let supplierCoverageScheduleRunning = false;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1915,7 +1918,7 @@ function supplierReportCsvValue(value) {
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
-async function queueSupplierCoverageRefreshJob(sourceJob = {}) {
+async function queueSupplierCoverageRefreshJob(sourceJob = {}, options = {}) {
   const recentJobs = await postgres.readOperationJobs(5000);
   const active = recentJobs.find((job) => String(job.workerTask || "") === "supplier-coverage-refresh"
     && ["queued", "running"].includes(String(job.status || "").toLowerCase()));
@@ -1924,6 +1927,9 @@ async function queueSupplierCoverageRefreshJob(sourceJob = {}) {
   }
   const status = await postgres.readSupplierIndexStatus();
   const now = new Date().toISOString();
+  const trigger = String(options.trigger || "manual-full-reconciliation");
+  const scheduleKey = String(options.scheduleKey || "");
+  const weekly = trigger === "weekly-full-reconciliation";
   const job = {
     id: crypto.randomUUID(),
     section: "Catalog",
@@ -1934,8 +1940,12 @@ async function queueSupplierCoverageRefreshJob(sourceJob = {}) {
     source: "supplier-matching-index",
     status: "queued",
     phase: "queued",
-    message: "Supplier matching index rebuild queued after the product datadump refresh.",
-    details: "Builds exact UPC and SKU coverage in bounded batches, then stores MPN similarities for review.",
+    message: weekly
+      ? "Friday supplier matching reconciliation queued."
+      : "Supplier matching index reconciliation queued.",
+    details: weekly
+      ? "Weekly safety pass: rebuilds exact UPC and SKU coverage in bounded batches, then stores MPN similarities for review."
+      : "Builds exact UPC and SKU coverage in bounded batches, then stores MPN similarities for review.",
     fileName: "supplier-matching-report.csv",
     totalRows: Number(status.totalProducts || 0),
     processedRows: 0,
@@ -1944,8 +1954,9 @@ async function queueSupplierCoverageRefreshJob(sourceJob = {}) {
     workerPayload: {
       background: true,
       scheduled: true,
-      sourceJobId: String(sourceJob.id || ""),
-      trigger: "product-dump-import"
+      sourceJobId: String(options.sourceJobId || sourceJob.id || ""),
+      trigger,
+      scheduleKey
     },
     background: true,
     scheduled: true,
@@ -1954,6 +1965,39 @@ async function queueSupplierCoverageRefreshJob(sourceJob = {}) {
   };
   await postgres.upsertOperationJob(job);
   return { job, duplicate: false };
+}
+
+async function checkScheduledSupplierCoverageRefresh(force = false) {
+  if (!["all", "background"].includes(WORKER_LANE)) return false;
+  if (["0", "false", "no"].includes(String(process.env.SUPPLIER_COVERAGE_WEEKLY_ENABLED || "true").toLowerCase())) return false;
+  const nowMs = Date.now();
+  if (supplierCoverageScheduleRunning || (!force && nowMs - lastSupplierCoverageScheduleCheckAt < 60_000)) return false;
+  lastSupplierCoverageScheduleCheckAt = nowMs;
+  const slot = supplierCoverageScheduleSlot(new Date(nowMs), {
+    timeZone: process.env.SUPPLIER_COVERAGE_WEEKLY_TIME_ZONE || "America/New_York",
+    day: Number(process.env.SUPPLIER_COVERAGE_WEEKLY_DAY ?? 5),
+    hour: Number(process.env.SUPPLIER_COVERAGE_WEEKLY_HOUR ?? 20)
+  });
+  if (!slot) return false;
+  supplierCoverageScheduleRunning = true;
+  try {
+    const existing = await postgres.getPool().query(`
+      select job_id
+      from operations_jobs
+      where raw ->> 'workerTask' = 'supplier-coverage-refresh'
+        and raw -> 'workerPayload' ->> 'scheduleKey' = $1
+      limit 1
+    `, [slot.key]);
+    if (existing.rowCount) return false;
+    const queued = await queueSupplierCoverageRefreshJob({}, {
+      trigger: "weekly-full-reconciliation",
+      scheduleKey: slot.key,
+      sourceJobId: slot.key
+    });
+    return !queued.duplicate;
+  } finally {
+    supplierCoverageScheduleRunning = false;
+  }
 }
 
 async function runSupplierCoverageRefreshJob(job) {
@@ -2398,7 +2442,7 @@ async function runProductDumpImportJob(job) {
   let supplierCoverageJob = null;
   let supplierCoverageError = "";
   const shouldRefreshSupplierCoverage = importType !== "sku-creation"
-    && (payload.refreshSupplierCoverage === true || syncMode !== "reconciliation");
+    && payload.refreshSupplierCoverage === true;
   if (importType !== "sku-creation" && payload.postgresOnly !== false && postgres.isPostgresEnabled()) {
     const postImportHeartbeatTimer = setInterval(() => {
       writeHeartbeat("running", current).catch((error) => console.error("Unable to refresh product dump post-import heartbeat:", error.message || error));
@@ -2421,7 +2465,10 @@ async function runProductDumpImportJob(job) {
           message: "Queueing the independent supplier coverage rebuild..."
         });
         try {
-          supplierCoverageJob = await queueSupplierCoverageRefreshJob(current);
+          supplierCoverageJob = await queueSupplierCoverageRefreshJob(current, {
+            trigger: "explicit-product-dump-reconciliation",
+            sourceJobId: current.id
+          });
         } catch (error) {
           supplierCoverageError = error.message || "Supplier coverage job could not be queued.";
         }
@@ -2503,7 +2550,7 @@ async function runProductDumpImportJob(job) {
       : importType === "sku-creation"
         ? `Datadump SKU creation finished: ${Number(finalProcessedRows || 0).toLocaleString()} checked and ${Number(finalChanged || 0).toLocaleString()} missing SKUs created.`
         : "Product dump price and inventory refresh finished.",
-    details: [outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "), analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : "", supplierCoverageJob ? supplierCoverageJob.duplicate ? `Supplier coverage is already queued or running as Job ${supplierCoverageJob.job?.jobNumber || supplierCoverageJob.job?.id}.` : `Supplier coverage queued independently as Job ${supplierCoverageJob.job?.jobNumber || supplierCoverageJob.job?.id}.` : "", !shouldRefreshSupplierCoverage ? importType === "sku-creation" ? "Commercial updates and supplier coverage are handled by the separate refresh stage." : "Supplier coverage was unchanged and skipped for this reconciliation-only refresh." : "", supplierCoverageError ? `Supplier coverage rebuild could not be queued: ${supplierCoverageError}` : "", ...followOn].filter(Boolean).join(" "),
+    details: [outputText.split(/\r?\n/).filter(Boolean).slice(-8).join(" "), analyzeResult.tables.length ? `Planner statistics refreshed for ${analyzeResult.tables.join(", ")}.` : "", analyzeResult.error ? `Planner statistics refresh skipped: ${analyzeResult.error}` : "", supplierCoverageJob ? supplierCoverageJob.duplicate ? `Supplier coverage is already queued or running as Job ${supplierCoverageJob.job?.jobNumber || supplierCoverageJob.job?.id}.` : `Supplier coverage queued independently as Job ${supplierCoverageJob.job?.jobNumber || supplierCoverageJob.job?.id}.` : "", !shouldRefreshSupplierCoverage ? importType === "sku-creation" ? "Commercial updates run separately; the full supplier reconciliation is scheduled for Friday evening." : "Missing UPC and MPN values were handled by the targeted fill policy; the full supplier reconciliation remains scheduled for Friday evening." : "", supplierCoverageError ? `Supplier coverage rebuild could not be queued: ${supplierCoverageError}` : "", ...followOn].filter(Boolean).join(" "),
     totalRows: finalProcessedRows || current.totalRows || 0,
     processedRows: finalProcessedRows || current.processedRows || 0,
     changed: finalChanged || current.changed || 0,
@@ -2706,6 +2753,7 @@ async function tick() {
   let job = await postgres.claimQueuedOperationJob({ workerId: WORKER_ID, tasks: SUPPORTED_TASKS, lane: WORKER_LANE });
   if (!job) {
     if (['all', 'background'].includes(WORKER_LANE)) {
+      await checkScheduledSupplierCoverageRefresh().catch((error) => console.error("Supplier coverage schedule check failed:", error.message || error));
       await checkScheduledVendorFeedImports();
       await dataplus.checkWalmartOrderSchedule().catch(error => console.error(error.message));
       await dataplus.checkTikTokSchedule().catch(error => console.error(error.message));
@@ -2804,9 +2852,14 @@ async function main() {
   await writeHeartbeat("starting", null, true);
   console.log(`[${WORKER_ID}] started. Supported tasks: ${SUPPORTED_TASKS.join(", ")}`);
   await checkScheduledFulfillmentRateRefresh();
+  await checkScheduledSupplierCoverageRefresh(true).catch((error) => console.error("Supplier coverage schedule check failed:", error.message || error));
   if (!RUN_ONCE && ['all', 'background'].includes(WORKER_LANE)) {
     const fulfillmentRateScheduleTimer = setInterval(() => void checkScheduledFulfillmentRateRefresh(), 60_000);
     fulfillmentRateScheduleTimer.unref?.();
+    const supplierCoverageScheduleTimer = setInterval(() => {
+      void checkScheduledSupplierCoverageRefresh().catch((error) => console.error("Supplier coverage schedule check failed:", error.message || error));
+    }, 60_000);
+    supplierCoverageScheduleTimer.unref?.();
   }
   do {
     const worked = await tick();

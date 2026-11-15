@@ -8,8 +8,8 @@ const importerSource = fs.readFileSync(path.join(root, "scripts", "import-produc
 
 assert.match(
   dbSource,
-  /const mainConflictClause = catalogOnly[\s\S]*?: !reconciliationOnly[\s\S]*?internal_sku = excluded\.internal_sku,[\s\S]*?mfr_part_number = excluded\.mfr_part_number,[\s\S]*?barcode = excluded\.barcode/,
-  "split imports must refresh supplier source identifiers instead of freezing the first imported values"
+  /const mainConflictClause = catalogOnly[\s\S]*?: !reconciliationOnly[\s\S]*?internal_sku = case[\s\S]*?mfr_part_number = case[\s\S]*?barcode = case/,
+  "split imports must fill missing supplier identifiers without overwriting established identity"
 );
 assert.match(
   dbSource,
@@ -22,4 +22,15 @@ assert.match(
   "the routine product dump should continue using the split source/commercial workflow"
 );
 
-console.log("Product dump split imports refresh supplier identifiers while preserving focused change events.");
+assert.match(
+  dbSource,
+  /async function fillMissingProductIdentifiersFromVendorCatalog[\s\S]*?product\.barcode is distinct from targets\.next_barcode/,
+  "the managed catalog must receive targeted UPC and MPN fills without a full reconciliation"
+);
+assert.doesNotMatch(
+  dbSource,
+  /update products product[\s\S]{0,1200}set sku\s*=/,
+  "the targeted identifier fill must never rename a managed SKU"
+);
+
+console.log("Product dump imports preserve SKU identity and fill only missing UPC and MPN values.");

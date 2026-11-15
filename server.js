@@ -20517,6 +20517,7 @@ async function queueProductDumpImportJob(db = {}, body = {}, options = {}) {
       discoverFirst,
       downloadFtp,
       downloadIfMissing: body.downloadIfMissing === true,
+      refreshSupplierCoverage: body.refreshSupplierCoverage === true,
       background,
       prerequisiteJobId,
       ...(includeFtpConnection ? {
