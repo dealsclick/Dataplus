@@ -107,6 +107,24 @@ wait_for_carrier_worker() {
   return 1
 }
 
+wait_for_routing_worker() {
+  local timeout_seconds="${1:-120}"
+  local deadline=$((SECONDS + timeout_seconds))
+  local online
+  while (( SECONDS < deadline )); do
+    online="$(run_with_timeout 10 docker exec dataplus-postgres psql -U postgres -d dataplus -Atqc \
+      "select case when coalesce(nullif(data->>'lastSeenAt','')::timestamptz, 'epoch'::timestamptz) > now() - interval '60 seconds' then 1 else 0 end from state_documents where doc_key='workerHeartbeat.routing' limit 1" \
+      2>/dev/null || true)"
+    if [[ "$online" == "1" ]]; then
+      echo "Paid order routing worker heartbeat is current."
+      return 0
+    fi
+    sleep 3
+  done
+  echo "Paid order routing worker did not publish a current heartbeat within ${timeout_seconds}s." >&2
+  return 1
+}
+
 runtime_schema_is_ready() {
   local ready
   ready="$(run_with_timeout 10 docker exec dataplus-postgres psql -U postgres -d dataplus -Atqc \
@@ -131,7 +149,7 @@ if runtime_schema_is_ready; then
   echo "Runtime database schema marker is current."
 else
   echo "Runtime schema marker is missing; stopping blocked runtime services before the one-time preparation..."
-  docker compose stop dataplus worker worker-orders-shopify worker-carrier worker-orders-ebay worker-orders-temu || true
+  docker compose stop dataplus worker worker-orders-shopify worker-routing worker-carrier worker-orders-ebay worker-orders-temu || true
   prepare_runtime_schema
 fi
 
@@ -164,7 +182,7 @@ run_with_timeout "${DATAPLUS_RELEASE_HISTORY_TIMEOUT_SECONDS:-120}" docker compo
 record_deployment_status deploying
 
 echo "Starting production services and waiting for health checks..."
-DEPLOY_SERVICES=(redis postgres dataplus worker worker-orders-shopify worker-carrier worker-orders-ebay worker-orders-temu)
+DEPLOY_SERVICES=(redis postgres dataplus worker worker-orders-shopify worker-routing worker-carrier worker-orders-ebay worker-orders-temu)
 if [[ "$PRESERVE_BACKGROUND_WORKER" != "true" ]]; then
   DEPLOY_SERVICES+=(worker-background)
 fi
@@ -173,6 +191,7 @@ docker compose ps
 curl --fail --silent --show-error http://127.0.0.1:4173/ > /dev/null
 wait_for_dataplus_api "${DATAPLUS_API_READY_TIMEOUT_SECONDS:-90}"
 wait_for_carrier_worker "${DATAPLUS_CARRIER_READY_TIMEOUT_SECONDS:-120}"
+wait_for_routing_worker "${DATAPLUS_ROUTING_READY_TIMEOUT_SECONDS:-120}"
 record_deployment_status healthy
 resume_label_purchases
 if [[ "$PRESERVE_BACKGROUND_WORKER" == "true" ]]; then

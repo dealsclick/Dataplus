@@ -36678,8 +36678,8 @@ async function queueFulfillmentRateRefreshJob(options = {}) {
       routeIds,
       selectionMode: options.selectionMode === "rules" ? "rules" : "cheapest",
       requestedBy: options.actor || "DataPlus",
-      // Carrier work belongs on the background worker even when a user starts it.
-      // `scheduled` remains the source of truth for Manual vs Automated in Jobs.
+      // Carrier rate work uses the carrier lane; `scheduled` only identifies
+      // the trigger as Manual or Automated in Jobs.
       background: true,
       scheduled: options.scheduled === true
     },
@@ -80060,6 +80060,7 @@ let purchasePoolProcessing = false;
 let fulfillmentRoutingWatchdogProcessing = false;
 let criticalQueueWatchdogProcessing = false;
 let fulfillmentRoutingHealthCache = null;
+let paidOrderRoutingEnqueue = Promise.resolve();
 const SCHEDULED_ORDER_ROUTING_LIMIT = 25;
 const SCHEDULED_ORDER_ROUTING_SCAN_PAGE_SIZE = 250;
 const FULFILLMENT_ROUTING_WATCHDOG_INTERVAL_MS = 5 * 60_000;
@@ -80074,59 +80075,63 @@ function scheduledOrderRoutingFingerprint(candidateIds = []) {
 }
 
 async function queuePaidOrderRoutingCandidates(candidateIds = [], options = {}) {
-  if (!postgres.isPostgresEnabled()) return [];
-  const requestedIds = [...new Set(candidateIds.map(String).filter(Boolean))];
-  if (!requestedIds.length) return [];
-  await postgres.compactQueuedOperationJobCandidates({
-    workerTask: "paid-order-routing",
-    maxCandidates: SCHEDULED_ORDER_ROUTING_LIMIT
-  });
-  const active = await postgres.getPool().query(`
-    select raw->'workerPayload'->'candidateIds' as candidate_ids
-    from operations_jobs
-    where lower(status) in ('queued', 'running')
-      and raw->>'workerTask' = 'paid-order-routing'
-  `);
-  const alreadyQueued = new Set(active.rows.flatMap((row) => Array.isArray(row.candidate_ids) ? row.candidate_ids.map(String) : []));
-  const pendingIds = requestedIds.filter((id) => !alreadyQueued.has(id));
-  if (!pendingIds.length) return [];
-  const jobs = [];
-  for (let offset = 0; offset < pendingIds.length; offset += SCHEDULED_ORDER_ROUTING_LIMIT) {
-    const chunk = pendingIds.slice(offset, offset + SCHEDULED_ORDER_ROUTING_LIMIT);
-    const candidateFingerprint = scheduledOrderRoutingFingerprint(chunk);
-    const queueDb = { importJobs: [] };
-    const job = createImportJob(queueDb, {
-      section: "Orders",
-      category: "Fulfillment",
-      operation: "Paid order routing",
-      direction: "sync",
-      status: "queued",
-      startedAt: "",
-      totalRows: chunk.length,
-      processedRows: 0,
-      progressPercent: 0,
-      phase: "queued",
-      queuePriority: options.immediate === true ? 150 : 110,
+  const run = paidOrderRoutingEnqueue.then(async () => {
+    if (!postgres.isPostgresEnabled()) return [];
+    const requestedIds = [...new Set(candidateIds.map(String).filter(Boolean))];
+    if (!requestedIds.length) return [];
+    await postgres.compactQueuedOperationJobCandidates({
       workerTask: "paid-order-routing",
-      workerPayload: {
-        scheduled: true,
-        background: true,
-        immediate: options.immediate === true,
-        source: String(options.source || "routing-watchdog"),
-        sourceJobId: String(options.sourceJobId || ""),
-        candidateIds: chunk,
-        candidateFingerprint
-      },
-      message: `${chunk.length} paid order${chunk.length === 1 ? " is" : "s are"} queued for fulfillment routing${options.immediate === true ? " immediately after import" : ""}.`
+      maxCandidates: SCHEDULED_ORDER_ROUTING_LIMIT
     });
-    await postgres.upsertOperationJob(job);
-    jobs.push(job);
-  }
-  await postgres.compactQueuedOperationJobCandidates({
-    workerTask: "paid-order-routing",
-    maxCandidates: SCHEDULED_ORDER_ROUTING_LIMIT
+    const active = await postgres.getPool().query(`
+      select raw->'workerPayload'->'candidateIds' as candidate_ids
+      from operations_jobs
+      where lower(status) in ('queued', 'running')
+        and raw->>'workerTask' = 'paid-order-routing'
+    `);
+    const alreadyQueued = new Set(active.rows.flatMap((row) => Array.isArray(row.candidate_ids) ? row.candidate_ids.map(String) : []));
+    const pendingIds = requestedIds.filter((id) => !alreadyQueued.has(id));
+    if (!pendingIds.length) return [];
+    const jobs = [];
+    for (let offset = 0; offset < pendingIds.length; offset += SCHEDULED_ORDER_ROUTING_LIMIT) {
+      const chunk = pendingIds.slice(offset, offset + SCHEDULED_ORDER_ROUTING_LIMIT);
+      const candidateFingerprint = scheduledOrderRoutingFingerprint(chunk);
+      const queueDb = { importJobs: [] };
+      const job = createImportJob(queueDb, {
+        section: "Orders",
+        category: "Fulfillment",
+        operation: "Paid order routing",
+        direction: "sync",
+        status: "queued",
+        startedAt: "",
+        totalRows: chunk.length,
+        processedRows: 0,
+        progressPercent: 0,
+        phase: "queued",
+        queuePriority: options.immediate === true ? 150 : 110,
+        workerTask: "paid-order-routing",
+        workerPayload: {
+          scheduled: true,
+          background: true,
+          immediate: options.immediate === true,
+          source: String(options.source || "routing-watchdog"),
+          sourceJobId: String(options.sourceJobId || ""),
+          candidateIds: chunk,
+          candidateFingerprint
+        },
+        message: `${chunk.length} paid order${chunk.length === 1 ? " is" : "s are"} queued for fulfillment routing${options.immediate === true ? " immediately after import" : ""}.`
+      });
+      await postgres.upsertOperationJob(job);
+      jobs.push(job);
+    }
+    await postgres.compactQueuedOperationJobCandidates({
+      workerTask: "paid-order-routing",
+      maxCandidates: SCHEDULED_ORDER_ROUTING_LIMIT
+    });
+    return jobs;
   });
-  return jobs;
+  paidOrderRoutingEnqueue = run.then(() => undefined, () => undefined);
+  return run;
 }
 
 function orderHasActiveFulfillmentRoute(order = {}) {
@@ -80195,7 +80200,7 @@ async function readFulfillmentRoutingHealth() {
     pausedCount: 0,
     oldestUnroutedAgeMinutes: 0,
     routedLastHour: 0,
-    worker: { configured: true, online: false, label: "Fulfillment operations" },
+    worker: { configured: true, online: false, label: "Paid order routing" },
     criticalQueues: []
   };
 }
@@ -80215,23 +80220,6 @@ async function auditCriticalOperationQueues() {
     const queues = await postgres.readCriticalOperationQueueHealth();
     const criticalQueues = queues.filter((queue) => queue.stale);
     const checkedAt = new Date().toISOString();
-    for (const recovery of recoveredJobs.filter((row) => row.action === "paused")) {
-      const policy = CRITICAL_JOB_POLICIES[recovery.task] || {};
-      await postgres.createSystemNotification({
-        tenantId: LEGACY_TENANT,
-        companyId: LEGACY_COMPANY,
-        severity: "warning",
-        category: "job",
-        title: `${policy.label || recovery.task} paused for review`,
-        message: `${policy.label || recovery.task} remained queued after three automatic recoveries. Review and retry the job when the ${recovery.lane} worker lane is available.`,
-        source: "critical-job-watchdog",
-        entityType: "job",
-        entityId: recovery.jobId,
-        actionUrl: "/jobs?tab=review",
-        dedupeKey: `critical-job-paused:${recovery.jobId}`,
-        raw: { checkedAt, recovery }
-      });
-    }
     for (const queue of criticalQueues) {
       const episodeId = String(queue.latestJobId || queue.oldestQueuedAt || queue.oldestRunningAt || "unknown");
       await postgres.createSystemNotification({
@@ -80244,7 +80232,7 @@ async function auditCriticalOperationQueues() {
         source: "critical-job-watchdog",
         entityType: "job_queue",
         entityId: queue.task,
-        actionUrl: queue.lane === "carrier" ? "/fulfillment" : "/jobs",
+        actionUrl: ["carrier", "routing"].includes(queue.lane) ? "/fulfillment" : "/jobs",
         dedupeKey: `critical-job-stale:${queue.task}:${episodeId}`,
         raw: { checkedAt, queue }
       });
@@ -80275,10 +80263,10 @@ async function refreshFulfillmentRoutingHealth() {
     if (workflowSettings.automation?.routePaidOrders !== false && backlog.candidateIds.length) {
       await queuePaidOrderRoutingCandidates(backlog.candidateIds, { source: "five-minute-watchdog" });
     }
-    const carrierWorker = (workerStatus.workers || []).find((worker) => worker.lane === "carrier") || null;
+    const routingWorker = (workerStatus.workers || []).find((worker) => worker.lane === "routing") || null;
     const routingQueue = queueHealth.find((row) => row.task === "paid-order-routing") || {};
     const criticalQueues = queueHealth.filter((row) => row.stale);
-    const workerOnline = workerStatus.configured === false ? true : carrierWorker?.online === true;
+    const workerOnline = workerStatus.configured === false ? true : routingWorker?.online === true;
     const backlogLate = backlog.oldestUnroutedAgeMinutes > FULFILLMENT_ROUTING_BACKLOG_ALERT_MINUTES;
     const queueAuditError = String(queueAudit.error || "");
     const criticalAttentionLastHour = queueHealth.reduce((total, row) => total + Number(row.failedOrPausedLastHour || 0), 0);
@@ -80298,9 +80286,9 @@ async function refreshFulfillmentRoutingHealth() {
       worker: {
         configured: workerStatus.configured !== false,
         online: workerOnline,
-        label: carrierWorker?.name || "Fulfillment operations",
-        currentTask: carrierWorker?.currentTask || (workerStatus.configured === false ? "Inline mode" : "Idle"),
-        lastSeenAt: carrierWorker?.lastSeenAt || ""
+        label: routingWorker?.name || "Paid order routing",
+        currentTask: routingWorker?.currentTask || (workerStatus.configured === false ? "Inline mode" : "Idle"),
+        lastSeenAt: routingWorker?.lastSeenAt || ""
       },
       routingQueue,
       criticalQueues,
@@ -80330,14 +80318,14 @@ async function refreshFulfillmentRoutingHealth() {
         companyId: LEGACY_COMPANY,
         severity: "error",
         category: "fulfillment",
-        title: "Fulfillment worker is offline",
-        message: "The Fulfillment operations worker is not reporting a current heartbeat. Paid-order routing, rate requests, and label purchases may be delayed.",
+        title: "Paid order routing worker is offline",
+        message: "The paid order routing worker is not reporting a current heartbeat. New paid orders may be delayed before reaching fulfillment.",
         source: "fulfillment-routing-watchdog",
         entityType: "worker_lane",
-        entityId: "carrier",
+        entityId: "routing",
         actionUrl: "/jobs",
-        dedupeKey: `fulfillment-worker-offline:${carrierWorker?.lastSeenAt || "no-heartbeat"}`,
-        raw: { checkedAt, worker: carrierWorker || null }
+        dedupeKey: `fulfillment-worker-offline:${routingWorker?.lastSeenAt || "no-heartbeat"}`,
+        raw: { checkedAt, worker: routingWorker || null }
       });
     }
     return fulfillmentRoutingHealthCache;
@@ -80444,24 +80432,7 @@ async function processScheduledOrderRouting() {
       && Number.isFinite(latestFinishedAt)
       && Date.now() - latestFinishedAt < SCHEDULED_ORDER_ROUTING_NOOP_COOLDOWN_MS
     ) return;
-    const queueDb = { importJobs: [] };
-    const job = createImportJob(queueDb, {
-      section: "Orders",
-      category: "Fulfillment",
-      operation: "Paid order routing",
-      direction: "sync",
-      status: "queued",
-      startedAt: "",
-      totalRows: candidateIds.length,
-      processedRows: 0,
-      progressPercent: 0,
-      phase: "queued",
-      queuePriority: 110,
-      workerTask: "paid-order-routing",
-      workerPayload: { scheduled: true, background: true, candidateIds, candidateFingerprint },
-      message: `${candidateIds.length} paid order${candidateIds.length === 1 ? " is" : "s are"} queued for fulfillment routing.`
-    });
-    await postgres.upsertOperationJob(job);
+    await queuePaidOrderRoutingCandidates(candidateIds, { source: "scheduled-routing" });
   } catch (error) {
     console.error(`Paid order routing queue failed: ${error.message}`);
   } finally {

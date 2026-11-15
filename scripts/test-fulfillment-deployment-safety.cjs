@@ -43,9 +43,9 @@ test("production deploy drains label purchases before restarting services", () =
   assert.ok(schemaReady >= 0 && schemaReady < restart);
   assert.match(deploySource, /PGAPPNAME=dataplus-deploy-schema/);
   assert.match(deploySource, /runtime_schema_is_ready/);
-  assert.match(deploySource, /2026-11-13-runtime-schema-ensures-v2/);
+  assert.match(deploySource, /2026-11-15-supplier-coverage-resume-v3/);
   assert.match(deploySource, /stopping blocked runtime services before the one-time preparation/);
-  assert.match(deploySource, /docker compose stop dataplus worker worker-orders-shopify worker-carrier worker-orders-ebay worker-orders-temu/);
+  assert.match(deploySource, /docker compose stop dataplus worker worker-orders-shopify worker-routing worker-carrier worker-orders-ebay worker-orders-temu/);
   assert.match(deploySource, /cleanup_stale_deployment_helpers/);
   assert.match(deploySource, /com\.docker\.compose\.oneoff=True/);
   assert.match(deploySource, /prepare-runtime-schema\.cjs/);
@@ -55,6 +55,9 @@ test("production deploy drains label purchases before restarting services", () =
   assert.match(deploySource, /wait_for_carrier_worker/);
   assert.match(deploySource, /DATAPLUS_CARRIER_READY_TIMEOUT_SECONDS:-120/);
   assert.match(deploySource, /workerHeartbeat\.carrier/);
+  assert.match(deploySource, /wait_for_routing_worker/);
+  assert.match(deploySource, /DATAPLUS_ROUTING_READY_TIMEOUT_SECONDS:-120/);
+  assert.match(deploySource, /workerHeartbeat\.routing/);
   assert.doesNotMatch(deploySource, /Running bounded post-deploy maintenance/);
   assert.match(drainSource, /from operations_jobs[\s\S]*?workerTask' = 'fulfillment-label-purchase'/);
   assert.doesNotMatch(drainSource, /readOperationJobs\(/);
@@ -63,7 +66,7 @@ test("production deploy drains label purchases before restarting services", () =
 });
 
 test("runtime schema ensures run once per durable schema version", () => {
-  assert.match(dbSource, /RUNTIME_SCHEMA_ENSURES_VERSION = "2026-11-13-runtime-schema-ensures-v2"/);
+  assert.match(dbSource, /RUNTIME_SCHEMA_ENSURES_VERSION = "2026-11-15-supplier-coverage-resume-v3"/);
   assert.match(dbSource, /runtimeEnsures\.rows\[0\]\?\.current !== true/);
   assert.match(dbSource, /\[RUNTIME_SCHEMA_ENSURES_VERSION\]/);
 });

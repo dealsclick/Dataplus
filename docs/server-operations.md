@@ -50,6 +50,7 @@ Read recent logs:
 docker compose logs --tail=100 dataplus
 docker compose logs --tail=100 worker
 docker compose logs --tail=100 worker-background
+docker compose logs --tail=100 worker-routing
 docker compose logs --tail=100 worker-carrier
 docker compose logs --tail=100 worker-orders-shopify
 docker compose logs --tail=100 worker-orders-ebay
@@ -70,7 +71,8 @@ Press `Ctrl+C` to stop following the log. This does not stop the service.
 
 - `worker`: manual and general marketplace jobs.
 - `worker-background`: scheduled maintenance and background jobs.
-- `worker-carrier`: operator-started carrier rates and label purchases.
+- `worker-routing`: paid-order fulfillment routing.
+- `worker-carrier`: scheduled and operator-started carrier rates plus label purchases.
 - `worker-orders-shopify`: Shopify order and return imports.
 - `worker-orders-ebay`: eBay order and return imports.
 - `worker-orders-temu`: Temu order, status, enrichment, and return imports.
@@ -113,6 +115,7 @@ A restart retains the existing container:
 docker compose restart dataplus
 docker compose restart worker
 docker compose restart worker-background
+docker compose restart worker-routing
 docker compose restart worker-carrier
 docker compose restart worker-orders-shopify
 docker compose restart worker-orders-ebay
@@ -134,6 +137,7 @@ Recreate a worker to make it use the latest built image:
 ```bash
 docker compose up -d --no-deps --force-recreate worker
 docker compose up -d --no-deps --force-recreate worker-background
+docker compose up -d --no-deps --force-recreate worker-routing
 docker compose up -d --no-deps --force-recreate worker-carrier
 docker compose up -d --no-deps --force-recreate worker-orders-shopify
 docker compose up -d --no-deps --force-recreate worker-orders-ebay

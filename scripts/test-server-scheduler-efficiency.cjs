@@ -21,8 +21,7 @@ assert.match(orderRoutingScan, /sort: "created-asc"/, 'order routing must rescue
 assert.match(orderRoutingScan, /page <= totalPages/, 'order routing must continue beyond the first page when necessary');
 assert.doesNotMatch(orderRoutingScan, /limit: 1000/, 'order routing must not strand orders behind a fixed newest-order window');
 const orderRoutingQueue = functionBody('processScheduledOrderRouting');
-assert.match(orderRoutingQueue, /workerTask: "paid-order-routing"/, 'the web scheduler must queue routing on a worker');
-assert.match(orderRoutingQueue, /queuePriority: 110/, 'paid-order routing must outrank background refresh work without delaying label purchases');
+assert.match(orderRoutingQueue, /queuePaidOrderRoutingCandidates/, 'the web scheduler must use the serialized routing queue');
 assert.match(orderRoutingQueue, /candidateFingerprint/, 'the web scheduler must identify repeated candidate sets');
 assert.match(orderRoutingQueue, /SCHEDULED_ORDER_ROUTING_NOOP_COOLDOWN_MS/, 'the web scheduler must back off after a no-change routing pass');
 assert.doesNotMatch(orderRoutingQueue, /readDbFast|readOrdersByIds|routeOrderForFulfillment/, 'the web scheduler must not execute routing work');
@@ -38,9 +37,11 @@ assert.match(immediateRoutingQueue, /lower\(status\) in \('queued', 'running'\)/
 assert.match(immediateRoutingQueue, /queuePriority: options\.immediate === true \? 150 : 110/, 'import-triggered routing must outrank the periodic recovery pass');
 assert.match(immediateRoutingQueue, /pendingIds\.length; offset \+= SCHEDULED_ORDER_ROUTING_LIMIT/, 'immediate routing must preserve bounded worker payloads');
 assert.match(immediateRoutingQueue, /compactQueuedOperationJobCandidates/, 'immediate routing must coalesce per-order import hooks into bounded jobs');
-for (const importSource of ['ebay-order-import', 'temu-order-import', 'shopify-order-import', 'walmart-order-import', 'tiktok-orders']) {
+assert.match(immediateRoutingQueue, /paidOrderRoutingEnqueue\.then/, 'routing enqueue operations must be serialized so concurrent marketplace imports cannot create duplicate jobs');
+for (const importSource of ['temu-order-import', 'shopify-order-import', 'walmart-order-import', 'tiktok-orders']) {
   assert.match(source, new RegExp(`queuePaidOrderRoutingCandidates\\([^\\n]+source: ['\"]${importSource}['\"]`), `${importSource} must enqueue fulfillment routing immediately after a live import`);
 }
+assert.match(source, /source: "ebay-order-import"[\s\S]*?source: "ebay-live-order-import"[\s\S]*?queuePaidOrderRoutingCandidates\([^\n]+source: group\.source/, 'standard and live eBay imports must enqueue paid-order routing independently');
 
 const routingWatchdog = functionBody('refreshFulfillmentRoutingHealth');
 assert.match(source, /FULFILLMENT_ROUTING_WATCHDOG_INTERVAL_MS = 5 \* 60_000/, 'the reconciliation watchdog must run every five minutes');
@@ -84,12 +85,12 @@ assert.match(dbSource, /async function listFulfillmentConsoleRateCandidates/, 's
 assert.match(dbSource, /async function listFulfillmentLabelBatchProjectionRows/, 'snapshot rebuilds must project compact label batches in PostgreSQL');
 assert.match(dbSource, /async function pruneRedundantNoopOperationJobs/, 'retention cleanup must compact redundant no-change routing history');
 assert.match(dbSource, /async function readCriticalOperationQueueHealth/, 'critical queue telemetry must report queue age and worker progress');
-assert.match(dbSource, /async function recoverStaleCriticalOperationJobs/, 'critical queued jobs must have bounded priority recovery');
+assert.match(dbSource, /async function recoverStaleCriticalOperationJobs/, 'critical queued jobs must have priority recovery');
 assert.match(dbSource, /async function compactQueuedOperationJobCandidates/, 'queued routing candidates must be compacted and deduplicated');
-assert.match(dbSource, /queueRecoveryCount[\s\S]*?< 3/, 'automatic recovery must be bounded to prevent endless queue churn');
-assert.match(dbSource, /'phase', 'paused'[\s\S]*?queueRecoveryCount[\s\S]*?>= 3/, 'jobs that exhaust automatic recovery must pause for operator review');
+assert.doesNotMatch(dbSource, /queueRecoveryCount[\s\S]{0,500}< 3/, 'queued critical work must not become terminal merely because its lane is busy');
+assert.doesNotMatch(dbSource, /'phase', 'paused'[\s\S]{0,500}queueRecoveryCount/, 'queue recovery must retain original work instead of pausing it');
 assert.match(dbSource, /failed_or_paused_last_hour/, 'critical queue telemetry must report recently failed or paused work');
-assert.match(criticalQueueWatchdog, /critical-job-paused/, 'the queue watchdog must notify operators when exhausted work is paused');
+assert.doesNotMatch(criticalQueueWatchdog, /critical-job-paused/, 'the queue watchdog must not convert lane congestion into operator-paused work');
 assert.match(dbSource, /status === "attention"[\s\S]*?\('failed', 'warning', 'stopped'\)/, 'Jobs needs-review filtering must run across the full database result set');
 assert.match(dbSource, /coalesce\(ended_at, updated_at, started_at, created_at\) end desc/, 'completed and attention jobs must sort by their latest terminal update');
 const ratePreparation = source.slice(source.indexOf('async function prepareFulfillmentRateRefresh'), source.indexOf('async function refreshFulfillmentRateRow'));
