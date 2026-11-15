@@ -42,6 +42,13 @@ assert.match(source, /readProductsForOrderSkus\(keys, \{ fast: true \}\)/, "orde
 assert.match(source, /orderLineSkuLookupKeys\(lines, \{ preferredOnly: true \}\)/, "order details must not re-scan a line's channel identifiers after its catalog SKU resolves");
 assert.match(source, /if \(products\.length\) return products;/, "broader line identifiers must remain a fallback only when the preferred SKU is unresolved");
 
+const importedProductsStart = source.indexOf("async function ensureProductsForImportedOrders(");
+const importedProductsEnd = source.indexOf("\nasync function ", importedProductsStart + 1);
+const importedProducts = source.slice(importedProductsStart, importedProductsEnd);
+assert.match(importedProducts, /readProductsForOrderSkus\(productLookupValues, \{ fast: true \}\)/, "marketplace order imports must use the indexed product identity lookup");
+assert.match(source, /const inventory = skus\.length \? await postgres\.readProductsForOrderSkus\(skus, \{ fast: true \}\) : \[\];/, "draft quotes must use indexed catalog hydration");
+assert.match(source, /readProductsForOrderSkus\(\[sku\], \{ fast: true \}\)\.catch/, "draft quote similar-item lookup must stay index-backed");
+
 const carriersStart = source.indexOf('url.pathname === "/api/fulfillment/carriers"');
 const carriersEnd = source.indexOf('\n  if (req.method', carriersStart + 1);
 const carriersRoute = source.slice(carriersStart, carriersEnd);

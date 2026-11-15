@@ -78,6 +78,15 @@ async function run() {
     assert.equal(tracking.deliveryEvidence.receivedBy, "J SMITH");
     assert.equal(tracking.uniqueTrackingID, "unique-id");
 
+    global.fetch = async (url, options) => {
+      assert.equal(url, "https://apis.usps.com/tracking/v3r2/tracking");
+      const body = JSON.parse(options.body);
+      assert.equal(body[0].mailingDate, new Date(1792184293 * 1000).toISOString().slice(0, 10));
+      return { ok: true, status: 200, text: async () => JSON.stringify(trackingPayload) };
+    };
+    const refreshedTracking = await usps.trackShipment("9400111899223856928499", {}, runtime, { mailingDate: 1792184293 });
+    assert.equal(refreshedTracking.status, "delivered");
+
     const notification = { timestamp: "2026-10-30T16:00:00Z", payload: JSON.stringify({ trackingNumber: "9400111899223856928499" }) };
     const hmac = crypto.createHmac("sha256", runtime.webhookSecret).update(`${notification.timestamp}${notification.payload}`).digest("base64");
     assert.equal(usps.verifyTrackingNotification(notification, hmac, runtime.webhookSecret), true);

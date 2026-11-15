@@ -87,6 +87,7 @@ assert.match(dbSource, /async function pruneRedundantNoopOperationJobs/, 'retent
 assert.match(dbSource, /async function readCriticalOperationQueueHealth/, 'critical queue telemetry must report queue age and worker progress');
 assert.match(dbSource, /async function recoverStaleCriticalOperationJobs/, 'critical queued jobs must have priority recovery');
 assert.match(dbSource, /async function compactQueuedOperationJobCandidates/, 'queued routing candidates must be compacted and deduplicated');
+assert.match(dbSource, /async function readActiveOperationJobByWorkerTask/, 'carrier tracking deduplication must use a targeted active-job query');
 assert.doesNotMatch(dbSource, /queueRecoveryCount[\s\S]{0,500}< 3/, 'queued critical work must not become terminal merely because its lane is busy');
 assert.doesNotMatch(dbSource, /'phase', 'paused'[\s\S]{0,500}queueRecoveryCount/, 'queue recovery must retain original work instead of pausing it');
 assert.match(dbSource, /failed_or_paused_last_hour/, 'critical queue telemetry must report recently failed or paused work');
@@ -110,6 +111,10 @@ const labelQueue = functionBody('queueFulfillmentLabelPurchaseJob');
 assert.match(labelQueue, /postgres\.isPostgresEnabled\(\)[\s\S]*?\{ importJobs: \[\] \}/, 'label queueing must use a compact PostgreSQL job context');
 assert.match(labelQueue, /queuePriority: 140/, 'label purchases must outrank rate refreshes and ordinary background work');
 assert.match(labelQueue, /workerPayload:[\s\S]*?background: true/, 'label purchases must use the background carrier worker instead of waiting behind manual catalog jobs');
+const trackingQueue = functionBody('queueFulfillmentTrackingRefreshJob');
+assert.match(trackingQueue, /readActiveOperationJobByWorkerTask\("fulfillment-tracking-refresh"\)/, 'tracking queueing must deduplicate across the complete operations table');
+assert.match(trackingQueue, /queuePriority: scheduled \? 90 : 135/, 'manual tracking checks must outrank scheduled carrier sweeps');
+assert.doesNotMatch(trackingQueue, /readOperationJobs\(100\)/, 'tracking deduplication must not be limited to the newest 100 jobs');
 
 const batchCreationState = functionBody('readFulfillmentLabelBatchCreationState');
 assert.match(batchCreationState, /listFulfillmentLabelBatchProjectionRows\(\)/, 'batch creation must inspect compact PostgreSQL projections');

@@ -31905,9 +31905,7 @@ async function refreshFulfillmentShipmentTracking({ force = false, limit = 100, 
 
 async function queueFulfillmentTrackingRefreshJob(options = {}) {
   if (!postgres.isPostgresEnabled()) return null;
-  const existingJobs = await postgres.readOperationJobs(100).catch(() => []);
-  const active = existingJobs.find((entry) => ["queued", "running"].includes(String(entry.status || "").toLowerCase())
-    && String(entry.workerTask || entry.raw?.workerTask || "") === "fulfillment-tracking-refresh");
+  const active = await postgres.readActiveOperationJobByWorkerTask("fulfillment-tracking-refresh").catch(() => null);
   if (active) return active;
   const scheduled = options.scheduled === true;
   const force = options.force === true;
@@ -31930,6 +31928,7 @@ async function queueFulfillmentTrackingRefreshJob(options = {}) {
     progressPercent: 0,
     phase: "queued",
     workerTask: "fulfillment-tracking-refresh",
+    queuePriority: scheduled ? 90 : 135,
     scheduleKey,
     workerPayload: { scheduled, background: true, force, trackingOnly, scanStartedAt, limit: totalRows, batchSize: Math.min(50, Number(options.batchSize || 50)), requestedBy: options.requestedBy || "", scheduleKey },
     rowLabel: "shipping labels",
@@ -38203,7 +38202,7 @@ async function ensureProductsForImportedOrders(db = {}, orders = [], options = {
     const values = importedOrderLineLookupValues(entry.sku, entry.line);
     return [...values.upcs, ...values.manufacturerSkus, ...values.supplierSkus];
   }))];
-  const existing = await postgres.readProductsForOrderSkus(productLookupValues);
+  const existing = await postgres.readProductsForOrderSkus(productLookupValues, { fast: true });
   const resolved = new Set();
   const selectedByImportedSku = new Map();
   for (const [key, entry] of firstLineBySku) {
@@ -73304,7 +73303,7 @@ async function handleApi(req, res) {
     // Draft lines are matched like order lines: SKU, active aliases, and Shopify
     // variant IDs. This stays index-backed even when a manually entered SKU has
     // no catalog match, unlike the broad product-key resolver.
-    const inventory = skus.length ? await postgres.readProductsForOrderSkus(skus) : [];
+    const inventory = skus.length ? await postgres.readProductsForOrderSkus(skus, { fast: true }) : [];
     const db = { inventory: inventory || [], warehouses: warehouses || [], systemSettings, sequence: {} };
     const draft = normalizeOrderDraft(db, rawDraft);
     return sendJson(res, 200, { draft, warehouses: db.warehouses, quoteTerms: normalizeQuoteTermLibrary(systemSettings.quoteTerms) });
@@ -73335,7 +73334,7 @@ async function handleApi(req, res) {
     const line = Array.isArray(rawDraft.items) ? rawDraft.items[lineIndex] || {} : {};
     const sku = String(url.searchParams.get("sku") || line.sku || "").trim();
     const title = String(url.searchParams.get("title") || line.title || "").trim();
-    const currentProducts = sku ? await postgres.readProductsForOrderSkus([sku]).catch(() => []) : [];
+    const currentProducts = sku ? await postgres.readProductsForOrderSkus([sku], { fast: true }).catch(() => []) : [];
     const current = currentProducts?.[0] || null;
     const words = title.split(/\s+/).map((word) => word.replace(/[^a-z0-9-]/gi, "")).filter((word) => word.length > 2);
     const searchTerms = [

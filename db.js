@@ -16082,6 +16082,28 @@ async function readLatestOperationJobByWorkerTask(workerTask = "") {
   return result.rows[0] ? operationJobFromRow(result.rows[0]) : null;
 }
 
+async function readActiveOperationJobByWorkerTask(workerTask = "") {
+  const client = getPool();
+  const task = String(workerTask || "").trim();
+  if (!client || !task) return null;
+  await initRelationalSchema();
+  const result = await client.query(`
+    select job_id, job_number, job_type, category, status, name, message, total_rows, processed_rows,
+      changed_rows, missing_rows, progress, eta_seconds, source, output_path,
+      error_path, created_at, started_at, ended_at, updated_at, raw
+    from operations_jobs
+    where raw ->> 'workerTask' = $1
+      and lower(status) in ('queued', 'running')
+    order by
+      case lower(status) when 'running' then 0 else 1 end,
+      case when raw ->> 'queuePriority' ~ '^-?[0-9]+$' then (raw ->> 'queuePriority')::integer else 0 end desc,
+      created_at asc,
+      job_id asc
+    limit 1
+  `, [task]);
+  return result.rows[0] ? operationJobFromRow(result.rows[0]) : null;
+}
+
 async function compactQueuedOperationJobCandidates(options = {}) {
   const pool = getPool();
   const workerTask = nullableString(options.workerTask) || "paid-order-routing";
@@ -22145,6 +22167,7 @@ module.exports = {
   readOperationJobsPage,
   readOperationJob,
   readLatestOperationJobByWorkerTask,
+  readActiveOperationJobByWorkerTask,
   pruneRedundantNoopOperationJobs,
   readExpiredOperationJobArtifactBatch,
   expireOperationJobArtifacts,
