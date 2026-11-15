@@ -136,6 +136,7 @@ services:
       NODE_OPTIONS: --max-old-space-size=512
       DATAPLUS_WORKER_JOB_RSS_MB: 480
       DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: 560
+      DATAPLUS_SHOPIFY_ORDER_JOB_RSS_MB: 560
     mem_limit: 768m
     cpus: 1.0
 
@@ -191,6 +192,7 @@ services:
       NODE_OPTIONS: --max-old-space-size=1024
       DATAPLUS_WORKER_JOB_RSS_MB: 1000
       DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: 1200
+      DATAPLUS_TEMU_ORDER_JOB_RSS_MB: 1200
     # Temu reconciliation uses a larger order snapshot and needs additional
     # native-buffer headroom beyond the V8 heap.
     mem_limit: 1536m
@@ -207,6 +209,7 @@ services:
       NODE_OPTIONS: --max-old-space-size=512
       DATAPLUS_WORKER_JOB_RSS_MB: 480
       DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: 600
+      DATAPLUS_TIKTOK_ORDER_JOB_RSS_MB: 600
     mem_limit: 768m
     cpus: 1.0
 
@@ -221,6 +224,7 @@ services:
       NODE_OPTIONS: --max-old-space-size=768
       DATAPLUS_WORKER_JOB_RSS_MB: 680
       DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: 820
+      DATAPLUS_WALMART_ORDER_JOB_RSS_MB: 820
     mem_limit: 1024m
     cpus: 1.5
 

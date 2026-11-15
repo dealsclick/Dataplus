@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
+const { MARKETPLACE_ORDER_WORKLOADS } = require("../lib/worker-lanes");
 
 const ROOT = path.join(__dirname, "..");
 const WORKER_SCRIPT = path.join(__dirname, "dataplus-worker.js");
@@ -17,6 +18,7 @@ const HEAVY_TASKS = new Set([
   "postgres-backup", "walmart-bulk-launch", "walmart-existing-launch", "walmart-feed",
   "ebay-catalog-sync", "ebay-taxonomy-sync", "ebay-order-import", "ebay-return-import", "shopify-order-import", "shopify-return-import", "shopify-status-import", "category-mapping-bulk-refresh"
 ]);
+const MARKETPLACE_ORDER_TASK_POLICIES = new Map(MARKETPLACE_ORDER_WORKLOADS.flatMap((group) => group.tasks.map((task) => [task, group])));
 
 function positiveNumber(value, fallback) {
   const number = Number(value);
@@ -53,13 +55,19 @@ function startupMemoryBudgetMb(lane, env = process.env) {
 }
 
 function jobMemoryBudgetMb(lane, task = "", env = process.env) {
-  if (String(task || "") === "product-dump-import") {
+  const normalizedTask = String(task || "");
+  if (normalizedTask === "product-dump-import") {
     return Math.floor(positiveNumber(env.DATAPLUS_PRODUCT_DUMP_JOB_RSS_MB, 900));
   }
-  if (["ebay-order-import", "ebay-return-import"].includes(String(task || ""))) {
-    return Math.floor(positiveNumber(env.DATAPLUS_EBAY_ORDER_JOB_RSS_MB, 900));
+  const orderPolicy = MARKETPLACE_ORDER_TASK_POLICIES.get(normalizedTask);
+  if (orderPolicy) {
+    const channelKey = String(orderPolicy.channel || "marketplace").replace(/[^a-z0-9]+/gi, "_").toUpperCase();
+    return Math.floor(positiveNumber(
+      env[`DATAPLUS_${channelKey}_ORDER_JOB_RSS_MB`] || env.DATAPLUS_MARKETPLACE_ORDER_JOB_RSS_MB,
+      orderPolicy.memoryBudgetMb || laneHeavyBudgetMb(lane)
+    ));
   }
-  const heavy = HEAVY_TASKS.has(String(task || ""));
+  const heavy = HEAVY_TASKS.has(normalizedTask);
   return Math.floor(positiveNumber(
     heavy ? env.DATAPLUS_WORKER_HEAVY_JOB_RSS_MB : env.DATAPLUS_WORKER_JOB_RSS_MB,
     heavy ? laneHeavyBudgetMb(lane) : laneDefaultBudgetMb(lane)

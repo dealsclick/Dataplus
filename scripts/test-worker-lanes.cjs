@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const {LANES, ORDER_TASKS, SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, TIKTOK_ORDER_TASKS, WALMART_TASKS, ROUTING_TASKS, CARRIER_TASKS, CRITICAL_JOB_POLICIES, HEAVY_RESOURCE_TASKS, WORKLOAD_LIMITS, validateLane, supportsTask, summarizeWorkers, jobWorkerStatus, laneSql} = require('../lib/worker-lanes');
+const {LANES, ORDER_TASKS, SHOPIFY_ORDER_TASKS, EBAY_ORDER_TASKS, TEMU_ORDER_TASKS, TIKTOK_ORDER_TASKS, WALMART_ORDER_TASKS, WALMART_TASKS, MARKETPLACE_ORDER_WORKLOADS, ROUTING_TASKS, CARRIER_TASKS, CRITICAL_JOB_POLICIES, HEAVY_RESOURCE_TASKS, WORKLOAD_LIMITS, validateLane, supportsTask, summarizeWorkers, jobWorkerStatus, laneSql} = require('../lib/worker-lanes');
 assert.throws(()=>validateLane('typo'));
 const now=new Date().toISOString();
 const workers=summarizeWorkers(LANES.map(lane=>({lane,workerId:lane+'-new',status:'running',lastSeenAt:now,supportedTasks:ORDER_TASKS})),true);
@@ -60,6 +60,17 @@ assert.deepEqual(WORKLOAD_LIMITS['ebay-order-import'], {lane:'ebay-order-sync',l
 assert.deepEqual(WORKLOAD_LIMITS['ebay-return-import'], {lane:'ebay-order-sync',limit:1});
 assert.deepEqual(WORKLOAD_LIMITS['temu-order-import'], {lane:'temu-order-sync',limit:1});
 assert.deepEqual(WORKLOAD_LIMITS['tiktok-orders'], {lane:'tiktok-order-sync',limit:1});
+assert.deepEqual(WORKLOAD_LIMITS['walmart-orders'], {lane:'walmart-order-sync',limit:1});
+assert.deepEqual(WALMART_ORDER_TASKS, ['walmart-orders', 'walmart-returns']);
+assert.deepEqual(MARKETPLACE_ORDER_WORKLOADS.map((group) => group.channel), ['shopify', 'ebay', 'temu', 'tiktok', 'walmart']);
+for (const group of MARKETPLACE_ORDER_WORKLOADS) {
+  assert.ok(group.memoryBudgetMb > 0, `${group.channel} order jobs must have a protected memory budget`);
+  for (const task of group.tasks) {
+    assert.deepEqual(WORKLOAD_LIMITS[task], {lane:group.workloadLane,limit:group.limit});
+    assert.equal(supportsTask(group.workerLane, task), true, `${task} must be owned by ${group.workerLane}`);
+    assert.notEqual(WORKLOAD_LIMITS[task].lane, 'marketplace-sync', `${task} must not wait behind unrelated channel jobs`);
+  }
+}
 const databaseSource = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'db.js'), 'utf8');
 assert.match(databaseSource, /dataplus-worker-resource-scheduler/);
 assert.match(databaseSource, /workerResourceClass/);
