@@ -27,7 +27,7 @@ let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
 let returnsWorkspaceSummaryCache = null;
 const RELATIONAL_SCHEMA_VERSION = "2026-10-29-shipping-report-facts-v1";
-const RUNTIME_SCHEMA_ENSURES_VERSION = "2026-11-13-runtime-schema-ensures-v2";
+const RUNTIME_SCHEMA_ENSURES_VERSION = "2026-11-15-supplier-coverage-resume-v3";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -361,6 +361,80 @@ async function ensureReturnWorkspaceSchema(client) {
   }
 }
 
+async function ensureSupplierCoverageRebuildSchema(client) {
+  await client.query(`
+    create table if not exists supplier_coverage_rebuild_state (
+      state_key text primary key,
+      rebuild_id text not null,
+      status text not null default 'running',
+      phase text not null default 'vendor_identities',
+      product_count bigint not null default 0,
+      vendor_item_count bigint not null default 0,
+      processed_work_rows bigint not null default 0,
+      last_vendor_id text not null default '',
+      last_vendor_source_sku text not null default '',
+      last_match_key text not null default '',
+      last_product_id text not null default '',
+      last_summary_product_id text not null default '',
+      last_summary_vendor_id text not null default '',
+      last_summary_vendor_source_sku text not null default '',
+      products_updated bigint not null default 0,
+      vendor_items_updated bigint not null default 0,
+      coverage_keys bigint not null default 0,
+      supplier_links bigint not null default 0,
+      review_candidates bigint not null default 0,
+      linked_sku_candidates bigint not null default 0,
+      candidate_warning text not null default '',
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      finished_at timestamptz
+    );
+    alter table supplier_coverage_rebuild_state add column if not exists coverage_keys bigint not null default 0;
+    alter table supplier_coverage_rebuild_state add column if not exists supplier_links bigint not null default 0;
+    create table if not exists supplier_coverage_vendor_identity_stage (
+      match_key text not null,
+      vendor_id text not null,
+      source_sku text not null,
+      match_type text not null,
+      primary key (vendor_id, source_sku, match_type, match_key)
+    );
+    create index if not exists supplier_coverage_vendor_identity_match_idx
+      on supplier_coverage_vendor_identity_stage (match_key, vendor_id, source_sku);
+    create table if not exists supplier_coverage_vendor_mpn_stage (
+      vendor_id text not null,
+      source_sku text not null,
+      mfr_part_number text not null,
+      primary key (vendor_id, source_sku, mfr_part_number)
+    );
+    create index if not exists supplier_coverage_vendor_mpn_value_idx
+      on supplier_coverage_vendor_mpn_stage (mfr_part_number, vendor_id, source_sku);
+    create table if not exists supplier_coverage_product_mpn_stage (
+      product_id text not null,
+      product_sku text not null,
+      mfr_part_number text not null,
+      primary key (product_id, mfr_part_number)
+    );
+    create index if not exists supplier_coverage_product_mpn_value_idx
+      on supplier_coverage_product_mpn_stage (mfr_part_number, product_id);
+    create table if not exists supplier_coverage_key_stage (
+      match_key text primary key,
+      supplier_count integer not null,
+      identity_count integer not null
+    );
+    create table if not exists supplier_coverage_link_stage (
+      product_id text not null,
+      product_sku text not null,
+      vendor_id text not null,
+      source_sku text not null,
+      match_key text,
+      match_type text not null,
+      primary key (product_id, vendor_id, source_sku, match_type)
+    );
+    create index if not exists supplier_coverage_link_product_idx
+      on supplier_coverage_link_stage (product_id);
+  `);
+}
+
 async function initRelationalSchema() {
   const dbPool = getPool();
   if (!dbPool) return false;
@@ -389,6 +463,7 @@ async function initRelationalSchema() {
             await ensureOutboundAuditSchema(client);
             await ensureProductShadowSkuSchema(client);
             await ensureReturnWorkspaceSchema(client);
+            await ensureSupplierCoverageRebuildSchema(client);
             await client.query(
               "insert into schema_migrations (name) values ($1) on conflict (name) do nothing",
               [RUNTIME_SCHEMA_ENSURES_VERSION]
@@ -987,6 +1062,74 @@ async function initRelationalSchema() {
       updated_at timestamptz not null default now()
     );
     create index if not exists vendor_supplier_coverage_count_idx on vendor_supplier_coverage (supplier_count, match_key);
+
+    create table if not exists supplier_coverage_rebuild_state (
+      state_key text primary key,
+      rebuild_id text not null,
+      status text not null default 'running',
+      phase text not null default 'vendor_identities',
+      product_count bigint not null default 0,
+      vendor_item_count bigint not null default 0,
+      processed_work_rows bigint not null default 0,
+      last_vendor_id text not null default '',
+      last_vendor_source_sku text not null default '',
+      last_match_key text not null default '',
+      last_product_id text not null default '',
+      last_summary_product_id text not null default '',
+      last_summary_vendor_id text not null default '',
+      last_summary_vendor_source_sku text not null default '',
+      products_updated bigint not null default 0,
+      vendor_items_updated bigint not null default 0,
+      coverage_keys bigint not null default 0,
+      supplier_links bigint not null default 0,
+      review_candidates bigint not null default 0,
+      linked_sku_candidates bigint not null default 0,
+      candidate_warning text not null default '',
+      created_at timestamptz not null default now(),
+      updated_at timestamptz not null default now(),
+      finished_at timestamptz
+    );
+    create table if not exists supplier_coverage_vendor_identity_stage (
+      match_key text not null,
+      vendor_id text not null,
+      source_sku text not null,
+      match_type text not null,
+      primary key (vendor_id, source_sku, match_type, match_key)
+    );
+    create index if not exists supplier_coverage_vendor_identity_match_idx
+      on supplier_coverage_vendor_identity_stage (match_key, vendor_id, source_sku);
+    create table if not exists supplier_coverage_vendor_mpn_stage (
+      vendor_id text not null,
+      source_sku text not null,
+      mfr_part_number text not null,
+      primary key (vendor_id, source_sku, mfr_part_number)
+    );
+    create index if not exists supplier_coverage_vendor_mpn_value_idx
+      on supplier_coverage_vendor_mpn_stage (mfr_part_number, vendor_id, source_sku);
+    create table if not exists supplier_coverage_product_mpn_stage (
+      product_id text not null,
+      product_sku text not null,
+      mfr_part_number text not null,
+      primary key (product_id, mfr_part_number)
+    );
+    create index if not exists supplier_coverage_product_mpn_value_idx
+      on supplier_coverage_product_mpn_stage (mfr_part_number, product_id);
+    create table if not exists supplier_coverage_key_stage (
+      match_key text primary key,
+      supplier_count integer not null,
+      identity_count integer not null
+    );
+    create table if not exists supplier_coverage_link_stage (
+      product_id text not null,
+      product_sku text not null,
+      vendor_id text not null,
+      source_sku text not null,
+      match_key text,
+      match_type text not null,
+      primary key (product_id, vendor_id, source_sku, match_type)
+    );
+    create index if not exists supplier_coverage_link_product_idx
+      on supplier_coverage_link_stage (product_id);
 
     create table if not exists product_supplier_links (
       product_id text not null,
@@ -7057,6 +7200,9 @@ async function terminateStaleSupplierCoverageQueries({ minimumAgeMinutes = 10 } 
       and (
         query ilike '%vendor_supplier_coverage_next%'
         or query ilike '%product_supplier_links_next%'
+        or query ilike '%supplier_coverage_vendor_identity_stage%'
+        or query ilike '%supplier_coverage_product_mpn_stage%'
+        or query ilike '%supplier_coverage_link_stage%'
         or (query ilike '%supplier_match_reviews%' and query ilike '%linked-vendor-sku%')
       )
   `, [String(ageMinutes)]);
@@ -7068,600 +7214,765 @@ async function terminateStaleSupplierCoverageQueries({ minimumAgeMinutes = 10 } 
   };
 }
 
-async function refreshVendorSupplierCoverage({ onProgress, isCanceled } = {}) {
+
+async function refreshVendorSupplierCoverage({ onProgress, isCanceled, runId } = {}) {
   const catalogPool = getPool();
   if (!catalogPool) return { enabled: false, keys: 0 };
   await initRelationalSchema();
   const client = await catalogPool.connect();
-  const batchSize = Math.max(1000, Math.min(100000, Number(process.env.SUPPLIER_COVERAGE_BATCH_SIZE) || 25000));
+  const rebuildId = String(runId || crypto.randomUUID());
+  const batchSize = Math.max(500, Math.min(25000, Number(process.env.SUPPLIER_COVERAGE_BATCH_SIZE) || 5000));
+  const keyBatchSize = Math.max(100, Math.min(25000, Number(process.env.SUPPLIER_COVERAGE_KEY_BATCH_SIZE) || 5000));
+  const batchTimeoutMs = Math.max(30000, Math.min(900000, Number(process.env.SUPPLIER_COVERAGE_BATCH_TIMEOUT_MS) || 300000));
   const maxIdentityMatches = Math.max(10, Math.min(10000, Number(process.env.SUPPLIER_COVERAGE_MAX_IDENTITY_MATCHES) || 250));
+  const lockName = "dataplus-supplier-coverage-rebuild";
   const vendorBarcodeValueSql = "coalesce(nullif(trim(item.barcode), ''), nullif(trim(item.raw ->> 'upc'), ''), nullif(trim(item.raw ->> 'gtin'), ''), nullif(trim(item.raw ->> 'upcCode'), ''), '')";
   const productBarcodeValueSql = "coalesce(nullif(trim(product.barcode), ''), nullif(trim(product.raw ->> 'upc'), ''), nullif(trim(product.raw ->> 'gtin'), ''), nullif(trim(product.raw ->> 'upcCode'), ''), '')";
   const validVendorBarcodeSql = `lower(trim(${vendorBarcodeValueSql})) not in ('0', '0.0', 'n', 'na', 'n/a', 'none', 'null', 'unknown') and ${canonicalSupplierBarcodeSql(vendorBarcodeValueSql)} !~ '^0+$'`;
   const validProductBarcodeSql = `lower(trim(${productBarcodeValueSql})) not in ('0', '0.0', 'n', 'na', 'n/a', 'none', 'null', 'unknown') and ${canonicalSupplierBarcodeSql(productBarcodeValueSql)} !~ '^0+$'`;
+  let ownsLock = false;
+  let transactionOpen = false;
+
   const throwIfCanceled = () => {
     if (typeof isCanceled === "function" && isCanceled()) throw new Error("Supplier coverage refresh canceled.");
   };
-  const reportProgress = (patch = {}) => {
-    if (typeof onProgress === "function") onProgress(patch);
-  };
-  let transactionOpen = false;
-  try {
-    await client.query("set lock_timeout to '30s'");
-    await client.query("set statement_timeout to '10min'");
-    throwIfCanceled();
-    const countsResult = await client.query(`
-      select
-        (select count(*) from products)::bigint as product_count,
-        (select count(*) from vendor_catalog_items)::bigint as vendor_item_count
-    `);
-    const productCount = Number(countsResult.rows[0]?.product_count || 0);
-    const vendorItemCount = Number(countsResult.rows[0]?.vendor_item_count || 0);
-    const totalWorkRows = Math.max(1, (productCount * 2) + (vendorItemCount * 2));
-    let processedWorkRows = 0;
-    reportProgress({
-      phase: "supplier_coverage_prepare",
-      message: "Preparing the batched supplier identifier index...",
-      processedRows: processedWorkRows,
-      totalRows: totalWorkRows,
-      progressPercent: 0
+  const reportProgress = (state, phase, message) => {
+    if (typeof onProgress !== "function") return;
+    const productCount = Number(state.product_count || 0);
+    const vendorItemCount = Number(state.vendor_item_count || 0);
+    const totalRows = Math.max(1, (productCount * 2) + (vendorItemCount * 2));
+    const processedRows = Math.min(totalRows, Number(state.processed_work_rows || 0));
+    onProgress({
+      phase,
+      message,
+      processedRows,
+      totalRows,
+      progressPercent: Math.min(99, Math.floor((processedRows / totalRows) * 100))
     });
-    await client.query("drop table if exists vendor_supplier_coverage_next");
-    await client.query("drop table if exists vendor_supplier_identity_next");
-    await client.query("drop table if exists vendor_mpn_identity_next");
-    await client.query("drop table if exists product_mpn_identity_next");
-    await client.query("drop table if exists product_supplier_links_next");
-    await client.query(`
-      create temporary table vendor_supplier_identity_next (
-        match_key text not null,
-        vendor_id text not null,
-        source_sku text not null,
-        match_type text not null
-      ) on commit preserve rows
-    `);
-    await client.query(`
-      create temporary table vendor_mpn_identity_next (
-        vendor_id text not null,
-        source_sku text not null,
-        mfr_part_number text not null
-      ) on commit preserve rows
-    `);
-    await client.query(`
-      create temporary table product_mpn_identity_next (
-        product_id text not null,
-        product_sku text not null,
-        mfr_part_number text not null
-      ) on commit preserve rows
-    `);
-    await client.query(`
-      create temporary table product_supplier_links_next (
-        product_id text not null,
-        product_sku text not null,
-        vendor_id text not null,
-        source_sku text not null,
-        match_key text,
-        match_type text not null
-      ) on commit preserve rows
-    `);
+  };
+  const loadState = async () => {
+    const result = await client.query("select * from supplier_coverage_rebuild_state where state_key = 'active'");
+    return result.rows[0] || null;
+  };
+  const begin = async () => {
+    await client.query("begin read write");
+    transactionOpen = true;
+  };
+  const commit = async () => {
+    await client.query("commit");
+    transactionOpen = false;
+  };
+  const rollback = async () => {
+    if (!transactionOpen) return;
+    await client.query("rollback").catch(() => {});
+    transactionOpen = false;
+  };
 
-    let lastVendorId = "";
-    let lastSourceSku = "";
-    while (true) {
-      throwIfCanceled();
-      const batchResult = await client.query(`
-        select vendor_id, source_sku
-        from vendor_catalog_items
-        where $1 = '' or (vendor_id, source_sku) > ($1, $2)
-        order by vendor_id, source_sku
-        limit $3
-      `, [lastVendorId, lastSourceSku, batchSize]);
-      if (!batchResult.rowCount) break;
-      const vendorIds = batchResult.rows.map((row) => row.vendor_id);
-      const sourceSkus = batchResult.rows.map((row) => row.source_sku);
+  try {
+    const lockResult = await client.query("select pg_try_advisory_lock(hashtext($1)) as locked", [lockName]);
+    ownsLock = lockResult.rows[0]?.locked === true;
+    if (!ownsLock) throw new Error("Another supplier coverage rebuild is already active.");
+    await client.query("set lock_timeout to '30s'");
+    await client.query(`set statement_timeout to '${batchTimeoutMs}ms'`);
+
+    let state = await loadState();
+    if (!state || state.rebuild_id !== rebuildId) {
+      const estimates = await client.query(`
+        select
+          greatest(coalesce((select reltuples::bigint from pg_class where oid = 'products'::regclass), 0), 0) as product_count,
+          greatest(coalesce((select reltuples::bigint from pg_class where oid = 'vendor_catalog_items'::regclass), 0), 0) as vendor_item_count
+      `);
+      const productCount = Number(estimates.rows[0]?.product_count || 0);
+      const vendorItemCount = Number(estimates.rows[0]?.vendor_item_count || 0);
+      await begin();
       await client.query(`
-        with batch(vendor_id, source_sku) as (
-          select * from unnest($1::text[], $2::text[])
+        truncate table
+          supplier_coverage_vendor_identity_stage,
+          supplier_coverage_vendor_mpn_stage,
+          supplier_coverage_product_mpn_stage,
+          supplier_coverage_key_stage,
+          supplier_coverage_link_stage
+      `);
+      await client.query("delete from supplier_coverage_rebuild_state where state_key = 'active'");
+      const stateResult = await client.query(`
+        insert into supplier_coverage_rebuild_state (
+          state_key, rebuild_id, status, phase, product_count, vendor_item_count,
+          processed_work_rows, created_at, updated_at
         )
-        insert into vendor_supplier_identity_next (match_key, vendor_id, source_sku, match_type)
-        select distinct
-          identity.match_key,
-          item.vendor_id,
-          item.source_sku,
-          identity.match_type
-        from batch
-        join vendor_catalog_items item using (vendor_id, source_sku)
-        cross join lateral (values
-          (
-            case
-              when ${vendorBarcodeValueSql} <> '' and ${validVendorBarcodeSql}
-                then 'barcode:' || ${canonicalSupplierBarcodeSql(vendorBarcodeValueSql)}
-              else null
-            end,
-            'upc'
-          ),
-          (
-            case
-              when coalesce(trim(item.vendor_sku), '') <> ''
-                then 'sku:' || lower(trim(item.vendor_sku))
-              else null
-            end,
-            'vendor-sku'
-          ),
-          (case when coalesce(trim(item.internal_sku), '') <> '' then 'sku:' || lower(trim(item.internal_sku)) else null end, 'exact-sku'),
-          (case when coalesce(trim(item.source_sku), '') <> '' then 'sku:' || lower(trim(item.source_sku)) else null end, 'source-sku')
-        ) identity(match_key, match_type)
-        where coalesce(identity.match_key, '') <> ''
-      `, [vendorIds, sourceSkus]);
-      await client.query(`
-        with batch(vendor_id, source_sku) as (
-          select * from unnest($1::text[], $2::text[])
-        )
-        insert into vendor_mpn_identity_next (vendor_id, source_sku, mfr_part_number)
-        select distinct item.vendor_id, item.source_sku, lower(trim(item.mfr_part_number))
-        from batch
-        join vendor_catalog_items item using (vendor_id, source_sku)
-        where length(trim(coalesce(item.mfr_part_number, ''))) >= 4
-          and lower(trim(item.mfr_part_number)) not in ('none', 'unknown', 'n/a', 'na', 'null', 'misc')
-      `, [vendorIds, sourceSkus]);
-      const lastRow = batchResult.rows[batchResult.rows.length - 1];
-      lastVendorId = lastRow.vendor_id;
-      lastSourceSku = lastRow.source_sku;
-      processedWorkRows += batchResult.rowCount;
-      reportProgress({
-        phase: "supplier_identities",
-        message: `Indexed ${Math.min(processedWorkRows, vendorItemCount).toLocaleString()} of ${vendorItemCount.toLocaleString()} supplier records...`,
-        processedRows: processedWorkRows,
-        totalRows: totalWorkRows,
-        progressPercent: Math.min(99, Math.floor((processedWorkRows / totalWorkRows) * 100))
+        values ('active', $1, 'running', 'vendor_identities', $2, $3, 0, now(), now())
+        returning *
+      `, [rebuildId, productCount, vendorItemCount]);
+      state = stateResult.rows[0];
+      await commit();
+    } else if (state.status === "complete") {
+      const completedWorkRows = Math.max(1, (Number(state.product_count || 0) * 2) + (Number(state.vendor_item_count || 0) * 2));
+      onProgress?.({
+        phase: "complete",
+        message: "Supplier coverage rebuild was already completed for this catalog generation.",
+        processedRows: completedWorkRows,
+        totalRows: completedWorkRows,
+        progressPercent: 100
       });
+      return {
+        enabled: true,
+        resumed: true,
+        alreadyComplete: true,
+        keys: Number(state.coverage_keys || 0),
+        supplierLinks: Number(state.supplier_links || 0),
+        reviewCandidates: Number(state.review_candidates || 0),
+        linkedSkuCandidates: Number(state.linked_sku_candidates || 0),
+        productsUpdated: Number(state.products_updated || 0),
+        vendorItemsUpdated: Number(state.vendor_items_updated || 0),
+        totalRows: completedWorkRows,
+        processedRows: completedWorkRows,
+        productRows: Number(state.product_count || 0),
+        warnings: state.candidate_warning ? [state.candidate_warning] : []
+      };
+    } else {
+      const resumed = await client.query(`
+        update supplier_coverage_rebuild_state
+        set status = 'running', updated_at = now(), finished_at = null
+        where state_key = 'active'
+        returning *
+      `);
+      state = resumed.rows[0];
     }
 
-    throwIfCanceled();
-    await client.query("set statement_timeout to 0");
-    await client.query("create index vendor_supplier_identity_next_match_idx on vendor_supplier_identity_next (match_key)");
-    await client.query("create index vendor_supplier_identity_next_item_idx on vendor_supplier_identity_next (vendor_id, source_sku)");
-    await client.query("create index vendor_mpn_identity_next_mpn_idx on vendor_mpn_identity_next (mfr_part_number)");
-    await client.query("create index vendor_mpn_identity_next_item_idx on vendor_mpn_identity_next (vendor_id, source_sku)");
-    await client.query(`
-      create temporary table vendor_supplier_coverage_next on commit preserve rows as
-      select
-        identity.match_key,
-        count(distinct identity.vendor_id)::integer as supplier_count,
-        count(*)::integer as identity_count
-      from vendor_supplier_identity_next identity
-      group by identity.match_key
-    `);
-    await client.query("create unique index vendor_supplier_coverage_next_key_idx on vendor_supplier_coverage_next (match_key)");
-    await client.query("set statement_timeout to '10min'");
+    if (state.phase === "vendor_identities") {
+      reportProgress(state, "supplier_identities", state.last_vendor_id
+        ? "Resuming the durable supplier identifier index..."
+        : "Building the durable supplier identifier index...");
+      while (true) {
+        throwIfCanceled();
+        const hasCursor = Boolean(state.last_vendor_id);
+        const batchResult = await client.query(`
+          select vendor_id, source_sku
+          from vendor_catalog_items
+          ${hasCursor ? "where (vendor_id, source_sku) > ($1, $2)" : ""}
+          order by vendor_id, source_sku
+          limit $${hasCursor ? 3 : 1}
+        `, hasCursor
+          ? [state.last_vendor_id, state.last_vendor_source_sku, batchSize]
+          : [batchSize]);
+        if (!batchResult.rowCount) break;
+        const vendorIds = batchResult.rows.map((row) => row.vendor_id);
+        const sourceSkus = batchResult.rows.map((row) => row.source_sku);
+        const lastRow = batchResult.rows[batchResult.rows.length - 1];
+        await begin();
+        await client.query(`
+          with batch(vendor_id, source_sku) as (
+            select * from unnest($1::text[], $2::text[])
+          )
+          insert into supplier_coverage_vendor_identity_stage (match_key, vendor_id, source_sku, match_type)
+          select distinct identity.match_key, item.vendor_id, item.source_sku, identity.match_type
+          from batch
+          join vendor_catalog_items item using (vendor_id, source_sku)
+          cross join lateral (values
+            (
+              case
+                when ${vendorBarcodeValueSql} <> '' and ${validVendorBarcodeSql}
+                  then 'barcode:' || ${canonicalSupplierBarcodeSql(vendorBarcodeValueSql)}
+                else null
+              end,
+              'upc'
+            ),
+            (case when coalesce(trim(item.vendor_sku), '') <> '' then 'sku:' || lower(trim(item.vendor_sku)) else null end, 'vendor-sku'),
+            (case when coalesce(trim(item.internal_sku), '') <> '' then 'sku:' || lower(trim(item.internal_sku)) else null end, 'exact-sku'),
+            (case when coalesce(trim(item.source_sku), '') <> '' then 'sku:' || lower(trim(item.source_sku)) else null end, 'source-sku')
+          ) identity(match_key, match_type)
+          where coalesce(identity.match_key, '') <> ''
+          on conflict do nothing
+        `, [vendorIds, sourceSkus]);
+        await client.query(`
+          with batch(vendor_id, source_sku) as (
+            select * from unnest($1::text[], $2::text[])
+          )
+          insert into supplier_coverage_vendor_mpn_stage (vendor_id, source_sku, mfr_part_number)
+          select distinct item.vendor_id, item.source_sku, lower(trim(item.mfr_part_number))
+          from batch
+          join vendor_catalog_items item using (vendor_id, source_sku)
+          where length(trim(coalesce(item.mfr_part_number, ''))) >= 4
+            and lower(trim(item.mfr_part_number)) not in ('none', 'unknown', 'n/a', 'na', 'null', 'misc')
+          on conflict do nothing
+        `, [vendorIds, sourceSkus]);
+        const stateResult = await client.query(`
+          update supplier_coverage_rebuild_state
+          set last_vendor_id = $1,
+              last_vendor_source_sku = $2,
+              processed_work_rows = processed_work_rows + $3,
+              updated_at = now()
+          where state_key = 'active'
+          returning *
+        `, [lastRow.vendor_id, lastRow.source_sku, batchResult.rowCount]);
+        state = stateResult.rows[0];
+        await commit();
+        reportProgress(state, "supplier_identities", `Indexed ${Number(state.processed_work_rows || 0).toLocaleString()} supplier records...`);
+      }
+      const stateResult = await client.query(`
+        update supplier_coverage_rebuild_state
+        set phase = 'coverage_keys', last_match_key = '', updated_at = now()
+        where state_key = 'active'
+        returning *
+      `);
+      state = stateResult.rows[0];
+    }
 
-    let lastProductId = "";
-    while (true) {
-      throwIfCanceled();
-      const batchResult = await client.query(`
-        select product_id
-        from products
-        where $1 = '' or product_id > $1
-        order by product_id
-        limit $2
-      `, [lastProductId, batchSize]);
-      if (!batchResult.rowCount) break;
-      const productIds = batchResult.rows.map((row) => row.product_id);
-      await client.query(`
-        insert into product_mpn_identity_next (product_id, product_sku, mfr_part_number)
-        select distinct product.product_id, product.sku, lower(trim(product.mfr_part_number))
-        from products product
-        where product.product_id = any($1::text[])
-          and length(trim(coalesce(product.mfr_part_number, ''))) >= 4
-          and lower(trim(product.mfr_part_number)) not in ('none', 'unknown', 'n/a', 'na', 'null', 'misc')
-      `, [productIds]);
-      await client.query(`
-        with product_identities as materialized (
-        select product.product_id, product.sku as product_sku, identity.match_key, identity.match_type
-        from products product
-        cross join lateral (values
-          (
-            case
-              when ${productBarcodeValueSql} <> '' and ${validProductBarcodeSql}
-                then 'barcode:' || ${canonicalSupplierBarcodeSql(productBarcodeValueSql)}
-              else null
-            end,
-            'upc'
-          ),
-          (case when coalesce(trim(product.sku), '') <> '' then 'sku:' || lower(trim(product.sku)) else null end, 'exact-sku')
-        ) identity(match_key, match_type)
+    if (state.phase === "coverage_keys") {
+      reportProgress(state, "supplier_coverage_keys", state.last_match_key
+        ? "Resuming supplier identity counts..."
+        : "Counting supplier identity coverage in durable batches...");
+      while (true) {
+        throwIfCanceled();
+        const keyResult = await client.query(`
+          select match_key
+          from supplier_coverage_vendor_identity_stage
+          where match_key > $1
+          group by match_key
+          order by match_key
+          limit $2
+        `, [state.last_match_key || "", keyBatchSize]);
+        if (!keyResult.rowCount) break;
+        const keys = keyResult.rows.map((row) => row.match_key);
+        const lastKey = keys[keys.length - 1];
+        await begin();
+        const inserted = await client.query(`
+          insert into supplier_coverage_key_stage (match_key, supplier_count, identity_count)
+          select match_key, count(distinct vendor_id)::integer, count(*)::integer
+          from supplier_coverage_vendor_identity_stage
+          where match_key = any($1::text[])
+          group by match_key
+          on conflict (match_key) do update
+          set supplier_count = excluded.supplier_count,
+              identity_count = excluded.identity_count
+        `, [keys]);
+        const stateResult = await client.query(`
+          update supplier_coverage_rebuild_state
+          set last_match_key = $1,
+              coverage_keys = coverage_keys + $2,
+              updated_at = now()
+          where state_key = 'active'
+          returning *
+        `, [lastKey, inserted.rowCount || 0]);
+        state = stateResult.rows[0];
+        await commit();
+        reportProgress(state, "supplier_coverage_keys", `Counted ${Number(state.coverage_keys || 0).toLocaleString()} supplier identity keys...`);
+      }
+      const stateResult = await client.query(`
+        update supplier_coverage_rebuild_state
+        set phase = 'product_links', last_product_id = '', updated_at = now()
+        where state_key = 'active'
+        returning *
+      `);
+      state = stateResult.rows[0];
+    }
+
+    if (state.phase === "product_links") {
+      reportProgress(state, "supplier_links", state.last_product_id
+        ? "Resuming exact product-to-supplier links..."
+        : "Matching products to supplier identities...");
+      while (true) {
+        throwIfCanceled();
+        const hasCursor = Boolean(state.last_product_id);
+        const batchResult = await client.query(`
+          select product_id
+          from products
+          ${hasCursor ? "where product_id > $1" : ""}
+          order by product_id
+          limit $${hasCursor ? 2 : 1}
+        `, hasCursor ? [state.last_product_id, batchSize] : [batchSize]);
+        if (!batchResult.rowCount) break;
+        const productIds = batchResult.rows.map((row) => row.product_id);
+        const lastProductId = productIds[productIds.length - 1];
+        await begin();
+        await client.query(`
+          insert into supplier_coverage_product_mpn_stage (product_id, product_sku, mfr_part_number)
+          select distinct product.product_id, product.sku, lower(trim(product.mfr_part_number))
+          from products product
           where product.product_id = any($1::text[])
-            and coalesce(identity.match_key, '') <> ''
-      )
-        insert into product_supplier_links_next (
+            and length(trim(coalesce(product.mfr_part_number, ''))) >= 4
+            and lower(trim(product.mfr_part_number)) not in ('none', 'unknown', 'n/a', 'na', 'null', 'misc')
+          on conflict (product_id, mfr_part_number) do update set product_sku = excluded.product_sku
+        `, [productIds]);
+        await client.query(`
+          with product_identities as materialized (
+            select product.product_id, product.sku as product_sku, identity.match_key, identity.match_type
+            from products product
+            cross join lateral (values
+              (
+                case
+                  when ${productBarcodeValueSql} <> '' and ${validProductBarcodeSql}
+                    then 'barcode:' || ${canonicalSupplierBarcodeSql(productBarcodeValueSql)}
+                  else null
+                end,
+                'upc'
+              ),
+              (case when coalesce(trim(product.sku), '') <> '' then 'sku:' || lower(trim(product.sku)) else null end, 'exact-sku')
+            ) identity(match_key, match_type)
+            where product.product_id = any($1::text[])
+              and coalesce(identity.match_key, '') <> ''
+          )
+          insert into supplier_coverage_link_stage (
+            product_id, product_sku, vendor_id, source_sku, match_key, match_type
+          )
+          select distinct
+            product_identity.product_id,
+            product_identity.product_sku,
+            supplier.vendor_id,
+            supplier.source_sku,
+            product_identity.match_key,
+            supplier.match_type
+          from product_identities product_identity
+          join supplier_coverage_key_stage coverage
+            on coverage.match_key = product_identity.match_key
+           and coverage.identity_count <= $2
+          join supplier_coverage_vendor_identity_stage supplier
+            on supplier.match_key = product_identity.match_key
+          where not (
+            supplier.match_type = 'upc'
+            and lower(supplier.source_sku) <> lower(product_identity.product_sku)
+            and exists (
+              select 1
+              from products source_product
+              where lower(source_product.sku) = lower(supplier.source_sku)
+            )
+          )
+          on conflict (product_id, vendor_id, source_sku, match_type) do update
+          set product_sku = excluded.product_sku,
+              match_key = excluded.match_key
+        `, [productIds, maxIdentityMatches]);
+        const stateResult = await client.query(`
+          update supplier_coverage_rebuild_state
+          set last_product_id = $1,
+              processed_work_rows = processed_work_rows + $2,
+              updated_at = now()
+          where state_key = 'active'
+          returning *
+        `, [lastProductId, batchResult.rowCount]);
+        state = stateResult.rows[0];
+        await commit();
+        reportProgress(state, "supplier_links", `Matched ${Math.max(0, Number(state.processed_work_rows || 0) - Number(state.vendor_item_count || 0)).toLocaleString()} products...`);
+      }
+
+      await begin();
+      await client.query(`
+        insert into supplier_coverage_link_stage (
           product_id, product_sku, vendor_id, source_sku, match_key, match_type
         )
         select distinct
-          product_identity.product_id,
-          product_identity.product_sku,
-          supplier.vendor_id,
-          supplier.source_sku,
-          product_identity.match_key,
-          supplier.match_type
-        from product_identities product_identity
-        join vendor_supplier_coverage_next coverage
-          on coverage.match_key = product_identity.match_key
-         and coverage.identity_count <= $2
-        join vendor_supplier_identity_next supplier on supplier.match_key = product_identity.match_key
-        where not (
-          supplier.match_type = 'upc'
-          and lower(trim(supplier.source_sku)) <> lower(trim(product_identity.product_sku))
-          and exists (
-            select 1
-            from products source_product
-            where lower(trim(source_product.sku)) = lower(trim(supplier.source_sku))
+          review.product_id,
+          review.product_sku,
+          review.vendor_id,
+          review.source_sku,
+          'approved-review:' || coalesce(review.match_value, review.match_id),
+          case when review.match_type = 'linked-vendor-sku' then 'approved-vendor-sku' else 'approved-mfr-part-number' end
+        from supplier_match_reviews review
+        where review.status = 'approved'
+          and review.match_type in ('manufacturer-part-number', 'linked-vendor-sku')
+        on conflict (product_id, vendor_id, source_sku, match_type) do update
+        set product_sku = excluded.product_sku,
+            match_key = excluded.match_key
+      `);
+      const linkCount = await client.query("select count(*)::bigint as total from supplier_coverage_link_stage");
+      const stateResult = await client.query(`
+        update supplier_coverage_rebuild_state
+        set phase = 'swap', supplier_links = $1, updated_at = now()
+        where state_key = 'active'
+        returning *
+      `, [Number(linkCount.rows[0]?.total || 0)]);
+      state = stateResult.rows[0];
+      await commit();
+    }
+
+    if (state.phase === "swap") {
+      throwIfCanceled();
+      reportProgress(state, "supplier_coverage_swap", "Publishing the completed supplier index atomically...");
+      await begin();
+      await client.query("set local statement_timeout to 0");
+      await client.query("truncate vendor_supplier_coverage");
+      await client.query(`
+        insert into vendor_supplier_coverage (match_key, supplier_count, updated_at)
+        select match_key, supplier_count, now()
+        from supplier_coverage_key_stage
+      `);
+      await client.query("truncate product_supplier_links");
+      await client.query(`
+        insert into product_supplier_links (
+          product_id, product_sku, vendor_id, source_sku, match_key, match_type, updated_at
+        )
+        select product_id, product_sku, vendor_id, source_sku, match_key, match_type, now()
+        from supplier_coverage_link_stage
+      `);
+      const stateResult = await client.query(`
+        update supplier_coverage_rebuild_state
+        set phase = 'product_summaries', last_summary_product_id = '', updated_at = now()
+        where state_key = 'active'
+        returning *
+      `);
+      state = stateResult.rows[0];
+      await commit();
+    }
+
+    if (state.phase === "product_summaries") {
+      reportProgress(state, "supplier_product_summaries", state.last_summary_product_id
+        ? "Resuming catalog supplier summaries..."
+        : "Applying supplier coverage to catalog products...");
+      while (true) {
+        throwIfCanceled();
+        const hasCursor = Boolean(state.last_summary_product_id);
+        const batchResult = await client.query(`
+          select product_id
+          from products
+          ${hasCursor ? "where product_id > $1" : ""}
+          order by product_id
+          limit $${hasCursor ? 2 : 1}
+        `, hasCursor ? [state.last_summary_product_id, batchSize] : [batchSize]);
+        if (!batchResult.rowCount) break;
+        const productIds = batchResult.rows.map((row) => row.product_id);
+        const lastProductId = productIds[productIds.length - 1];
+        let reviewCandidates = 0;
+        let linkedSkuCandidates = 0;
+        let candidateWarning = state.candidate_warning || "";
+        await begin();
+        const productsResult = await client.query(`
+          with batch(product_id) as (
+            select * from unnest($1::text[])
+          ), product_coverage as materialized (
+            select
+              batch.product_id,
+              case
+                when bool_or(matches.match_type = 'upc') then 'upc'
+                when bool_or(matches.match_type = 'vendor-sku') then 'vendor-sku'
+                when bool_or(matches.match_type = 'exact-sku') then 'exact-sku'
+                when bool_or(matches.match_type = 'source-sku') then 'source-sku'
+                when bool_or(matches.match_type = 'approved-vendor-sku') then 'approved-vendor-sku'
+                when bool_or(matches.match_type = 'approved-mfr-part-number') then 'approved-mfr-part-number'
+                else 'none'
+              end as match_type,
+              count(distinct matches.vendor_id)::integer as supplier_count
+            from batch
+            left join product_supplier_links matches on matches.product_id = batch.product_id
+            group by batch.product_id
           )
-        )
-      `, [productIds, maxIdentityMatches]);
-      lastProductId = batchResult.rows[batchResult.rows.length - 1].product_id;
-      processedWorkRows += batchResult.rowCount;
-      reportProgress({
-        phase: "supplier_links",
-        message: `Matched ${Math.min(processedWorkRows - vendorItemCount, productCount).toLocaleString()} of ${productCount.toLocaleString()} catalog products...`,
-        processedRows: processedWorkRows,
-        totalRows: totalWorkRows,
-        progressPercent: Math.min(99, Math.floor((processedWorkRows / totalWorkRows) * 100))
-      });
-    }
-    await client.query(`
-      insert into product_supplier_links_next (
-        product_id, product_sku, vendor_id, source_sku, match_key, match_type
-      )
-      select distinct
-        review.product_id,
-        review.product_sku,
-        review.vendor_id,
-        review.source_sku,
-        'approved-review:' || coalesce(review.match_value, review.match_id),
-        case when review.match_type = 'linked-vendor-sku' then 'approved-vendor-sku' else 'approved-mfr-part-number' end
-      from supplier_match_reviews review
-      where review.status = 'approved'
-        and review.match_type in ('manufacturer-part-number', 'linked-vendor-sku')
-    `);
-    await client.query("set statement_timeout to 0");
-    await client.query("create index product_supplier_links_next_product_idx on product_supplier_links_next (product_id)");
-    await client.query("create index product_mpn_identity_next_mpn_idx on product_mpn_identity_next (mfr_part_number)");
-    await client.query("set statement_timeout to '10min'");
-    throwIfCanceled();
-    await client.query("begin read write");
-    transactionOpen = true;
-    await client.query("set local statement_timeout to 0");
-    await client.query("truncate vendor_supplier_coverage");
-    const result = await client.query(`
-      insert into vendor_supplier_coverage (match_key, supplier_count, updated_at)
-      select match_key, supplier_count, now()
-      from vendor_supplier_coverage_next
-    `);
-    await client.query("truncate product_supplier_links");
-    const supplierLinksResult = await client.query(`
-      insert into product_supplier_links (
-        product_id, product_sku, vendor_id, source_sku, match_key, match_type, updated_at
-      )
-      select distinct on (product_id, vendor_id, source_sku, match_type)
-        product_id, product_sku, vendor_id, source_sku, match_key, match_type, now()
-      from product_supplier_links_next
-      order by product_id, vendor_id, source_sku, match_type, match_key
-    `);
-    await client.query("commit");
-    transactionOpen = false;
-
-    let productsUpdated = 0;
-    let reviewCandidates = 0;
-    let linkedSkuCandidates = 0;
-    let candidateWarning = "";
-    let candidatesEnabled = true;
-    lastProductId = "";
-    while (true) {
-      throwIfCanceled();
-      const batchResult = await client.query(`
-        select product_id
-        from products
-        where $1 = '' or product_id > $1
-        order by product_id
-        limit $2
-      `, [lastProductId, batchSize]);
-      if (!batchResult.rowCount) break;
-      const productIds = batchResult.rows.map((row) => row.product_id);
-      const productsResult = await client.query(`
-        with batch(product_id) as (
-          select * from unnest($1::text[])
-        ), product_coverage as materialized (
-        select
-            batch.product_id,
-          case
-            when bool_or(matches.match_type = 'upc') then 'upc'
-            when bool_or(matches.match_type = 'vendor-sku') then 'vendor-sku'
-            when bool_or(matches.match_type = 'exact-sku') then 'exact-sku'
-            when bool_or(matches.match_type = 'source-sku') then 'source-sku'
-            when bool_or(matches.match_type = 'approved-vendor-sku') then 'approved-vendor-sku'
-            when bool_or(matches.match_type = 'approved-mfr-part-number') then 'approved-mfr-part-number'
-            else 'none'
-          end as match_type,
-          count(distinct matches.vendor_id)::integer as supplier_count
-          from batch
-          left join product_supplier_links matches on matches.product_id = batch.product_id
-          group by batch.product_id
-      )
-      update products product
-      set
-        supplier_count = coverage.supplier_count,
-        has_multiple_suppliers = coverage.supplier_count >= 2,
-        supplier_coverage_match_type = coverage.match_type,
-        supplier_coverage_updated_at = now()
-      from product_coverage coverage
-      where product.product_id = coverage.product_id
-        and (
-          product.supplier_count is distinct from coverage.supplier_count
-          or product.has_multiple_suppliers is distinct from (coverage.supplier_count >= 2)
-          or product.supplier_coverage_match_type is distinct from coverage.match_type
-          or product.supplier_coverage_updated_at is null
-        )
-      `, [productIds]);
-      productsUpdated += productsResult.rowCount || 0;
-
-      if (candidatesEnabled) {
-        try {
-          const reviewCandidatesResult = await client.query(`
-            insert into supplier_match_reviews (
-              match_id, product_id, product_sku, vendor_id, source_sku, match_type,
-              match_value, status, confidence, details, created_at, updated_at, last_seen_at
+          update products product
+          set supplier_count = coverage.supplier_count,
+              has_multiple_suppliers = coverage.supplier_count >= 2,
+              supplier_coverage_match_type = coverage.match_type,
+              supplier_coverage_updated_at = now()
+          from product_coverage coverage
+          where product.product_id = coverage.product_id
+            and (
+              product.supplier_count is distinct from coverage.supplier_count
+              or product.has_multiple_suppliers is distinct from (coverage.supplier_count >= 2)
+              or product.supplier_coverage_match_type is distinct from coverage.match_type
+              or product.supplier_coverage_updated_at is null
             )
-            select
-              md5(product.product_id || '|' || item.vendor_id || '|' || item.source_sku || '|manufacturer-part-number'),
-              product.product_id,
-              product.sku,
-              item.vendor_id,
-              item.source_sku,
-              'manufacturer-part-number',
-              trim(product.mfr_part_number),
-              'pending',
-              0.82,
-              jsonb_build_object(
-                'productBrand', coalesce(product.brand, ''),
-                'supplierBrand', coalesce(item.brand, ''),
-                'productTitle', coalesce(product.title, product.marketplace_title, ''),
-                'supplierTitle', coalesce(item.title, '')
-              ),
-              now(), now(), now()
-            from product_mpn_identity_next product_identity
-            join products product on product.product_id = product_identity.product_id
-            join vendor_mpn_identity_next supplier_mpn on supplier_mpn.mfr_part_number = product_identity.mfr_part_number
-            join vendor_catalog_items item
-              on item.vendor_id = supplier_mpn.vendor_id
-             and item.source_sku = supplier_mpn.source_sku
-            where product_identity.product_id = any($1::text[])
-              and not (
-                ${productBarcodeValueSql} <> ''
-                and ${canonicalSupplierBarcodeSql(vendorBarcodeValueSql)} = ${canonicalSupplierBarcodeSql(productBarcodeValueSql)}
+        `, [productIds]);
+
+        if (!candidateWarning) {
+          await client.query("savepoint supplier_review_candidates");
+          try {
+            const reviewResult = await client.query(`
+              insert into supplier_match_reviews (
+                match_id, product_id, product_sku, vendor_id, source_sku, match_type,
+                match_value, status, confidence, details, created_at, updated_at, last_seen_at
               )
-              and lower(trim(product.sku)) not in (
-                lower(trim(item.source_sku)),
-                lower(trim(coalesce(item.internal_sku, ''))),
-                lower(trim(coalesce(item.vendor_sku, '')))
-              )
-            on conflict (product_id, vendor_id, source_sku, match_type) do update
-            set
-              product_sku = excluded.product_sku,
-              match_value = excluded.match_value,
-              confidence = excluded.confidence,
-              details = excluded.details,
-              updated_at = now(),
-              last_seen_at = now()
-          `, [productIds]);
-          reviewCandidates += reviewCandidatesResult.rowCount || 0;
-          const linkedSkuCandidatesResult = await client.query(`
-            with mpn_seed_items as materialized (
-              select distinct
+              select
+                md5(product.product_id || '|' || item.vendor_id || '|' || item.source_sku || '|manufacturer-part-number'),
                 product.product_id,
-                product.product_sku,
-                product.mfr_part_number,
-                seed.vendor_id as seed_vendor_id,
-                seed.source_sku as seed_source_sku
-              from product_mpn_identity_next product
-              join vendor_mpn_identity_next seed on seed.mfr_part_number = product.mfr_part_number
-              where product.product_id = any($1::text[])
-            ), first_hop_items as materialized (
-              select distinct
-                seed.product_id,
-                seed.product_sku,
-                seed.mfr_part_number,
-                related.vendor_id,
-                related.source_sku,
-                identity.match_key,
-                related.brand,
-                related.title,
-                related.mfr_part_number as supplier_mfr_part_number
-              from mpn_seed_items seed
-              join vendor_supplier_identity_next seed_identity
-                on seed_identity.vendor_id = seed.seed_vendor_id
-               and seed_identity.source_sku = seed.seed_source_sku
-               and seed_identity.match_key like 'sku:%'
-              join vendor_supplier_coverage_next seed_coverage
-                on seed_coverage.match_key = seed_identity.match_key
-               and seed_coverage.supplier_count <= 25
-               and seed_coverage.identity_count <= $2
-              join vendor_supplier_identity_next identity
-                on identity.match_key = seed_identity.match_key
-              join vendor_catalog_items related
-                on related.vendor_id = identity.vendor_id
-               and related.source_sku = identity.source_sku
-            ), linked_items as materialized (
-              select * from first_hop_items
-              union
-              select distinct
-                first.product_id,
-                first.product_sku,
-                first.mfr_part_number,
-                related.vendor_id,
-                related.source_sku,
-                related_identity.match_key,
-                related.brand,
-                related.title,
-                lower(trim(coalesce(related.mfr_part_number, ''))) as supplier_mfr_part_number
-              from first_hop_items first
-              join vendor_supplier_identity_next first_identity
-                on first_identity.vendor_id = first.vendor_id
-               and first_identity.source_sku = first.source_sku
-               and first_identity.match_key like 'sku:%'
-              join vendor_supplier_coverage_next first_coverage
-                on first_coverage.match_key = first_identity.match_key
-               and first_coverage.supplier_count <= 25
-               and first_coverage.identity_count <= $2
-              join vendor_supplier_identity_next related_identity
-                on related_identity.match_key = first_identity.match_key
-              join vendor_catalog_items related
-                on related.vendor_id = related_identity.vendor_id
-               and related.source_sku = related_identity.source_sku
-            )
-            insert into supplier_match_reviews (
-              match_id, product_id, product_sku, vendor_id, source_sku, match_type,
-              match_value, status, confidence, details, created_at, updated_at, last_seen_at
-            )
-            select
-              md5(linked.product_id || '|' || linked.vendor_id || '|' || linked.source_sku || '|linked-vendor-sku'),
-              linked.product_id,
-              linked.product_sku,
-              linked.vendor_id,
-              linked.source_sku,
-              'linked-vendor-sku',
-              linked.match_key,
-              'pending',
-              0.74,
-              jsonb_build_object(
-                'linkedBy', 'manufacturer-part-number-to-shared-sku',
-                'productMpn', linked.mfr_part_number,
-                'supplierMpn', coalesce(linked.supplier_mfr_part_number, ''),
-                'supplierBrand', coalesce(linked.brand, ''),
-                'supplierTitle', coalesce(linked.title, '')
-              ),
-              now(), now(), now()
-            from linked_items linked
-            where lower(trim(coalesce(linked.supplier_mfr_part_number, ''))) <> linked.mfr_part_number
-              and not exists (
-                select 1
-                from product_supplier_links confirmed
-                where confirmed.product_id = linked.product_id
-                  and confirmed.vendor_id = linked.vendor_id
-                  and confirmed.source_sku = linked.source_sku
+                product.sku,
+                item.vendor_id,
+                item.source_sku,
+                'manufacturer-part-number',
+                trim(product.mfr_part_number),
+                'pending',
+                0.82,
+                jsonb_build_object(
+                  'productBrand', coalesce(product.brand, ''),
+                  'supplierBrand', coalesce(item.brand, ''),
+                  'productTitle', coalesce(product.title, product.marketplace_title, ''),
+                  'supplierTitle', coalesce(item.title, '')
+                ),
+                now(), now(), now()
+              from supplier_coverage_product_mpn_stage product_identity
+              join products product on product.product_id = product_identity.product_id
+              join supplier_coverage_vendor_mpn_stage supplier_mpn
+                on supplier_mpn.mfr_part_number = product_identity.mfr_part_number
+              join vendor_catalog_items item
+                on item.vendor_id = supplier_mpn.vendor_id
+               and item.source_sku = supplier_mpn.source_sku
+              where product_identity.product_id = any($1::text[])
+                and not (
+                  ${productBarcodeValueSql} <> ''
+                  and ${canonicalSupplierBarcodeSql(vendorBarcodeValueSql)} = ${canonicalSupplierBarcodeSql(productBarcodeValueSql)}
+                )
+                and lower(trim(product.sku)) not in (
+                  lower(trim(item.source_sku)),
+                  lower(trim(coalesce(item.internal_sku, ''))),
+                  lower(trim(coalesce(item.vendor_sku, '')))
+                )
+              on conflict (product_id, vendor_id, source_sku, match_type) do update
+              set product_sku = excluded.product_sku,
+                  match_value = excluded.match_value,
+                  confidence = excluded.confidence,
+                  details = excluded.details,
+                  updated_at = now(),
+                  last_seen_at = now()
+            `, [productIds]);
+            reviewCandidates = reviewResult.rowCount || 0;
+            const linkedResult = await client.query(`
+              with mpn_seed_items as materialized (
+                select distinct
+                  product.product_id,
+                  product.product_sku,
+                  product.mfr_part_number,
+                  seed.vendor_id as seed_vendor_id,
+                  seed.source_sku as seed_source_sku
+                from supplier_coverage_product_mpn_stage product
+                join supplier_coverage_vendor_mpn_stage seed
+                  on seed.mfr_part_number = product.mfr_part_number
+                where product.product_id = any($1::text[])
+              ), first_hop_items as materialized (
+                select distinct
+                  seed.product_id,
+                  seed.product_sku,
+                  seed.mfr_part_number,
+                  related.vendor_id,
+                  related.source_sku,
+                  identity.match_key,
+                  related.brand,
+                  related.title,
+                  related.mfr_part_number as supplier_mfr_part_number
+                from mpn_seed_items seed
+                join supplier_coverage_vendor_identity_stage seed_identity
+                  on seed_identity.vendor_id = seed.seed_vendor_id
+                 and seed_identity.source_sku = seed.seed_source_sku
+                 and seed_identity.match_key like 'sku:%'
+                join supplier_coverage_key_stage seed_coverage
+                  on seed_coverage.match_key = seed_identity.match_key
+                 and seed_coverage.supplier_count <= 25
+                 and seed_coverage.identity_count <= $2
+                join supplier_coverage_vendor_identity_stage identity
+                  on identity.match_key = seed_identity.match_key
+                join vendor_catalog_items related
+                  on related.vendor_id = identity.vendor_id
+                 and related.source_sku = identity.source_sku
+              ), linked_items as materialized (
+                select * from first_hop_items
+                union
+                select distinct
+                  first.product_id,
+                  first.product_sku,
+                  first.mfr_part_number,
+                  related.vendor_id,
+                  related.source_sku,
+                  related_identity.match_key,
+                  related.brand,
+                  related.title,
+                  lower(trim(coalesce(related.mfr_part_number, ''))) as supplier_mfr_part_number
+                from first_hop_items first
+                join supplier_coverage_vendor_identity_stage first_identity
+                  on first_identity.vendor_id = first.vendor_id
+                 and first_identity.source_sku = first.source_sku
+                 and first_identity.match_key like 'sku:%'
+                join supplier_coverage_key_stage first_coverage
+                  on first_coverage.match_key = first_identity.match_key
+                 and first_coverage.supplier_count <= 25
+                 and first_coverage.identity_count <= $2
+                join supplier_coverage_vendor_identity_stage related_identity
+                  on related_identity.match_key = first_identity.match_key
+                join vendor_catalog_items related
+                  on related.vendor_id = related_identity.vendor_id
+                 and related.source_sku = related_identity.source_sku
               )
-            on conflict (product_id, vendor_id, source_sku, match_type) do update
-            set
-              product_sku = excluded.product_sku,
-              match_value = excluded.match_value,
-              confidence = excluded.confidence,
-              details = excluded.details,
-              updated_at = now(),
-              last_seen_at = now()
-          `, [productIds, maxIdentityMatches]);
-          linkedSkuCandidates += linkedSkuCandidatesResult.rowCount || 0;
-        } catch (error) {
-          candidatesEnabled = false;
-          candidateWarning = `Supplier review candidates were deferred after exact coverage completed: ${error.message || error}`;
+              insert into supplier_match_reviews (
+                match_id, product_id, product_sku, vendor_id, source_sku, match_type,
+                match_value, status, confidence, details, created_at, updated_at, last_seen_at
+              )
+              select
+                md5(linked.product_id || '|' || linked.vendor_id || '|' || linked.source_sku || '|linked-vendor-sku'),
+                linked.product_id,
+                linked.product_sku,
+                linked.vendor_id,
+                linked.source_sku,
+                'linked-vendor-sku',
+                linked.match_key,
+                'pending',
+                0.74,
+                jsonb_build_object(
+                  'linkedBy', 'manufacturer-part-number-to-shared-sku',
+                  'productMpn', linked.mfr_part_number,
+                  'supplierMpn', coalesce(linked.supplier_mfr_part_number, ''),
+                  'supplierBrand', coalesce(linked.brand, ''),
+                  'supplierTitle', coalesce(linked.title, '')
+                ),
+                now(), now(), now()
+              from linked_items linked
+              where lower(trim(coalesce(linked.supplier_mfr_part_number, ''))) <> linked.mfr_part_number
+                and not exists (
+                  select 1
+                  from product_supplier_links confirmed
+                  where confirmed.product_id = linked.product_id
+                    and confirmed.vendor_id = linked.vendor_id
+                    and confirmed.source_sku = linked.source_sku
+                )
+              on conflict (product_id, vendor_id, source_sku, match_type) do update
+              set product_sku = excluded.product_sku,
+                  match_value = excluded.match_value,
+                  confidence = excluded.confidence,
+                  details = excluded.details,
+                  updated_at = now(),
+                  last_seen_at = now()
+            `, [productIds, maxIdentityMatches]);
+            linkedSkuCandidates = linkedResult.rowCount || 0;
+          } catch (error) {
+            await client.query("rollback to savepoint supplier_review_candidates");
+            candidateWarning = `Supplier review candidates were deferred after exact coverage completed: ${error.message || error}`;
+          }
         }
+
+        const stateResult = await client.query(`
+          update supplier_coverage_rebuild_state
+          set last_summary_product_id = $1,
+              processed_work_rows = processed_work_rows + $2,
+              products_updated = products_updated + $3,
+              review_candidates = review_candidates + $4,
+              linked_sku_candidates = linked_sku_candidates + $5,
+              candidate_warning = $6,
+              updated_at = now()
+          where state_key = 'active'
+          returning *
+        `, [lastProductId, batchResult.rowCount, productsResult.rowCount || 0, reviewCandidates, linkedSkuCandidates, candidateWarning]);
+        state = stateResult.rows[0];
+        await commit();
+        reportProgress(state, "supplier_product_summaries", `Applied supplier coverage to ${Math.max(0, Number(state.processed_work_rows || 0) - Number(state.vendor_item_count || 0) - Number(state.product_count || 0)).toLocaleString()} products...`);
       }
-
-      lastProductId = batchResult.rows[batchResult.rows.length - 1].product_id;
-      processedWorkRows += batchResult.rowCount;
-      reportProgress({
-        phase: "supplier_product_summaries",
-        message: `Applied supplier coverage to ${Math.min(processedWorkRows - vendorItemCount - productCount, productCount).toLocaleString()} of ${productCount.toLocaleString()} products...`,
-        processedRows: processedWorkRows,
-        totalRows: totalWorkRows,
-        progressPercent: Math.min(99, Math.floor((processedWorkRows / totalWorkRows) * 100))
-      });
+      const stateResult = await client.query(`
+        update supplier_coverage_rebuild_state
+        set phase = 'vendor_summaries',
+            last_summary_vendor_id = '',
+            last_summary_vendor_source_sku = '',
+            updated_at = now()
+        where state_key = 'active'
+        returning *
+      `);
+      state = stateResult.rows[0];
     }
 
-    let vendorItemsUpdated = 0;
-    lastVendorId = "";
-    lastSourceSku = "";
-    while (true) {
-      throwIfCanceled();
-      const batchResult = await client.query(`
-        select vendor_id, source_sku
-        from vendor_catalog_items
-        where $1 = '' or (vendor_id, source_sku) > ($1, $2)
-        order by vendor_id, source_sku
-        limit $3
-      `, [lastVendorId, lastSourceSku, batchSize]);
-      if (!batchResult.rowCount) break;
-      const vendorIds = batchResult.rows.map((row) => row.vendor_id);
-      const sourceSkus = batchResult.rows.map((row) => row.source_sku);
-      const vendorItemsResult = await client.query(`
-        with batch(vendor_id, source_sku) as (
-          select * from unnest($1::text[], $2::text[])
-        ), vendor_item_coverage as materialized (
-        select
-          candidate.vendor_id,
-          candidate.source_sku,
-          case
-            when bool_or(candidate.match_type = 'upc') then 'upc'
-            when bool_or(candidate.match_type = 'vendor-sku') then 'vendor-sku'
-            when bool_or(candidate.match_type = 'exact-sku') then 'exact-sku'
-            else 'source-sku'
-          end as match_type,
-          greatest(max(coverage.supplier_count), 1)::integer as supplier_count
-          from batch
-          join vendor_supplier_identity_next candidate using (vendor_id, source_sku)
-        join vendor_supplier_coverage_next coverage on coverage.match_key = candidate.match_key
-        group by candidate.vendor_id, candidate.source_sku
-      )
-      update vendor_catalog_items item
-      set
-        supplier_count = coverage.supplier_count,
-        has_multiple_suppliers = coverage.supplier_count >= 2,
-        supplier_coverage_match_type = coverage.match_type,
-        supplier_coverage_updated_at = now()
-      from vendor_item_coverage coverage
-      where item.vendor_id = coverage.vendor_id
-        and item.source_sku = coverage.source_sku
-        and (
-          item.supplier_count is distinct from coverage.supplier_count
-          or item.has_multiple_suppliers is distinct from (coverage.supplier_count >= 2)
-          or item.supplier_coverage_match_type is distinct from coverage.match_type
-          or item.supplier_coverage_updated_at is null
-        )
-      `, [vendorIds, sourceSkus]);
-      vendorItemsUpdated += vendorItemsResult.rowCount || 0;
-      const lastRow = batchResult.rows[batchResult.rows.length - 1];
-      lastVendorId = lastRow.vendor_id;
-      lastSourceSku = lastRow.source_sku;
-      processedWorkRows += batchResult.rowCount;
-      reportProgress({
-        phase: "supplier_vendor_summaries",
-        message: `Applied supplier coverage to ${Math.min(processedWorkRows - vendorItemCount - (productCount * 2), vendorItemCount).toLocaleString()} of ${vendorItemCount.toLocaleString()} supplier records...`,
-        processedRows: processedWorkRows,
-        totalRows: totalWorkRows,
-        progressPercent: Math.min(99, Math.floor((processedWorkRows / totalWorkRows) * 100))
-      });
+    if (state.phase === "vendor_summaries") {
+      reportProgress(state, "supplier_vendor_summaries", state.last_summary_vendor_id
+        ? "Resuming supplier catalog summaries..."
+        : "Applying shared coverage to supplier records...");
+      while (true) {
+        throwIfCanceled();
+        const hasCursor = Boolean(state.last_summary_vendor_id);
+        const batchResult = await client.query(`
+          select vendor_id, source_sku
+          from vendor_catalog_items
+          ${hasCursor ? "where (vendor_id, source_sku) > ($1, $2)" : ""}
+          order by vendor_id, source_sku
+          limit $${hasCursor ? 3 : 1}
+        `, hasCursor
+          ? [state.last_summary_vendor_id, state.last_summary_vendor_source_sku, batchSize]
+          : [batchSize]);
+        if (!batchResult.rowCount) break;
+        const vendorIds = batchResult.rows.map((row) => row.vendor_id);
+        const sourceSkus = batchResult.rows.map((row) => row.source_sku);
+        const lastRow = batchResult.rows[batchResult.rows.length - 1];
+        await begin();
+        const vendorItemsResult = await client.query(`
+          with batch(vendor_id, source_sku) as (
+            select * from unnest($1::text[], $2::text[])
+          ), vendor_item_coverage as materialized (
+            select
+              candidate.vendor_id,
+              candidate.source_sku,
+              case
+                when bool_or(candidate.match_type = 'upc') then 'upc'
+                when bool_or(candidate.match_type = 'vendor-sku') then 'vendor-sku'
+                when bool_or(candidate.match_type = 'exact-sku') then 'exact-sku'
+                else 'source-sku'
+              end as match_type,
+              greatest(max(coverage.supplier_count), 1)::integer as supplier_count
+            from batch
+            join supplier_coverage_vendor_identity_stage candidate using (vendor_id, source_sku)
+            join supplier_coverage_key_stage coverage on coverage.match_key = candidate.match_key
+            group by candidate.vendor_id, candidate.source_sku
+          )
+          update vendor_catalog_items item
+          set supplier_count = coverage.supplier_count,
+              has_multiple_suppliers = coverage.supplier_count >= 2,
+              supplier_coverage_match_type = coverage.match_type,
+              supplier_coverage_updated_at = now()
+          from vendor_item_coverage coverage
+          where item.vendor_id = coverage.vendor_id
+            and item.source_sku = coverage.source_sku
+            and (
+              item.supplier_count is distinct from coverage.supplier_count
+              or item.has_multiple_suppliers is distinct from (coverage.supplier_count >= 2)
+              or item.supplier_coverage_match_type is distinct from coverage.match_type
+              or item.supplier_coverage_updated_at is null
+            )
+        `, [vendorIds, sourceSkus]);
+        const stateResult = await client.query(`
+          update supplier_coverage_rebuild_state
+          set last_summary_vendor_id = $1,
+              last_summary_vendor_source_sku = $2,
+              processed_work_rows = processed_work_rows + $3,
+              vendor_items_updated = vendor_items_updated + $4,
+              updated_at = now()
+          where state_key = 'active'
+          returning *
+        `, [lastRow.vendor_id, lastRow.source_sku, batchResult.rowCount, vendorItemsResult.rowCount || 0]);
+        state = stateResult.rows[0];
+        await commit();
+        reportProgress(state, "supplier_vendor_summaries", `Applied supplier coverage to ${Math.max(0, Number(state.processed_work_rows || 0) - Number(state.vendor_item_count || 0) - (Number(state.product_count || 0) * 2)).toLocaleString()} supplier records...`);
+      }
+      const stateResult = await client.query(`
+        update supplier_coverage_rebuild_state
+        set status = 'complete',
+            phase = 'complete',
+            processed_work_rows = greatest(processed_work_rows, (product_count * 2) + (vendor_item_count * 2)),
+            updated_at = now(),
+            finished_at = now()
+        where state_key = 'active'
+        returning *
+      `);
+      state = stateResult.rows[0];
     }
 
-    reportProgress({
+    const totalWorkRows = Math.max(1, (Number(state.product_count || 0) * 2) + (Number(state.vendor_item_count || 0) * 2));
+    onProgress?.({
       phase: "supplier_coverage_apply",
-      message: candidateWarning || "Supplier coverage rebuild complete.",
+      message: state.candidate_warning || "Supplier coverage rebuild complete.",
       processedRows: totalWorkRows,
       totalRows: totalWorkRows,
       progressPercent: 100
     });
     return {
       enabled: true,
-      keys: result.rowCount || 0,
-      supplierLinks: supplierLinksResult.rowCount || 0,
-      reviewCandidates,
-      linkedSkuCandidates,
-      productsUpdated,
-      vendorItemsUpdated,
-      totalRows: productCount,
-      processedRows: productCount,
-      warnings: candidateWarning ? [candidateWarning] : []
+      resumed: Boolean(state.created_at && state.updated_at && String(state.created_at) !== String(state.updated_at)),
+      keys: Number(state.coverage_keys || 0),
+      supplierLinks: Number(state.supplier_links || 0),
+      reviewCandidates: Number(state.review_candidates || 0),
+      linkedSkuCandidates: Number(state.linked_sku_candidates || 0),
+      productsUpdated: Number(state.products_updated || 0),
+      vendorItemsUpdated: Number(state.vendor_items_updated || 0),
+      totalRows: totalWorkRows,
+      processedRows: totalWorkRows,
+      productRows: Number(state.product_count || 0),
+      warnings: state.candidate_warning ? [state.candidate_warning] : []
     };
   } catch (error) {
-    if (transactionOpen) await client.query("rollback").catch(() => {});
+    await rollback();
+    await client.query(`
+      update supplier_coverage_rebuild_state
+      set status = $1, updated_at = now()
+      where state_key = 'active' and rebuild_id = $2
+    `, [/canceled|cancelled|stopped/i.test(String(error.message || "")) ? "stopped" : "failed", rebuildId]).catch(() => {});
     throw error;
   } finally {
+    await rollback();
+    if (ownsLock) await client.query("select pg_advisory_unlock(hashtext($1))", [lockName]).catch(() => {});
     client.release();
   }
 }
@@ -9062,7 +9373,7 @@ async function vendorCatalogFacets() {
   };
 }
 
-async function refreshVendorCatalogFacets({ onProgress, isCanceled } = {}) {
+async function refreshVendorCatalogFacets({ onProgress, isCanceled, runId } = {}) {
   const client = getPool();
   if (!client) return null;
   await initRelationalSchema();
@@ -9130,7 +9441,7 @@ async function refreshVendorCatalogFacets({ onProgress, isCanceled } = {}) {
           row_count = excluded.row_count,
           updated_at = now()
   `);
-  const supplierCoverage = await refreshVendorSupplierCoverage({ onProgress: progress, isCanceled });
+  const supplierCoverage = await refreshVendorSupplierCoverage({ onProgress: progress, isCanceled, runId });
   progress({ phase: "complete", processedRows: 5, totalRows: 5, progressPercent: 100 });
   const facets = await vendorCatalogFacets();
   return { ...facets, supplierCoverage, durationMs: Date.now() - startedAt };

@@ -71241,6 +71241,7 @@ async function handleApi(req, res) {
         workJob.message = "Rebuilding stored supplier matches...";
         upsertImportJobStore(workJob);
         const result = await postgres.refreshVendorSupplierCoverage({
+          runId: String(workJob.id || ""),
           isCanceled: () => !["queued", "running"].includes(String(activeJobProgress.get(workJob.id)?.status || workJob.status || "").toLowerCase()),
           onProgress: (patch) => {
             const next = setActiveJobProgress(workJob.id, { ...patch, status: "running", startedAt: workJob.startedAt });
@@ -71416,6 +71417,7 @@ async function handleApi(req, res) {
         upsertImportJobStore(workJob);
         const isCanceled = () => !["queued", "running"].includes(String(activeJobProgress.get(workJob.id)?.status || workJob.status || "").toLowerCase());
         const result = await postgres.refreshVendorCatalogFacets({
+          runId: String(workJob.id || ""),
           isCanceled,
           onProgress: (patch) => {
             const next = setActiveJobProgress(workJob.id, { ...patch, status: "running", startedAt: workJob.startedAt });

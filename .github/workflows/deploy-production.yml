@@ -56,6 +56,13 @@ jobs:
         run: |
           createdb --host=127.0.0.1 --username=postgres dataplus_company_test
           node scripts/test-company-workspaces.cjs
+      - name: Run resumable supplier coverage test
+        env:
+          PGPASSWORD: postgres
+          SUPPLIER_COVERAGE_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dataplus_supplier_test
+        run: |
+          createdb --host=127.0.0.1 --username=postgres dataplus_supplier_test
+          node scripts/test-supplier-coverage-resume.cjs
 
   deploy:
     name: Deploy to DigitalOcean Droplet

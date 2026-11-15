@@ -1476,6 +1476,7 @@ async function runSourceFacetsRefreshJob(job) {
   }, 1000);
   try {
     const result = await postgres.refreshVendorCatalogFacets({
+      runId: String(job.id || ""),
       isCanceled: () => canceled,
       onProgress: (patch = {}) => {
         current = normalizeJobPatch(current, {
@@ -1967,6 +1968,7 @@ async function runSupplierCoverageRefreshJob(job) {
   }, 10000);
   try {
     const result = await postgres.refreshVendorSupplierCoverage({
+      runId: String(job.workerPayload?.sourceJobId || job.id || ""),
       isCanceled: () => false,
       onProgress: (patch = {}) => {
         current = normalizeJobPatch(current, {

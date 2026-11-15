@@ -110,7 +110,7 @@ wait_for_carrier_worker() {
 runtime_schema_is_ready() {
   local ready
   ready="$(run_with_timeout 10 docker exec dataplus-postgres psql -U postgres -d dataplus -Atqc \
-    "select case when exists(select 1 from schema_migrations where name='2026-11-13-runtime-schema-ensures-v2') then 1 else 0 end" \
+    "select case when exists(select 1 from schema_migrations where name='2026-11-15-supplier-coverage-resume-v3') then 1 else 0 end" \
     2>/dev/null || true)"
   [[ "$ready" == "1" ]]
 }
@@ -136,10 +136,13 @@ else
 fi
 
 PRESERVE_BACKGROUND_WORKER=false
+ACTIVE_PRODUCT_DUMP_JOB_ID=""
+ACTIVE_PRODUCT_DUMP_WORKER_ID=""
 if [[ "$(docker inspect -f '{{.State.Running}}' dataplus-worker-background 2>/dev/null || true)" == "true" ]]; then
-  ACTIVE_PRODUCT_DUMP="$(docker exec dataplus-postgres psql -U postgres -d dataplus -Atqc \
-    "select 1 from operations_jobs where lower(status)='running' and coalesce(raw->>'workerTask','')='product-dump-import' and coalesce(raw->>'workerLane','')='background' limit 1" 2>/dev/null || true)"
-  if [[ "$ACTIVE_PRODUCT_DUMP" == "1" ]]; then
+  ACTIVE_PRODUCT_DUMP="$(docker exec dataplus-postgres psql -U postgres -d dataplus -AtF '|' -c \
+    "select job_id, coalesce(raw->>'workerId','') from operations_jobs where lower(status)='running' and coalesce(raw->>'workerTask','')='product-dump-import' and coalesce(raw->>'workerLane','')='background' order by started_at limit 1" 2>/dev/null || true)"
+  if [[ -n "$ACTIVE_PRODUCT_DUMP" ]]; then
+    IFS='|' read -r ACTIVE_PRODUCT_DUMP_JOB_ID ACTIVE_PRODUCT_DUMP_WORKER_ID <<< "$ACTIVE_PRODUCT_DUMP"
     PRESERVE_BACKGROUND_WORKER=true
     echo "An active product datadump owns worker-background; preserving that container until the import finishes."
   fi
@@ -172,6 +175,13 @@ wait_for_dataplus_api "${DATAPLUS_API_READY_TIMEOUT_SECONDS:-90}"
 wait_for_carrier_worker "${DATAPLUS_CARRIER_READY_TIMEOUT_SECONDS:-120}"
 record_deployment_status healthy
 resume_label_purchases
+if [[ "$PRESERVE_BACKGROUND_WORKER" == "true" ]]; then
+  HANDOFF_LOG="/tmp/dataplus-background-handoff-${ACTIVE_PRODUCT_DUMP_JOB_ID}.log"
+  nohup bash scripts/handoff-preserved-background-worker.sh \
+    "$ACTIVE_PRODUCT_DUMP_JOB_ID" "$ACTIVE_PRODUCT_DUMP_WORKER_ID" \
+    >"$HANDOFF_LOG" 2>&1 < /dev/null &
+  echo "Scheduled the preserved background-worker handoff; log: $HANDOFF_LOG"
+fi
 trap - ERR
 
 echo "DataPlus production deployment is healthy."
