@@ -460,9 +460,14 @@ async function initRelationalSchema() {
             [RUNTIME_SCHEMA_ENSURES_VERSION]
           );
           if (runtimeEnsures.rows[0]?.current !== true) {
-            await ensureOutboundAuditSchema(client);
-            await ensureProductShadowSkuSchema(client);
-            await ensureReturnWorkspaceSchema(client);
+            const previousRuntimeEnsures = await client.query(
+              "select exists (select 1 from schema_migrations where name = '2026-11-13-runtime-schema-ensures-v2') as current"
+            );
+            if (previousRuntimeEnsures.rows[0]?.current !== true) {
+              await ensureOutboundAuditSchema(client);
+              await ensureProductShadowSkuSchema(client);
+              await ensureReturnWorkspaceSchema(client);
+            }
             await ensureSupplierCoverageRebuildSchema(client);
             await client.query(
               "insert into schema_migrations (name) values ($1) on conflict (name) do nothing",
