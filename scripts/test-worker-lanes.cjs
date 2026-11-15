@@ -55,7 +55,10 @@ assert.deepEqual(WORKLOAD_LIMITS['shipping-report-export'], {lane:'report-export
 assert.deepEqual(WORKLOAD_LIMITS['order-export'], {lane:'report-export',limit:1});
 assert.deepEqual(WORKLOAD_LIMITS['product-dump-import'], {lane:'catalog-import',limit:1});
 assert.deepEqual(WORKLOAD_LIMITS['fulfillment-projection-rebuild'], {lane:'fulfillment-rebuild',limit:1});
-assert.deepEqual(WORKLOAD_LIMITS['ebay-order-import'], {lane:'marketplace-sync',limit:2});
+assert.deepEqual(WORKLOAD_LIMITS['shopify-order-import'], {lane:'shopify-order-sync',limit:1});
+assert.deepEqual(WORKLOAD_LIMITS['ebay-order-import'], {lane:'ebay-order-sync',limit:1});
+assert.deepEqual(WORKLOAD_LIMITS['ebay-return-import'], {lane:'ebay-order-sync',limit:1});
+assert.deepEqual(WORKLOAD_LIMITS['temu-order-import'], {lane:'temu-order-sync',limit:1});
 assert.deepEqual(WORKLOAD_LIMITS['tiktok-orders'], {lane:'tiktok-order-sync',limit:1});
 const databaseSource = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'db.js'), 'utf8');
 assert.match(databaseSource, /dataplus-worker-resource-scheduler/);

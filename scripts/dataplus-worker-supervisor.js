@@ -56,7 +56,7 @@ function jobMemoryBudgetMb(lane, task = "", env = process.env) {
   if (String(task || "") === "product-dump-import") {
     return Math.floor(positiveNumber(env.DATAPLUS_PRODUCT_DUMP_JOB_RSS_MB, 900));
   }
-  if (String(task || "") === "ebay-order-import") {
+  if (["ebay-order-import", "ebay-return-import"].includes(String(task || ""))) {
     return Math.floor(positiveNumber(env.DATAPLUS_EBAY_ORDER_JOB_RSS_MB, 900));
   }
   const heavy = HEAVY_TASKS.has(String(task || ""));
