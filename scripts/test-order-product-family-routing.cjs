@@ -206,7 +206,10 @@ test("outbound can consume stock reserved for the same order line", async () => 
     sku: product.sku,
     members: [{ productId: product.id, sku: product.sku, isCurrent: true, matchTypes: ["current"] }],
   });
-  postgres.readProductsByKeys = async () => [structuredClone(product)];
+  postgres.readProductsByKeys = async (_keys, options) => {
+    assert.equal(options.directProductIds, true);
+    return [structuredClone(product)];
+  };
   try {
     const result = await outboundInventoryProductForWarehouse({ vendors }, product, warehouse, { order, target: { lineIndex: 0 } });
     assert.equal(result.selected.product.id, product.id);

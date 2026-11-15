@@ -21,6 +21,7 @@ async function main() {
     await client.query('begin');
     await client.query(`create temporary table products(product_id text, sku text, raw jsonb) on commit drop;
       create temporary table product_aliases(product_id text, alias_sku text, active boolean) on commit drop;
+      create temporary table product_shadow_skus(product_id text, shadow_sku text, merchant_sku text, marketplace_sku text, channel_sku text, active boolean) on commit drop;
       insert into products values ('p1','SKU1','{"shopifyId":"gid://shopify/Product/123"}');
       insert into product_aliases values ('p1','ALIAS1',true),('p1','OLD',false);`);
     for (const includeMarketplaceIds of [false, true, undefined]) {
@@ -33,7 +34,11 @@ async function main() {
       assert.equal((await context.readProductsByKeys(['OLD'], { includeMarketplaceIds })).length, 0);
       assert.equal((await context.readProductsByKeys(['123'], { includeMarketplaceIds })).length, includeMarketplaceIds === false ? 0 : 1);
     }
-    console.log('Product key query tests passed: exact IDs, SKUs, aliases and optional marketplace IDs.');
+    assert.equal((await context.readProductsByKeys(['p1'], { directProductIds: true })).length, 1);
+    assert.equal((await context.readProductsByKeys(['SKU1'], { directProductIds: true })).length, 0);
+    assert.equal((await context.readProductsByKeys(['alias1'], { directProductIds: true })).length, 0);
+    assert.equal((await context.readProductsByKeys(['123'], { directProductIds: true })).length, 0);
+    console.log('Product key query tests passed: exact IDs, direct-ID hydration, SKUs, aliases and optional marketplace IDs.');
   } finally {
     await client.query('rollback');
     await client.end();

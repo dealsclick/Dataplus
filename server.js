@@ -40761,7 +40761,7 @@ async function fulfillmentProductFamilyForOrderedSku(importedSku = "", db = {}, 
     ...(similarity?.members || []).map((member) => member.productId)
   ].filter(Boolean))];
   const hydrated = familyKeys.length
-    ? await postgres.readProductsByKeys(familyKeys, { includeMarketplaceIds: false, includeInventoryLevels: true, includeVendorOffers: true })
+    ? await postgres.readProductsByKeys(familyKeys, { directProductIds: true, includeMarketplaceIds: false, includeInventoryLevels: true, includeVendorOffers: true })
     : [];
   const byId = new Map(hydrated.map((member) => [String(member.id || ""), member]));
   const products = [product, ...hydrated]
@@ -43521,7 +43521,7 @@ async function outboundInventoryProductForWarehouse(db = {}, scannedProduct = {}
     ...(similarity?.members || []).map((member) => member.productId)
   ].filter(Boolean))];
   const hydrated = familyKeys.length
-    ? await postgres.readProductsByKeys(familyKeys, { includeMarketplaceIds: false, includeInventoryLevels: true })
+    ? await postgres.readProductsByKeys(familyKeys, { directProductIds: true, includeMarketplaceIds: false, includeInventoryLevels: true })
     : [];
   const candidates = [scannedProduct, ...hydrated]
     .filter((product, index, all) => product?.id && all.findIndex((entry) => String(entry.id || "") === String(product.id || "")) === index)

@@ -17221,43 +17221,48 @@ async function readProductsByKeys(keys = [], options = {}) {
     .filter(Boolean))];
   if (!normalized.length) return [];
   await initRelationalSchema();
-  const lowerKeys = normalized.map((key) => key.toLowerCase());
-  const legacyKeys = normalized.map((key) => key.match(/\/Product\/(\d+)$/)?.[1] || key).filter(Boolean);
-  const lowerLegacyKeys = [...new Set(legacyKeys.map((key) => String(key).toLowerCase()))];
-  const marketplaceIdMatches = options.includeMarketplaceIds === false ? "" : `
-      union
-      select product_id from products where lower(coalesce(raw ->> 'shopifyId', '')) = any($1)
-      union
-      select product_id
+  let result;
+  if (options.directProductIds === true) {
+    result = await client.query("select * from products where product_id = any($1::text[])", [normalized]);
+  } else {
+    const lowerKeys = normalized.map((key) => key.toLowerCase());
+    const legacyKeys = normalized.map((key) => key.match(/\/Product\/(\d+)$/)?.[1] || key).filter(Boolean);
+    const lowerLegacyKeys = [...new Set(legacyKeys.map((key) => String(key).toLowerCase()))];
+    const marketplaceIdMatches = options.includeMarketplaceIds === false ? "" : `
+        union
+        select product_id from products where lower(coalesce(raw ->> 'shopifyId', '')) = any($1)
+        union
+        select product_id
+        from products
+        where lower(regexp_replace(coalesce(raw ->> 'shopifyId', ''), '^.*/Product/', '')) = any($2)
+    `;
+    result = await client.query(`
+      with matched_product_ids as (
+        select product_id from products where lower(product_id) = any($1)
+        union
+        select product_id from products where lower(sku) = any($1)
+        ${marketplaceIdMatches}
+        union
+        select product_id
+        from product_aliases
+        where lower(alias_sku) = any($1)
+          and active = true
+        union
+        select product_id
+        from product_shadow_skus
+        where active = true
+          and (
+            lower(shadow_sku) = any($1)
+            or lower(coalesce(merchant_sku, '')) = any($1)
+            or lower(coalesce(marketplace_sku, '')) = any($1)
+            or lower(coalesce(channel_sku, '')) = any($1)
+          )
+      )
+      select products.*
       from products
-      where lower(regexp_replace(coalesce(raw ->> 'shopifyId', ''), '^.*/Product/', '')) = any($2)
-  `;
-  const result = await client.query(`
-    with matched_product_ids as (
-      select product_id from products where lower(product_id) = any($1)
-      union
-      select product_id from products where lower(sku) = any($1)
-      ${marketplaceIdMatches}
-      union
-      select product_id
-      from product_aliases
-      where lower(alias_sku) = any($1)
-        and active = true
-      union
-      select product_id
-      from product_shadow_skus
-      where active = true
-        and (
-          lower(shadow_sku) = any($1)
-          or lower(coalesce(merchant_sku, '')) = any($1)
-          or lower(coalesce(marketplace_sku, '')) = any($1)
-          or lower(coalesce(channel_sku, '')) = any($1)
-        )
-    )
-    select products.*
-    from products
-    join matched_product_ids using (product_id)
-  `, options.includeMarketplaceIds === false ? [lowerKeys] : [lowerKeys, lowerLegacyKeys]);
+      join matched_product_ids using (product_id)
+    `, options.includeMarketplaceIds === false ? [lowerKeys] : [lowerKeys, lowerLegacyKeys]);
+  }
   const products = result.rows.map(productRowToState);
   const productIds = products.map((product) => product.id).filter(Boolean);
   if (!productIds.length) return products;
