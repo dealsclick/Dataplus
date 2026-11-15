@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 const postgres = require("../db");
 
@@ -17,6 +19,15 @@ const vendors = [
   { id: "rjs", name: "RJS", purchaseOrderRules: { sourcingPriority: 2 } },
   { id: "do-it-best", name: "Do It Best", purchaseOrderRules: { sourcingPriority: 3 } },
 ];
+
+test("fulfillment routing uses indexed identity resolution before direct family hydration", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../server.js"), "utf8");
+  const start = source.indexOf("async function fulfillmentProductFamilyForOrderedSku(");
+  const end = source.indexOf("\nasync function fulfillmentProductForOrderedSku(", start);
+  const implementation = source.slice(start, end);
+  assert.match(implementation, /readProductsForOrderSkus\([\s\S]+\{ fast: true \}\)/);
+  assert.match(implementation, /readProductsByKeys\(familyKeys, \{ directProductIds: true,/);
+});
 
 test("RJ Schinner canonical supplier name inherits the RJS default priority", () => {
   const db = { vendors: [{ id: "rj-schinner", name: "RJ Schinner Company", purchaseOrderRules: {} }] };

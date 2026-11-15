@@ -40733,7 +40733,7 @@ async function fulfillmentProductFamilyForOrderedSku(importedSku = "", db = {}, 
     ...lineLookupValues.upcs,
     ...lineLookupValues.manufacturerSkus,
     ...lineLookupValues.supplierSkus
-  ])]);
+  ])], { fast: true });
   const selected = selectImportedOrderProduct(db, candidates, orderedSku, line);
   let product = selected ? await postgres.readProductByKey(selected.product.id || selected.product.sku) : null;
   if (!product) {
