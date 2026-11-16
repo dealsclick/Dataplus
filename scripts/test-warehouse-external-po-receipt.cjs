@@ -34,6 +34,8 @@ assert.match(server, /detectedOpenPurchaseOrders/, 'completed manual receipts re
 assert.match(server, /syncPurchaseOrderReceivingProgress\(audit\)/, 'linked PO scans publish live receiving progress');
 assert.match(server, /activeReceivers/, 'linked PO progress identifies users active in the shared receiving session');
 assert.match(server, /lineProgress:\s*countedLines\.map/, 'linked PO progress preserves scanned quantities by line for the PO detail');
+assert.match(server, /purchaseOrderReceivingExtraItemsFromAudit/, 'linked PO progress identifies extra scanned items before receipt posting');
+assert.match(server, /extraItemUnits:\s*extraItems\.reduce/, 'linked PO progress publishes its extra-unit total to the PO detail');
 assert.match(server, /function closePurchaseOrderRecord[\s\S]*Finish the receipt before closing this PO/, 'closing a PO is blocked while receiving scans are not posted');
 assert.match(server, /function reopenPurchaseOrderRecord[\s\S]*activeAudit[\s\S]*nextStatus = "receiving"/, 'reopening a PO with an active audit restores the receiving lifecycle');
 assert.doesNotMatch(server, /action === "reopen"\) \{\s*po\.status = "draft"/, 'reopening an operational PO no longer resets it to an unapproved draft');
@@ -66,6 +68,7 @@ assert.match(warehouseUi, /compressEvidenceImage/, 'packing-slip photos are comp
 assert.match(warehouseUi, /Packing slip optional/, 'the UI explains that packing-slip evidence is optional');
 assert.doesNotMatch(warehouseUi, /Add at least one packing-slip photo or file before finishing this receipt/, 'the UI does not block completion without a packing slip');
 assert.match(warehouseUi, /Extra item[\s\S]*Expected on another open PO/, 'linked PO receiving flags extra items and shows other open PO expectations');
+assert.match(warehouseUi, /purchaseOrderUrl\(current\.linkedPurchaseOrderNumber, current\.linkedPurchaseOrderId\)/, 'the linked PO reference inside the audit opens its purchase-order detail');
 assert.match(warehouseUi, /This is not an inventory-availability warning/, 'the extra-unit warning distinguishes an unexpected PO line from missing inventory');
 assert.match(warehouseUi, /Math\.floor\(remaining \/ inventoryMultiplier\)/, 'piece scans are converted into complete PO pack units before receipt posting');
 assert.match(warehouseUi, /sm:!max-w-6xl/, 'the finish-receiving workflow uses a wide desktop dialog');
@@ -106,6 +109,7 @@ assert.match(purchasingUi, /Receiving now[\s\S]*Receipt not posted yet/, 'the pu
 assert.match(purchasingUi, /Active: \$\{activeUsers\.join/, 'the purchasing queue identifies all users active on a PO');
 assert.match(purchaseOrderUi, /PO receiving in progress[\s\S]*activeReceivingAudit\.scannedUnits/, 'the PO detail displays live scan progress');
 assert.match(purchaseOrderUi, /scanned, not (?:yet )?posted/, 'the PO detail distinguishes pending scanner progress from posted receipt quantities');
+assert.match(purchaseOrderUi, /Extra items received with this PO[\s\S]*Scanned, not posted[\s\S]*Received as extra/, 'the PO detail displays extra items before and after receipt posting');
 assert.match(purchaseOrderUi, /<TableHead[^>]*>Ordered<\/TableHead>[\s\S]*<TableHead[^>]*>Scanned<\/TableHead>[\s\S]*<TableHead[^>]*>Received<\/TableHead>/, 'desktop PO quantities use separate ordered, scanned, and received columns');
 assert.match(purchaseOrderUi, /Reopen PO[\s\S]*Close PO/, 'desktop and mobile PO detail expose guarded reopen and close actions');
 assert.match(purchaseOrderUi, /statusChangeAction === "reopen" && !statusChangeNote\.trim\(\)/, 'reopening a PO requires an operator reason');

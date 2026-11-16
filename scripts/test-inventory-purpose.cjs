@@ -5,6 +5,7 @@ const {
   normalizeLiveInventoryChannel,
   purchaseOrderPurposeForOrders,
   purchaseOrderPurposeForRecord,
+  purchaseOrderReceivingProgressFromAudit,
   createManualPurchaseOrder,
   createPurchaseOrderFromOrders
 } = require("../server");
@@ -23,6 +24,26 @@ assert.equal(normalizeInventoryPurpose("orders"), "customer_orders");
 assert.equal(normalizeInventoryPurpose("live orders"), "live_selling");
 assert.equal(normalizeLiveInventoryChannel("TikTok Shop"), "tiktok_live");
 assert.equal(normalizeLiveInventoryChannel("eBay Live"), "ebay_live");
+
+{
+  const progress = purchaseOrderReceivingProgressFromAudit({
+    id: "audit-221",
+    auditNumber: "AUDIT-221",
+    reason: "purchase_order_receipt",
+    linkedPurchaseOrderNumber: "PO#136766",
+    purchaseOrderExpectedLines: [{ id: "ordered-1", sku: "BUS-ORDERED", expectedQty: 20, inventoryMultiplier: 1 }],
+    lines: [
+      { id: "scan-ordered", sku: "BUS-ORDERED", title: "Ordered item", countedQty: 20 },
+      { id: "scan-extra-1", sku: "BUS-EXTRA-1", title: "Extra one", countedQty: 55, selectedSupplierCost: 17.89 },
+      { id: "scan-extra-2", sku: "BUS-EXTRA-2", title: "Extra two", countedQty: 2, selectedSupplierCost: 488.25 },
+      { id: "scan-extra-3", sku: "BUS-EXTRA-3", title: "Extra three", countedQty: 1 }
+    ]
+  });
+  assert.equal(progress.extraItemUnits, 58);
+  assert.equal(progress.extraItems.length, 3);
+  assert.deepEqual(progress.extraItems.map((item) => item.qtyReceived), [55, 2, 1]);
+  assert.equal(progress.extraItems[0].unitCost, 17.89);
+}
 
 assert.deepEqual(purchaseOrderPurposeForOrders([{ channelType: "shopify" }]), {
   inventoryPurpose: "customer_orders",
@@ -52,12 +73,15 @@ assert.deepEqual(purchaseOrderPurposeForOrders([{ salesOrigin: "tiktok_live" }])
 
 {
   const db = baseDb();
-  assert.throws(() => createManualPurchaseOrder(db, {
+  const unassignedLivePo = createManualPurchaseOrder(db, {
     vendorId: "vendor-1",
     warehouseId: "warehouse-1",
     inventoryPurpose: "live_selling",
     items: [{ sku: "SKU-2", title: "Live item", qty: 1, estimatedUnitCost: 15 }]
-  }), /Choose eBay Live or TikTok Live/);
+  });
+  assert.equal(unassignedLivePo.inventoryPurpose, "live_selling");
+  assert.equal(unassignedLivePo.liveChannel, "");
+  assert.equal(unassignedLivePo.liveChannelLabel, "");
 
   const po = createManualPurchaseOrder(db, {
     vendorId: "vendor-1",

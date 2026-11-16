@@ -1286,6 +1286,8 @@ function buildLinkedPurchaseOrderReceiptItems(
       items.push({
         sku,
         title: String(line.title || sku || line.barcode || "Extra item"),
+        supplierName: String(line.selectedSupplierName || line.supplierName || audit.supplierName || ""),
+        unitCost: line.selectedSupplierCost ?? line.cost ?? line.unitCost ?? null,
         barcode: String(line.barcode || line.upc || line.selectedSupplierUpc || ""),
         upc: String(line.upc || line.barcode || line.selectedSupplierUpc || ""),
         manufacturerSku: String(line.manufacturerSku || line.mfrPartNumber || ""),
@@ -2862,7 +2864,7 @@ function WarehouseAuditPanel({
                   )}
                   {isLiveSellingAudit && <Badge variant="outline" className="border-pink-500/40 bg-pink-500/10 text-pink-700 dark:text-pink-300"><Store className="mr-1 size-3" />{String(current.liveChannelLabel || (current.liveChannel === "tiktok_live" ? "TikTok Live" : "eBay Live"))}</Badge>}
                   {String(current.externalPurchaseOrderNumber || "") && <Badge variant="outline">External PO {String(current.externalPurchaseOrderNumber)}</Badge>}
-                  {String(current.linkedPurchaseOrderNumber || "") && <Badge variant="outline">DataPlus PO {String(current.linkedPurchaseOrderNumber)}</Badge>}
+                  {String(current.linkedPurchaseOrderNumber || "") && <a href={purchaseOrderUrl(current.linkedPurchaseOrderNumber, current.linkedPurchaseOrderId)}><Badge variant="outline" className="cursor-pointer hover:bg-muted">DataPlus PO {String(current.linkedPurchaseOrderNumber)} <ExternalLink className="ml-1 size-3" /></Badge></a>}
                   {isReceivingAudit && activeReceivingParticipants.map((participant) => <Badge key={String(participant.user)} variant="success"><Users className="mr-1 size-3" />{String(participant.user)} active</Badge>)}
                   {auditDisposition && <Badge variant="secondary">{String(auditDisposition.label || "Inventory outcome applied")}</Badge>}
                   {Boolean(auditDisposition?.supplierReturnNumber) && <Badge variant="outline">{String(auditDisposition?.supplierReturnNumber)} draft</Badge>}

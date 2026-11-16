@@ -13697,7 +13697,6 @@ function createManualPurchaseOrder(db, options = {}) {
 
   const inventoryPurpose = normalizeInventoryPurpose(options.inventoryPurpose || options.purpose, "stock");
   const liveChannel = inventoryPurpose === "live_selling" ? normalizeLiveInventoryChannel(options.liveChannel) : "";
-  if (inventoryPurpose === "live_selling" && !liveChannel) throw new Error("Choose eBay Live or TikTok Live for a live-orders purchase order.");
   const purpose = { inventoryPurpose, liveChannel };
   const items = applyInventoryPurposeToPoLines(normalizeManualPurchaseOrderItems(options.items, { allowIncompleteDraft }), purpose);
   if (!allowIncompleteDraft && !items.length) throw new Error("Add at least one item to the purchase order.");
@@ -49082,12 +49081,62 @@ function purchaseOrderReceivingParticipants(audit = {}) {
   return participants;
 }
 
+function purchaseOrderReceivingLineMatch(auditLine = {}, expectedLine = {}) {
+  const skuKeys = new Set([auditLine.sku, auditLine.selectedSupplierSku].flatMap(externalOperationalPoIdentifierKeys));
+  if (externalOperationalPoIdentifierKeys(expectedLine.sku).some((key) => skuKeys.has(key))) return true;
+  const vendorKeys = new Set([auditLine.selectedVendorSku, auditLine.vendorSku].flatMap(externalOperationalPoIdentifierKeys));
+  if (externalOperationalPoIdentifierKeys(expectedLine.vendorItemNumber).some((key) => vendorKeys.has(key))) return true;
+  const upcKeys = new Set([auditLine.selectedSupplierUpc, auditLine.barcode, auditLine.upc].flatMap(externalOperationalPoIdentifierKeys));
+  return externalOperationalPoIdentifierKeys(expectedLine.upc).some((key) => upcKeys.has(key));
+}
+
+function purchaseOrderReceivingExtraItemsFromAudit(audit = {}) {
+  const expectedLines = Array.isArray(audit.purchaseOrderExpectedLines) ? audit.purchaseOrderExpectedLines : [];
+  const countedLines = (Array.isArray(audit.lines) ? audit.lines : [])
+    .filter((line) => Number(line.countedQty || 0) > 0 && String(line.reviewStatus || "").toLowerCase() !== "excluded");
+  const allocatedByExpectedId = new Map();
+  const extraItems = [];
+  for (const line of countedLines) {
+    let remaining = Number(line.countedQty || 0);
+    for (const expected of expectedLines.filter((candidate) => purchaseOrderReceivingLineMatch(line, candidate))) {
+      if (remaining <= 0) break;
+      const expectedId = String(expected.id || expected.lineIndex || expected.sku || "");
+      const available = Math.max(0, Number(expected.expectedQty || 0) - Number(allocatedByExpectedId.get(expectedId) || 0));
+      const inventoryMultiplier = Math.max(1, Number(expected.inventoryMultiplier || 1));
+      const allocatedPurchaseUnits = Math.min(Math.floor(remaining / inventoryMultiplier), available);
+      if (allocatedPurchaseUnits <= 0) continue;
+      allocatedByExpectedId.set(expectedId, Number(allocatedByExpectedId.get(expectedId) || 0) + allocatedPurchaseUnits);
+      remaining -= allocatedPurchaseUnits * inventoryMultiplier;
+    }
+    if (remaining <= 0) continue;
+    const selectedCost = line.selectedSupplierCost ?? line.cost ?? line.unitCost;
+    extraItems.push({
+      sku: String(line.sku || "").trim(),
+      title: String(line.title || line.productTitle || line.sku || line.barcode || "Extra item"),
+      qtyReceived: remaining,
+      barcode: String(line.barcode || line.upc || line.selectedSupplierUpc || ""),
+      upc: String(line.upc || line.barcode || line.selectedSupplierUpc || ""),
+      manufacturerSku: String(line.manufacturerSku || line.mfrPartNumber || line.selectedManufacturerSku || ""),
+      vendorSku: String(line.selectedVendorSku || line.vendorSku || ""),
+      supplierName: String(line.selectedSupplierName || line.supplierName || audit.supplierName || ""),
+      unitCost: selectedCost !== null && selectedCost !== undefined && selectedCost !== "" && Number.isFinite(Number(selectedCost)) ? Number(selectedCost) : null,
+      locationBin: String(line.locationBin || ""),
+      sourceAuditLineId: String(line.id || line.productId || ""),
+      extraItem: true,
+      extraItemStatus: "unexpected_on_selected_po",
+      varianceNote: `Not ordered on ${String(audit.linkedPurchaseOrderNumber || "the selected PO")}.`
+    });
+  }
+  return extraItems;
+}
+
 function purchaseOrderReceivingProgressFromAudit(audit = {}) {
   const countedLines = (Array.isArray(audit.lines) ? audit.lines : []).filter((line) => Number(line.countedQty || 0) > 0);
   const unknownBarcodes = (Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes : []).filter((entry) => Number(entry.count || 0) > 0);
   const scannedUnits = countedLines.reduce((sum, line) => sum + Number(line.countedQty || 0), 0);
   const unknownUnits = unknownBarcodes.reduce((sum, entry) => sum + Number(entry.count || 0), 0);
   const documents = Array.isArray(audit.receivingDocuments) ? audit.receivingDocuments : [];
+  const extraItems = purchaseOrderReceivingExtraItemsFromAudit(audit);
   const receivers = purchaseOrderReceivingParticipants(audit);
   const activeCutoff = Date.now() - PURCHASE_ORDER_RECEIVING_ACTIVE_MS;
   const activeReceivers = receivers.filter((entry) => {
@@ -49109,6 +49158,8 @@ function purchaseOrderReceivingProgressFromAudit(audit = {}) {
     matchedUnits: scannedUnits,
     unknownUnits,
     scannedSkuCount: countedLines.length,
+    extraItemUnits: extraItems.reduce((sum, item) => sum + Number(item.qtyReceived || 0), 0),
+    extraItems,
     lineProgress: countedLines.map((line) => ({
       sku: String(line.sku || ""),
       title: String(line.title || line.productTitle || line.sku || ""),
@@ -65443,6 +65494,21 @@ async function handleApi(req, res) {
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
+    if (po.activeReceivingAudit?.auditId) {
+      const activeAudit = await postgres.readWarehouseAudit(String(po.activeReceivingAudit.auditId)).catch(() => null);
+      if (activeAudit
+        && String(activeAudit.reason || "") === "purchase_order_receipt"
+        && String(activeAudit.linkedPurchaseOrderId || "") === String(po.id || "")
+        && ["in_progress", "pending_review"].includes(String(activeAudit.status || "").toLowerCase())) {
+        const previousProgress = po.activeReceivingAudit;
+        const refreshedProgress = purchaseOrderReceivingProgressFromAudit(activeAudit);
+        po.activeReceivingAudit = refreshedProgress;
+        if (Number(previousProgress.extraItemUnits || 0) !== Number(refreshedProgress.extraItemUnits || 0)
+          || JSON.stringify(previousProgress.extraItems || []) !== JSON.stringify(refreshedProgress.extraItems || [])) {
+          await postgres.updatePurchaseOrderReceivingProgress(po.id, refreshedProgress);
+        }
+      }
+    }
     const linkedOrderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
     const [linkedOrders, db] = await Promise.all([
       postgres.readOrdersByIds(linkedOrderIds),
@@ -65847,7 +65913,6 @@ async function handleApi(req, res) {
       const liveChannel = inventoryPurpose === "live_selling"
         ? normalizeLiveInventoryChannel(body.liveChannel !== undefined ? body.liveChannel : previousPurpose.liveChannel)
         : "";
-      if (inventoryPurpose === "live_selling" && !liveChannel) return sendJson(res, 400, { error: "Choose eBay Live or TikTok Live for a live-orders purchase order." });
       amendmentNeeded = amendmentNeeded || committed
         && (previousPurpose.inventoryPurpose !== inventoryPurpose || previousPurpose.liveChannel !== liveChannel);
       po.inventoryPurpose = inventoryPurpose;
@@ -66828,6 +66893,8 @@ async function handleApi(req, res) {
         routeId: String(poLine?.routeId || line.routeId || ""),
         orderId: String(poLine?.orderId || ""),
         title: product?.title || poLine?.title || sku,
+        supplierName: String(line.supplierName || product?.supplier || po.supplier || ""),
+        unitCost: line.unitCost ?? line.cost ?? poLine?.estimatedUnitCost ?? poLine?.unitCost ?? poLine?.cost ?? product?.cost ?? null,
         inventoryPurpose: normalizeInventoryPurpose(poLine?.inventoryPurpose, poPurpose.inventoryPurpose),
         liveChannel: normalizeLiveInventoryChannel(poLine?.liveChannel || poPurpose.liveChannel),
         qtyReceived,
@@ -78902,7 +78969,6 @@ async function handleApi(req, res) {
       const liveChannel = inventoryPurpose === "live_selling"
         ? normalizeLiveInventoryChannel(body.liveChannel !== undefined ? body.liveChannel : previousPurpose.liveChannel)
         : "";
-      if (inventoryPurpose === "live_selling" && !liveChannel) return sendJson(res, 400, { error: "Choose eBay Live or TikTok Live for a live-orders purchase order." });
       Object.assign(po, {
         inventoryPurpose,
         inventoryPurposeLabel: INVENTORY_PURPOSE_LABELS[inventoryPurpose],
@@ -79200,6 +79266,8 @@ async function handleApi(req, res) {
         routeId: String(poLine?.routeId || line.routeId || ""),
         orderId: String(poLine?.orderId || ""),
         title: product?.title || poLine?.title || sku,
+        supplierName: String(line.supplierName || product?.supplier || po.supplier || ""),
+        unitCost: line.unitCost ?? line.cost ?? poLine?.estimatedUnitCost ?? poLine?.unitCost ?? poLine?.cost ?? product?.cost ?? null,
         qtyReceived,
         receivedBy: receivingContributors.map((entry) => entry.user).join(", "),
         receivingContributors,
@@ -82081,6 +82149,7 @@ module.exports = {
   purchaseOrderCatalogAddition,
   manualPurchaseOrderDraftIssues,
   validatePurchaseOrderReceiptLines,
+  purchaseOrderReceivingProgressFromAudit,
   openPurchaseOrderExpectationsFromState,
   applyUnresolvedPurchaseOrderReceipt,
   parseExternalOperationalPoText,
