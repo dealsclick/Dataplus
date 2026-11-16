@@ -32956,13 +32956,85 @@ function externalOperationalPoIdentifierKeys(value = "") {
   return [...new Set([exact, withoutLeadingZeros].filter(Boolean))];
 }
 
+function warehouseAuditSupplierIdentity(value = "") {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function purchaseOrderAuditExpectedLine(audit = {}, product = {}, barcode = "") {
+  const expectedLines = Array.isArray(audit.purchaseOrderExpectedLines) ? audit.purchaseOrderExpectedLines : [];
+  const productSku = String(product.sku || "").trim().toLowerCase();
+  const exactSkuLine = productSku
+    ? expectedLines.find((line) => String(line.sku || "").trim().toLowerCase() === productSku)
+    : null;
+  if (exactSkuLine) return exactSkuLine;
+  const identifiers = new Set([
+    barcode,
+    product.sku,
+    product.upc,
+    product.barcode,
+    product.gtin,
+    product.vendorSku,
+    product.sourceSku,
+    product.mfrPartNumber,
+    product.manufacturerPartNumber,
+    product.mpn
+  ].flatMap(externalOperationalPoIdentifierKeys));
+  if (!identifiers.size) return null;
+  return expectedLines.find((line) => [line.sku, line.upc, line.barcode, line.vendorItemNumber, line.manufacturerSku]
+    .some((value) => externalOperationalPoIdentifierKeys(value).some((identifier) => identifiers.has(identifier)))) || null;
+}
+
+function purchaseOrderAuditSupplierSelection(audit = {}, expectedLine = null, product = {}, sourceItem = {}, currentLine = {}, context = {}) {
+  if (String(audit.reason || "") !== "purchase_order_receipt") return {};
+  const supplierName = String(expectedLine?.supplierName || audit.supplierName || "").trim();
+  const supplierId = String(expectedLine?.supplierId || audit.supplierId || "").trim();
+  if (!supplierName && !supplierId) return {};
+  const supplierIdentity = warehouseAuditSupplierIdentity(supplierName);
+  const matchingSource = [sourceItem, product].find((candidate) => {
+    const candidateName = candidate?.supplier || candidate?.supplierName || candidate?.vendor || "";
+    return supplierIdentity && warehouseAuditSupplierIdentity(candidateName) === supplierIdentity;
+  }) || {};
+  const supplierCode = String(expectedLine?.supplierCode || matchingSource.supplierCode || "").trim();
+  const expectedCost = expectedLine?.unitCost;
+  const matchingCost = matchingSource.cost ?? matchingSource.unitCost;
+  const selectedCost = expectedCost !== null && expectedCost !== undefined && expectedCost !== ""
+    ? Number(expectedCost)
+    : matchingCost !== null && matchingCost !== undefined && matchingCost !== ""
+      ? Number(matchingCost)
+      : null;
+  const selectedQty = matchingSource.qty ?? matchingSource.stockQty;
+  const selectedAt = String(currentLine.supplierSelectedAt || context.now || new Date().toISOString());
+  const selectedBy = String(currentLine.supplierSelectedBy || context.actor || "DataPlus PO").trim();
+  return {
+    selectedSupplierKey: `purchase-order:${supplierId || supplierIdentity}`,
+    selectedSupplierId: supplierId,
+    selectedSupplierName: supplierName || String(matchingSource.supplier || matchingSource.vendor || "").trim(),
+    selectedSupplierCode: supplierCode,
+    selectedSupplierSku: String(expectedLine?.supplierSku || matchingSource.sourceSku || expectedLine?.sku || product.sku || "").trim(),
+    selectedVendorSku: String(expectedLine?.vendorItemNumber || matchingSource.vendorSku || "").trim(),
+    selectedManufacturerSku: String(expectedLine?.manufacturerSku || matchingSource.mfrPartNumber || product.mfrPartNumber || product.manufacturerPartNumber || product.mpn || "").trim(),
+    selectedSupplierUpc: String(expectedLine?.upc || matchingSource.upc || matchingSource.barcode || matchingSource.gtin || product.upc || product.barcode || product.gtin || "").trim(),
+    selectedSupplierCost: Number.isFinite(selectedCost) ? selectedCost : null,
+    selectedSupplierQty: selectedQty === null || selectedQty === undefined || selectedQty === "" || !Number.isFinite(Number(selectedQty)) ? null : Number(selectedQty),
+    selectedSupplierMatchType: "purchase-order",
+    selectedSupplierIndexed: true,
+    supplierName,
+    supplierInheritedFromPurchaseOrder: true,
+    supplierInheritedPurchaseOrderId: String(audit.linkedPurchaseOrderId || "").trim(),
+    supplierInheritedPurchaseOrderNumber: String(audit.linkedPurchaseOrderNumber || expectedLine?.poNumber || "").trim(),
+    supplierSelectedAt: selectedAt,
+    supplierSelectedBy: selectedBy
+  };
+}
+
 async function resolveWarehouseAuditBarcode(audit = {}, barcode = "") {
   let lookup = await resolveScannedCatalogBarcode(barcode);
   if (!["purchase_order_receipt", "po_recount"].includes(String(audit.reason || ""))) return lookup;
   const scannedIdentifiers = new Set(externalOperationalPoIdentifierKeys(barcode));
   const expectedLine = (audit.purchaseOrderExpectedLines || []).find((line) => [line.sku, line.upc, line.barcode, line.vendorItemNumber, line.manufacturerSku]
     .some((value) => externalOperationalPoIdentifierKeys(value).some((identifier) => scannedIdentifiers.has(identifier))));
-  if (!expectedLine?.sku || String(lookup.product?.sku || "").toLowerCase() === String(expectedLine.sku).toLowerCase()) return lookup;
+  if (!expectedLine?.sku) return lookup;
+  if (String(lookup.product?.sku || "").toLowerCase() === String(expectedLine.sku).toLowerCase()) return { ...lookup, purchaseOrderExpectedLine: expectedLine };
   const expectedProduct = await postgres.readProductByKey(expectedLine.sku).catch(() => null);
   return expectedProduct ? { ...lookup, product: expectedProduct, purchaseOrderExpectedLine: expectedLine } : lookup;
 }
@@ -60000,6 +60072,8 @@ async function handleApi(req, res) {
         purchaseUnitSuffix ? Number(purchaseUnitSuffix[1] || 1) : 1,
         purchaseUnitSuffix ? purchaseReceiptInventoryMultiplier(product) : 1
       );
+      const productMatchesSupplier = warehouseAuditSupplierIdentity(product.supplier || product.vendor) === warehouseAuditSupplierIdentity(supplierName);
+      const rawUnitCost = line.estimatedUnitCost ?? line.unitCost ?? line.cost;
       return {
         id: String(line.id || `${linkedPurchaseOrder.id}:${lineIndex}`),
         lineIndex,
@@ -60007,9 +60081,14 @@ async function handleApi(req, res) {
         sku: String(line.sku || ""),
         title: String(line.title || product.title || line.sku || ""),
         description: String(line.title || product.title || line.sku || ""),
-        vendorItemNumber: String(line.sourceItemNumber || line.vendorSku || product.vendorSku || ""),
+        vendorItemNumber: String(line.sourceItemNumber || line.vendorSku || (productMatchesSupplier ? product.vendorSku : "") || ""),
         manufacturerSku: String(line.manufacturerSku || line.mfrPartNumber || product.mfrPartNumber || product.manufacturerPartNumber || product.mpn || ""),
         upc: String(line.upc || line.barcode || product.upc || product.barcode || product.gtin || ""),
+        supplierId,
+        supplierName,
+        supplierCode: String(line.supplierCode || linkedPurchaseOrder.supplierCode || (productMatchesSupplier ? product.supplierCode : "") || ""),
+        supplierSku: String(line.sourceSku || line.supplierSku || (productMatchesSupplier ? product.sourceSku : "") || line.sku || ""),
+        unitCost: rawUnitCost === null || rawUnitCost === undefined || rawUnitCost === "" || !Number.isFinite(Number(rawUnitCost)) ? null : Number(rawUnitCost),
         orderedQty: Number(line.qty || 0),
         receivedQty: Number(line.receivedQty || 0),
         expectedQty: purchaseOrderOpenQuantity(line),
@@ -60036,6 +60115,11 @@ async function handleApi(req, res) {
           vendorItemNumber: String(line.sourceItemNumber || line.vendorSku || product.vendorSku || ""),
           manufacturerSku: String(line.manufacturerSku || line.mfrPartNumber || product.mfrPartNumber || product.manufacturerPartNumber || product.mpn || ""),
           upc: String(line.upc || line.barcode || product.upc || product.barcode || product.gtin || ""),
+          supplierId,
+          supplierName,
+          supplierCode: String(line.supplierCode || linkedPurchaseOrder.supplierCode || product.supplierCode || ""),
+          supplierSku: String(line.sourceSku || line.supplierSku || product.sourceSku || line.sku || ""),
+          unitCost: Number.isFinite(Number(line.estimatedUnitCost ?? line.unitCost ?? line.cost)) ? Number(line.estimatedUnitCost ?? line.unitCost ?? line.cost) : null,
           orderedQty: 0,
           receivedQty: 0,
           expectedQty: auditWarehousePhysicalQty(product, { warehouseId: warehouse.id, warehouseName: warehouse.name }),
@@ -60584,6 +60668,7 @@ async function handleApi(req, res) {
       const currentLine = (audit.lines || []).find((entry) => String(entry.productId || entry.sku) === String(product.id || product.sku) && String(entry.locationBin || "").trim().toLowerCase() === resolvedLocationBin.toLowerCase());
       const supplierCount = Math.max(0, Number(product.supplierCount || 0), Number(lookup.sourceItem?.supplierCount || 0), Number(scanSupplierCoverage?.supplierCount || 0));
       const possibleSupplierCount = Math.max(supplierCount, Number(scanSupplierCoverage?.possibleSupplierCount || 0));
+      const purchaseOrderExpectedLine = lookup.purchaseOrderExpectedLine || purchaseOrderAuditExpectedLine(audit, product, barcode);
       const lineTemplate = {
         ...(currentLine || {}),
         id: currentLine?.id || crypto.randomUUID(),
@@ -60603,6 +60688,7 @@ async function handleApi(req, res) {
         possibleSupplierCount,
         hasPossibleMultipleSuppliers: Boolean(scanSupplierCoverage?.hasPossibleMultipleSuppliers || possibleSupplierCount >= 2),
         supplierCoverageMatchType: String(scanSupplierCoverage?.supplierCoverageMatchType || coverageProduct?.supplierCoverageMatchType || ""),
+        ...purchaseOrderAuditSupplierSelection(audit, purchaseOrderExpectedLine, product, lookup.sourceItem || {}, currentLine || {}, { now, actor: receivingActor }),
         firstScannedAt: currentLine?.firstScannedAt || now,
         lastScannedAt: now,
         reviewStatus: "unreviewed"

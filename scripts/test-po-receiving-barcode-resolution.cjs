@@ -21,8 +21,8 @@ function functionSource(name) {
 }
 
 const products = new Map([
-  ['BUS142523TRV', { id: 'trv-142523', sku: 'BUS142523TRV', title: 'Expected True Value product' }],
-  ['BUS210787TRV', { id: 'trv-210787', sku: 'BUS210787TRV', title: 'Expected True Value product' }],
+  ['BUS142523TRV', { id: 'trv-142523', sku: 'BUS142523TRV', title: 'Expected True Value product', supplier: 'True Value', supplierCode: 'TRV', vendorSku: '142523', sourceSku: 'BUS142523TRV', cost: 19.25 }],
+  ['BUS210787TRV', { id: 'trv-210787', sku: 'BUS210787TRV', title: 'Expected True Value product', supplier: 'True Value', supplierCode: 'TRV', vendorSku: '210787', sourceSku: 'BUS210787TRV', cost: 12.5 }],
 ]);
 const context = {
   Set,
@@ -37,14 +37,22 @@ vm.createContext(context);
 vm.runInContext([
   functionSource('externalOperationalPoIdentifierKey'),
   functionSource('externalOperationalPoIdentifierKeys'),
+  functionSource('warehouseAuditSupplierIdentity'),
+  functionSource('purchaseOrderAuditExpectedLine'),
+  functionSource('purchaseOrderAuditSupplierSelection'),
   functionSource('resolveWarehouseAuditBarcode'),
 ].join('\n'), context);
 
 const audit = {
+  id: 'audit-221',
   reason: 'purchase_order_receipt',
+  supplierId: 'true-value-id',
+  supplierName: 'True Value',
+  linkedPurchaseOrderId: 'po-136766-id',
+  linkedPurchaseOrderNumber: 'PO#136766',
   purchaseOrderExpectedLines: [
-    { sku: 'BUS142523TRV', upc: '45242749416' },
-    { sku: 'BUS210787TRV', upc: '45242167234' },
+    { sku: 'BUS142523TRV', upc: '45242749416', vendorItemNumber: '142523', manufacturerSku: '48-89-4670', unitCost: 17.75, supplierId: 'true-value-id', supplierName: 'True Value' },
+    { sku: 'BUS210787TRV', upc: '45242167234', vendorItemNumber: '210787', manufacturerSku: '48-89-2801', unitCost: 11.25, supplierId: 'true-value-id', supplierName: 'True Value' },
   ],
 };
 
@@ -56,6 +64,22 @@ const audit = {
   const second = await context.resolveWarehouseAuditBarcode(audit, '045242167234');
   assert.equal(second.product.sku, 'BUS210787TRV');
   assert.equal(second.purchaseOrderExpectedLine.sku, 'BUS210787TRV');
+
+  const alreadyCorrect = await context.resolveWarehouseAuditBarcode(audit, 'BUS142523TRV');
+  assert.equal(alreadyCorrect.product.sku, 'BUS142523TRV');
+  assert.equal(alreadyCorrect.purchaseOrderExpectedLine.sku, 'BUS142523TRV', 'the expected PO line is retained when catalog resolution already chose the correct product');
+
+  const inherited = context.purchaseOrderAuditSupplierSelection(audit, audit.purchaseOrderExpectedLines[0], products.get('BUS142523TRV'), {}, {}, { now: '2026-11-16T12:00:00.000Z', actor: 'Luis' });
+  assert.equal(inherited.selectedSupplierName, 'True Value');
+  assert.equal(inherited.selectedSupplierId, 'true-value-id');
+  assert.equal(inherited.selectedSupplierCost, 17.75, 'the purchase-order unit cost wins over the catalog cost');
+  assert.equal(inherited.selectedVendorSku, '142523');
+  assert.equal(inherited.selectedManufacturerSku, '48-89-4670');
+  assert.equal(inherited.supplierInheritedFromPurchaseOrder, true);
+
+  const extraItem = context.purchaseOrderAuditSupplierSelection(audit, null, { sku: 'BUS-OTHER', supplier: 'Different supplier', vendorSku: 'WRONG-VENDOR-SKU' }, {}, {}, { now: '2026-11-16T12:00:00.000Z', actor: 'Luis' });
+  assert.equal(extraItem.selectedSupplierName, 'True Value', 'extra items still retain the shipment supplier');
+  assert.equal(extraItem.selectedVendorSku, '', 'another supplier vendor SKU is not attributed to the PO supplier');
 
   const unrelated = await context.resolveWarehouseAuditBarcode({ reason: 'cycle_count', purchaseOrderExpectedLines: audit.purchaseOrderExpectedLines }, '045242749416');
   assert.equal(unrelated.product.sku, 'BUS495-48-89-4670ESB', 'ordinary audits keep the general catalog result');

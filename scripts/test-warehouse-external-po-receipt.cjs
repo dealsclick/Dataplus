@@ -10,11 +10,15 @@ const purchasingUi = fs.readFileSync(path.join(root, 'web', 'src', 'components',
 const purchaseOrderUi = fs.readFileSync(path.join(root, 'web', 'src', 'components', 'purchasing-workspaces.tsx'), 'utf8');
 const dialogUi = fs.readFileSync(path.join(root, 'web', 'src', 'components', 'ui', 'dialog.tsx'), 'utf8');
 const alertDialogUi = fs.readFileSync(path.join(root, 'web', 'src', 'components', 'ui', 'alert-dialog.tsx'), 'utf8');
+const poSupplierRepair = fs.readFileSync(path.join(root, 'scripts', 'repair-po-audit-supplier-inheritance.cjs'), 'utf8');
 
 assert.match(server, /external_po_receipt:\s*"External PO receipt"/, 'server accepts the external PO receipt audit reason');
 assert.doesNotMatch(server, /Enter the PO number from the external system\./, 'server allows a manual inbound receipt without an external PO identity');
 assert.match(server, /purchase_order_receipt:\s*"PO receiving"/, 'server labels linked PO work as receiving instead of a generic audit');
 assert.match(server, /purchaseOrderExpectedLines/, 'linked PO receipts save their open expected lines');
+assert.match(server, /supplierCode:[\s\S]*supplierSku:[\s\S]*unitCost:/, 'linked PO expected lines retain supplier identity, supplier SKU, and PO unit cost');
+assert.match(server, /purchaseOrderAuditSupplierSelection\(audit, purchaseOrderExpectedLine/, 'linked PO scans inherit their supplier selection from the purchase order');
+assert.match(server, /supplierInheritedFromPurchaseOrder:\s*true/, 'PO supplier inheritance is durable on each scanned line');
 assert.match(server, /existingAuditReceipt/, 'PO receipt posting is idempotent by source audit');
 assert.match(server, /sourceAuditId/, 'PO receipts retain their inbound audit identity');
 assert.match(server, /allocatePurchaseOrderReceiptInventory/, 'PO receipts can allocate newly received inventory to eligible open orders');
@@ -84,6 +88,11 @@ assert.match(warehouseUi, /receiving-progress/, 'desktop receiving shows compact
 assert.doesNotMatch(warehouseUi, /Live receiving activity/, 'desktop receiving does not duplicate the editable item list');
 assert.match(warehouseUi, /refreshReceivingActivity[\s\S]*6_000/, 'desktop receiving refreshes shared scan activity without a page reload');
 assert.match(warehouseUi, /receiving-item-title[\s\S]*truncate/, 'receiving rows prioritize a one-line product title');
+assert.match(warehouseUi, /Inherited from PO/, 'linked PO receiving identifies the fixed supplier source');
+assert.match(warehouseUi, /!isLinkedPurchaseOrderReceipt && Number\(line\.supplierCount/, 'linked PO lines do not ask the receiver to choose another supplier');
+assert.match(poSupplierRepair, /saveWarehouseAuditLine/, 'historical PO audit supplier repair updates lines individually');
+assert.match(poSupplierRepair, /saveWarehouseAuditMetadata/, 'historical PO audit supplier repair updates audit metadata without replacing active lines');
+assert.doesNotMatch(poSupplierRepair, /countedQty\s*[:=]|saveWarehouseAudit\(/, 'supplier repair never changes counts or replaces an active audit snapshot');
 assert.match(warehouseUi, /Type \/ reference/, 'the audit register visibly identifies every audit type and PO reference');
 assert.match(warehouseUi, /All PO receiving/, 'the audit register can isolate DataPlus and external PO receiving');
 assert.match(warehouseUi, /Search audit, PO, supplier, or counter/, 'the audit register exposes operational search');
