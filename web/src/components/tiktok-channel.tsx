@@ -249,6 +249,7 @@ export function TikTokChannel({
     && (Boolean(credentials.appSecret.trim()) || status.appSecretConfigured === true)
   const canConnect = canSaveCredentials && Boolean(credentials.serviceId.trim())
   const callbackUrl = typeof window === "undefined" ? "/auth/tiktok/callback" : `${window.location.origin}/auth/tiktok/callback`
+  const missingShopScope = /seller\.authorization\.info|Shop Authorized Information/i.test(error)
 
   return (
     <Card className="min-w-0">
@@ -263,7 +264,7 @@ export function TikTokChannel({
         </div>
       </CardHeader>
       <CardContent className="min-w-0 space-y-4 pt-4">
-        {error && <Alert variant="destructive"><AlertTitle>TikTok Shop action failed</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
+        {error && <Alert variant="destructive"><AlertTitle>{missingShopScope ? "TikTok API permission required" : "TikTok Shop action failed"}</AlertTitle><AlertDescription>{error}{missingShopScope && <span className="mt-2 block">After TikTok approves or saves the permission, use the seller account Actions menu and choose <strong>Reconnect</strong>. <a className="underline" href="https://partner.tiktokshop.com/docv2/page/6507ead7b99d5302be949ba9" target="_blank" rel="noreferrer">View TikTok's required scope</a>.</span>}</AlertDescription></Alert>}
         {message && <Alert><CheckCircle2 className="size-4" /><AlertTitle>Update</AlertTitle><AlertDescription>{message}</AlertDescription></Alert>}
         {job && <p className="text-sm"><a className="font-medium underline" href="/jobs">Job #{job.jobNumber || job.id}</a> is {job.status}. Progress and row-level evidence are available in Jobs.</p>}
         {dirty && <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"><span>Feature changes are not saved yet.</span><div className="flex gap-2"><Button size="sm" disabled={busy} onClick={() => void run(saveSettings)}><Save className="size-4" /> Save</Button><Button size="sm" variant="outline" onClick={() => setEdits({})}>Discard</Button></div></div>}
