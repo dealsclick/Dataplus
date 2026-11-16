@@ -32951,7 +32951,7 @@ function externalOperationalPoIdentifierKey(value = "") {
 
 async function resolveWarehouseAuditBarcode(audit = {}, barcode = "") {
   let lookup = await resolveScannedCatalogBarcode(barcode);
-  if (String(audit.reason || "") !== "purchase_order_receipt") return lookup;
+  if (!["purchase_order_receipt", "po_recount"].includes(String(audit.reason || ""))) return lookup;
   const scannedIdentifier = externalOperationalPoIdentifierKey(barcode);
   const expectedLine = (audit.purchaseOrderExpectedLines || []).find((line) => [line.sku, line.upc, line.barcode, line.vendorItemNumber, line.manufacturerSku]
     .some((value) => externalOperationalPoIdentifierKey(value) === scannedIdentifier));
@@ -48607,15 +48607,25 @@ async function resolveScannedCatalogBarcode(value) {
   return { barcode: forms[0], product, sourceItem };
 }
 
-function auditWarehouseStockRow(product, audit, locationBin = "") {
+function auditWarehouseStockRows(product, audit) {
   const rows = Array.isArray(product?.warehouseStock) ? product.warehouseStock : [];
   const warehouseId = String(audit?.warehouseId || "").trim().toLowerCase();
   const warehouseName = String(audit?.warehouseName || "").trim().toLowerCase();
-  const bin = String(locationBin || "").trim().toLowerCase();
-  const warehouseRows = rows.filter((row) => (warehouseId && String(row.warehouseId || "").trim().toLowerCase() === warehouseId)
+  return rows.filter((row) => (warehouseId && String(row.warehouseId || "").trim().toLowerCase() === warehouseId)
     || (warehouseName && String(row.warehouseName || "").trim().toLowerCase() === warehouseName));
+}
+
+function auditWarehouseStockRow(product, audit, locationBin = "") {
+  const warehouseRows = auditWarehouseStockRows(product, audit);
+  const bin = String(locationBin || "").trim().toLowerCase();
   if (bin) return warehouseRows.find((row) => String(row.locationBin || "").trim().toLowerCase() === bin) || warehouseRows[0] || null;
   return warehouseRows[0] || null;
+}
+
+function auditWarehousePhysicalQty(product, audit) {
+  const warehouseRows = auditWarehouseStockRows(product, audit);
+  if (warehouseRows.length) return warehouseRows.reduce((sum, row) => sum + Math.max(0, Number(row.qty || 0)), 0);
+  return Array.isArray(product?.warehouseStock) && product.warehouseStock.length ? 0 : Math.max(0, Number(product?.qty || 0));
 }
 
 function ebayShadowListingSeed(product = {}, shadowSku = "") {
@@ -59679,7 +59689,8 @@ async function handleApi(req, res) {
       live_selling_inventory: "Live selling inventory",
       receiving_inventory: "Receive inventory",
       external_po_receipt: "External PO receipt",
-      purchase_order_receipt: "PO receiving"
+      purchase_order_receipt: "PO receiving",
+      po_recount: "PO recount"
     };
     const reason = String(body.reason || "").trim();
     if (!Object.prototype.hasOwnProperty.call(reasonOptions, reason)) {
@@ -59687,6 +59698,9 @@ async function handleApi(req, res) {
     }
     const audit = await postgres.readWarehouseAudit(parts[2]);
     if (!audit) return notFound(res);
+    if (reason === "po_recount" && String(audit.reason || "") !== "po_recount") {
+      return sendJson(res, 400, { error: "Start a PO recount from the purchase order Actions menu so the audit remains linked to that PO." });
+    }
     const receivingReason = ["receiving_inventory", "external_po_receipt", "purchase_order_receipt"].includes(reason);
     const inventoryPurpose = audit.linkedPurchaseOrderId
       ? normalizeInventoryPurpose(audit.inventoryPurpose, "stock")
@@ -59806,18 +59820,21 @@ async function handleApi(req, res) {
       live_selling_inventory: "Live selling inventory",
       receiving_inventory: "Receive inventory",
       external_po_receipt: "External PO receipt",
-      purchase_order_receipt: "PO receiving"
+      purchase_order_receipt: "PO receiving",
+      po_recount: "PO recount"
     };
     const reason = Object.prototype.hasOwnProperty.call(reasonOptions, String(body.reason || "")) ? String(body.reason) : "cycle_count";
     const receivingReason = ["receiving_inventory", "external_po_receipt", "purchase_order_receipt"].includes(reason);
     const purchaseOrderReceipt = reason === "purchase_order_receipt";
-    const linkedPurchaseOrder = purchaseOrderReceipt ? await postgres.readPurchaseOrderByKey(String(body.purchaseOrderId || "").trim()) : null;
-    if (purchaseOrderReceipt && !linkedPurchaseOrder) return sendJson(res, 404, { error: "Choose an open DataPlus purchase order to receive." });
+    const purchaseOrderRecount = reason === "po_recount";
+    const linkedPurchaseOrder = purchaseOrderReceipt || purchaseOrderRecount ? await postgres.readPurchaseOrderByKey(String(body.purchaseOrderId || "").trim()) : null;
+    if ((purchaseOrderReceipt || purchaseOrderRecount) && !linkedPurchaseOrder) return sendJson(res, 404, { error: purchaseOrderRecount ? "Choose a received DataPlus purchase order to recount." : "Choose an open DataPlus purchase order to receive." });
     if (linkedPurchaseOrder && (String(linkedPurchaseOrder.fulfillmentMode || "").toLowerCase() === "dropship_per_order" || linkedPurchaseOrder.directToCustomer === true)) return sendJson(res, 400, { error: "Dropship purchase orders bypass warehouse receiving." });
-    if (linkedPurchaseOrder && ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(linkedPurchaseOrder.status || "").toLowerCase())) return sendJson(res, 409, { error: `PO ${linkedPurchaseOrder.poNumber || linkedPurchaseOrder.id} is no longer open for receiving.` });
+    if (purchaseOrderReceipt && linkedPurchaseOrder && ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(linkedPurchaseOrder.status || "").toLowerCase())) return sendJson(res, 409, { error: `PO ${linkedPurchaseOrder.poNumber || linkedPurchaseOrder.id} is no longer open for receiving.` });
+    if (purchaseOrderRecount && linkedPurchaseOrder && !((linkedPurchaseOrder.items || []).some((line) => Number(line.receivedQty || 0) > 0))) return sendJson(res, 409, { error: `PO ${linkedPurchaseOrder.poNumber || linkedPurchaseOrder.id} has no received quantities to recount.` });
     const existingLinkedAudit = linkedPurchaseOrder
       ? audits
-        .filter((candidate) => String(candidate.reason || "") === "purchase_order_receipt"
+        .filter((candidate) => String(candidate.reason || "") === reason
           && String(candidate.linkedPurchaseOrderId || "") === String(linkedPurchaseOrder.id || "")
           && ["in_progress", "pending_review"].includes(String(candidate.status || "").toLowerCase()))
         .sort((left, right) => {
@@ -59829,11 +59846,13 @@ async function handleApi(req, res) {
     if (existingLinkedAudit) {
       await postgres.touchWarehouseAuditReceivingParticipant(existingLinkedAudit.id, receivingActor, { at: new Date().toISOString() });
       const resumedAudit = await postgres.readWarehouseAudit(existingLinkedAudit.id) || existingLinkedAudit;
-      await syncPurchaseOrderReceivingProgress(resumedAudit);
+      if (purchaseOrderReceipt) await syncPurchaseOrderReceivingProgress(resumedAudit);
       return sendJson(res, 200, {
         audit: resumedAudit,
         resumed: true,
-        message: `${resumedAudit.auditNumber || "The receiving audit"} is already receiving ${linkedPurchaseOrder.poNumber || linkedPurchaseOrder.id}. Resuming that session.`
+        message: purchaseOrderRecount
+          ? `${resumedAudit.auditNumber || "The recount"} is already recounting ${linkedPurchaseOrder.poNumber || linkedPurchaseOrder.id}. Resuming that session.`
+          : `${resumedAudit.auditNumber || "The receiving audit"} is already receiving ${linkedPurchaseOrder.poNumber || linkedPurchaseOrder.id}. Resuming that session.`
       });
     }
     const linkedPurpose = linkedPurchaseOrder ? purchaseOrderPurposeForRecord(linkedPurchaseOrder) : null;
@@ -59851,7 +59870,7 @@ async function handleApi(req, res) {
       ? await postgres.readProductsByKeys([...(new Set((linkedPurchaseOrder.items || []).map((line) => String(line.sku || "").trim()).filter(Boolean)))], { includeMarketplaceIds: false }).catch(() => [])
       : [];
     const linkedProductsBySku = new Map((linkedProducts || []).map((product) => [String(product.sku || "").trim().toLowerCase(), product]));
-    const purchaseOrderExpectedLines = linkedPurchaseOrder ? (linkedPurchaseOrder.items || []).map((line, lineIndex) => {
+    let purchaseOrderExpectedLines = linkedPurchaseOrder ? (linkedPurchaseOrder.items || []).map((line, lineIndex) => {
       const product = linkedProductsBySku.get(String(line.sku || "").trim().toLowerCase()) || {};
       return {
         id: String(line.id || `${linkedPurchaseOrder.id}:${lineIndex}`),
@@ -59871,12 +59890,44 @@ async function handleApi(req, res) {
         liveChannel: normalizeLiveInventoryChannel(line.liveChannel || liveChannel)
       };
     }).filter((line) => line.expectedQty > 0) : [];
+    if (purchaseOrderRecount) {
+      const recountLinesBySku = new Map();
+      for (const [lineIndex, line] of (linkedPurchaseOrder.items || []).entries()) {
+        const sku = String(line.sku || "").trim();
+        const receivedQty = Math.max(0, Number(line.receivedQty || 0));
+        if (!sku || receivedQty <= 0) continue;
+        const key = sku.toLowerCase();
+        const product = linkedProductsBySku.get(key) || {};
+        const current = recountLinesBySku.get(key) || {
+          id: `po-recount:${linkedPurchaseOrder.id}:${key}`,
+          lineIndex,
+          sku,
+          title: String(line.title || product.title || sku),
+          description: String(line.title || product.title || sku),
+          vendorItemNumber: String(line.sourceItemNumber || line.vendorSku || product.vendorSku || ""),
+          manufacturerSku: String(line.manufacturerSku || line.mfrPartNumber || product.mfrPartNumber || product.manufacturerPartNumber || product.mpn || ""),
+          upc: String(line.upc || line.barcode || product.upc || product.barcode || product.gtin || ""),
+          orderedQty: 0,
+          receivedQty: 0,
+          expectedQty: auditWarehousePhysicalQty(product, { warehouseId: warehouse.id, warehouseName: warehouse.name }),
+          physicalBaselineQty: auditWarehousePhysicalQty(product, { warehouseId: warehouse.id, warehouseName: warehouse.name }),
+          poNumber: String(linkedPurchaseOrder.poNumber || ""),
+          inventoryPurpose: normalizeInventoryPurpose(line.inventoryPurpose, inventoryPurpose),
+          liveChannel: normalizeLiveInventoryChannel(line.liveChannel || liveChannel)
+        };
+        current.orderedQty += Math.max(0, Number(line.qty || 0));
+        current.receivedQty += receivedQty;
+        recountLinesBySku.set(key, current);
+      }
+      purchaseOrderExpectedLines = [...recountLinesBySku.values()];
+    }
     if (purchaseOrderReceipt && !purchaseOrderExpectedLines.length) return sendJson(res, 409, { error: `PO ${linkedPurchaseOrder.poNumber || linkedPurchaseOrder.id} has no open quantities to receive.` });
+    if (purchaseOrderRecount && !purchaseOrderExpectedLines.length) return sendJson(res, 409, { error: `PO ${linkedPurchaseOrder.poNumber || linkedPurchaseOrder.id} has no received catalog lines to recount.` });
     const now = new Date().toISOString();
     const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", reason, reasonLabel: reasonOptions[reason], inventoryPurpose, inventoryPurposeLabel: INVENTORY_PURPOSE_LABELS[inventoryPurpose], liveChannel, liveChannelLabel: LIVE_INVENTORY_CHANNEL_LABELS[liveChannel] || "", supplierId, supplierName, externalPurchaseOrderNumber, linkedPurchaseOrderId: String(linkedPurchaseOrder?.id || ""), linkedPurchaseOrderNumber: String(linkedPurchaseOrder?.poNumber || ""), purchaseOrderLinkedAt: linkedPurchaseOrder ? now : "", purchaseOrderExpectedLines, receivingDocuments: [], packingSlipReview: null, warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], receivingParticipants: receivingReason ? [{ user: receivingActor, firstActiveAt: now, lastActiveAt: now, scannedUnits: 0 }] : [], createdAt: now, createdBy: receivingActor, reviewer: String(body.reviewer || "").trim() };
     audits.unshift(audit);
     await postgres.saveWarehouseAudit(audit);
-    await syncPurchaseOrderReceivingProgress(audit);
+    if (purchaseOrderReceipt) await syncPurchaseOrderReceivingProgress(audit);
     return sendJson(res, 201, { audit, message: `${audit.auditNumber} started.` });
   }
 
@@ -60879,6 +60930,147 @@ async function handleApi(req, res) {
     db.inventoryLedger = await postgres.readStateField("inventoryLedger").catch(() => []) || [];
     const auditWarehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(audit.warehouseId || "") || String(row.name || "").toLowerCase() === String(audit.warehouseName || "").toLowerCase()) || null;
     if (!auditWarehouse || !isPhysicalWarehouse(auditWarehouse)) return sendJson(res, 400, { error: "This audit no longer has a valid physical warehouse." });
+    if (String(audit.reason || "") === "po_recount" && audit.linkedPurchaseOrderId) {
+      const linkedPo = await postgres.readPurchaseOrderByKey(audit.linkedPurchaseOrderId);
+      if (!linkedPo) return sendJson(res, 404, { error: "The linked purchase order no longer exists." });
+      const recountLines = (audit.lines || []).filter((line) => String(line.reviewStatus || "").toLowerCase() !== "excluded" && Number(line.countedQty || 0) >= 0);
+      if (!recountLines.length) return sendJson(res, 400, { error: "Scan at least one received PO item before completing the recount." });
+      const products = [];
+      const now = new Date().toISOString();
+      const actor = String(body.user || "Warehouse").trim() || "Warehouse";
+      let decreasedQty = 0;
+      let excessReviewQty = 0;
+      let unchangedLines = 0;
+      for (const line of recountLines) {
+        const product = await postgres.readProductByKey(line.productId || line.sku);
+        if (!product) continue;
+        const hadWarehouseRows = Array.isArray(product.warehouseStock) && product.warehouseStock.length > 0;
+        let stockRows = auditWarehouseStockRows(product, audit);
+        if (String(line.locationBin || "").trim()) {
+          const locationKey = String(line.locationBin || "").trim().toLowerCase();
+          stockRows = stockRows.filter((row) => String(row.locationBin || "").trim().toLowerCase() === locationKey);
+        }
+        if (!stockRows.length) {
+          const row = ensureInventoryWarehouseStock(product, auditWarehouse);
+          if (!hadWarehouseRows) row.qty = Math.max(0, Number(product.qty || 0));
+          stockRows = [row];
+        }
+        const qtyBefore = stockRows.reduce((sum, row) => sum + Math.max(0, Number(row.qty || 0)), 0);
+        const reservedBefore = stockRows.reduce((sum, row) => sum + Math.max(0, Number(row.reserved || 0)), 0);
+        const countedQty = Math.max(0, Number(line.countedQty || 0));
+        const qtyAfter = Math.min(qtyBefore, countedQty);
+        let reductionRemaining = Math.max(0, qtyBefore - qtyAfter);
+        for (const stockRow of [...stockRows].sort((left, right) => (Number(right.qty || 0) - Number(right.reserved || 0)) - (Number(left.qty || 0) - Number(left.reserved || 0)))) {
+          if (reductionRemaining <= 0) break;
+          const rowQty = Math.max(0, Number(stockRow.qty || 0));
+          const rowReduction = Math.min(rowQty, reductionRemaining);
+          stockRow.qty = rowQty - rowReduction;
+          stockRow.updatedAt = now;
+          reductionRemaining -= rowReduction;
+        }
+        syncInventoryTotalsFromWarehouses(product);
+        product.lastInventoryAuditAt = now;
+        product.lastInventoryAuditId = audit.id;
+        product.updatedAt = now;
+        const shortageQty = Math.max(0, qtyBefore - qtyAfter);
+        const lineExcessQty = Math.max(0, countedQty - qtyBefore);
+        decreasedQty += shortageQty;
+        excessReviewQty += lineExcessQty;
+        if (!shortageQty && !lineExcessQty) unchangedLines += 1;
+        line.recountQtyBefore = qtyBefore;
+        line.recountCountedQty = countedQty;
+        line.recountQtyAfter = qtyAfter;
+        line.recountShortageQty = shortageQty;
+        line.recountExcessReviewQty = lineExcessQty;
+        line.recountAppliedAt = now;
+        if (shortageQty > 0) {
+          addInventoryLedger(db, product, {
+            type: "po_recount_adjustment",
+            source: "purchase_order_recount",
+            referenceId: audit.id,
+            referenceNumber: audit.auditNumber,
+            sourceAuditId: audit.id,
+            sourceAuditNumber: audit.auditNumber,
+            sourcePurchaseOrderId: linkedPo.id,
+            sourcePurchaseOrderNumber: linkedPo.poNumber,
+            warehouseId: auditWarehouse.id,
+            warehouseName: auditWarehouse.name,
+            locationBin: String(line.locationBin || (stockRows.length === 1 ? stockRows[0].locationBin || "" : "Multiple bins")),
+            quantityChange: -shortageQty,
+            qtyBefore,
+            qtyAfter,
+            reservedBefore,
+            reservedAfter: stockRows.reduce((sum, row) => sum + Math.max(0, Number(row.reserved || 0)), 0),
+            reason: `PO recount ${audit.auditNumber} for ${linkedPo.poNumber || linkedPo.id}`,
+            user: actor
+          });
+        }
+        products.push(product);
+      }
+      if (!products.length) return sendJson(res, 400, { error: "None of the scanned recount lines could be matched to catalog products." });
+      await postgres.upsertProductsFromState(products);
+      await postgres.upsertInventoryLevelsFromProducts(products);
+      const scannedSkuKeys = new Set(recountLines.map((line) => String(line.sku || "").trim().toLowerCase()).filter(Boolean));
+      const unscannedExpectedLines = (audit.purchaseOrderExpectedLines || []).filter((line) => !scannedSkuKeys.has(String(line.sku || "").trim().toLowerCase())).length;
+      audit.status = "completed";
+      audit.completedAt = now;
+      audit.approvedAt = now;
+      audit.approvedBy = actor;
+      audit.appliedLines = products.length;
+      audit.disposition = {
+        type: "purchase_order_recount",
+        label: "PO recount completed",
+        purchaseOrderId: linkedPo.id,
+        purchaseOrderNumber: linkedPo.poNumber,
+        countedLines: products.length,
+        decreasedQty,
+        excessReviewQty,
+        unchangedLines,
+        unscannedExpectedLines,
+        note: String(body.dispositionNote || "").trim(),
+        appliedAt: now,
+        appliedBy: actor
+      };
+      audit.lifecycleEvents = [...(Array.isArray(audit.lifecycleEvents) ? audit.lifecycleEvents : []), {
+        type: "purchase_order_recount_completed",
+        at: now,
+        user: actor,
+        purchaseOrderId: linkedPo.id,
+        purchaseOrderNumber: linkedPo.poNumber,
+        decreasedQty,
+        excessReviewQty
+      }].slice(-100);
+      audit.updatedAt = now;
+      linkedPo.inventoryRecounts = Array.isArray(linkedPo.inventoryRecounts) ? linkedPo.inventoryRecounts : [];
+      linkedPo.inventoryRecounts.unshift({
+        id: audit.id,
+        auditNumber: audit.auditNumber,
+        status: "completed",
+        warehouseId: auditWarehouse.id,
+        warehouseName: auditWarehouse.name,
+        countedLines: products.length,
+        decreasedQty,
+        excessReviewQty,
+        completedAt: now,
+        completedBy: actor
+      });
+      linkedPo.inventoryRecounts = linkedPo.inventoryRecounts.slice(0, 50);
+      addPoTimeline(linkedPo, {
+        type: "inventory_recount",
+        title: "PO inventory recounted",
+        message: `${audit.auditNumber} verified ${products.length} catalog line${products.length === 1 ? "" : "s"}; ${decreasedQty} missing unit${decreasedQty === 1 ? " was" : "s were"} deducted${excessReviewQty ? ` and ${excessReviewQty} higher counted unit${excessReviewQty === 1 ? " was" : "s were"} flagged without adding stock` : ""}.`,
+        user: actor,
+        createdAt: now
+      });
+      await postgres.savePurchaseOrder(linkedPo);
+      await postgres.saveWarehouseAudit(audit);
+      await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [] });
+      return sendJson(res, 200, {
+        audit,
+        purchaseOrder: linkedPo,
+        message: `${audit.auditNumber} completed for ${linkedPo.poNumber || linkedPo.id}. ${decreasedQty} missing unit${decreasedQty === 1 ? " was" : "s were"} deducted.${excessReviewQty ? ` ${excessReviewQty} extra counted unit${excessReviewQty === 1 ? " was" : "s were"} flagged for review.` : ""} No inventory was added.`
+      });
+    }
     const dispositionType = String(body.dispositionType || "").trim().toLowerCase();
     if (!["fulfill_orders", "stock_here", "transfer", "return_to_supplier"].includes(dispositionType)) return sendJson(res, 400, { error: "Choose whether to use the stock for open orders, stock it, transfer it, or return it." });
     if (receivingAudit && !["fulfill_orders", "stock_here"].includes(dispositionType)) return sendJson(res, 400, { error: "Inbound receipts can be stocked here or used for open orders after receipt." });
