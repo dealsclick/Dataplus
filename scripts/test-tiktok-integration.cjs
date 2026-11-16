@@ -124,6 +124,8 @@ async function main() {
   assert.equal(tiktokChannelSource.includes('onSave(channel.id, { settings:'), false, 'TikTok channel settings must use the flat PATCH /api/channels/:id contract.');
   assert.equal(tiktokChannelSource.includes('Add another TikTok account'), true, 'TikTok settings must expose a clear multi-account authorization action.');
   assert.equal(tiktokChannelSource.includes('Use account'), true, 'TikTok settings must expose explicit seller-account selection.');
+  assert.equal(tiktokChannelSource.includes('Shared TikTok app credentials'), true, 'TikTok settings must distinguish app credentials from seller accounts.');
+  assert.equal(tiktokChannelSource.includes('Saved securely'), true, 'TikTok settings must explain that saved app secrets are not displayed.');
   const exchanged = await exchangeAuthorizationCode({
     appKey: 'app-key', appSecret: 'app-secret', authCode: 'auth-code',
     fetchImpl: async url => {
