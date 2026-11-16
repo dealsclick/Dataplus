@@ -32949,12 +32949,19 @@ function externalOperationalPoIdentifierKey(value = "") {
   return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+function externalOperationalPoIdentifierKeys(value = "") {
+  const exact = externalOperationalPoIdentifierKey(value);
+  if (!exact) return [];
+  const withoutLeadingZeros = /^\d+$/.test(exact) ? exact.replace(/^0+(?=\d)/, "") : exact;
+  return [...new Set([exact, withoutLeadingZeros].filter(Boolean))];
+}
+
 async function resolveWarehouseAuditBarcode(audit = {}, barcode = "") {
   let lookup = await resolveScannedCatalogBarcode(barcode);
   if (!["purchase_order_receipt", "po_recount"].includes(String(audit.reason || ""))) return lookup;
-  const scannedIdentifier = externalOperationalPoIdentifierKey(barcode);
+  const scannedIdentifiers = new Set(externalOperationalPoIdentifierKeys(barcode));
   const expectedLine = (audit.purchaseOrderExpectedLines || []).find((line) => [line.sku, line.upc, line.barcode, line.vendorItemNumber, line.manufacturerSku]
-    .some((value) => externalOperationalPoIdentifierKey(value) === scannedIdentifier));
+    .some((value) => externalOperationalPoIdentifierKeys(value).some((identifier) => scannedIdentifiers.has(identifier))));
   if (!expectedLine?.sku || String(lookup.product?.sku || "").toLowerCase() === String(expectedLine.sku).toLowerCase()) return lookup;
   const expectedProduct = await postgres.readProductByKey(expectedLine.sku).catch(() => null);
   return expectedProduct ? { ...lookup, product: expectedProduct, purchaseOrderExpectedLine: expectedLine } : lookup;
