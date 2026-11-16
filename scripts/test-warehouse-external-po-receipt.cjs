@@ -87,7 +87,8 @@ assert.match(db, /createdWithinDays[\s\S]*make_interval\(days => \$3::integer\)/
 assert.match(purchasingUi, /Receiving now[\s\S]*Receipt not posted yet/, 'the purchasing queue displays active warehouse receiving work');
 assert.match(purchasingUi, /Active: \$\{activeUsers\.join/, 'the purchasing queue identifies all users active on a PO');
 assert.match(purchaseOrderUi, /PO receiving in progress[\s\S]*activeReceivingAudit\.scannedUnits/, 'the PO detail displays live scan progress');
-assert.match(purchaseOrderUi, /scanned, not posted/, 'the PO detail distinguishes pending scanner progress from posted receipt quantities');
+assert.match(purchaseOrderUi, /scanned, not (?:yet )?posted/, 'the PO detail distinguishes pending scanner progress from posted receipt quantities');
+assert.match(purchaseOrderUi, /<TableHead[^>]*>Ordered<\/TableHead>[\s\S]*<TableHead[^>]*>Scanned<\/TableHead>[\s\S]*<TableHead[^>]*>Received<\/TableHead>/, 'desktop PO quantities use separate ordered, scanned, and received columns');
 assert.match(purchaseOrderUi, /Reopen PO[\s\S]*Close PO/, 'desktop and mobile PO detail expose guarded reopen and close actions');
 assert.match(purchaseOrderUi, /statusChangeAction === "reopen" && !statusChangeNote\.trim\(\)/, 'reopening a PO requires an operator reason');
 assert.match(purchaseOrderUi, /PO received by[\s\S]*purchaseOrderLineReceiverNames/, 'the PO detail shows overall and per-line receiver attribution');
