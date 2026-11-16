@@ -61,6 +61,17 @@ type PooledSupplierGroup = {
 
 const PURCHASING_PAGE_SIZE = 25
 
+const purchaseOrderPurposeOptions = [
+  { value: "stock", label: "In stock", description: "Replenishment kept available in the warehouse." },
+  { value: "customer_orders", label: "Customer orders", description: "Inventory purchased for existing unfilled orders." },
+  { value: "live_selling", label: "Live orders", description: "Inventory reserved for a live-selling channel." },
+]
+
+const liveInventoryChannelOptions = [
+  { value: "ebay_live", label: "eBay Live" },
+  { value: "tiktok_live", label: "TikTok Live" },
+]
+
 function pooledSupplierKey(row: Record<string, unknown>) {
   const vendorId = String(row.vendorId || "").trim()
   if (vendorId) return `vendor:${vendorId}`
@@ -929,7 +940,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const createPoRequestIdRef = useRef("")
   const [createPoMode, setCreatePoMode] = useState<"choose" | "new" | "external">("choose")
   const [purchaseReferences, setPurchaseReferences] = useState<{ vendors: Array<Record<string, unknown>>; warehouses: Array<Record<string, unknown>> }>({ vendors: [], warehouses: [] })
-  const [createPoForm, setCreatePoForm] = useState({ vendorId: "", warehouseId: "", expectedAt: "", notes: "", items: [] as Array<{ sku: string; title: string; qty: string; unitCost: string; vendorSku?: string; brand?: string; manufacturer?: string; catalogProduct?: boolean }> })
+  const [createPoForm, setCreatePoForm] = useState({ vendorId: "", warehouseId: "", expectedAt: "", notes: "", inventoryPurpose: "stock", liveChannel: "", items: [] as Array<{ sku: string; title: string; qty: string; unitCost: string; vendorSku?: string; brand?: string; manufacturer?: string; catalogProduct?: boolean }> })
   const [externalPoFile, setExternalPoFile] = useState<File | null>(null)
   const [externalPoPreview, setExternalPoPreview] = useState<null | { document: Record<string, unknown>; vendor: Record<string, unknown>; catalogSupplier?: Record<string, unknown> | null; file: Record<string, unknown>; duplicate?: { id?: string; poNumber?: string } | null; readyToCreate?: boolean; unresolvedLineCount?: number; items: Array<Record<string, unknown>> }>(null)
   const [externalPoPreviewing, setExternalPoPreviewing] = useState(false)
@@ -1140,7 +1151,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const receivingWarehouses = purchaseReferences.warehouses.filter((warehouse) => warehouse.isPhysical !== false && warehouse.allowReceiving !== false && !["supplier_feed", "dropship", "virtual", "transfer"].includes(String(warehouse.inventorySourceType || "").toLowerCase())).sort((left, right) => String(left.name || "").localeCompare(String(right.name || "")))
   const openCreatePo = () => {
     const defaultWarehouse = receivingWarehouses.find((warehouse) => warehouse.isDefaultReceiving === true) || receivingWarehouses[0]
-    setCreatePoForm({ vendorId: "", warehouseId: String(defaultWarehouse?.id || ""), expectedAt: "", notes: "", items: [] })
+    setCreatePoForm({ vendorId: "", warehouseId: String(defaultWarehouse?.id || ""), expectedAt: "", notes: "", inventoryPurpose: "stock", liveChannel: "", items: [] })
     setPoCatalogQuery("")
     setPoCatalogResults([])
     setCreatePoMode("choose")
@@ -1237,7 +1248,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
       const selectedMatches = externalPoPreview.items
         .filter((line) => line.reviewedMatch === true && line.sku)
         .map((line, index) => ({ line: Number(line.line || index + 1), manufacturerPartNumber: String(line.manufacturerPartNumber || ""), sku: String(line.sku || "") }))
-      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ requestId, external: true, vendorId: createPoForm.vendorId, warehouseId: createPoForm.warehouseId, notes: createPoForm.notes, fileName: externalPoFile.name, pdfBase64: await externalPoBase64(externalPoFile), selectedMatches, user: operatorName }) })
+      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ requestId, external: true, vendorId: createPoForm.vendorId, warehouseId: createPoForm.warehouseId, notes: createPoForm.notes, inventoryPurpose: createPoForm.inventoryPurpose, liveChannel: createPoForm.liveChannel, fileName: externalPoFile.name, pdfBase64: await externalPoBase64(externalPoFile), selectedMatches, user: operatorName }) })
       const poId = String(result.purchaseOrder?.id || "")
       toast.success(result.message || "External purchase order added.")
       createPoRequestIdRef.current = ""
@@ -1698,6 +1709,10 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
               <FormField><FieldLabel>Supplier</FieldLabel><Select value={createPoForm.vendorId} onValueChange={(vendorId) => { setCreatePoForm((current) => ({ ...current, vendorId })); setExternalPoPreview(null) }}><SelectTrigger><SelectValue placeholder="Choose supplier" /></SelectTrigger><SelectContent>{activePurchaseVendors.map((vendor) => <SelectItem key={String(vendor.id)} value={String(vendor.id)}>{String(vendor.name || vendor.id)}</SelectItem>)}</SelectContent></Select><FieldDescription>The supplier profile determines how the ITEM column is matched.</FieldDescription></FormField>
               <FormField><FieldLabel>Receiving warehouse</FieldLabel><Select value={createPoForm.warehouseId} onValueChange={(warehouseId) => setCreatePoForm((current) => ({ ...current, warehouseId }))}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{receivingWarehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || warehouse.id)}</SelectItem>)}</SelectContent></Select><FieldDescription>Inventory will be received into this physical warehouse.</FieldDescription></FormField>
             </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <FormField><FieldLabel>Inventory purpose</FieldLabel><Select value={createPoForm.inventoryPurpose} onValueChange={(inventoryPurpose) => setCreatePoForm((current) => ({ ...current, inventoryPurpose, liveChannel: inventoryPurpose === "live_selling" ? current.liveChannel : "" }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{purchaseOrderPurposeOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select><FieldDescription>{purchaseOrderPurposeOptions.find((option) => option.value === createPoForm.inventoryPurpose)?.description}</FieldDescription></FormField>
+              {createPoForm.inventoryPurpose === "live_selling" ? <FormField><FieldLabel>Live destination</FieldLabel><Select value={createPoForm.liveChannel} onValueChange={(liveChannel) => setCreatePoForm((current) => ({ ...current, liveChannel }))}><SelectTrigger><SelectValue placeholder="Choose live channel" /></SelectTrigger><SelectContent>{liveInventoryChannelOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select><FieldDescription>The receiver will see which live workflow owns this inventory.</FieldDescription></FormField> : null}
+            </div>
             <FormField><FieldLabel>CTech PO PDF</FieldLabel><Input type="file" accept="application/pdf,.pdf" onChange={(event) => { setExternalPoFile(event.target.files?.[0] || null); setExternalPoPreview(null) }} />{externalPoFile ? <FieldDescription>{externalPoFile.name} / {(externalPoFile.size / 1024).toFixed(0)} KB</FieldDescription> : <FieldDescription>Text-based CTech PDFs are parsed locally; no AI usage is required.</FieldDescription>}</FormField>
             <div className="flex justify-end"><Button type="button" variant="outline" disabled={externalPoPreviewing || !createPoForm.vendorId || !externalPoFile} onClick={() => void previewExternalPo()}>{externalPoPreviewing ? <Loader2 className="size-4 animate-spin" /> : <Eye className="size-4" />} Preview matches</Button></div>
             {externalPoPreview ? <div className="grid gap-4">
@@ -1729,6 +1744,10 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
               <FormField><FieldLabel>Receiving warehouse</FieldLabel><Select value={createPoForm.warehouseId} onValueChange={(warehouseId) => setCreatePoForm((current) => ({ ...current, warehouseId }))}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{receivingWarehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || warehouse.id)}</SelectItem>)}</SelectContent></Select><FieldDescription>Virtual and dropship locations are excluded.</FieldDescription></FormField>
               <FormField><FieldLabel>Expected arrival</FieldLabel><Input type="date" value={createPoForm.expectedAt} onChange={(event) => setCreatePoForm((current) => ({ ...current, expectedAt: event.target.value }))} /><FieldDescription>Optional until the supplier confirms.</FieldDescription></FormField>
             </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <FormField><FieldLabel>Inventory purpose</FieldLabel><Select value={createPoForm.inventoryPurpose} onValueChange={(inventoryPurpose) => setCreatePoForm((current) => ({ ...current, inventoryPurpose, liveChannel: inventoryPurpose === "live_selling" ? current.liveChannel : "" }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{purchaseOrderPurposeOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select><FieldDescription>{purchaseOrderPurposeOptions.find((option) => option.value === createPoForm.inventoryPurpose)?.description}</FieldDescription></FormField>
+              {createPoForm.inventoryPurpose === "live_selling" ? <FormField><FieldLabel>Live destination</FieldLabel><Select value={createPoForm.liveChannel} onValueChange={(liveChannel) => setCreatePoForm((current) => ({ ...current, liveChannel }))}><SelectTrigger><SelectValue placeholder="Choose live channel" /></SelectTrigger><SelectContent>{liveInventoryChannelOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select><FieldDescription>Use one live destination per PO so receiving stays unambiguous.</FieldDescription></FormField> : null}
+            </div>
             <FormField>
               <FieldLabel>Quick add SKU</FieldLabel>
               <div className="relative"><ScanBarcode className="absolute left-3 top-3 size-4 text-muted-foreground" /><Input autoFocus className="pl-9" value={poCatalogQuery} onChange={(event) => setPoCatalogQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && poCatalogResults[0]) { event.preventDefault(); addPoCatalogItem(poCatalogResults[0]) } }} placeholder="Type or scan SKU, alias, UPC, vendor SKU, or MPN" /></div>
@@ -1745,7 +1764,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
             <FormField><FieldLabel>Buyer notes</FieldLabel><Textarea className="min-h-24" value={createPoForm.notes} onChange={(event) => setCreatePoForm((current) => ({ ...current, notes: event.target.value }))} placeholder="Terms, supplier instructions, reason for purchase, or internal receiving notes" /></FormField>
           </div>}
         </div>
-        <DialogFooter className="border-t bg-muted/20 px-5 py-4 sm:px-6">{createPoMode !== "choose" ? <Button variant="outline" disabled={createPoSaving || externalPoPreviewing} onClick={() => { setCreatePoMode("choose"); setExternalPoPreview(null) }}><ArrowLeft className="size-4" /> Back</Button> : null}<Button variant="outline" disabled={createPoSaving || externalPoPreviewing} onClick={() => setCreatePoOpen(false)}>Cancel</Button>{createPoMode === "new" ? <Button disabled={createPoSaving} onClick={() => void saveManualPo()}>{createPoSaving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save draft</Button> : createPoMode === "external" ? <Button disabled={createPoSaving || externalPoPreviewing || !externalPoPreview?.readyToCreate} onClick={() => void saveExternalPo()}>{createPoSaving ? <Loader2 className="size-4 animate-spin" /> : <FileUp className="size-4" />} Add existing PO</Button> : null}</DialogFooter>
+        <DialogFooter className="border-t bg-muted/20 px-5 py-4 sm:px-6">{createPoMode !== "choose" ? <Button variant="outline" disabled={createPoSaving || externalPoPreviewing} onClick={() => { setCreatePoMode("choose"); setExternalPoPreview(null) }}><ArrowLeft className="size-4" /> Back</Button> : null}<Button variant="outline" disabled={createPoSaving || externalPoPreviewing} onClick={() => setCreatePoOpen(false)}>Cancel</Button>{createPoMode === "new" ? <Button disabled={createPoSaving || (createPoForm.inventoryPurpose === "live_selling" && !createPoForm.liveChannel)} onClick={() => void saveManualPo()}>{createPoSaving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save draft</Button> : createPoMode === "external" ? <Button disabled={createPoSaving || externalPoPreviewing || !externalPoPreview?.readyToCreate || (createPoForm.inventoryPurpose === "live_selling" && !createPoForm.liveChannel)} onClick={() => void saveExternalPo()}>{createPoSaving ? <Loader2 className="size-4 animate-spin" /> : <FileUp className="size-4" />} Add existing PO</Button> : null}</DialogFooter>
       </DialogContent>
     </Dialog>
     <AlertDialog open={forcePoolOpen} onOpenChange={setForcePoolOpen}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Attach older lines to Draft POs?</AlertDialogTitle><AlertDialogDescription>DataPlus will group {numberLabel(pooledRequirements.length)} older purchase line{pooledRequirements.length === 1 ? "" : "s"} by supplier and receiving warehouse, then create or update local numbered Draft POs. It will not approve, submit, or send anything to a supplier.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={poolingBusy}>Cancel</AlertDialogCancel><AlertDialogAction disabled={poolingBusy} onClick={(event) => { event.preventDefault(); void runPurchasePool(true) }}>{poolingBusy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Attach to Draft POs</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>

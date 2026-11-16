@@ -18,6 +18,8 @@ const context = {
   String,
   postgres: {
     readProductByKey: async () => null,
+    readProductSimilarityGroup: async () => null,
+    readProductsByKeys: async () => [],
   },
 };
 vm.createContext(context);
@@ -25,6 +27,13 @@ vm.runInContext(
   source.slice(
     source.indexOf('function normalizeShadowSku('),
     source.indexOf('function normalizeProductAlias('),
+  ),
+  context,
+);
+vm.runInContext(
+  source.slice(
+    source.indexOf('const INVENTORY_PURPOSE_LABELS'),
+    source.indexOf('function findOpenPurchaseOrderLinks('),
   ),
   context,
 );
@@ -72,6 +81,34 @@ async function main() {
   assert.deepEqual(Array.from(product.shadowSkus[0].channels), ['eBay']);
   assert.equal(product.shadowSkus[0].channelListings.ebay.categoryId, '12345');
   assert.equal(product.aliases.length, 1, 'warehouse shadows must not create catalog aliases');
+
+  const liveProduct = {
+    id: 'product-live-1',
+    sku: 'BUS123TRV',
+    title: 'Live product',
+    mfrPartNumber: '48-22-1234',
+    supplier: 'True Value',
+    shadowSkus: [],
+  };
+  const liveResult = await context.ensureWarehouseLiveChannelShadows(
+    { id: 'audit-live-1', auditNumber: 'AUDIT-500', liveChannel: 'tiktok_live' },
+    warehouse,
+    [liveProduct],
+  );
+  assert.equal(liveResult.created.length, 1);
+  assert.equal(liveProduct.shadowSkus[0].shadowSku, 'BUS123TRV-SI-TTLIVE');
+  assert.equal(liveProduct.shadowSkus[0].merchantSku, '48-22-1234');
+  assert.equal(liveProduct.shadowSkus[0].channelSku, '48-22-1234');
+  assert.equal(liveProduct.shadowSkus[0].channelListings.tiktok.sellerSku, '48-22-1234');
+  assert.equal(liveProduct.shadowSkus[0].inventoryPolicy, 'Warehouse only');
+
+  const blockedLiveResult = await context.ensureWarehouseLiveChannelShadows(
+    { id: 'audit-live-2', auditNumber: 'AUDIT-501', liveChannel: 'ebay_live' },
+    warehouse,
+    [{ id: 'product-live-2', sku: 'NO-MPN', title: 'Missing MPN', shadowSkus: [] }],
+  );
+  assert.equal(blockedLiveResult.created.length, 0);
+  assert.match(blockedLiveResult.blocked[0].reason, /Manufacturer SKU is missing/);
 
   const second = await context.ensureWarehouseAuditShadows({ id: 'audit-2' }, warehouse, [product]);
   assert.equal(second.created.length, 0);

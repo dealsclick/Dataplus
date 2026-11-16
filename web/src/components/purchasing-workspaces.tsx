@@ -108,6 +108,26 @@ const quotePdfVersions = [
   { id: "summary", title: "Compact summary", description: "A shorter customer view with item, quantity, and total only." },
 ] as const
 
+const purchaseOrderPurposeOptions = [
+  { value: "stock", label: "In stock" },
+  { value: "customer_orders", label: "Customer orders" },
+  { value: "live_selling", label: "Live orders" },
+]
+
+const liveInventoryChannelOptions = [
+  { value: "ebay_live", label: "eBay Live" },
+  { value: "tiktok_live", label: "TikTok Live" },
+]
+
+function purchaseOrderPurposeLabel(po: Record<string, unknown>) {
+  const liveChannel = String(po.liveChannel || "")
+  if (liveChannel === "ebay_live") return "eBay Live"
+  if (liveChannel === "tiktok_live") return "TikTok Live"
+  if (String(po.inventoryPurpose || "") === "customer_orders") return "Customer orders"
+  if (String(po.inventoryPurpose || "") === "live_selling") return "Live orders"
+  return "In stock"
+}
+
 function quoteDateKey(date: Date) {
   const year = date.getFullYear()
   const month = String(date.getMonth() + 1).padStart(2, "0")
@@ -2268,6 +2288,8 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
     setEditDraft({
       vendorId: String(po.vendorId || ""),
       ...(isDropship ? {} : { warehouseId: String(po.warehouseId || "") }),
+      inventoryPurpose: String(po.inventoryPurpose || (Array.isArray(po.orderIds) && po.orderIds.length ? "customer_orders" : "stock")),
+      liveChannel: String(po.liveChannel || ""),
       notes: String(po.notes || ""),
       expectedAt: String(po.expectedAt || ""),
       amendmentReason: "",
@@ -2447,9 +2469,11 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
           <DialogDescription>Enter the quantity physically received for each item. Save a draft while counting, or finalize to add stock and release eligible customer demand.</DialogDescription>
         </DialogHeader>
         <div className="grid min-h-0 gap-4 overflow-y-auto px-5 py-4">
-          <div className="grid gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm sm:grid-cols-3">
+          <Alert className={String(po.inventoryPurpose || "") === "live_selling" ? "border-pink-500/40 bg-pink-500/10" : "border-blue-500/30 bg-blue-500/5"}><PackageCheck className="size-4" /><AlertTitle>Receiving for {purchaseOrderPurposeLabel(po)}</AlertTitle><AlertDescription>{String(po.inventoryPurpose || "") === "live_selling" ? "Keep these units tied to the selected live-selling workflow. The PO, receipt, audit, and inventory ledger retain this purpose." : String(po.inventoryPurpose || "") === "customer_orders" ? "These units were purchased for customer demand and can release eligible orders after receipt." : "These units are warehouse replenishment intended to remain available in stock."}</AlertDescription></Alert>
+          <div className="grid gap-2 rounded-md border bg-muted/20 px-3 py-2 text-sm sm:grid-cols-4">
             <div><span className="block text-xs font-medium text-muted-foreground">Supplier</span><span className="font-medium">{String(po.supplier || "Unassigned")}</span></div>
             <div><span className="block text-xs font-medium text-muted-foreground">Receiving location</span><span className="font-medium">{String(po.warehouseName || "Unassigned")}</span></div>
+            <div><span className="block text-xs font-medium text-muted-foreground">Inventory purpose</span><span className="font-medium">{purchaseOrderPurposeLabel(po)}</span></div>
             <div><span className="block text-xs font-medium text-muted-foreground">This receipt</span><span className="font-medium">{numberLabel(receiptUnitTotal)} unit{receiptUnitTotal === 1 ? "" : "s"}</span></div>
           </div>
           {mobile && <div className="grid gap-2"><Label htmlFor="po-item-scan">Scan item SKU, UPC, or vendor SKU</Label><div className="flex gap-2"><Input id="po-item-scan" ref={scanRef} autoFocus autoComplete="off" value={scan} onChange={event => setScan(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); scanItem() } }} /><Button variant="outline" onClick={scanItem}>Add unit</Button></div><p role="status" className="text-sm text-muted-foreground">{scanMessage || "Each matched scan adds one unit. Review quantities before saving."}</p></div>}
@@ -2627,7 +2651,8 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
     {linkOrdersDialog}
     <PurchaseOrderProgress po={po} />
     {draftMissingFields.length > 0 ? <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Draft saved, details still needed</AlertTitle><AlertDescription className="flex flex-wrap items-start justify-between gap-3"><span>{draftMissingFields.join(" ")} You can keep editing this draft, but it cannot be approved or sent yet.</span><Button size="sm" variant="outline" onClick={openEditor}><Pencil className="size-4" /> Continue draft</Button></AlertDescription></Alert> : null}
-    <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-5"><Detail label="Status" value={String(po.status || "draft").replace(/_/g, " ")} /><Detail label="Supplier" value={String(po.supplier || "Unassigned")} />{ctechId ? <Detail label="CTech PO #" value={ctechId} /> : null}{po.placedFromExternalSource === true ? <Detail label={`${String(po.externalSourceSystem || "External source")} PO #`} value={String(po.externalPoNumber || "Not recorded")} /> : null}<Detail label="Destination" value={String(po.warehouseName || "-")} /><Detail label="Units" value={numberLabel(Number(po.totalUnits || lines.reduce((sum, line) => sum + Number(line.qty || 0), 0)))} /><Detail label="Created by" value={String(po.creationActor || po.createdBy || "System")} /><Detail label="Creation path" value={String(po.creationOperation || po.source || "manual").replace(/_/g, " ")} /><Detail label="Merchandise cost" value={moneyLabel(Number(po.merchandiseCost ?? po.estimatedCost ?? 0))} /><Detail label="Dropship fee" value={moneyLabel(Number(po.dropShipFee || 0))} /><Detail label="Total PO cost" value={moneyLabel(Number(po.estimatedTotalCost ?? po.estimatedCost ?? 0))} /><Detail label="Expected delivery" value={purchaseScheduleDateLabel(po.expectedDeliveryDate || po.expectedAt)} /></div>
+    <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-5"><Detail label="Status" value={String(po.status || "draft").replace(/_/g, " ")} /><Detail label="Purpose" value={purchaseOrderPurposeLabel(po)} /><Detail label="Supplier" value={String(po.supplier || "Unassigned")} />{ctechId ? <Detail label="CTech PO #" value={ctechId} /> : null}{po.placedFromExternalSource === true ? <Detail label={`${String(po.externalSourceSystem || "External source")} PO #`} value={String(po.externalPoNumber || "Not recorded")} /> : null}<Detail label="Destination" value={String(po.warehouseName || "-")} /><Detail label="Units" value={numberLabel(Number(po.totalUnits || lines.reduce((sum, line) => sum + Number(line.qty || 0), 0)))} /><Detail label="Created by" value={String(po.creationActor || po.createdBy || "System")} /><Detail label="Creation path" value={String(po.creationOperation || po.source || "manual").replace(/_/g, " ")} /><Detail label="Merchandise cost" value={moneyLabel(Number(po.merchandiseCost ?? po.estimatedCost ?? 0))} /><Detail label="Dropship fee" value={moneyLabel(Number(po.dropShipFee || 0))} /><Detail label="Total PO cost" value={moneyLabel(Number(po.estimatedTotalCost ?? po.estimatedCost ?? 0))} /><Detail label="Expected delivery" value={purchaseScheduleDateLabel(po.expectedDeliveryDate || po.expectedAt)} /></div>
+    {String(po.inventoryPurpose || "") === "live_selling" ? <Alert className="border-pink-500/40 bg-pink-500/10"><PackageCheck className="size-4" /><AlertTitle>{purchaseOrderPurposeLabel(po)} inventory</AlertTitle><AlertDescription>Receiving activity and every posted line retain this live-selling purpose so warehouse and channel teams can trace the stock back to this PO.</AlertDescription></Alert> : null}
     {activeReceivingNotice}
     {receivedByNotice}
     {!isDropship && purchaseOrderHasSubmission(po) && !["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase()) ? <Alert className="border-blue-500/30 bg-blue-500/5"><Truck className="size-4" /><AlertTitle>{po.noTrackingNeeded === true ? "Incoming without tracking" : po.trackingNumber ? "Inbound shipment tracking" : "Awaiting supplier tracking"}</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>{po.noTrackingNeeded === true ? `${String(po.supplier || "The supplier")} does not provide tracking. Start receiving when this PO arrives${po.expectedAt ? `; expected ${purchaseScheduleDateLabel(po.expectedAt)}` : ""}.` : po.trackingNumber ? `${String(po.shippingCarrier || "Carrier")} ${String(po.trackingNumber)} is shipping to ${String(po.warehouseName || "the receiving warehouse")}.` : `Record tracking when ${String(po.supplier || "the supplier")} ships this PO to ${String(po.warehouseName || "the receiving warehouse")}.`}</span><span className="flex flex-wrap gap-2">{canMarkInbound ? <Button size="sm" onClick={() => void markInbound()}><Truck className="size-4" /> Mark inbound</Button> : null}{po.noTrackingNeeded === true ? null : <Button size="sm" variant="outline" onClick={openInboundTracking}>{po.trackingNumber ? "Edit inbound tracking" : "Add inbound tracking"}</Button>}</span></AlertDescription></Alert> : null}
@@ -2788,6 +2813,7 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           <div className="grid gap-5">
             <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3"><Field label="Supplier"><Select value={String(editDraft.vendorId || "")} onValueChange={(value) => setEditDraft((current) => ({ ...current, vendorId: value }))}><SelectTrigger><SelectValue placeholder="Choose supplier" /></SelectTrigger><SelectContent>{(referenceData.vendors || []).map((vendor) => <SelectItem key={String(vendor.id)} value={String(vendor.id)}>{String(vendor.name || vendor.id)}</SelectItem>)}</SelectContent></Select></Field>{!isDropship ? <Field label="Receiving warehouse"><Select value={String(editDraft.warehouseId || "")} onValueChange={(value) => setEditDraft((current) => ({ ...current, warehouseId: value }))}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{(referenceData.warehouses || []).map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.id)}</SelectItem>)}</SelectContent></Select></Field> : <div className="rounded-md border bg-muted/30 p-3 text-sm"><p className="font-medium">Direct to customer</p><p className="mt-1 text-xs text-muted-foreground">No receiving warehouse is used for this dropship PO.</p></div>}<Field label="Expected date"><Input type="date" value={String(editDraft.expectedAt || "")} onChange={(event) => setEditDraft((current) => ({ ...current, expectedAt: event.target.value }))} /></Field></div>
+            {!isDropship ? <div className="grid gap-4 sm:grid-cols-2"><Field label="Inventory purpose"><Select value={String(editDraft.inventoryPurpose || "stock")} onValueChange={(inventoryPurpose) => setEditDraft((current) => ({ ...current, inventoryPurpose, liveChannel: inventoryPurpose === "live_selling" ? current.liveChannel : "" }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{purchaseOrderPurposeOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></Field>{String(editDraft.inventoryPurpose || "") === "live_selling" ? <Field label="Live destination"><Select value={String(editDraft.liveChannel || "")} onValueChange={(liveChannel) => setEditDraft((current) => ({ ...current, liveChannel }))}><SelectTrigger><SelectValue placeholder="Choose live channel" /></SelectTrigger><SelectContent>{liveInventoryChannelOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></Field> : null}</div> : null}
             {!editableManualDraftLines ? <div className="grid gap-3">
               <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-medium">Add a catalog SKU</p><p className="text-xs text-muted-foreground">Add a product carried by {String(po.supplier || "this supplier")}. Saving a sent PO records an amendment and requires a reason.</p></div><Button size="sm" variant={editCatalogOpen ? "secondary" : "outline"} onClick={() => { setEditCatalogOpen((open) => !open); setEditCatalogQuery(""); setEditCatalogResults([]) }}><Plus className="size-4" /> Add SKU</Button></div>
               {editCatalogOpen ? <div className="grid gap-3 rounded-md border bg-muted/20 p-3">
@@ -2814,7 +2840,7 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
             {poCommitted ? <div className="grid gap-2"><Label htmlFor="po-amendment-reason">Reason for supplier amendment</Label><Textarea id="po-amendment-reason" value={String(editDraft.amendmentReason || "")} onChange={(event) => setEditDraft((current) => ({ ...current, amendmentReason: event.target.value }))} placeholder="Explain what changed and why the supplier must confirm it" /></div> : null}
           </div>
         </div>
-        <DialogFooter className="shrink-0 border-t px-5 py-4"><Button variant="outline" onClick={() => setEditingOpen(false)}>Cancel</Button><Button disabled={saving} onClick={() => void saveEdit()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save PO</Button></DialogFooter>
+        <DialogFooter className="shrink-0 border-t px-5 py-4"><Button variant="outline" onClick={() => setEditingOpen(false)}>Cancel</Button><Button disabled={saving || (String(editDraft.inventoryPurpose || "") === "live_selling" && !String(editDraft.liveChannel || ""))} onClick={() => void saveEdit()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save PO</Button></DialogFooter>
       </DialogContent>
     </Dialog>
     <Dialog open={financialOpen} onOpenChange={setFinancialOpen}>

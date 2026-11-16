@@ -764,6 +764,7 @@ const warehouseAuditTypeFilterOptions = [
   { value: "new_inventory_onboarding", label: "New inventory onboarding" },
   { value: "extra_stock", label: "Extra stock" },
   { value: "ebay_one_time_listing", label: "One-time eBay listings" },
+  { value: "live_selling_inventory", label: "Live selling inventory" },
 ] as const;
 
 function warehouseAuditQueryParam(name: string) {
@@ -780,7 +781,9 @@ function WarehouseAuditType({ audit }: { audit: Record<string, unknown> }) {
     ? "PO receiving"
     : isExternalPo
       ? reference ? "External PO receipt" : "Manual inbound receipt"
-      : warehouseAuditReasonLabel(reason, audit.reasonLabel) || "Other audit";
+      : reason === "live_selling_inventory"
+        ? String(audit.liveChannelLabel || (audit.liveChannel === "tiktok_live" ? "TikTok Live" : "eBay Live"))
+        : warehouseAuditReasonLabel(reason, audit.reasonLabel) || "Other audit";
   return <div className="grid min-w-0 gap-1">
     <Badge
       variant="outline"
@@ -789,6 +792,7 @@ function WarehouseAuditType({ audit }: { audit: Record<string, unknown> }) {
         isDataPlusPo && "border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-300",
         isExternalPo && "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-300",
         reason === "receiving_inventory" && "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
+        reason === "live_selling_inventory" && "border-pink-500/40 bg-pink-500/10 text-pink-700 dark:text-pink-300",
       )}
     >{label}</Badge>
     {isDataPlusPo && reference && audit.linkedPurchaseOrderId
@@ -1152,8 +1156,14 @@ const warehouseAuditReasonOptions = [
   { value: "new_inventory_onboarding", label: "New inventory onboarding" },
   { value: "extra_stock", label: "Extra stock" },
   { value: "ebay_one_time_listing", label: "One-time eBay listings" },
+  { value: "live_selling_inventory", label: "Live selling inventory" },
   { value: "receiving_inventory", label: "Receive inventory" },
   { value: "external_po_receipt", label: "External PO receipt" },
+] as const;
+
+const liveInventoryChannelOptions = [
+  { value: "ebay_live", label: "eBay Live" },
+  { value: "tiktok_live", label: "TikTok Live" },
 ] as const;
 
 const warehouseUomOptions = [
@@ -1323,6 +1333,7 @@ function WarehouseAuditPanel({
   const [barcode, setBarcode] = useState("");
   const [warehouse, setWarehouse] = useState("Staten Island");
   const [auditReason, setAuditReason] = useState("cycle_count");
+  const [liveChannel, setLiveChannel] = useState("ebay_live");
   const [receivingSupplier, setReceivingSupplier] = useState("True Value");
   const [receivingSupplierId, setReceivingSupplierId] = useState("");
   const [externalPurchaseOrderNumber, setExternalPurchaseOrderNumber] = useState("");
@@ -1739,6 +1750,7 @@ function WarehouseAuditPanel({
           warehouseId: selectedCreateWarehouse?.id || "",
           warehouseName: selectedCreateWarehouse?.name || warehouse,
           reason: auditReason,
+          liveChannel: auditReason === "live_selling_inventory" ? liveChannel : "",
           supplierId: isReceivingAuditReason(auditReason) ? receivingSupplierId : "",
           supplierName: isReceivingAuditReason(auditReason) ? receivingSupplier : "",
           externalPurchaseOrderNumber: auditReason === "external_po_receipt" ? externalPurchaseOrderNumber.trim() : "",
@@ -2394,7 +2406,7 @@ function WarehouseAuditPanel({
     setActionPreviewError("");
     setReturnDespiteDemand(false);
     setCloseShortPurchaseOrder(false);
-    if (String(resumedAudit.reason || "") === "ebay_one_time_listing") {
+    if (["ebay_one_time_listing", "live_selling_inventory"].includes(String(resumedAudit.reason || ""))) {
       setDispositionType("stock_here");
       setActionPreview({ totalUsableQty: 0, affectedOrderCount: 0, orders: [], lines: [] });
       setActionPreviewLoading(false);
@@ -2556,6 +2568,7 @@ function WarehouseAuditPanel({
   };
   const openPurposeEditor = () => {
     setPurposeDraft(String(resumedAudit?.reason || ""));
+    setLiveChannel(String(resumedAudit?.liveChannel || "ebay_live"));
     setReceivingSupplier(String(resumedAudit?.supplierName || ""));
     setReceivingSupplierId(String(resumedAudit?.supplierId || receivingSupplierId || ""));
     setExternalPurchaseOrderNumber(String(resumedAudit?.externalPurchaseOrderNumber || ""));
@@ -2567,7 +2580,7 @@ function WarehouseAuditPanel({
     try {
       const result = await api<{ audit?: Record<string, unknown>; message?: string }>(
         `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}`,
-        { method: "PATCH", body: JSON.stringify({ reason: purposeDraft, supplierId: isReceivingAuditReason(purposeDraft) ? receivingSupplierId : "", supplierName: isReceivingAuditReason(purposeDraft) ? receivingSupplier : "", externalPurchaseOrderNumber: purposeDraft === "external_po_receipt" ? externalPurchaseOrderNumber.trim() : "", user: auditOwner || "Luis" }) },
+        { method: "PATCH", body: JSON.stringify({ reason: purposeDraft, liveChannel: purposeDraft === "live_selling_inventory" ? liveChannel : "", supplierId: isReceivingAuditReason(purposeDraft) ? receivingSupplierId : "", supplierName: isReceivingAuditReason(purposeDraft) ? receivingSupplier : "", externalPurchaseOrderNumber: purposeDraft === "external_po_receipt" ? externalPurchaseOrderNumber.trim() : "", user: auditOwner || "Luis" }) },
       );
       applyAuditUpdate(result.audit || resumedAudit);
       setPurposeEditorOpen(false);
@@ -2600,6 +2613,9 @@ function WarehouseAuditPanel({
     return Number.isFinite(lastActiveAt) && lastActiveAt >= Date.now() - 2 * 60 * 1000;
   });
   const isEbayOneTimeAudit = String(current?.reason || "") === "ebay_one_time_listing";
+  const isLiveSellingAudit = String(current?.reason || "") === "live_selling_inventory";
+  const isMarketplacePurposeAudit = isEbayOneTimeAudit || isLiveSellingAudit;
+  const isEbayLiveAudit = isLiveSellingAudit && String(current?.liveChannel || "") === "ebay_live";
   const receivingDocuments = Array.isArray(current?.receivingDocuments) ? current.receivingDocuments as Array<Record<string, unknown>> : [];
   const hasPackingSlip = receivingDocuments.some((document) => String(document.documentType || "") === "packing_slip");
   const isLinkedPurchaseOrderReceipt = String(current?.reason || "") === "purchase_order_receipt" && Boolean(current?.linkedPurchaseOrderId);
@@ -2648,6 +2664,8 @@ function WarehouseAuditPanel({
   const latestFoundStockSummary = latestFoundStockImport?.summary && typeof latestFoundStockImport.summary === "object" ? latestFoundStockImport.summary as Record<string, unknown> : null;
   const auditDisposition = current?.disposition && typeof current.disposition === "object" ? current.disposition as Record<string, unknown> : null;
   const marketplaceShadows = Array.isArray(auditDisposition?.marketplaceShadows) ? auditDisposition.marketplaceShadows as Array<Record<string, unknown>> : [];
+  const marketplaceShadowSummary = current?.marketplaceShadowSummary && typeof current.marketplaceShadowSummary === "object" ? current.marketplaceShadowSummary as Record<string, unknown> : null;
+  const marketplaceShadowBlocked = Array.isArray(marketplaceShadowSummary?.blocked) ? marketplaceShadowSummary.blocked as Array<Record<string, unknown>> : [];
   const transferDestinations = auditWarehouses.filter((item) =>
     String(item.id || "") !== String(current?.warehouseId || "") &&
     warehouseTypeOption(item.warehouseType).isPhysical &&
@@ -2748,10 +2766,11 @@ function WarehouseAuditPanel({
               <SelectContent>{warehouseAuditReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
             </Select>
           </Field>
+          {auditReason === "live_selling_inventory" && <Field label="Live destination"><Select value={liveChannel} onValueChange={setLiveChannel}><SelectTrigger className="min-w-48"><SelectValue /></SelectTrigger><SelectContent>{liveInventoryChannelOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></Field>}
           {isReceivingAuditReason(auditReason) && <Field label="Supplier">{receivingSupplierPicker(auditReason === "external_po_receipt")}</Field>}
           {auditReason === "external_po_receipt" && <Field label="External PO or reference (optional)"><Input value={externalPurchaseOrderNumber} onChange={(event) => setExternalPurchaseOrderNumber(event.target.value)} placeholder="PO, invoice, shipment, or other reference" /></Field>}
           <Button
-            disabled={busy || !warehouse.trim() || !auditOwner.trim() || (isReceivingAuditReason(auditReason) && !receivingSupplierId)}
+            disabled={busy || !warehouse.trim() || !auditOwner.trim() || (isReceivingAuditReason(auditReason) && !receivingSupplierId) || (auditReason === "live_selling_inventory" && !liveChannel)}
             onClick={() => void create()}
           >
             {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} Create audit
@@ -2789,10 +2808,11 @@ function WarehouseAuditPanel({
                 <SelectContent>{warehouseAuditReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
               </Select>
             </Field>
+            {auditReason === "live_selling_inventory" && <Field label="Live destination"><Select value={liveChannel} onValueChange={setLiveChannel}><SelectTrigger className="min-w-48"><SelectValue /></SelectTrigger><SelectContent>{liveInventoryChannelOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></Field>}
             {isReceivingAuditReason(auditReason) && <Field label="Supplier">{receivingSupplierPicker(auditReason === "external_po_receipt")}</Field>}
             {auditReason === "external_po_receipt" && <Field label="External PO or reference (optional)"><Input value={externalPurchaseOrderNumber} onChange={(event) => setExternalPurchaseOrderNumber(event.target.value)} placeholder="PO, invoice, shipment, or other reference" /></Field>}
             <Button
-              disabled={busy || !warehouse.trim() || (isReceivingAuditReason(auditReason) && !receivingSupplierId)}
+              disabled={busy || !warehouse.trim() || (isReceivingAuditReason(auditReason) && !receivingSupplierId) || (auditReason === "live_selling_inventory" && !liveChannel)}
               onClick={() => void create()}
             >
               Start warehouse audit
@@ -2815,13 +2835,14 @@ function WarehouseAuditPanel({
                   ) : (
                     <Badge variant="outline" className="border-amber-400 bg-amber-50 text-amber-950 dark:border-amber-600 dark:bg-amber-950/50 dark:text-amber-100"><AlertTriangle className="mr-1 size-3" /> Reason missing</Badge>
                   )}
+                  {isLiveSellingAudit && <Badge variant="outline" className="border-pink-500/40 bg-pink-500/10 text-pink-700 dark:text-pink-300"><Store className="mr-1 size-3" />{String(current.liveChannelLabel || (current.liveChannel === "tiktok_live" ? "TikTok Live" : "eBay Live"))}</Badge>}
                   {String(current.externalPurchaseOrderNumber || "") && <Badge variant="outline">External PO {String(current.externalPurchaseOrderNumber)}</Badge>}
                   {String(current.linkedPurchaseOrderNumber || "") && <Badge variant="outline">DataPlus PO {String(current.linkedPurchaseOrderNumber)}</Badge>}
                   {isReceivingAudit && activeReceivingParticipants.map((participant) => <Badge key={String(participant.user)} variant="success"><Users className="mr-1 size-3" />{String(participant.user)} active</Badge>)}
                   {auditDisposition && <Badge variant="secondary">{String(auditDisposition.label || "Inventory outcome applied")}</Badge>}
                   {Boolean(auditDisposition?.supplierReturnNumber) && <Badge variant="outline">{String(auditDisposition?.supplierReturnNumber)} draft</Badge>}
                   {offlineScanCount > 0 && <Badge variant="outline">{syncingOfflineScans ? "Syncing offline scans" : `${offlineScanCount} scan${offlineScanCount === 1 ? "" : "s"} queued offline`}</Badge>}
-                  {auditStatus === "pending_review" && <span className="text-xs text-muted-foreground">{isReceivingAudit ? "Shipment scan complete · verify the packing slip and post the receipt" : "Count complete · choose what happens to the inventory"}</span>}
+                  {auditStatus === "pending_review" && <span className="text-xs text-muted-foreground">{isReceivingAudit ? "Shipment scan complete · verify the packing slip and post the receipt" : isMarketplacePurposeAudit ? "Count complete · prepare the inventory for its selected marketplace purpose" : "Count complete · choose what happens to the inventory"}</span>}
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-2 sm:flex sm:w-auto">
@@ -2845,9 +2866,9 @@ function WarehouseAuditPanel({
                   <Camera className="size-4" /> Use phone camera
                 </Button>
                 {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setLastScan(null); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}><ScanBarcode className="size-4" /> Scan bin</Button>}
-                  {["in_progress", "pending_review"].includes(auditStatus) && <Button size="sm" disabled={busy || !lines.length} onClick={() => void openInventoryAction()}><ArrowRight className="size-4" /> {isReceivingAudit ? "Finish receipt" : isEbayOneTimeAudit ? "Create shadows" : "Finish count"}</Button>}
+                {["in_progress", "pending_review"].includes(auditStatus) && <Button size="sm" disabled={busy || !lines.length} onClick={() => void openInventoryAction()}><ArrowRight className="size-4" /> {isReceivingAudit ? "Finish receipt" : isLiveSellingAudit ? "Prepare live items" : isEbayOneTimeAudit ? "Create shadows" : "Finish count"}</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}><Play className="size-4" /> Continue counting</Button>}
-                {auditStatus === "completed" && String(current.reason || "") === "ebay_one_time_listing" && <Button size="sm" disabled={ebayShadowLaunchBusy} onClick={() => void launchAuditShadowsOnEbay()}>{ebayShadowLaunchBusy ? <Loader2 className="size-4 animate-spin" /> : <Store className="size-4" />} Launch shadows</Button>}
+                {auditStatus === "completed" && (isEbayOneTimeAudit || isEbayLiveAudit) && <Button size="sm" disabled={ebayShadowLaunchBusy} onClick={() => void launchAuditShadowsOnEbay()}>{ebayShadowLaunchBusy ? <Loader2 className="size-4 animate-spin" /> : <Store className="size-4" />} {isEbayLiveAudit ? "Publish eBay listing" : "Launch shadows"}</Button>}
                 <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setBinLabelsOpen(true)}><Printer className="size-4" /> Print bin labels</DropdownMenuItem><DropdownMenuItem onSelect={() => void shareAuditLink()}><Share2 className="size-4" /> Share audit link</DropdownMenuItem>{activeBin && auditStatus === "in_progress" && <DropdownMenuItem disabled={busy || clearBinBusy} onSelect={requestClearBin}><X className="size-4" /> Clear bin</DropdownMenuItem>}{!mobile && desktopAuditTools && <DropdownMenuItem onSelect={() => setAuditToolsOpen(true)}><FileUp className="size-4" /> Import stock / eBay tools</DropdownMenuItem>}{!isLinkedPurchaseOrderReceipt && <DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem>}<DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
               </div>
             </div>
@@ -2870,7 +2891,7 @@ function WarehouseAuditPanel({
                 {!recentReceivingActivity.length && <p className="px-4 py-5 text-center text-sm text-muted-foreground">No products have been scanned yet.</p>}
               </div>
             </section>}
-            {isEbayOneTimeAudit && auditStatus === "completed" && <div className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">Warehouse shadows ready</p><p className="mt-1 text-xs text-muted-foreground">{numberLabel(marketplaceShadows.length)} reusable shadow SKU{marketplaceShadows.length === 1 ? "" : "s"} tied to {String(current.warehouseName)}. Launching reuses their saved channel data.</p></div>{Number(current.lastEbayShadowLaunchJobNumber || 0) > 0 && <Badge variant="outline">Job #{numberLabel(Number(current.lastEbayShadowLaunchJobNumber))}</Badge>}</div>{marketplaceShadows.length > 0 && <div className="mt-2 flex max-h-24 flex-wrap gap-1 overflow-y-auto">{marketplaceShadows.map((shadow) => <Badge key={String(shadow.shadowId || shadow.shadowSku)} variant="secondary" className="font-mono">{String(shadow.shadowSku || "Shadow")}</Badge>)}</div>}</div>}
+            {isMarketplacePurposeAudit && auditStatus === "completed" && <div className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">{isLiveSellingAudit ? `${String(current.liveChannelLabel || (current.liveChannel === "tiktok_live" ? "TikTok Live" : "eBay Live"))} items prepared` : "Warehouse shadows ready"}</p><p className="mt-1 text-xs text-muted-foreground">{numberLabel(marketplaceShadows.length)} reusable internal shadow SKU{marketplaceShadows.length === 1 ? "" : "s"} tied to {String(current.warehouseName)}. Manufacturer part numbers remain the channel-facing merchant SKUs.</p></div>{Number(current.lastEbayShadowLaunchJobNumber || 0) > 0 && <Badge variant="outline">Job #{numberLabel(Number(current.lastEbayShadowLaunchJobNumber))}</Badge>}</div>{marketplaceShadows.length > 0 && <div className="mt-3 grid max-h-40 gap-2 overflow-y-auto">{marketplaceShadows.map((shadow) => <div key={String(shadow.shadowId || shadow.shadowSku)} className="flex flex-wrap items-center gap-2 rounded-md border bg-background/80 px-3 py-2 text-xs"><Badge variant="secondary" className="font-mono">Internal {String(shadow.shadowSku || "Shadow")}</Badge><Badge variant="outline" className="font-mono">Merchant {String(shadow.merchantSku || shadow.channelSku || "MPN needed")}</Badge>{Boolean(shadow.contentSourceSku) && <span className="text-muted-foreground">Content from {String(shadow.contentSourceSku)}</span>}</div>)}</div>}{marketplaceShadowBlocked.length > 0 && <Alert className="mt-3 border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>{numberLabel(marketplaceShadowBlocked.length)} item{marketplaceShadowBlocked.length === 1 ? " needs" : "s need"} review</AlertTitle><AlertDescription>DataPlus could not prepare these items automatically because a manufacturer SKU is missing or conflicts with another product.</AlertDescription></Alert>}{isLiveSellingAudit && String(current.liveChannel || "") === "tiktok_live" && <p className="mt-3 text-xs text-muted-foreground">TikTok requires the product to be published before it can be assigned to a LIVE room. This audit prepares the product identity and inventory candidate; it does not silently publish or schedule the item.</p>}</div>}
             <Dialog open={Boolean(shareAuditUrl)} onOpenChange={(open) => { if (!open) setShareAuditUrl(""); }}>
               <DialogContent className="sm:max-w-lg">
                 <DialogHeader><DialogTitle>Share audit link</DialogTitle><DialogDescription>Copy this link and send it to a teammate. They must sign in and have access to this audit.</DialogDescription></DialogHeader>
@@ -2898,9 +2919,10 @@ function WarehouseAuditPanel({
                     <SelectContent>{warehouseAuditReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
                   </Select>
                 </Field>
+                {purposeDraft === "live_selling_inventory" && <Field label="Live destination"><Select value={liveChannel} onValueChange={setLiveChannel}><SelectTrigger><SelectValue placeholder="Select a destination" /></SelectTrigger><SelectContent>{liveInventoryChannelOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></Field>}
                 {isReceivingAuditReason(purposeDraft) && <Field label="Supplier">{receivingSupplierPicker(purposeDraft === "external_po_receipt")}</Field>}
                 {purposeDraft === "external_po_receipt" && <Field label="External PO or reference (optional)"><Input value={externalPurchaseOrderNumber} onChange={(event) => setExternalPurchaseOrderNumber(event.target.value)} placeholder="PO, invoice, shipment, or other reference" /></Field>}
-                <DialogFooter><Button variant="outline" onClick={() => setPurposeEditorOpen(false)}>Cancel</Button><Button disabled={purposeSaving || !purposeDraft || (isReceivingAuditReason(purposeDraft) && !receivingSupplierId)} onClick={() => void saveAuditPurpose()}>{purposeSaving && <Loader2 className="size-4 animate-spin" />} Save purpose</Button></DialogFooter>
+                <DialogFooter><Button variant="outline" onClick={() => setPurposeEditorOpen(false)}>Cancel</Button><Button disabled={purposeSaving || !purposeDraft || (purposeDraft === "live_selling_inventory" && !liveChannel) || (isReceivingAuditReason(purposeDraft) && !receivingSupplierId)} onClick={() => void saveAuditPurpose()}>{purposeSaving && <Loader2 className="size-4 animate-spin" />} Save purpose</Button></DialogFooter>
               </DialogContent>
             </Dialog>
 
@@ -2945,8 +2967,8 @@ function WarehouseAuditPanel({
             <Dialog open={dispositionOpen} onOpenChange={setDispositionOpen}>
               <DialogContent className="max-w-3xl">
                 <DialogHeader>
-                  <DialogTitle>{isLinkedPurchaseOrderReceipt ? "Finish PO receiving" : isReceivingAudit ? "Finish inbound receipt" : "Finish count"}</DialogTitle>
-                  <DialogDescription>{isLinkedPurchaseOrderReceipt ? `Post the scanned quantities to ${String(current.linkedPurchaseOrderNumber || "the linked purchase order")}. Any uploaded packing-slip evidence stays in its receiving history.` : isReceivingAudit ? "Post the scanned shipment as new inbound inventory. Any uploaded receiving documents remain attached as evidence." : "The audit is the review record. DataPlus checks supplier-equivalent SKUs against open orders before inventory can be returned."}</DialogDescription>
+                  <DialogTitle>{isLinkedPurchaseOrderReceipt ? "Finish PO receiving" : isReceivingAudit ? "Finish inbound receipt" : isLiveSellingAudit ? `Prepare ${String(current.liveChannelLabel || (current.liveChannel === "tiktok_live" ? "TikTok Live" : "eBay Live"))} inventory` : "Finish count"}</DialogTitle>
+                  <DialogDescription>{isLinkedPurchaseOrderReceipt ? `Post the scanned quantities to ${String(current.linkedPurchaseOrderNumber || "the linked purchase order")}. Any uploaded packing-slip evidence stays in its receiving history.` : isReceivingAudit ? "Post the scanned shipment as new inbound inventory. Any uploaded receiving documents remain attached as evidence." : isLiveSellingAudit ? "Stock the counted units in this warehouse and prepare a traceable live-channel candidate. Manufacturer part number is used as the merchant SKU; nothing is silently published." : "The audit is the review record. DataPlus checks supplier-equivalent SKUs against open orders before inventory can be returned."}</DialogDescription>
                 </DialogHeader>
                 {isLinkedPurchaseOrderReceipt && <Alert className="border-blue-500/40 bg-blue-500/5"><PackageCheck className="size-4" /><AlertTitle>Ready to post, not received yet</AlertTitle><AlertDescription>The scans below are saved as live receiving progress. Posting releases customer demand already tied to this PO. Choose below whether remaining received stock should also allocate other eligible open orders.</AlertDescription></Alert>}
                 {isLinkedPurchaseOrderReceipt && <div className="grid gap-3 rounded-md border bg-muted/30 p-4 sm:grid-cols-3"><div><p className="text-xs text-muted-foreground">Purchase order</p><p className="font-medium">{String(current.linkedPurchaseOrderNumber || "-")}</p></div><div><p className="text-xs text-muted-foreground">Scanned units</p><p className="font-medium">{numberLabel(lines.reduce((sum, line) => sum + Number(line.countedQty || 0), 0))}</p></div><div><p className="text-xs text-muted-foreground">Packing slips</p><p className="font-medium">{numberLabel(receivingDocuments.filter((document) => String(document.documentType || "") === "packing_slip").length)}</p></div></div>}
@@ -2955,16 +2977,16 @@ function WarehouseAuditPanel({
                 {actionPreviewLoading && <div className="flex items-center gap-2 rounded-md border bg-muted/30 p-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Checking open orders and receipt details...</div>}
                 {actionPreviewError && <div className={`rounded-md border p-3 text-sm ${isLinkedPurchaseOrderReceipt ? "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-200" : "border-destructive/40 bg-destructive/10 text-destructive"}`}>{actionPreviewError}</div>}
                 {isLinkedPurchaseOrderReceipt && !actionPreviewLoading && !actionPreviewError && actionPreview && <div className="rounded-md border p-4"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">Orders this receipt can move forward</p><p className="mt-1 text-xs text-muted-foreground">Includes paid orders awaiting stock and unshipped orders that already have allocated stock or a purchased label.</p></div>{receiptFulfillmentOrders.length > 0 && <Badge variant="outline">{numberLabel(receiptFulfillmentOrders.length)} order{receiptFulfillmentOrders.length === 1 ? "" : "s"}</Badge>}</div>{receiptFulfillmentOrders.length > 0 ? <ScrollArea className="mt-3 max-h-44"><div className="grid gap-2 pr-3">{receiptFulfillmentOrders.slice(0, 12).map((order) => { const state = String(order.state || "needs_allocation"); return <a key={String(order.orderId || order.id)} href={`/orders/${encodeURIComponent(String(order.orderId || order.id || ""))}`} className="flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2 text-sm hover:bg-muted/40"><span className="min-w-0"><span className="block font-medium">#{String(order.orderNumber || order.orderId || order.id)}</span><span className="block truncate text-xs text-muted-foreground">{String(order.customer || "Customer")} · {(Array.isArray(order.skus) ? order.skus : [order.sku]).filter(Boolean).join(", ")}</span></span><span className="flex shrink-0 flex-col items-end gap-1"><Badge variant="outline" className={state === "label_purchased" ? "border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-300" : state === "ready_to_ship" ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-300"}>{String(order.stateLabel || "Needs allocation")}</Badge>{order.linkedToPurchaseOrder ? <span className="text-[11px] text-muted-foreground">Linked to this PO</span> : <span className="text-[11px] text-muted-foreground">Additional match</span>}</span></a> })}</div></ScrollArea> : <p className="mt-3 text-sm text-muted-foreground">No matching unshipped customer orders were found for the scanned products.</p>}</div>}
-                {!isEbayOneTimeAudit && !actionPreviewLoading && !actionPreviewError && actionPreview && <div className={`rounded-md border p-4 ${compatibleDemandQty > 0 ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-700 dark:bg-emerald-950/35 dark:text-emerald-100" : "bg-muted/30"}`}><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">{compatibleDemandQty > 0 ? `${numberLabel(compatibleDemandQty)} counted units can serve additional open orders` : isLinkedPurchaseOrderReceipt && receiptFulfillmentOrders.length > 0 ? "No additional allocation is needed" : "No compatible open order demand found"}</p><p className="mt-1 text-xs text-muted-foreground">Matched across UPC, manufacturer part number, vendor SKU, and equivalent supplier SKUs.</p></div>{compatibleOrderCount > 0 && <Badge className="bg-emerald-600 text-white">{numberLabel(compatibleOrderCount)} order{compatibleOrderCount === 1 ? "" : "s"}</Badge>}</div>{compatibleOrders.length > 0 && <ScrollArea className="mt-3 max-h-40"><div className="grid gap-2 pr-3">{compatibleOrders.slice(0, 12).map((order) => <a key={String(order.id)} href={`/orders/${encodeURIComponent(String(order.id))}`} className="flex items-center justify-between gap-3 rounded-md border border-emerald-300/70 bg-background/80 px-3 py-2 text-sm hover:bg-background"><span className="min-w-0"><span className="block font-medium">#{String(order.orderNumber || order.id)}</span><span className="block truncate text-xs text-muted-foreground">{String(order.orderSku || order.auditSku || "Matched item")}</span></span><span className="flex shrink-0 items-center gap-2"><Badge variant="outline">{String(order.matchedBy || "") === "supplier_family" ? "Supplier-equivalent" : "Catalog SKU"}</Badge><span className="text-muted-foreground">{numberLabel(Number(order.remainingQty || 0))} needed</span></span></a>)}</div></ScrollArea>}</div>}
+                {!isMarketplacePurposeAudit && !actionPreviewLoading && !actionPreviewError && actionPreview && <div className={`rounded-md border p-4 ${compatibleDemandQty > 0 ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-700 dark:bg-emerald-950/35 dark:text-emerald-100" : "bg-muted/30"}`}><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">{compatibleDemandQty > 0 ? `${numberLabel(compatibleDemandQty)} counted units can serve additional open orders` : isLinkedPurchaseOrderReceipt && receiptFulfillmentOrders.length > 0 ? "No additional allocation is needed" : "No compatible open order demand found"}</p><p className="mt-1 text-xs text-muted-foreground">Matched across UPC, manufacturer part number, vendor SKU, and equivalent supplier SKUs.</p></div>{compatibleOrderCount > 0 && <Badge className="bg-emerald-600 text-white">{numberLabel(compatibleOrderCount)} order{compatibleOrderCount === 1 ? "" : "s"}</Badge>}</div>{compatibleOrders.length > 0 && <ScrollArea className="mt-3 max-h-40"><div className="grid gap-2 pr-3">{compatibleOrders.slice(0, 12).map((order) => <a key={String(order.id)} href={`/orders/${encodeURIComponent(String(order.id))}`} className="flex items-center justify-between gap-3 rounded-md border border-emerald-300/70 bg-background/80 px-3 py-2 text-sm hover:bg-background"><span className="min-w-0"><span className="block font-medium">#{String(order.orderNumber || order.id)}</span><span className="block truncate text-xs text-muted-foreground">{String(order.orderSku || order.auditSku || "Matched item")}</span></span><span className="flex shrink-0 items-center gap-2"><Badge variant="outline">{String(order.matchedBy || "") === "supplier_family" ? "Supplier-equivalent" : "Catalog SKU"}</Badge><span className="text-muted-foreground">{numberLabel(Number(order.remainingQty || 0))} needed</span></span></a>)}</div></ScrollArea>}</div>}
                 {isLinkedPurchaseOrderReceipt && remainingPurchaseOrderUnits > 0 && !actionPreviewLoading && !actionPreviewError && <label className={`flex items-start gap-3 rounded-md border p-3 transition-colors ${closeShortPurchaseOrder ? "border-amber-500/50 bg-amber-500/10" : "bg-muted/20"}`}><Checkbox checked={closeShortPurchaseOrder} onCheckedChange={(checked) => setCloseShortPurchaseOrder(checked === true)} /><span className="text-sm"><strong>Close {numberLabel(remainingPurchaseOrderUnits)} unreceived unit{remainingPurchaseOrderUnits === 1 ? "" : "s"} as supplier short shipment.</strong><span className="mt-1 block text-muted-foreground">Use this when the supplier will not send the balance. Ordered and received quantities remain in history, and linked unfilled demand returns to buyer review.</span></span></label>}
-                {isEbayOneTimeAudit && <Alert className="border-blue-500/30 bg-blue-500/10"><Store className="size-4" /><AlertTitle>Reusable warehouse shadows</AlertTitle><AlertDescription>DataPlus will stock these counts here and create or reuse one cross-channel shadow per product using this warehouse code. Supplier inventory will not replenish these shadows.</AlertDescription></Alert>}
+                {isMarketplacePurposeAudit && <Alert className="border-blue-500/30 bg-blue-500/10"><Store className="size-4" /><AlertTitle>{isLiveSellingAudit ? `${String(current.liveChannelLabel || (current.liveChannel === "tiktok_live" ? "TikTok Live" : "eBay Live"))} inventory purpose` : "Reusable warehouse shadows"}</AlertTitle><AlertDescription>{isLiveSellingAudit ? "DataPlus will stock these counts here, use the manufacturer part number as the channel-facing merchant SKU, and create or reuse a separate internal shadow identity. Supplier inventory will not inflate the physical quantity." : "DataPlus will stock these counts here and create or reuse one cross-channel shadow per product using this warehouse code. Supplier inventory will not replenish these shadows."}</AlertDescription></Alert>}
                 <div className="grid gap-3 md:grid-cols-2">
                   {[
                     { value: "fulfill_orders", title: "Use for open orders", description: "Stock the count here, then allocate compatible units and reroute affected orders." },
                     { value: "stock_here", title: "Stock here", description: `Make the approved units available in ${String(current.warehouseName)}.` },
                     { value: "transfer", title: "Transfer", description: "Count the units here, then move them to another physical warehouse." },
                     { value: "return_to_supplier", title: "Return to supplier", description: "Hold the units from sale and create a supplier-return draft." },
-                  ].filter((option) => isEbayOneTimeAudit ? option.value === "stock_here" : !isReceivingAudit || ["fulfill_orders", "stock_here"].includes(option.value)).map((option) => <button key={option.value} type="button" onClick={() => setDispositionType(option.value as typeof dispositionType)} className={`rounded-md border p-4 text-left transition-colors ${dispositionType === option.value ? "border-primary bg-primary/10 ring-1 ring-primary" : "bg-background hover:bg-muted/60"}`}><span className="font-medium">{isEbayOneTimeAudit ? "Stock here and create shadows" : isLinkedPurchaseOrderReceipt ? option.value === "fulfill_orders" ? "Allocate additional open orders" : "Only release this PO's demand" : option.title}</span><span className="mt-1 block text-xs text-muted-foreground">{isEbayOneTimeAudit ? `Keep inventory in ${String(current.warehouseName)} and prepare reusable temporary-listing SKUs.` : isLinkedPurchaseOrderReceipt ? option.value === "fulfill_orders" ? "After linked demand is released, reserve remaining received units for other compatible paid orders." : `Post the receipt and leave any remaining units available in ${String(current.warehouseName)}.` : option.description}</span></button>)}
+                  ].filter((option) => isMarketplacePurposeAudit ? option.value === "stock_here" : !isReceivingAudit || ["fulfill_orders", "stock_here"].includes(option.value)).map((option) => <button key={option.value} type="button" onClick={() => setDispositionType(option.value as typeof dispositionType)} className={`rounded-md border p-4 text-left transition-colors ${dispositionType === option.value ? "border-primary bg-primary/10 ring-1 ring-primary" : "bg-background hover:bg-muted/60"}`}><span className="font-medium">{isLiveSellingAudit ? "Stock here and prepare live item" : isEbayOneTimeAudit ? "Stock here and create shadows" : isLinkedPurchaseOrderReceipt ? option.value === "fulfill_orders" ? "Allocate additional open orders" : "Only release this PO's demand" : option.title}</span><span className="mt-1 block text-xs text-muted-foreground">{isLiveSellingAudit ? `Keep inventory in ${String(current.warehouseName)} and prepare its ${String(current.liveChannelLabel || "live channel")} merchant identity.` : isEbayOneTimeAudit ? `Keep inventory in ${String(current.warehouseName)} and prepare reusable temporary-listing SKUs.` : isLinkedPurchaseOrderReceipt ? option.value === "fulfill_orders" ? "After linked demand is released, reserve remaining received units for other compatible paid orders." : `Post the receipt and leave any remaining units available in ${String(current.warehouseName)}.` : option.description}</span></button>)}
                 </div>
                 {dispositionType === "transfer" && <Field label="Destination warehouse"><Select value={destinationWarehouseId} onValueChange={setDestinationWarehouseId}><SelectTrigger><SelectValue placeholder="Choose a physical warehouse" /></SelectTrigger><SelectContent>{transferDestinations.map((item) => <SelectItem key={String(item.id || item.name)} value={String(item.id || "")}>{String(item.name || "Warehouse")}{item.code ? ` (${String(item.code)})` : ""}</SelectItem>)}</SelectContent></Select></Field>}
                 {dispositionType === "return_to_supplier" && <div className={`rounded-md border p-3 text-sm ${missingReturnSupplierLines.length || compatibleDemandQty > 0 ? "border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100" : "bg-muted/30"}`}><p className="font-medium">Returns are created separately for each verified supplier</p><p className="mt-1 text-xs text-muted-foreground">A mixed audit can create multiple supplier-return drafts. Confirm every multi-supplier line first so one item is not returned to multiple vendors.</p>{multipleSupplierActionLines > 0 && <p className="mt-2">{numberLabel(multipleSupplierActionLines)} counted line{multipleSupplierActionLines === 1 ? " has" : "s have"} multiple supplier coverage.</p>}{missingReturnSupplierLines.length > 0 && <p className="mt-2 font-medium">{numberLabel(missingReturnSupplierLines.length)} line{missingReturnSupplierLines.length === 1 ? "" : "s"} still need a supplier.</p>}{compatibleDemandQty > 0 && <label className="mt-3 flex items-start gap-2 rounded-md border border-amber-400/60 bg-background/70 p-3"><Checkbox checked={returnDespiteDemand} onCheckedChange={(checked) => setReturnDespiteDemand(checked === true)} /><span><span className="block font-medium">Return despite open customer demand</span><span className="mt-0.5 block text-xs text-muted-foreground">I reviewed {numberLabel(compatibleOrderCount)} compatible order{compatibleOrderCount === 1 ? "" : "s"} and still want supplier-return drafts created.</span></span></label>}</div>}
@@ -2972,7 +2994,7 @@ function WarehouseAuditPanel({
                 </>
                 <DialogFooter>
                   <Button variant="outline" onClick={() => setDispositionOpen(false)}>Cancel</Button>
-                  <Button disabled={finishActionBlocked} onClick={() => void complete()}>{busy && <Loader2 className="size-4 animate-spin" />}{isLinkedPurchaseOrderReceipt ? closeShortPurchaseOrder ? "Post receipt & close PO" : dispositionType === "fulfill_orders" ? "Post receipt & allocate remaining" : "Post receipt" : isEbayOneTimeAudit ? "Apply & create shadows" : dispositionType === "fulfill_orders" ? "Receive & use for open orders" : dispositionType === "transfer" ? "Apply & transfer" : dispositionType === "return_to_supplier" ? "Create supplier return draft(s)" : isReceivingAudit ? "Receive & stock" : "Apply & stock"}</Button>
+                  <Button disabled={finishActionBlocked} onClick={() => void complete()}>{busy && <Loader2 className="size-4 animate-spin" />}{isLinkedPurchaseOrderReceipt ? closeShortPurchaseOrder ? "Post receipt & close PO" : dispositionType === "fulfill_orders" ? "Post receipt & allocate remaining" : "Post receipt" : isLiveSellingAudit ? "Apply & prepare live item" : isEbayOneTimeAudit ? "Apply & create shadows" : dispositionType === "fulfill_orders" ? "Receive & use for open orders" : dispositionType === "transfer" ? "Apply & transfer" : dispositionType === "return_to_supplier" ? "Create supplier return draft(s)" : isReceivingAudit ? "Receive & stock" : "Apply & stock"}</Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>

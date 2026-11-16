@@ -4883,6 +4883,7 @@ function normalizeDb(db) {
 
   const defaultPhysicalWarehouse = db.warehouses.find(isPhysicalWarehouse) || null;
   db.purchaseOrders = db.purchaseOrders.map((po) => ({
+    ...purchaseOrderPurposeForRecord(po),
     id: po.id || crypto.randomUUID(),
     poNumber: po.poNumber || nextPoNumber(db),
     status: po.status || "draft",
@@ -4893,7 +4894,7 @@ function normalizeDb(db) {
     source: po.source || "manual",
     orderIds: Array.isArray(po.orderIds) ? po.orderIds : [],
     orderNumbers: Array.isArray(po.orderNumbers) ? po.orderNumbers : [],
-    items: Array.isArray(po.items) ? po.items : [],
+    items: applyInventoryPurposeToPoLines(po.items, purchaseOrderPurposeForRecord(po)),
     totalUnits: Number(po.totalUnits || 0),
     estimatedCost: Number(po.estimatedCost || 0),
     notes: po.notes || "",
@@ -4939,12 +4940,17 @@ function normalizeShadowSku(shadow = {}, parent = {}) {
       .filter(([key, value]) => key && !["__proto__", "prototype", "constructor"].includes(key) && value && typeof value === "object" && !Array.isArray(value))
       .map(([key, value]) => [String(key).trim().toLowerCase(), { ...value }]))
     : {};
-  const channels = [...new Set([
+  const channelNames = [
     ...(Array.isArray(shadow.channels) ? shadow.channels : [marketplace]),
     ...Object.entries(channelListings).filter(([, listing]) => listing.enabled !== false).map(([key]) => key)
   ]
     .map((value) => String(value || "").trim())
-    .filter(Boolean))];
+    .filter(Boolean);
+  const channelsByKey = new Map();
+  for (const channelName of channelNames) {
+    if (!channelsByKey.has(channelName.toLowerCase())) channelsByKey.set(channelName.toLowerCase(), channelName);
+  }
+  const channels = [...channelsByKey.values()];
   const shadowSku = String(shadow.shadowSku || shadow.sku || "").trim();
   const persistence = shadow.persistence && typeof shadow.persistence === "object" && !Array.isArray(shadow.persistence)
     ? shadow.persistence
@@ -13373,6 +13379,71 @@ function generatedReceiptSerial(po, vendor, receivedAt, sku, unitIndex = 1) {
   return `${base}-${String(unitIndex).padStart(3, "0")}`;
 }
 
+const INVENTORY_PURPOSE_LABELS = Object.freeze({
+  stock: "In stock",
+  customer_orders: "Customer orders",
+  live_selling: "Live orders"
+});
+
+const LIVE_INVENTORY_CHANNEL_LABELS = Object.freeze({
+  ebay_live: "eBay Live",
+  tiktok_live: "TikTok Live"
+});
+
+function normalizeInventoryPurpose(value, fallback = "stock") {
+  const key = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (["stock", "in_stock", "replenishment", "warehouse_replenishment"].includes(key)) return "stock";
+  if (["customer_orders", "orders", "order", "customer_demand"].includes(key)) return "customer_orders";
+  if (["live_selling", "live", "live_orders", "live_order"].includes(key)) return "live_selling";
+  return fallback;
+}
+
+function normalizeLiveInventoryChannel(value) {
+  const key = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (["ebay", "ebay_live"].includes(key)) return "ebay_live";
+  if (["tiktok", "tiktok_shop", "tiktok_live"].includes(key)) return "tiktok_live";
+  return "";
+}
+
+function liveInventoryChannelForOrder(order = {}) {
+  const origin = String(order.salesOrigin || order.external?.salesOrigin || order.channelType || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (order.isEbayLive === true || order.ebayLive?.isLive === true || order.external?.isEbayLive === true || origin === "ebay_live") return "ebay_live";
+  if (order.isTikTokLive === true || order.tiktokLive?.isLive === true || order.external?.isTikTokLive === true || origin === "tiktok_live") return "tiktok_live";
+  return "";
+}
+
+function purchaseOrderPurposeForOrders(orders = []) {
+  const liveChannels = [...new Set((orders || []).map(liveInventoryChannelForOrder).filter(Boolean))];
+  if (liveChannels.length) {
+    return {
+      inventoryPurpose: "live_selling",
+      liveChannel: liveChannels.length === 1 ? liveChannels[0] : ""
+    };
+  }
+  return { inventoryPurpose: "customer_orders", liveChannel: "" };
+}
+
+function purchaseOrderPurposeForRecord(po = {}) {
+  const inferred = Array.isArray(po.orderIds) && po.orderIds.length ? "customer_orders" : "stock";
+  const inventoryPurpose = normalizeInventoryPurpose(po.inventoryPurpose || po.purpose, inferred);
+  return {
+    inventoryPurpose,
+    inventoryPurposeLabel: INVENTORY_PURPOSE_LABELS[inventoryPurpose],
+    liveChannel: inventoryPurpose === "live_selling" ? normalizeLiveInventoryChannel(po.liveChannel || po.liveSellingChannel) : "",
+    liveChannelLabel: inventoryPurpose === "live_selling" ? LIVE_INVENTORY_CHANNEL_LABELS[normalizeLiveInventoryChannel(po.liveChannel || po.liveSellingChannel)] || "Live channel not selected" : ""
+  };
+}
+
+function applyInventoryPurposeToPoLines(items = [], purpose = {}) {
+  return (Array.isArray(items) ? items : []).map((item) => ({
+    ...item,
+    inventoryPurpose: normalizeInventoryPurpose(item.inventoryPurpose, purpose.inventoryPurpose),
+    liveChannel: normalizeInventoryPurpose(item.inventoryPurpose, purpose.inventoryPurpose) === "live_selling"
+      ? normalizeLiveInventoryChannel(item.liveChannel || purpose.liveChannel)
+      : ""
+  }));
+}
+
 function findOpenPurchaseOrderLinks(db, orderIds = []) {
   const ids = new Set(orderIds.filter(Boolean));
   const duplicates = [];
@@ -13427,6 +13498,10 @@ function createPurchaseOrderFromOrders(db, orderIds, options = {}) {
 
   const vendor = options.vendorId ? findVendorById(db, options.vendorId) : findVendorByName(db, options.supplier) || preferredVendorForOrders(db, orders) || findVendorByName(db, "Local Wholesale");
   const warehouse = (db.warehouses || []).find((item) => item.id === options.warehouseId) || (db.warehouses || [])[0] || null;
+  const purpose = purchaseOrderPurposeForOrders(orders);
+  if (purpose.inventoryPurpose === "live_selling" && !purpose.liveChannel) {
+    throw new Error("eBay Live and TikTok Live demand must use separate purchase orders so receiving keeps the correct destination.");
+  }
   const po = {
     id: crypto.randomUUID(),
     poNumber: nextPoNumber(db),
@@ -13438,7 +13513,10 @@ function createPurchaseOrderFromOrders(db, orderIds, options = {}) {
     source: orders.length > 1 ? "master-order-selection" : "order",
     orderIds: orders.map((order) => order.id),
     orderNumbers: orders.map((order) => order.orderNumber),
-    items: Array.from(itemMap.values()),
+    ...purpose,
+    inventoryPurposeLabel: INVENTORY_PURPOSE_LABELS[purpose.inventoryPurpose],
+    liveChannelLabel: LIVE_INVENTORY_CHANNEL_LABELS[purpose.liveChannel] || "",
+    items: applyInventoryPurposeToPoLines(Array.from(itemMap.values()), purpose),
     totalUnits: Array.from(itemMap.values()).reduce((sum, item) => sum + Number(item.qty || 0), 0),
     estimatedCost: orders.reduce((sum, order) => sum + Number(order.productCost || 0), 0),
     notes: options.notes || "",
@@ -13617,7 +13695,11 @@ function createManualPurchaseOrder(db, options = {}) {
     throw new Error(`${warehouse.name || "This warehouse"} cannot receive inventory purchase orders.`);
   }
 
-  const items = normalizeManualPurchaseOrderItems(options.items, { allowIncompleteDraft });
+  const inventoryPurpose = normalizeInventoryPurpose(options.inventoryPurpose || options.purpose, "stock");
+  const liveChannel = inventoryPurpose === "live_selling" ? normalizeLiveInventoryChannel(options.liveChannel) : "";
+  if (inventoryPurpose === "live_selling" && !liveChannel) throw new Error("Choose eBay Live or TikTok Live for a live-orders purchase order.");
+  const purpose = { inventoryPurpose, liveChannel };
+  const items = applyInventoryPurposeToPoLines(normalizeManualPurchaseOrderItems(options.items, { allowIncompleteDraft }), purpose);
   if (!allowIncompleteDraft && !items.length) throw new Error("Add at least one item to the purchase order.");
 
   const now = new Date().toISOString();
@@ -13632,6 +13714,9 @@ function createManualPurchaseOrder(db, options = {}) {
     status: isExternalPurchaseOrder ? "submitted" : "draft",
     type: "manual_inventory",
     fulfillmentMode: "warehouse_replenishment",
+    ...purpose,
+    inventoryPurposeLabel: INVENTORY_PURPOSE_LABELS[inventoryPurpose],
+    liveChannelLabel: LIVE_INVENTORY_CHANNEL_LABELS[liveChannel] || "",
     vendorId: vendor?.id || "",
     supplier: vendor?.name || "",
     catalogVendorId: String(options.catalogVendorId || vendor?.distributorVendorId || "").trim(),
@@ -13867,13 +13952,17 @@ function reopenPurchaseRequirementsForPurchaseOrder(db, po, options = {}) {
   return reopenedCount;
 }
 
-function purchaseOrderMatchesWaitingGroup(po, vendor, warehouse) {
+function purchaseOrderMatchesWaitingGroup(po, vendor, warehouse, purpose = {}) {
   if (!purchaseOrderAcceptsWaitingDemand(po)) return false;
   if (String(po.fulfillmentMode || "pooled").toLowerCase() === "dropship_per_order") return false;
   const sameVendor = vendor?.id
     ? String(po.vendorId || "") === String(vendor.id)
     : String(po.supplier || "").trim().toLowerCase() === String(vendor?.name || "").trim().toLowerCase();
-  return sameVendor && String(po.warehouseId || "") === String(warehouse?.id || "");
+  const poPurpose = purchaseOrderPurposeForRecord(po);
+  const requestedPurpose = normalizeInventoryPurpose(purpose.inventoryPurpose, "customer_orders");
+  const samePurpose = poPurpose.inventoryPurpose === requestedPurpose
+    && (requestedPurpose !== "live_selling" || poPurpose.liveChannel === normalizeLiveInventoryChannel(purpose.liveChannel));
+  return sameVendor && samePurpose && String(po.warehouseId || "") === String(warehouse?.id || "");
 }
 
 function vendorPurchaseFulfillmentMode(vendor = {}) {
@@ -14729,6 +14818,18 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
           ? "pooled"
           : requestedExistingPo?.fulfillmentMode || vendorPurchaseFulfillmentMode(vendor);
       const dropshipAddress = fulfillmentMode === "dropship_per_order" ? requireDropshipAddress(order) : null;
+      const purpose = purchaseOrderPurposeForOrders([order]);
+      if (requestedExistingPo) {
+        const existingPurpose = purchaseOrderPurposeForRecord(requestedExistingPo);
+        if (existingPurpose.inventoryPurpose !== purpose.inventoryPurpose
+          || existingPurpose.liveChannel !== purpose.liveChannel) {
+          const requestedLabel = purpose.liveChannel
+            ? LIVE_INVENTORY_CHANNEL_LABELS[purpose.liveChannel]
+            : INVENTORY_PURPOSE_LABELS[purpose.inventoryPurpose];
+          const existingLabel = existingPurpose.liveChannelLabel || existingPurpose.inventoryPurposeLabel;
+          throw new Error(`The selected demand is for ${requestedLabel}, but ${requestedExistingPo.poNumber || "the existing PO"} is for ${existingLabel}. Keep those purposes on separate purchase orders.`);
+        }
+      }
       const preferredWarehouseId = route.warehouseId
         || options.warehouseId
         || vendor?.purchaseOrderRules?.defaultWarehouseId
@@ -14740,10 +14841,11 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
       if (fulfillmentMode !== "dropship_per_order" && !warehouse) {
         throw new Error(`No active physical receiving warehouse is configured for ${vendor?.name || route.vendorName || "this supplier"}.`);
       }
+      const purposeKey = `${purpose.inventoryPurpose}:${purpose.liveChannel || "none"}`;
       const key = requestedExistingPo ? `existing:${requestedExistingPo.id}` : fulfillmentMode === "dropship_per_order"
-        ? `${vendor?.id || route.vendorName || "unassigned"}:dropship:${shipmentAddressKey(order)}`
-        : `${vendor?.id || route.vendorName || "unassigned"}:${warehouse?.id || ""}`;
-      const group = groups.get(key) || { vendor, warehouse, fulfillmentMode, dropshipAddress, purchaseOrder: requestedExistingPo, routes: [], orders: [] };
+        ? `${vendor?.id || route.vendorName || "unassigned"}:dropship:${shipmentAddressKey(order)}:${purposeKey}`
+        : `${vendor?.id || route.vendorName || "unassigned"}:${warehouse?.id || ""}:${purposeKey}`;
+      const group = groups.get(key) || { vendor, warehouse, fulfillmentMode, dropshipAddress, purchaseOrder: requestedExistingPo, routes: [], orders: [], ...purpose };
       group.routes.push({ ...route, order }); if (!group.orders.includes(order)) group.orders.push(order); groups.set(key, group);
     }
   }
@@ -14788,7 +14890,7 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
         && String(existing.vendorId || "") === String(group.vendor?.id || "")
         && dropshipPurchaseOrderAddressKey(existing) === shipmentAddressKey(group.orders[0] || {})
         && purchaseOrderCanReleaseWaitingDemand(existing))
-      : db.purchaseOrders.find((existing) => purchaseOrderMatchesWaitingGroup(existing, group.vendor, group.warehouse)));
+        : db.purchaseOrders.find((existing) => purchaseOrderMatchesWaitingGroup(existing, group.vendor, group.warehouse, group)));
     const isNew = !po;
     if (!po) {
       const firstRoute = group.routes[0] || {};
@@ -14809,6 +14911,10 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
         poNumber: nextPoNumber(db),
         status: "draft",
         type: "customer_demand",
+        inventoryPurpose: group.inventoryPurpose,
+        inventoryPurposeLabel: INVENTORY_PURPOSE_LABELS[group.inventoryPurpose],
+        liveChannel: group.liveChannel || "",
+        liveChannelLabel: LIVE_INVENTORY_CHANNEL_LABELS[group.liveChannel] || "",
         fulfillmentMode: group.fulfillmentMode || "pooled",
         directToCustomer: isDropship,
         workflowStage: isDropship ? "dropship" : "waiting_for_po",
@@ -14870,6 +14976,8 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
         orderId: route.order.id,
         orderNumber: route.order.orderNumber,
         salesChannel: orderSourceChannelName(route.order, ""),
+        inventoryPurpose: group.inventoryPurpose,
+        liveChannel: group.liveChannel || "",
         routeId: route.id,
         purchaseDemandLinks: [{
           orderId: route.order.id,
@@ -48499,6 +48607,167 @@ async function ensureWarehouseAuditShadows(audit = {}, warehouse = {}, products 
   return { warehouseId: warehouse.id, warehouseName: warehouse.name, warehouseCode, created, reused, shadows: [...created, ...reused] };
 }
 
+function validLiveMerchantSku(value) {
+  const text = String(value || "").trim();
+  return text && !["0", "n/a", "na", "none", "unknown"].includes(text.toLowerCase()) ? text : "";
+}
+
+function liveListingContentScore(product = {}) {
+  const fields = [
+    product.marketplaceTitle || product.title,
+    product.shortDescription,
+    product.longDescription,
+    product.brand,
+    product.manufacturer,
+    product.category || product.mainCategory,
+    product.barcode || product.upc || product.gtin,
+    product.mfrPartNumber || product.manufacturerPartNumber || product.mpn,
+    product.packageWeight || product.weightOz || product.weight,
+    product.packageLength || product.lengthIn,
+    product.packageWidth || product.widthIn,
+    product.packageHeight || product.heightIn
+  ];
+  const imageCount = [...new Set([product.defaultImage, ...(Array.isArray(product.images) ? product.images : [])].filter(Boolean))].length;
+  const bulletCount = Array.isArray(product.bullets) ? product.bullets.filter(Boolean).length
+    : Array.isArray(product.keyFeaturesRaw) ? product.keyFeaturesRaw.filter(Boolean).length : 0;
+  return fields.filter((value) => value !== undefined && value !== null && String(value).trim() && String(value).trim() !== "0").length
+    + Math.min(4, imageCount)
+    + Math.min(5, bulletCount);
+}
+
+function liveListingIsTrueValue(product = {}) {
+  const identity = `${product.supplier || ""} ${product.vendor || ""} ${product.supplierCode || ""}`.trim().toLowerCase();
+  return identity.includes("true value") || /(^|\s)trv($|\s)/.test(identity);
+}
+
+async function preferredLiveListingContentSource(product = {}) {
+  const similarity = await postgres.readProductSimilarityGroup({ productId: product.id, sku: product.sku }).catch(() => null);
+  const confirmedIds = [...new Set((similarity?.members || [])
+    .filter((member) => member.isCurrent || (Array.isArray(member.matchTypes) && member.matchTypes.includes("upc")))
+    .map((member) => member.productId)
+    .filter(Boolean))];
+  const related = confirmedIds.length
+    ? await postgres.readProductsByKeys(confirmedIds, { directProductIds: true, includeMarketplaceIds: false, includeVendorOffers: true }).catch(() => [])
+    : [];
+  const candidates = [product, ...related]
+    .filter((candidate, index, all) => candidate?.id && all.findIndex((entry) => String(entry.id) === String(candidate.id)) === index)
+    .sort((left, right) => liveListingContentScore(right) - liveListingContentScore(left)
+      || Number(liveListingIsTrueValue(right)) - Number(liveListingIsTrueValue(left))
+      || Number(String(right.id || "") === String(product.id || "")) - Number(String(left.id || "") === String(product.id || "")));
+  const contentSource = candidates[0] || product;
+  const merchantSource = candidates.find((candidate) => validLiveMerchantSku(candidate.mfrPartNumber || candidate.manufacturerPartNumber || candidate.mpn)) || contentSource;
+  return {
+    contentSource,
+    merchantSource,
+    merchantSku: validLiveMerchantSku(merchantSource?.mfrPartNumber || merchantSource?.manufacturerPartNumber || merchantSource?.mpn),
+    candidates
+  };
+}
+
+function liveChannelInternalShadowSku(parentSku = "", warehouse = {}, liveChannel = "") {
+  const suffix = `-${normalizedWarehouseShadowCode(warehouse)}-${liveChannel === "tiktok_live" ? "TTLIVE" : "EBLIVE"}`;
+  const cleaned = String(parentSku || "SKU").trim().replace(/\s+/g, "-").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-+/g, "-");
+  return `${cleaned.slice(0, Math.max(1, 50 - suffix.length))}${suffix}`;
+}
+
+async function ensureWarehouseLiveChannelShadows(audit = {}, warehouse = {}, products = []) {
+  const liveChannel = normalizeLiveInventoryChannel(audit.liveChannel);
+  if (!liveChannel) throw new Error("Choose eBay Live or TikTok Live before preparing live-selling inventory.");
+  const channelName = liveChannel === "tiktok_live" ? "TikTok Shop" : "eBay";
+  const liveLabel = LIVE_INVENTORY_CHANNEL_LABELS[liveChannel];
+  const warehouseCode = normalizedWarehouseShadowCode(warehouse);
+  const uniqueProducts = [...new Map((products || []).map((product) => [String(product.id || product.sku), product])).values()];
+  const created = [];
+  const reused = [];
+  const blocked = [];
+  const pendingOwners = new Map();
+  for (const product of uniqueProducts) {
+    const source = await preferredLiveListingContentSource(product);
+    const merchantSku = source.merchantSku;
+    if (!merchantSku) {
+      blocked.push({ productId: product.id, parentSku: product.sku, reason: "Manufacturer SKU is missing. Add an MPN before preparing this product for live selling." });
+      continue;
+    }
+    product.shadowSkus = Array.isArray(product.shadowSkus) ? product.shadowSkus : [];
+    let shadow = product.shadowSkus.find((candidate) => candidate.kind === "live_channel"
+      && normalizeLiveInventoryChannel(candidate.liveChannel) === liveChannel
+      && String(candidate.warehouseId || "") === String(warehouse.id || ""));
+    const contentSource = source.contentSource || product;
+    const imageUrls = [...new Set([contentSource.defaultImage, ...(Array.isArray(contentSource.images) ? contentSource.images : [])].filter(Boolean))];
+    const channelListing = liveChannel === "ebay_live"
+      ? { ...ebayShadowListingSeed(contentSource, merchantSku), enabled: true, merchantSku, marketplaceSku: merchantSku, channelSku: merchantSku, status: "Prepared", liveAssignmentStatus: "Not assigned" }
+      : { enabled: true, merchantSku, marketplaceSku: merchantSku, channelSku: merchantSku, sellerSku: merchantSku, status: "Prepared", inventorySource: "warehouse shadow", liveAssignmentStatus: "Not assigned" };
+    if (!shadow) {
+      const shadowSku = liveChannelInternalShadowSku(product.sku, warehouse, liveChannel);
+      const pendingOwner = pendingOwners.get(shadowSku.toLowerCase());
+      if (pendingOwner && String(pendingOwner.id || pendingOwner.sku) !== String(product.id || product.sku)) {
+        blocked.push({ productId: product.id, parentSku: product.sku, reason: `Internal live SKU ${shadowSku} conflicts with ${pendingOwner.sku}.` });
+        continue;
+      }
+      const owner = await postgres.readProductByKey(shadowSku);
+      if (owner && String(owner.id || owner.sku) !== String(product.id || product.sku)) {
+        blocked.push({ productId: product.id, parentSku: product.sku, reason: `Internal live SKU ${shadowSku} already belongs to ${owner.sku}.` });
+        continue;
+      }
+      shadow = normalizeShadowSku({
+        shadowSku,
+        merchantSku,
+        marketplaceSku: merchantSku,
+        channelSku: merchantSku,
+        marketplace: liveLabel,
+        channels: [channelName],
+        kind: "live_channel",
+        liveChannel,
+        inventoryPurpose: "live_selling",
+        warehouseId: warehouse.id,
+        warehouseName: warehouse.name,
+        warehouseCode,
+        sourceAuditIds: [audit.id],
+        unitsPerPack: 1,
+        inventoryPolicy: "Warehouse only",
+        status: "Prepared",
+        notes: `${liveLabel} inventory prepared from ${audit.auditNumber || "warehouse audit"}. Merchant SKU uses the manufacturer part number.`,
+        persistence: { inventory: "parent", cost: "parent-piece", content: "override" },
+        contentOverrides: {
+          title: contentSource.marketplaceTitle || contentSource.title || product.marketplaceTitle || product.title || "",
+          shortDescription: contentSource.shortDescription || "",
+          longDescription: contentSource.longDescription || "",
+          imageUrls
+        },
+        contentSourceSku: contentSource.sku || product.sku,
+        contentSourceSupplier: contentSource.supplier || contentSource.vendor || "",
+        channelListings: { [liveChannel === "ebay_live" ? "ebay" : "tiktok"]: channelListing }
+      }, product);
+      shadow.liveChannel = liveChannel;
+      shadow.inventoryPurpose = "live_selling";
+      shadow.contentSourceSku = contentSource.sku || product.sku;
+      shadow.contentSourceSupplier = contentSource.supplier || contentSource.vendor || "";
+      product.shadowSkus.push(shadow);
+      pendingOwners.set(shadowSku.toLowerCase(), product);
+      created.push({ productId: product.id, parentSku: product.sku, shadowId: shadow.id, shadowSku, merchantSku, liveChannel, contentSourceSku: shadow.contentSourceSku, warehouseId: warehouse.id });
+    } else {
+      shadow.merchantSku = merchantSku;
+      shadow.marketplaceSku = merchantSku;
+      shadow.channelSku = merchantSku;
+      shadow.channels = [...new Set([...(Array.isArray(shadow.channels) ? shadow.channels : []), channelName])];
+      shadow.sourceAuditIds = [...new Set([...(Array.isArray(shadow.sourceAuditIds) ? shadow.sourceAuditIds : []), String(audit.id || "")].filter(Boolean))];
+      shadow.liveChannel = liveChannel;
+      shadow.inventoryPurpose = "live_selling";
+      shadow.warehouseName = warehouse.name || shadow.warehouseName;
+      shadow.warehouseCode = warehouseCode;
+      shadow.inventoryPolicy = "Warehouse only";
+      shadow.contentSourceSku = contentSource.sku || product.sku;
+      shadow.contentSourceSupplier = contentSource.supplier || contentSource.vendor || "";
+      shadow.channelListings = shadow.channelListings && typeof shadow.channelListings === "object" ? shadow.channelListings : {};
+      shadow.channelListings[liveChannel === "ebay_live" ? "ebay" : "tiktok"] = { ...channelListing, ...(shadow.channelListings[liveChannel === "ebay_live" ? "ebay" : "tiktok"] || {}), merchantSku, marketplaceSku: merchantSku, channelSku: merchantSku };
+      shadow.updatedAt = new Date().toISOString();
+      reused.push({ productId: product.id, parentSku: product.sku, shadowId: shadow.id, shadowSku: shadow.shadowSku, merchantSku, liveChannel, contentSourceSku: shadow.contentSourceSku, warehouseId: warehouse.id });
+    }
+    product.updatedAt = new Date().toISOString();
+  }
+  return { warehouseId: warehouse.id, warehouseName: warehouse.name, warehouseCode, liveChannel, liveChannelLabel: liveLabel, created, reused, blocked, shadows: [...created, ...reused] };
+}
+
 function auditExpectedQuantity(product, audit, locationBin = "") {
   const warehouseRow = auditWarehouseStockRow(product, audit, locationBin);
   if (warehouseRow) return Number(warehouseRow.qty || 0);
@@ -59305,6 +59574,7 @@ async function handleApi(req, res) {
       new_inventory_onboarding: "New inventory onboarding",
       extra_stock: "Extra stock",
       ebay_one_time_listing: "One-time eBay listings",
+      live_selling_inventory: "Live selling inventory",
       receiving_inventory: "Receive inventory",
       external_po_receipt: "External PO receipt",
       purchase_order_receipt: "PO receiving"
@@ -59316,6 +59586,13 @@ async function handleApi(req, res) {
     const audit = await postgres.readWarehouseAudit(parts[2]);
     if (!audit) return notFound(res);
     const receivingReason = ["receiving_inventory", "external_po_receipt", "purchase_order_receipt"].includes(reason);
+    const inventoryPurpose = audit.linkedPurchaseOrderId
+      ? normalizeInventoryPurpose(audit.inventoryPurpose, "stock")
+      : reason === "live_selling_inventory" ? "live_selling" : "stock";
+    const liveChannel = inventoryPurpose === "live_selling"
+      ? normalizeLiveInventoryChannel(body.liveChannel || audit.liveChannel)
+      : "";
+    if (reason === "live_selling_inventory" && !liveChannel) return sendJson(res, 400, { error: "Choose eBay Live or TikTok Live for this audit." });
     const supplierId = receivingReason ? String(body.supplierId || audit.supplierId || "").trim() : "";
     const supplierName = receivingReason ? String(body.supplierName || audit.supplierName || "").trim() : "";
     const externalPurchaseOrderNumber = reason === "external_po_receipt" ? String(body.externalPurchaseOrderNumber || audit.externalPurchaseOrderNumber || "").trim() : "";
@@ -59324,11 +59601,16 @@ async function handleApi(req, res) {
     const actor = String(body.user || "Luis").trim() || "Luis";
     const previousReason = String(audit.reason || "").trim();
     const previousExternalPurchaseOrderNumber = String(audit.externalPurchaseOrderNumber || "").trim();
+    const previousLiveChannel = String(audit.liveChannel || "").trim();
     audit.reason = reason;
     audit.reasonLabel = reasonOptions[reason];
     audit.supplierName = supplierName;
     audit.supplierId = supplierId;
     audit.externalPurchaseOrderNumber = externalPurchaseOrderNumber;
+    audit.inventoryPurpose = inventoryPurpose;
+    audit.inventoryPurposeLabel = INVENTORY_PURPOSE_LABELS[inventoryPurpose];
+    audit.liveChannel = liveChannel;
+    audit.liveChannelLabel = LIVE_INVENTORY_CHANNEL_LABELS[liveChannel] || "";
     audit.linkedPurchaseOrderId = String(audit.linkedPurchaseOrderId || "");
     audit.linkedPurchaseOrderNumber = String(audit.linkedPurchaseOrderNumber || "");
     audit.purchaseOrderLinkedAt = String(audit.purchaseOrderLinkedAt || "");
@@ -59340,7 +59622,9 @@ async function handleApi(req, res) {
       previousReason,
       reason,
       previousExternalPurchaseOrderNumber,
-      externalPurchaseOrderNumber
+      externalPurchaseOrderNumber,
+      previousLiveChannel,
+      liveChannel
     }].slice(-100);
     await postgres.saveWarehouseAudit(audit);
     return sendJson(res, 200, { audit, message: `${audit.auditNumber || "Audit"} purpose saved as ${reasonOptions[reason]}.` });
@@ -59417,6 +59701,7 @@ async function handleApi(req, res) {
       new_inventory_onboarding: "New inventory onboarding",
       extra_stock: "Extra stock",
       ebay_one_time_listing: "One-time eBay listings",
+      live_selling_inventory: "Live selling inventory",
       receiving_inventory: "Receive inventory",
       external_po_receipt: "External PO receipt",
       purchase_order_receipt: "PO receiving"
@@ -59449,6 +59734,13 @@ async function handleApi(req, res) {
         message: `${resumedAudit.auditNumber || "The receiving audit"} is already receiving ${linkedPurchaseOrder.poNumber || linkedPurchaseOrder.id}. Resuming that session.`
       });
     }
+    const linkedPurpose = linkedPurchaseOrder ? purchaseOrderPurposeForRecord(linkedPurchaseOrder) : null;
+    const inventoryPurpose = linkedPurpose?.inventoryPurpose
+      || (reason === "live_selling_inventory" ? "live_selling" : "stock");
+    const liveChannel = inventoryPurpose === "live_selling"
+      ? normalizeLiveInventoryChannel(linkedPurpose?.liveChannel || body.liveChannel)
+      : "";
+    if (reason === "live_selling_inventory" && !liveChannel) return sendJson(res, 400, { error: "Choose eBay Live or TikTok Live for this audit." });
     const supplierId = receivingReason ? String(linkedPurchaseOrder?.vendorId || body.supplierId || "").trim() : "";
     const supplierName = receivingReason ? String(linkedPurchaseOrder?.supplier || body.supplierName || "").trim() : "";
     const externalPurchaseOrderNumber = reason === "external_po_receipt" ? String(body.externalPurchaseOrderNumber || "").trim() : "";
@@ -59472,12 +59764,14 @@ async function handleApi(req, res) {
         orderedQty: Number(line.qty || 0),
         receivedQty: Number(line.receivedQty || 0),
         expectedQty: purchaseOrderOpenQuantity(line),
-        poNumber: String(linkedPurchaseOrder.poNumber || "")
+        poNumber: String(linkedPurchaseOrder.poNumber || ""),
+        inventoryPurpose: normalizeInventoryPurpose(line.inventoryPurpose, inventoryPurpose),
+        liveChannel: normalizeLiveInventoryChannel(line.liveChannel || liveChannel)
       };
     }).filter((line) => line.expectedQty > 0) : [];
     if (purchaseOrderReceipt && !purchaseOrderExpectedLines.length) return sendJson(res, 409, { error: `PO ${linkedPurchaseOrder.poNumber || linkedPurchaseOrder.id} has no open quantities to receive.` });
     const now = new Date().toISOString();
-    const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", reason, reasonLabel: reasonOptions[reason], supplierId, supplierName, externalPurchaseOrderNumber, linkedPurchaseOrderId: String(linkedPurchaseOrder?.id || ""), linkedPurchaseOrderNumber: String(linkedPurchaseOrder?.poNumber || ""), purchaseOrderLinkedAt: linkedPurchaseOrder ? now : "", purchaseOrderExpectedLines, receivingDocuments: [], packingSlipReview: null, warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], receivingParticipants: receivingReason ? [{ user: receivingActor, firstActiveAt: now, lastActiveAt: now, scannedUnits: 0 }] : [], createdAt: now, createdBy: receivingActor, reviewer: String(body.reviewer || "").trim() };
+    const audit = { id: crypto.randomUUID(), auditNumber: `AUDIT-${highest + 1}`, status: "in_progress", reason, reasonLabel: reasonOptions[reason], inventoryPurpose, inventoryPurposeLabel: INVENTORY_PURPOSE_LABELS[inventoryPurpose], liveChannel, liveChannelLabel: LIVE_INVENTORY_CHANNEL_LABELS[liveChannel] || "", supplierId, supplierName, externalPurchaseOrderNumber, linkedPurchaseOrderId: String(linkedPurchaseOrder?.id || ""), linkedPurchaseOrderNumber: String(linkedPurchaseOrder?.poNumber || ""), purchaseOrderLinkedAt: linkedPurchaseOrder ? now : "", purchaseOrderExpectedLines, receivingDocuments: [], packingSlipReview: null, warehouseId: String(warehouse?.id || body.warehouseId || ""), warehouseName: String(warehouse?.name || body.warehouseName || "Warehouse"), lines: [], unknownBarcodes: [], receivingParticipants: receivingReason ? [{ user: receivingActor, firstActiveAt: now, lastActiveAt: now, scannedUnits: 0 }] : [], createdAt: now, createdBy: receivingActor, reviewer: String(body.reviewer || "").trim() };
     audits.unshift(audit);
     await postgres.saveWarehouseAudit(audit);
     await syncPurchaseOrderReceivingProgress(audit);
@@ -59859,7 +60153,9 @@ async function handleApi(req, res) {
     }
     const audit = await postgres.readWarehouseAudit(parts[2]);
     if (!audit) return notFound(res);
-    if (String(audit.reason || "") !== "ebay_one_time_listing") return sendJson(res, 400, { error: "This audit was not created for one-time eBay listings." });
+    const oneTimeEbayAudit = String(audit.reason || "") === "ebay_one_time_listing";
+    const ebayLiveAudit = String(audit.reason || "") === "live_selling_inventory" && normalizeLiveInventoryChannel(audit.liveChannel) === "ebay_live";
+    if (!oneTimeEbayAudit && !ebayLiveAudit) return sendJson(res, 400, { error: "This audit was not prepared for an eBay listing launch." });
     if (String(audit.status || "") !== "completed") return sendJson(res, 409, { error: "Complete and apply the warehouse audit before launching its shadows." });
     const productKeys = [...new Set((audit.lines || [])
       .filter((line) => String(line.reviewStatus || "").toLowerCase() !== "excluded" && Number(line.countedQty || 0) > 0)
@@ -59868,7 +60164,9 @@ async function handleApi(req, res) {
     const products = await postgres.readProductsByKeys(productKeys, { includeMarketplaceIds: false, includeInventoryLevels: true });
     const shadowLaunches = [];
     for (const product of products) {
-      const shadow = (product.shadowSkus || []).find((candidate) => candidate.kind === "warehouse_clearance"
+      const shadow = (product.shadowSkus || []).find((candidate) => (oneTimeEbayAudit
+        ? candidate.kind === "warehouse_clearance"
+        : candidate.kind === "live_channel" && normalizeLiveInventoryChannel(candidate.liveChannel) === "ebay_live")
         && String(candidate.warehouseId || "") === String(audit.warehouseId || ""));
       if (!shadow) continue;
       shadowLaunches.push({
@@ -59880,7 +60178,7 @@ async function handleApi(req, res) {
         warehouseCode: shadow.warehouseCode
       });
     }
-    if (!shadowLaunches.length) return sendJson(res, 409, { error: "No reusable warehouse shadows were found. Reopen or recreate the audit before launching." });
+    if (!shadowLaunches.length) return sendJson(res, 409, { error: "No prepared eBay warehouse shadows were found. Review blocked manufacturer SKUs before launching." });
     const db = await readDbFast({ skipInventory: true });
     const result = await queueEbayListingLaunchJob(db, {
       skus: shadowLaunches.map((entry) => entry.productId || entry.parentSku),
@@ -59889,7 +60187,7 @@ async function handleApi(req, res) {
       lifecycleAction: "launch",
       publish: true,
       batchSize: Math.min(1000, Math.max(25, shadowLaunches.length))
-    }, { operation: `eBay warehouse shadows ${audit.auditNumber || ""}`.trim() });
+    }, { operation: `${ebayLiveAudit ? "eBay Live inventory candidates" : "eBay warehouse shadows"} ${audit.auditNumber || ""}`.trim() });
     const duplicateSourceAuditId = String(result.workerPayload?.sourceAuditId || result.job?.workerPayload?.sourceAuditId || "");
     if (result.duplicate && duplicateSourceAuditId !== String(audit.id || "")) {
       const activeReference = result.job?.jobNumber ? `Job #${result.job.jobNumber}` : "Another eBay launch job";
@@ -59911,7 +60209,7 @@ async function handleApi(req, res) {
       importJobs: clientImportJobs(jobs),
       message: result.duplicate
         ? "An eBay listing launch is already active. Open Jobs to monitor it before retrying this audit."
-        : `eBay launch queued for ${shadowLaunches.length.toLocaleString()} warehouse shadow${shadowLaunches.length === 1 ? "" : "s"}.`
+        : `eBay listing launch queued for ${shadowLaunches.length.toLocaleString()} warehouse shadow${shadowLaunches.length === 1 ? "" : "s"}.${ebayLiveAudit ? " Assign the published products to the eBay Live event in the approved live-selling workflow." : ""}`
     });
   }
 
@@ -60456,6 +60754,7 @@ async function handleApi(req, res) {
       audit.disposition = {
         type: linkedAllocation ? "fulfill_orders" : "purchase_order_receipt",
         label: linkedAllocation ? "Received against DataPlus PO and checked open orders" : "Received against DataPlus PO",
+        ...purchaseOrderPurposeForRecord(linkedPo),
         purchaseOrderId: linkedPo.id,
         purchaseOrderNumber: linkedPo.poNumber,
         receiptId: linkedReceipt.id,
@@ -60482,6 +60781,7 @@ async function handleApi(req, res) {
     if (!["fulfill_orders", "stock_here", "transfer", "return_to_supplier"].includes(dispositionType)) return sendJson(res, 400, { error: "Choose whether to use the stock for open orders, stock it, transfer it, or return it." });
     if (receivingAudit && !["fulfill_orders", "stock_here"].includes(dispositionType)) return sendJson(res, 400, { error: "Inbound receipts can be stocked here or used for open orders after receipt." });
     if (String(audit.reason || "") === "ebay_one_time_listing" && dispositionType !== "stock_here") return sendJson(res, 400, { error: "One-time marketplace inventory must remain stocked in its audited warehouse." });
+    if (String(audit.reason || "") === "live_selling_inventory" && dispositionType !== "stock_here") return sendJson(res, 400, { error: "Live-selling inventory must remain stocked in its audited warehouse." });
     if (receivingAudit) {
       const receivingAuditWithPurchaseOrders = await withRecentOpenPurchaseOrderMatches(audit);
       audit.lines = receivingAuditWithPurchaseOrders.lines;
@@ -60555,6 +60855,12 @@ async function handleApi(req, res) {
         source: receivingAudit ? "warehouse_receiving" : "warehouse_audit",
         referenceId: audit.id,
         referenceNumber: audit.auditNumber,
+        sourceAuditId: audit.id,
+        sourceAuditNumber: audit.auditNumber,
+        sourcePurchaseOrderId: String(audit.linkedPurchaseOrderId || ""),
+        sourcePurchaseOrderNumber: String(audit.linkedPurchaseOrderNumber || ""),
+        inventoryPurpose: normalizeInventoryPurpose(audit.inventoryPurpose, "stock"),
+        liveChannel: normalizeLiveInventoryChannel(audit.liveChannel),
         warehouseId: auditWarehouse?.id || audit.warehouseId || "",
         warehouseName: auditWarehouse?.name || audit.warehouseName || "",
         locationBin: line.locationBin || stockRow?.locationBin || "",
@@ -60585,13 +60891,17 @@ async function handleApi(req, res) {
       }
       productByAuditLineKey.set(auditLineKey(line), product);
       if (dispositionType !== "return_to_supplier" || countedQty > 0) {
-        dispositionLines.push({ sku: product.sku || line.sku, productId: product.id || line.productId || "", title: product.title || line.title || "", quantity: countedQty, qtyReceived: countedQty, qtyBefore, qtyAfter: Number(stockRow?.qty ?? product.qty ?? 0), locationBin: line.locationBin || stockRow?.locationBin || "", supplierId: lineSupplier?.vendorId || audit.supplierId || "", supplierName: lineSupplier?.supplierName || audit.supplierName || "", supplierCode: lineSupplier?.supplierCode || "", vendorSku: lineSupplier?.vendorSku || "", unitCost: Number(lineSupplier?.cost || 0), supplierMatchType: lineSupplier?.matchType || "", recentOpenPurchaseOrders: Array.isArray(line.recentOpenPurchaseOrders) ? line.recentOpenPurchaseOrders : [] });
+        dispositionLines.push({ sku: product.sku || line.sku, productId: product.id || line.productId || "", title: product.title || line.title || "", quantity: countedQty, qtyReceived: countedQty, qtyBefore, qtyAfter: Number(stockRow?.qty ?? product.qty ?? 0), locationBin: line.locationBin || stockRow?.locationBin || "", supplierId: lineSupplier?.vendorId || audit.supplierId || "", supplierName: lineSupplier?.supplierName || audit.supplierName || "", supplierCode: lineSupplier?.supplierCode || "", vendorSku: lineSupplier?.vendorSku || "", unitCost: Number(lineSupplier?.cost || 0), supplierMatchType: lineSupplier?.matchType || "", inventoryPurpose: normalizeInventoryPurpose(audit.inventoryPurpose, "stock"), liveChannel: normalizeLiveInventoryChannel(audit.liveChannel), sourceAuditId: audit.id, sourceAuditNumber: audit.auditNumber, sourcePurchaseOrderId: String(audit.linkedPurchaseOrderId || ""), sourcePurchaseOrderNumber: String(audit.linkedPurchaseOrderNumber || ""), recentOpenPurchaseOrders: Array.isArray(line.recentOpenPurchaseOrders) ? line.recentOpenPurchaseOrders : [] });
       }
       products.push(product);
     }
     let marketplaceShadowSummary = null;
     if (String(audit.reason || "") === "ebay_one_time_listing" && products.length) {
       marketplaceShadowSummary = await ensureWarehouseAuditShadows(audit, auditWarehouse, products);
+      audit.marketplaceShadowSummary = marketplaceShadowSummary;
+    }
+    if (String(audit.reason || "") === "live_selling_inventory" && products.length) {
+      marketplaceShadowSummary = await ensureWarehouseLiveChannelShadows(audit, auditWarehouse, products);
       audit.marketplaceShadowSummary = marketplaceShadowSummary;
     }
     if (products.length) { await postgres.upsertProductsFromState(products); await postgres.upsertInventoryLevelsFromProducts(products); }
@@ -60753,6 +61063,10 @@ async function handleApi(req, res) {
         source: String(audit.reason || "") === "external_po_receipt" ? "external_purchase_order" : "inbound_receiving",
         sourceAuditId: audit.id,
         sourceAuditNumber: audit.auditNumber,
+        inventoryPurpose: normalizeInventoryPurpose(audit.inventoryPurpose, "stock"),
+        inventoryPurposeLabel: INVENTORY_PURPOSE_LABELS[normalizeInventoryPurpose(audit.inventoryPurpose, "stock")],
+        liveChannel: normalizeLiveInventoryChannel(audit.liveChannel),
+        liveChannelLabel: LIVE_INVENTORY_CHANNEL_LABELS[normalizeLiveInventoryChannel(audit.liveChannel)] || "",
         externalPurchaseOrderNumber: String(audit.externalPurchaseOrderNumber || ""),
         supplierId: String(audit.supplierId || ""),
         supplierName: String(audit.supplierName || ""),
@@ -60772,7 +61086,7 @@ async function handleApi(req, res) {
     audit.status = "completed"; audit.completedAt = new Date().toISOString(); audit.approvedAt = audit.completedAt; audit.approvedBy = String(body.user || "Approver").trim() || "Approver"; audit.appliedLines = products.length;
     const allocatedQty = routedOrders.reduce((sum, row) => sum + Number(row.allocatedQty || 0), 0);
     const blockedQty = routedOrders.reduce((sum, row) => sum + Number(row.blockedQty || 0), 0);
-    audit.disposition = { type: receivingAudit ? "inbound_receipt" : dispositionType, label: receivingAudit ? `Inbound receipt ${inboundReceipt?.receiptNumber || "posted"}` : dispositionType === "fulfill_orders" ? "Allocated to open orders" : dispositionType === "transfer" ? "Transferred" : dispositionType === "return_to_supplier" ? "Return to suppliers" : "Stocked here", receiptId: inboundReceipt?.id || "", receiptNumber: inboundReceipt?.receiptNumber || "", destinationWarehouseId: destinationWarehouse?.id || "", destinationWarehouseName: destinationWarehouse?.name || "", supplierReturns: createdSupplierReturns.map((row) => ({ id: row.id, returnNumber: row.returnNumber, supplierId: row.supplierId, supplierName: row.supplierName, totalUnits: row.totalUnits })), routedOrders, allocatedQty, blockedQty, compatibleDemand: { orderCount: actionPreview.affectedOrderCount, usableQty: actionPreview.totalUsableQty }, marketplaceShadows: marketplaceShadowSummary?.shadows || [], packingSlipAttached: hasPackingSlip, note: String(body.dispositionNote || "").trim(), appliedAt: audit.completedAt, appliedBy: audit.approvedBy };
+    audit.disposition = { type: receivingAudit ? "inbound_receipt" : dispositionType, label: receivingAudit ? `Inbound receipt ${inboundReceipt?.receiptNumber || "posted"}` : dispositionType === "fulfill_orders" ? "Allocated to open orders" : dispositionType === "transfer" ? "Transferred" : dispositionType === "return_to_supplier" ? "Return to suppliers" : "Stocked here", inventoryPurpose: normalizeInventoryPurpose(audit.inventoryPurpose, "stock"), inventoryPurposeLabel: INVENTORY_PURPOSE_LABELS[normalizeInventoryPurpose(audit.inventoryPurpose, "stock")], liveChannel: normalizeLiveInventoryChannel(audit.liveChannel), liveChannelLabel: LIVE_INVENTORY_CHANNEL_LABELS[normalizeLiveInventoryChannel(audit.liveChannel)] || "", receiptId: inboundReceipt?.id || "", receiptNumber: inboundReceipt?.receiptNumber || "", destinationWarehouseId: destinationWarehouse?.id || "", destinationWarehouseName: destinationWarehouse?.name || "", supplierReturns: createdSupplierReturns.map((row) => ({ id: row.id, returnNumber: row.returnNumber, supplierId: row.supplierId, supplierName: row.supplierName, totalUnits: row.totalUnits })), routedOrders, allocatedQty, blockedQty, compatibleDemand: { orderCount: actionPreview.affectedOrderCount, usableQty: actionPreview.totalUsableQty }, marketplaceShadows: marketplaceShadowSummary?.shadows || [], packingSlipAttached: hasPackingSlip, note: String(body.dispositionNote || "").trim(), appliedAt: audit.completedAt, appliedBy: audit.approvedBy };
     await postgres.writeStateDocuments({ warehouseAudits: audits.slice(0, 500), inventoryLedger: db.inventoryLedger || [], ...(manualWarehouseReceipts ? { manualWarehouseReceipts: manualWarehouseReceipts.slice(0, 5000) } : {}) });
     const outcome = dispositionType === "fulfill_orders" ? `stocked in ${auditWarehouse.name}; ${allocatedQty} unit${allocatedQty === 1 ? " was" : "s were"} allocated to open orders${blockedQty ? ` and ${blockedQty} remained tied to submitted supplier POs` : ""}` : dispositionType === "transfer" ? `transferred to ${destinationWarehouse.name}` : dispositionType === "return_to_supplier" ? `placed on hold in ${createdSupplierReturns.length} supplier return draft${createdSupplierReturns.length === 1 ? "" : "s"}` : `stocked in ${auditWarehouse.name}`;
     return sendJson(res, 200, { audit, receipt: inboundReceipt, supplierReturn: createdSupplierReturns[0] || null, supplierReturns: createdSupplierReturns, routedOrders, actionPreview, message: receivingAudit ? `${audit.auditNumber} completed. ${inboundReceipt?.receiptNumber || "The inbound receipt"} added ${dispositionLines.reduce((sum, line) => sum + Number(line.quantity || 0), 0)} unit${dispositionLines.reduce((sum, line) => sum + Number(line.quantity || 0), 0) === 1 ? "" : "s"} to ${auditWarehouse.name}.` : `${audit.auditNumber} completed. ${products.length} catalog counts were ${outcome}.` });
@@ -64994,6 +65308,27 @@ async function handleApi(req, res) {
       po.expectedAt = String(body.expectedAt || "").trim();
       addPoTimeline(po, { type: "edited", title: "Expected date updated", message: po.expectedAt ? `Expected on ${po.expectedAt}.` : "Expected date cleared.", user: actor });
     }
+    if (body.inventoryPurpose !== undefined || body.liveChannel !== undefined) {
+      const previousPurpose = purchaseOrderPurposeForRecord(po);
+      const inventoryPurpose = normalizeInventoryPurpose(body.inventoryPurpose, previousPurpose.inventoryPurpose);
+      const liveChannel = inventoryPurpose === "live_selling"
+        ? normalizeLiveInventoryChannel(body.liveChannel !== undefined ? body.liveChannel : previousPurpose.liveChannel)
+        : "";
+      if (inventoryPurpose === "live_selling" && !liveChannel) return sendJson(res, 400, { error: "Choose eBay Live or TikTok Live for a live-orders purchase order." });
+      amendmentNeeded = amendmentNeeded || committed
+        && (previousPurpose.inventoryPurpose !== inventoryPurpose || previousPurpose.liveChannel !== liveChannel);
+      po.inventoryPurpose = inventoryPurpose;
+      po.inventoryPurposeLabel = INVENTORY_PURPOSE_LABELS[inventoryPurpose];
+      po.liveChannel = liveChannel;
+      po.liveChannelLabel = LIVE_INVENTORY_CHANNEL_LABELS[liveChannel] || "";
+      po.items = applyInventoryPurposeToPoLines(po.items, { inventoryPurpose, liveChannel });
+      addPoTimeline(po, {
+        type: "purpose_updated",
+        title: "Inventory purpose updated",
+        message: `This PO is for ${po.liveChannelLabel || po.inventoryPurposeLabel}.`,
+        user: actor
+      });
+    }
     if (Array.isArray(body.items) || Array.isArray(body.addItems)) {
       const terminal = ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "draft").toLowerCase());
       if (terminal) return sendJson(res, 400, { error: "Closed, canceled, and fully received POs cannot be edited." });
@@ -65038,6 +65373,7 @@ async function handleApi(req, res) {
       }
       po.totalUnits = (po.items || []).reduce((sum, line) => sum + Number(line.qty || 0), 0);
       po.estimatedCost = (po.items || []).reduce((sum, line) => sum + (Number(line.qty || 0) * Number(line.estimatedUnitCost || 0)), 0);
+      po.items = applyInventoryPurposeToPoLines(po.items, purchaseOrderPurposeForRecord(po));
       addPoTimeline(po, {
         type: "edited",
         title: body.replaceDraftItems === true ? "Draft PO lines updated" : addedLineCount ? "PO line added" : "PO quantities updated",
@@ -65335,6 +65671,8 @@ async function handleApi(req, res) {
           warehouseId: body.warehouseId,
           expectedAt: body.expectedAt,
           notes: body.notes,
+          inventoryPurpose: body.inventoryPurpose,
+          liveChannel: body.liveChannel,
           items: body.items,
           allowIncompleteDraft: true,
           user: actor
@@ -65357,6 +65695,8 @@ async function handleApi(req, res) {
           warehouseId: body.warehouseId,
           expectedAt: preview.document.expectedAt,
           notes: String(body.notes || `Imported from ${preview.file.name}.`).trim(),
+          inventoryPurpose: body.inventoryPurpose,
+          liveChannel: body.liveChannel,
           items: preview.items.map((item) => ({
             ...item,
             source: "external_po_pdf",
@@ -65825,6 +66165,7 @@ async function handleApi(req, res) {
       return sendJson(res, 409, { error: `PO ${po.poNumber || po.id} cannot receive inventory from status ${String(po.status || "unknown").replace(/_/g, " ")}.` });
     }
     const db = await readDbFast({ skipInventory: true });
+    const poPurpose = purchaseOrderPurposeForRecord(po);
     const workflowSettings = await readOrderWorkflowSettings();
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
     const receivedLines = Array.isArray(body.items) ? body.items : [];
@@ -65885,6 +66226,7 @@ async function handleApi(req, res) {
       note,
       sourceAuditId,
       sourceAuditNumber: String(body.sourceAuditNumber || sourceAudit?.auditNumber || ""),
+      ...poPurpose,
       defaultLocationBin,
       warehouseId: warehouse?.id || po.warehouseId || "",
       warehouseName: warehouse?.name || po.warehouseName || "",
@@ -65944,6 +66286,8 @@ async function handleApi(req, res) {
         routeId: String(poLine?.routeId || line.routeId || ""),
         orderId: String(poLine?.orderId || ""),
         title: product?.title || poLine?.title || sku,
+        inventoryPurpose: normalizeInventoryPurpose(poLine?.inventoryPurpose, poPurpose.inventoryPurpose),
+        liveChannel: normalizeLiveInventoryChannel(poLine?.liveChannel || poPurpose.liveChannel),
         qtyReceived,
         receivedBy: receivingContributors.map((entry) => entry.user).join(", "),
         receivingContributors,
@@ -66014,6 +66358,12 @@ async function handleApi(req, res) {
         source: "purchase_order",
         referenceId: po.id,
         referenceNumber: po.poNumber,
+        sourcePurchaseOrderId: po.id,
+        sourcePurchaseOrderNumber: po.poNumber,
+        sourceAuditId,
+        sourceAuditNumber: String(body.sourceAuditNumber || sourceAudit?.auditNumber || ""),
+        inventoryPurpose: normalizeInventoryPurpose(poLine?.inventoryPurpose, poPurpose.inventoryPurpose),
+        liveChannel: normalizeLiveInventoryChannel(poLine?.liveChannel || poPurpose.liveChannel),
         warehouseId: warehouse?.id || po.warehouseId || "",
         warehouseName: warehouse?.name || po.warehouseName || "",
         locationBin,
@@ -77838,6 +78188,8 @@ async function handleApi(req, res) {
           warehouseId: body.warehouseId,
           expectedAt: body.expectedAt,
           notes: body.notes,
+          inventoryPurpose: body.inventoryPurpose,
+          liveChannel: body.liveChannel,
           items: body.items,
           allowIncompleteDraft: true,
           user: body.user || "Luis"
@@ -77981,6 +78333,21 @@ async function handleApi(req, res) {
         title: "PO warehouse changed",
         message: `Warehouse changed from ${previous} to ${warehouse.name}.`,
         user: body.user || "Luis"
+      });
+    }
+    if (body.inventoryPurpose !== undefined || body.liveChannel !== undefined) {
+      const previousPurpose = purchaseOrderPurposeForRecord(po);
+      const inventoryPurpose = normalizeInventoryPurpose(body.inventoryPurpose, previousPurpose.inventoryPurpose);
+      const liveChannel = inventoryPurpose === "live_selling"
+        ? normalizeLiveInventoryChannel(body.liveChannel !== undefined ? body.liveChannel : previousPurpose.liveChannel)
+        : "";
+      if (inventoryPurpose === "live_selling" && !liveChannel) return sendJson(res, 400, { error: "Choose eBay Live or TikTok Live for a live-orders purchase order." });
+      Object.assign(po, {
+        inventoryPurpose,
+        inventoryPurposeLabel: INVENTORY_PURPOSE_LABELS[inventoryPurpose],
+        liveChannel,
+        liveChannelLabel: LIVE_INVENTORY_CHANNEL_LABELS[liveChannel] || "",
+        items: applyInventoryPurposeToPoLines(po.items, { inventoryPurpose, liveChannel })
       });
     }
     await writeDb(db);
@@ -80937,6 +81304,13 @@ module.exports = {
   websitePriceFromRule,
   normalizeCatalogProductForInventory,
   normalizeShadowSku,
+  normalizeInventoryPurpose,
+  normalizeLiveInventoryChannel,
+  purchaseOrderPurposeForOrders,
+  purchaseOrderPurposeForRecord,
+  createManualPurchaseOrder,
+  createPurchaseOrderFromOrders,
+  ensureWarehouseLiveChannelShadows,
   productEachUnitCost,
   exactEligibleOrderSourceProduct,
   normalizeChannel,
