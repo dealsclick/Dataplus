@@ -33724,7 +33724,7 @@ async function reconcileFulfillmentBatchPurchaseEvidence(state, batch, prefetche
         printJob.documentManifestFinalized = outstandingRows.length === 0;
         printJob.outstandingDocumentCount = outstandingRows.length;
         printJob.pendingDocumentCount = outstandingRows.filter((row) => String(row.status || "").toLowerCase() === "label_pending").length;
-        printJob.status = outstandingRows.length ? "waiting_for_labels" : "ready";
+        printJob.status = printJob.documentIds.length ? "ready" : outstandingRows.length ? "waiting_for_labels" : "ready";
       }
       printJob.orderCount = purchased.length;
       printJob.documentCount = purchased.length;
@@ -33952,7 +33952,8 @@ async function buildFulfillmentPrintPacket(state, printJob, options = {}) {
     invalidateFulfillmentConsoleSnapshot(fulfillmentBatchOrderIds(batch));
   }
   const outstandingRows = fulfillmentPrintJobOutstandingRows(batch, printJob);
-  if (outstandingRows.length && !fulfillmentPrintJobHasOutput(printJob, batch)) {
+  const hasPrintableManifest = (printJob.documentIds || []).some((documentId) => String(documentId || "").trim());
+  if (outstandingRows.length && !fulfillmentPrintJobHasOutput(printJob, batch) && !hasPrintableManifest) {
     const pendingDocuments = outstandingRows.filter((row) => String(row.status || "").toLowerCase() === "label_pending").length;
     throw Object.assign(new Error(`This print packet is still being assembled. ${outstandingRows.length} label${outstandingRows.length === 1 ? " is" : "s are"} still processing${pendingDocuments ? `, including ${pendingDocuments} waiting for marketplace documents` : ""}. The original batch will become printable automatically when they finish.`), { statusCode: 409 });
   }
@@ -36448,7 +36449,7 @@ async function ensureFulfillmentBatchPrintJob(state, batch, routeIds = [], print
     pendingDocumentCount: outstandingRows.filter((row) => String(row.status || "").toLowerCase() === "label_pending").length,
     orderCount: manifestDocumentIds.length,
     documentCount: manifestDocumentIds.length,
-    status: manifestExposed ? (printJob.status || "ready") : outstandingRows.length ? "waiting_for_labels" : "ready",
+    status: manifestExposed ? (printJob.status || "ready") : manifestDocumentIds.length ? "ready" : outstandingRows.length ? "waiting_for_labels" : "ready",
     size: batch.printSize,
     includePackingSlips: batch.includePackingSlips,
     packingSlipOrientation: batch.packingSlipOrientation === "landscape" ? "landscape" : "portrait",

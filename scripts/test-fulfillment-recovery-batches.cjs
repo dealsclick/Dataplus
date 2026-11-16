@@ -72,10 +72,11 @@ async function run() {
   };
   const assemblingState = { batches: [assemblingBatch], printQueue: [assemblingJob] };
   await ensureFulfillmentBatchPrintJob(assemblingState, assemblingBatch, [], "request-1", "Test");
-  assert.equal(assemblingJob.status, "waiting_for_labels");
+  assert.equal(assemblingJob.status, "ready", "completed labels must be printable while marketplace documents are pending");
   assert.equal(assemblingJob.documentManifestFinalized, false);
   assert.equal(assemblingBatch.printPacketStatus, "incomplete");
   assert.equal(assemblingJob.outstandingDocumentCount, 1);
+  assert.deepEqual(assemblingJob.documentIds, ["document-1"]);
   assert.equal(fulfillmentPrintJobOutstandingRows(assemblingBatch, assemblingJob).length, 1);
 
   Object.assign(assemblingBatch.rows[1], { status: "purchased", documentId: "document-2" });

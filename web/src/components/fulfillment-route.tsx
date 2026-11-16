@@ -1245,13 +1245,13 @@ export function FulfillmentPage() {
         const pendingLabels = Number(batch?.counts?.label_pending || job.pendingDocumentCount || 0)
         const purchasing = Number(batch?.counts?.processing || 0) + Number(batch?.counts?.queued || 0)
         const printable = Number(job.documentCount || 0) > 0 && String(job.status || "") !== "waiting_for_labels"
-        const pickerStatus = pendingLabels > 0 || String(job.status || "") === "waiting_for_labels"
-          ? "Pending labels"
-          : purchasing > 0 && String(batch?.phase || "") === "purchase"
+        const pickerStatus = printable
+          ? pendingLabels > 0 ? "Ready, partial" : "Ready"
+          : pendingLabels > 0 || String(job.status || "") === "waiting_for_labels"
+            ? "Pending labels"
+            : purchasing > 0 && String(batch?.phase || "") === "purchase"
             ? "Purchasing"
-            : printable
-              ? "Ready"
-              : Number(batch?.counts?.failed || 0) > 0
+            : Number(batch?.counts?.failed || 0) > 0
                 ? "Needs attention"
                 : "Preparing packet"
         return { ...job, ...orderTypeIndicators, warehouseStatus: String(batch?.warehouseStatus || "open"), batchRecord: batch, searchText, pickerStatus, printable } as Record<string, any> & { searchText: string; pickerStatus: string; printable: boolean }
@@ -3241,8 +3241,8 @@ export function FulfillmentPage() {
                     <ScrollArea className="h-[min(18rem,45vh)]">
                       <div className="p-1">
                         {filteredBatchPickerEntries.map((job) => <button key={String(job.id)} type="button" className="w-full rounded-sm px-2.5 py-2 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => openBatchPickerEntry(job)}>
-                          <span className="flex items-center justify-between gap-2"><span className="flex min-w-0 items-center gap-1.5"><span className="truncate text-sm font-medium">{String(job.batchNumber || job.printNumber || "Label batch")}</span><BatchOrderTypeIndicators hasCombinedOrders={job.hasCombinedOrders === true} hasEbayLiveOrders={job.hasEbayLiveOrders === true} /></span><span className="flex shrink-0 items-center gap-1"><Badge variant={job.pickerStatus === "Ready" ? "success" : job.pickerStatus === "Needs attention" ? "destructive" : "warning"}>{job.pickerStatus}</Badge><Badge variant={String(job.warehouseStatus || "open") === "closed" ? "success" : "outline"}>{String(job.warehouseStatus || "open") === "closed" ? "Closed" : "Open"}</Badge></span></span>
-                          <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground"><span>{numberLabel(Number(job.orderCount || job.batchRecord?.counts?.total || 0))} label{Number(job.orderCount || job.batchRecord?.counts?.total || 0) === 1 ? "" : "s"}{job.printable ? ` · ${String(job.lastOutputAction || "") === "saved_pdf" ? "Saved PDF" : isPrintedJob(job) ? "Printed" : "Not printed"}` : job.pickerStatus === "Pending labels" ? ` · ${numberLabel(Number(job.batchRecord?.counts?.label_pending || job.pendingDocumentCount || 0))} generating` : " · Open batch details"}</span><RecoverySourceLabel record={job} /></span>
+                          <span className="flex items-center justify-between gap-2"><span className="flex min-w-0 items-center gap-1.5"><span className="truncate text-sm font-medium">{String(job.batchNumber || job.printNumber || "Label batch")}</span><BatchOrderTypeIndicators hasCombinedOrders={job.hasCombinedOrders === true} hasEbayLiveOrders={job.hasEbayLiveOrders === true} /></span><span className="flex shrink-0 items-center gap-1"><Badge variant={job.pickerStatus.startsWith("Ready") ? "success" : job.pickerStatus === "Needs attention" ? "destructive" : "warning"}>{job.pickerStatus}</Badge><Badge variant={String(job.warehouseStatus || "open") === "closed" ? "success" : "outline"}>{String(job.warehouseStatus || "open") === "closed" ? "Closed" : "Open"}</Badge></span></span>
+                          <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground"><span>{numberLabel(Number(job.orderCount || job.batchRecord?.counts?.total || 0))} label{Number(job.orderCount || job.batchRecord?.counts?.total || 0) === 1 ? "" : "s"}{job.printable ? ` · ${String(job.lastOutputAction || "") === "saved_pdf" ? "Saved PDF" : isPrintedJob(job) ? "Printed" : "Not printed"}${Number(job.batchRecord?.counts?.label_pending || job.pendingDocumentCount || 0) > 0 ? ` · ${numberLabel(Number(job.batchRecord?.counts?.label_pending || job.pendingDocumentCount || 0))} still generating` : ""}` : job.pickerStatus === "Pending labels" ? ` · ${numberLabel(Number(job.batchRecord?.counts?.label_pending || job.pendingDocumentCount || 0))} generating` : " · Open batch details"}</span><RecoverySourceLabel record={job} /></span>
                         </button>)}
                         {!filteredBatchPickerEntries.length ? <div className="px-3 py-6 text-center text-sm text-muted-foreground">No batches match this filter.</div> : null}
                       </div>
