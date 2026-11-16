@@ -195,7 +195,7 @@ const { normalizeBatchHandlingStatus, setBatchHandlingStatus } = require("./lib/
 const { tokenHash: printAgentTokenHash, tokenMatches: printAgentTokenMatches, publicPrintStation, claimPrintJob, applyPrintJobStatus, releasePrintJobsForStation } = require("./lib/desktop-print-agent");
 const { carrierStatusConfirmsShipment, normalizeCarrierTrackingStatus, shouldSyncRecoveredTracking, walmartShipmentNeedsTrackingSync, walmartShipmentReadyForTrackingSync, veeqoRemoteTrackingStatus } = require("./lib/fulfillment-tracking");
 const { veeqoRemoteShipmentId, veeqoShipmentFromAllocationOrder, veeqoShipmentFromResponse, veeqoShipmentTrackingDetails } = require("./lib/veeqo-tracking");
-const { activeLabelFailure, releaseUnstartedLabelRows, retryReleasedLabelRows } = require("./lib/fulfillment-label-outcome");
+const { activeLabelFailure, marketplaceLabelFailureDisposition, releaseUnstartedLabelRows, retryReleasedLabelRows } = require("./lib/fulfillment-label-outcome");
 const { createDataQualityEngine } = require("./lib/data-quality");
 const redisCache = require("./lib/redis-cache");
 const {
@@ -35413,7 +35413,7 @@ async function buildFulfillmentConsoleSnapshot(options = {}) {
   const batchExceptions = state.batches.flatMap((batch) => (batch.rows || [])
     .filter((row) => activeFulfillmentOrderIds.has(String(row.orderId || "")))
     .filter((row) => ["failed", "blocked"].includes(String(row.status || "").toLowerCase()) && !row.releasedAt)
-    .map((row) => ({ id: `batch-${batch.id}-${row.id || row.orderId}`, type: "label", routeIds: row.routeIds || [], batchId: batch.id, batchNumber: batch.batchNumber, orderId: row.orderId, orderNumber: row.orderNumber, message: row.error || "Label processing failed.", status: "open", createdAt: row.updatedAt || batch.updatedAt || batch.createdAt })));
+    .map((row) => ({ id: `batch-${batch.id}-${row.id || row.orderId}`, type: "label", title: row.exceptionTitle || "Shipping-label review", reasonCode: row.resolutionCode || "label_failed", routeIds: row.routeIds || [], batchId: batch.id, batchNumber: batch.batchNumber, orderId: row.orderId, orderNumber: row.orderNumber, message: row.error || "Label processing failed.", status: "open", createdAt: row.updatedAt || batch.updatedAt || batch.createdAt })));
   const trackingExceptions = shipments.filter((shipment) => shipment.trackingRefreshError).map((shipment) => ({
     id: `tracking-${shipment.orderId}-${shipment.id}`,
     type: "tracking",
@@ -35833,8 +35833,9 @@ function batchSummary(batch = {}) {
       result.total += 1;
       result[row.status] = Number(result[row.status] || 0) + 1;
       if (row.pickedAt) result.picked += 1;
+      if (String(row.status || "").toLowerCase() === "failed" && row.releasedAt && !row.documentId && !row.shipmentId && !row.trackingNumber && !(Array.isArray(row.packageSnList) && row.packageSnList.length)) result.retryableFailed += 1;
       return result;
-    }, { total: 0, picked: 0 })
+    }, { total: 0, picked: 0, retryableFailed: 0 })
   };
 }
 
@@ -36620,13 +36621,21 @@ async function runFulfillmentLabelPurchaseWorkerJob(job = {}) {
             });
           } catch (error) {
             const documentPending = error?.code === "TEMU_LABEL_DOCUMENT_PENDING";
+            const disposition = documentPending ? null : marketplaceLabelFailureDisposition(error);
             row.status = documentPending ? "label_pending" : "failed";
-            row.error = error.message || "Fulfillment processing failed.";
+            row.error = disposition?.message || error.message || "Fulfillment processing failed.";
             if (documentPending) {
               row.packageSnList = Array.isArray(error.packageSnList) ? error.packageSnList : row.packageSnList || [];
               row.purchaseAcceptedAt = row.purchaseAcceptedAt || new Date().toISOString();
               row.releasedAt = "";
               row.releaseReason = "";
+            } else if (disposition) {
+              row.providerError = disposition.providerMessage;
+              row.resolutionCode = disposition.reasonCode;
+              row.exceptionTitle = disposition.title;
+              delete row.releasedAt;
+              delete row.releasedBy;
+              delete row.releaseReason;
             } else {
               row.releasedAt = new Date().toISOString();
               row.releasedBy = actor;
@@ -37055,11 +37064,19 @@ async function recoverTemuFulfillmentBatch(batchReference, actor = "DataPlus rec
         }
       }
       const documentPending = recoveryError?.code === "TEMU_LABEL_DOCUMENT_PENDING";
+      const disposition = documentPending ? null : marketplaceLabelFailureDisposition(recoveryError);
       row.status = documentPending ? "label_pending" : "failed";
-      row.error = recoveryError.message || "Unable to recover the Temu label.";
+      row.error = disposition?.message || recoveryError.message || "Unable to recover the Temu label.";
       if (documentPending) {
         row.packageSnList = Array.isArray(recoveryError.packageSnList) ? recoveryError.packageSnList : row.packageSnList || [];
         row.purchaseAcceptedAt = row.purchaseAcceptedAt || new Date().toISOString();
+      } else if (disposition) {
+        row.providerError = disposition.providerMessage;
+        row.resolutionCode = disposition.reasonCode;
+        row.exceptionTitle = disposition.title;
+        delete row.releasedAt;
+        delete row.releasedBy;
+        delete row.releaseReason;
       }
       row.updatedAt = new Date().toISOString();
       (documentPending ? pending : failed).push({ orderNumber: order.orderNumber || order.id, error: row.error, packageSnList: row.packageSnList || [] });
@@ -58577,13 +58594,21 @@ async function handleApi(req, res) {
             await processFulfillmentBatchRow(row, batch, db, state.settings, mode, authUser?.name || authUser?.username || "DataPlus", { adminPinAuthorized });
           } catch (error) {
             const documentPending = error?.code === "TEMU_LABEL_DOCUMENT_PENDING";
+            const disposition = documentPending ? null : marketplaceLabelFailureDisposition(error);
             row.status = documentPending ? "label_pending" : "failed";
-            row.error = error.message || "Fulfillment processing failed.";
+            row.error = disposition?.message || error.message || "Fulfillment processing failed.";
             if (documentPending) {
               row.packageSnList = Array.isArray(error.packageSnList) ? error.packageSnList : row.packageSnList || [];
               row.purchaseAcceptedAt = row.purchaseAcceptedAt || new Date().toISOString();
               row.releasedAt = "";
               row.releaseReason = "";
+            } else if (disposition) {
+              row.providerError = disposition.providerMessage;
+              row.resolutionCode = disposition.reasonCode;
+              row.exceptionTitle = disposition.title;
+              delete row.releasedAt;
+              delete row.releasedBy;
+              delete row.releaseReason;
             } else if (mode === "purchase") {
               row.releasedAt = new Date().toISOString();
               row.releasedBy = authUser?.name || authUser?.username || "DataPlus";

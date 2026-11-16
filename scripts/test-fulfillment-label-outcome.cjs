@@ -1,5 +1,14 @@
 const assert = require("node:assert/strict");
-const { activeLabelFailure, releaseUnstartedLabelRows, retryReleasedLabelRows } = require("../lib/fulfillment-label-outcome");
+const { activeLabelFailure, marketplaceLabelFailureDisposition, releaseUnstartedLabelRows, retryReleasedLabelRows } = require("../lib/fulfillment-label-outcome");
+
+assert.deepEqual(marketplaceLabelFailureDisposition(new Error('Temu API error: {"errorCode":120018025,"errorMsg":"Orders exist after-sales applications"}')), {
+  reasonCode: "marketplace_after_sales",
+  title: "Temu after-sales review",
+  message: "Temu blocked label creation because this order has an open cancellation, refund, return, or other after-sales request. Review the case in Temu before shipping.",
+  providerMessage: 'Temu API error: {"errorCode":120018025,"errorMsg":"Orders exist after-sales applications"}',
+  retryable: false
+});
+assert.equal(marketplaceLabelFailureDisposition(new Error("Carrier timeout")), null);
 
 const failure = {
   status: "failed",
