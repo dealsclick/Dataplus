@@ -40043,6 +40043,105 @@ function purchaseOrderHasSubmissionRecord(po = {}) {
     || (Array.isArray(po.submissionHistory) && po.submissionHistory.length > 0);
 }
 
+const ACTIVE_PURCHASE_ORDER_RECEIVING_STATUSES = new Set(["in_progress", "pending_review"]);
+
+function activePurchaseOrderReceivingAudit(po = {}) {
+  const audit = po.activeReceivingAudit && typeof po.activeReceivingAudit === "object" ? po.activeReceivingAudit : null;
+  if (!audit?.auditId || !ACTIVE_PURCHASE_ORDER_RECEIVING_STATUSES.has(String(audit.status || "in_progress").toLowerCase())) return null;
+  return audit;
+}
+
+function closePurchaseOrderRecord(po = {}, body = {}) {
+  const activeAudit = activePurchaseOrderReceivingAudit(po);
+  if (activeAudit) {
+    const error = new Error(`${activeAudit.auditNumber || "An active receiving audit"} has ${Number(activeAudit.scannedUnits || 0)} scanned unit(s) that have not been posted. Finish the receipt before closing this PO.`);
+    error.statusCode = 409;
+    throw error;
+  }
+  const now = new Date().toISOString();
+  po.closedFromStatus = String(po.status || "draft");
+  po.closedFromWorkflowStage = String(po.workflowStage || "");
+  po.status = "closed";
+  po.workflowStage = "history";
+  po.closedAt = now;
+  po.closedBy = body.user || "Luis";
+  po.closeReason = String(body.note || "").trim();
+  return po;
+}
+
+function reopenPurchaseOrderRecord(po = {}, body = {}) {
+  const previousStatus = String(po.status || "draft").toLowerCase();
+  const activeAudit = activePurchaseOrderReceivingAudit(po);
+  const reason = String(body.note || "").trim();
+  if (!["closed", "completed", "received"].includes(previousStatus) && !activeAudit) {
+    const now = new Date().toISOString();
+    po.status = "draft";
+    po.workflowStage = "waiting_for_po";
+    po.readyForReview = false;
+    po.manualDraftHold = true;
+    po.manualDraftHoldAt = now;
+    po.manualDraftHoldBy = body.user || "Luis";
+    po.approval = { ...(po.approval || {}), status: po.approval?.required === false ? "not_required" : "pending", approvedAt: "", approvedBy: "", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
+    po.reopenedAt = now;
+    po.reopenedBy = body.user || "Luis";
+    po.reopenReason = reason || "Returned to draft for buyer review";
+    return po;
+  }
+  if (!reason) {
+    const error = new Error("Enter a reason for reopening this purchase order.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const now = new Date().toISOString();
+  const lines = Array.isArray(po.items) ? po.items : [];
+  const receivedUnits = lines.reduce((sum, line) => sum + Math.max(0, Number(line.receivedQty || 0)), 0);
+  const openUnits = lines.reduce((sum, line) => sum + purchaseOrderOpenQuantity(line), 0);
+  const savedStatus = String(po.closedFromStatus || "").toLowerCase();
+  const restorableStatuses = new Set(["draft", "ready_to_send", "submitted", "placed", "sent", "awaiting_tracking", "acknowledged", "vendor_confirmed", "in_transit", "receiving", "partially_received"]);
+  let nextStatus = "draft";
+  let nextWorkflowStage = "waiting_for_po";
+  if (activeAudit) {
+    nextStatus = "receiving";
+    nextWorkflowStage = "receiving";
+  } else if (restorableStatuses.has(savedStatus)) {
+    nextStatus = savedStatus;
+    nextWorkflowStage = String(po.closedFromWorkflowStage || (savedStatus === "receiving" || savedStatus === "partially_received" ? "receiving" : "incoming"));
+  } else if (!openUnits && receivedUnits > 0) {
+    nextStatus = "receiving";
+    nextWorkflowStage = "receiving";
+  } else if (receivedUnits > 0) {
+    nextStatus = "partially_received";
+    nextWorkflowStage = "receiving";
+  } else if (po.noTrackingNeeded === true || Boolean(String(po.trackingNumber || "").trim())) {
+    nextStatus = "in_transit";
+    nextWorkflowStage = "incoming";
+  } else if (purchaseOrderHasSubmissionRecord(po) || purchaseOrderHasSupplierCommitment(po)) {
+    nextStatus = "awaiting_tracking";
+    nextWorkflowStage = "awaiting_tracking";
+  } else if (String(po.approval?.status || "").toLowerCase() === "approved") {
+    nextStatus = "ready_to_send";
+    nextWorkflowStage = "ready_to_send";
+  }
+  po.closureHistory = Array.isArray(po.closureHistory) ? po.closureHistory : [];
+  if (["closed", "completed", "received"].includes(previousStatus) || po.closedAt) {
+    po.closureHistory.push({
+      closedAt: String(po.closedAt || ""),
+      closedBy: String(po.closedBy || ""),
+      closeReason: String(po.closeReason || ""),
+      reopenedAt: now,
+      reopenedBy: body.user || "Luis",
+      reopenReason: reason,
+      restoredStatus: nextStatus
+    });
+  }
+  po.status = nextStatus;
+  po.workflowStage = nextWorkflowStage;
+  po.reopenedAt = now;
+  po.reopenedBy = body.user || "Luis";
+  po.reopenReason = reason;
+  return po;
+}
+
 function returnWarehouseAddress(warehouse = {}) {
   return {
     name: String(warehouse.returnRecipientName || "Dealsclick Returns"),
@@ -48925,6 +49024,17 @@ function purchaseOrderReceivingProgressFromAudit(audit = {}) {
     matchedUnits: scannedUnits,
     unknownUnits,
     scannedSkuCount: countedLines.length,
+    lineProgress: countedLines.map((line) => ({
+      sku: String(line.sku || ""),
+      title: String(line.title || line.productTitle || line.sku || ""),
+      countedQty: Number(line.countedQty || 0),
+      expectedQty: Number(line.expectedQty || line.purchaseOrderExpectedQty || 0),
+      upc: String(line.upc || line.barcode || line.gtin || ""),
+      manufacturerSku: String(line.manufacturerSku || line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || ""),
+      vendorSku: String(line.vendorSku || line.sourceSku || ""),
+      lastScannedAt: String(line.lastScannedAt || ""),
+      lastScannedBy: String(line.lastScannedBy || "")
+    })),
     unknownBarcodeCount: unknownBarcodes.length,
     documentCount: documents.length,
     packingSlipCount: documents.filter((document) => String(document.documentType || "") === "packing_slip").length,
@@ -65869,14 +65979,18 @@ async function handleApi(req, res) {
       markPurchaseOrderPlaced(po, { ...body, noTrackingNeeded: body.noTrackingNeeded === true || !supplierInboundTrackingExpected(vendor) });
     } else if (action === "mark_inbound") {
       markPurchaseOrderInbound(po, body);
+    } else if (action === "close") {
+      try {
+        closePurchaseOrderRecord(po, body);
+      } catch (error) {
+        return sendJson(res, Number(error.statusCode || 400), { error: error instanceof Error ? error.message : String(error) });
+      }
     } else if (action === "reopen") {
-      po.status = "draft";
-      po.workflowStage = "waiting_for_po";
-      po.readyForReview = false;
-      po.manualDraftHold = true;
-      po.manualDraftHoldAt = now;
-      po.manualDraftHoldBy = body.user || "Luis";
-      po.approval = { ...(po.approval || {}), status: po.approval?.required === false ? "not_required" : "pending", approvedAt: "", approvedBy: "", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
+      try {
+        reopenPurchaseOrderRecord(po, body);
+      } catch (error) {
+        return sendJson(res, Number(error.statusCode || 400), { error: error instanceof Error ? error.message : String(error) });
+      }
     } else if (action === "supplier_reference") {
       const supplierOrderNumber = String(body.supplierOrderNumber || "").trim();
       if (!supplierOrderNumber) return sendJson(res, 400, { error: "Enter the supplier order or reference number." });
@@ -78753,14 +78867,18 @@ async function handleApi(req, res) {
       markPurchaseOrderPlaced(po, { ...body, noTrackingNeeded: body.noTrackingNeeded === true || !supplierInboundTrackingExpected(vendor) });
     } else if (action === "mark_inbound") {
       markPurchaseOrderInbound(po, body);
+    } else if (action === "close") {
+      try {
+        closePurchaseOrderRecord(po, body);
+      } catch (error) {
+        return sendJson(res, Number(error.statusCode || 400), { error: error instanceof Error ? error.message : String(error) });
+      }
     } else if (action === "reopen") {
-      po.status = "draft";
-      po.workflowStage = "waiting_for_po";
-      po.readyForReview = false;
-      po.manualDraftHold = true;
-      po.manualDraftHoldAt = now;
-      po.manualDraftHoldBy = body.user || "Luis";
-      po.approval = { ...(po.approval || {}), status: po.approval?.required === false ? "not_required" : "pending", approvedAt: "", approvedBy: "", rejectedAt: "", rejectedBy: "", rejectionNote: "" };
+      try {
+        reopenPurchaseOrderRecord(po, body);
+      } catch (error) {
+        return sendJson(res, Number(error.statusCode || 400), { error: error instanceof Error ? error.message : String(error) });
+      }
     } else if (action === "supplier_reference") {
       const supplierOrderNumber = String(body.supplierOrderNumber || "").trim();
       if (!supplierOrderNumber) return sendJson(res, 400, { error: "Enter the supplier order or reference number." });
