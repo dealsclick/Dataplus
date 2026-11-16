@@ -58,6 +58,9 @@ assert.match(warehouseUi, /Extra item[\s\S]*Expected on another open PO/, 'linke
 assert.match(warehouseUi, /Found in recent PO/, 'manual receiving displays a dedicated recent-PO match column');
 assert.match(warehouseUi, /recentOpenPurchaseOrders[\s\S]*\/purchase-orders\//, 'each detected recent PO opens its purchase-order detail');
 assert.match(warehouseUi, /Ready to post, not received yet/, 'the receipt preview clearly distinguishes saved scans from posted inventory');
+assert.match(warehouseUi, /Promise\.allSettled/, 'linked PO receipt planning previews fail independently');
+assert.match(warehouseUi, /The receipt can still be posted and will be validated when submitted/, 'preview failures are advisory instead of blocking a valid receipt');
+assert.doesNotMatch(warehouseUi, /isLinkedPurchaseOrderReceipt && \(actionPreviewLoading \|\| Boolean\(actionPreviewError\)\)/, 'linked PO receiving is not disabled by an optional preview failure');
 assert.match(warehouseUi, /Post receipt & allocate remaining/, 'linked PO audits offer an explicit receive-and-allocate outcome');
 assert.match(warehouseUi, /allocateOpenOrders: dispositionType === "fulfill_orders"/, 'linked PO audits send the selected allocation outcome to the receipt API');
 assert.match(warehouseUi, /closeRemaining: closeShortPurchaseOrder/, 'linked PO receiving can explicitly close a supplier short shipment');

@@ -43529,7 +43529,7 @@ async function outboundInventoryProductForWarehouse(db = {}, scannedProduct = {}
       const qty = Math.max(0, Number(stock.qty || 0));
       const reserved = Math.max(0, Number(stock.reserved || 0));
       const consumesReservation = reserved > 0 && reservedProductIds.has(String(product.id || ""));
-      const available = consumesReservation ? Math.min(qty, reserved) : Math.max(0, qty - reserved);
+      const available = outboundInventoryAvailableQuantity(stock, consumesReservation);
       const direct = String(product.id || "") === String(scannedProduct.id || "");
       const similarityMember = memberById.get(String(product.id || "")) || null;
       return {
@@ -43560,6 +43560,12 @@ async function outboundInventoryProductForWarehouse(db = {}, scannedProduct = {}
     candidates,
     similarity
   };
+}
+
+function outboundInventoryAvailableQuantity(stock = {}, consumesReservation = false) {
+  const qty = Math.max(0, Number(stock.qty || 0));
+  const reserved = Math.max(0, Number(stock.reserved || 0));
+  return consumesReservation ? Math.min(qty, reserved) : Math.max(0, qty - reserved);
 }
 
 async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, clientScanId, actor, quickCreate = null, forceItem = false }) {
@@ -43757,7 +43763,7 @@ async function recordOutboundLiveItem({ scope, auditId, scanId, barcodeValue, cl
     const stock = inventorySelection.stock;
     const qtyBefore = Math.max(0, Number(stock.qty || 0));
     const reservedBefore = Math.max(0, Number(stock.reserved || 0));
-    const availableBefore = Math.max(0, qtyBefore - reservedBefore);
+    const availableBefore = outboundInventoryAvailableQuantity(stock, inventorySelection.consumesReservation);
     if (availableBefore < 1) {
       throw Object.assign(new Error(`${product.sku} has no unreserved physical stock in ${warehouse.name}. Receive or adjust the item before shipping it.`), { statusCode: 409 });
     }
@@ -60426,7 +60432,11 @@ async function handleApi(req, res) {
     const audits = await postgres.readStateField("warehouseAudits").catch(() => []) || [];
     const audit = audits.find((row) => String(row.id) === String(parts[2]));
     if (!audit) return notFound(res);
-    if (!["in_progress", "pending_review"].includes(String(audit.status || "").toLowerCase())) return sendJson(res, 400, { error: "This audit no longer has inventory awaiting an action." });
+    const auditStatus = String(audit.status || "").toLowerCase();
+    if (auditStatus === "completed") {
+      return sendJson(res, 200, { audit, duplicate: true, message: `${audit.auditNumber || "This warehouse audit"} was already completed.` });
+    }
+    if (!["in_progress", "pending_review"].includes(auditStatus)) return sendJson(res, 400, { error: "This audit no longer has inventory awaiting an action." });
     const receivingAudit = ["receiving_inventory", "external_po_receipt", "purchase_order_receipt"].includes(String(audit.reason || ""));
     const hasPackingSlip = (audit.receivingDocuments || []).some((document) => String(document.documentType || "") === "packing_slip");
     if (receivingAudit) audit.packingSlipMissingAtCompletion = !hasPackingSlip;
@@ -81046,6 +81056,7 @@ module.exports = {
   orderIdentityPriority,
   supplierSourcingPriority,
   familyProductsForWarehouse,
+  outboundInventoryAvailableQuantity,
   outboundInventoryProductForWarehouse,
   routingSupplierOffers,
   routingSupplierOffersForFamily,

@@ -8,6 +8,7 @@ const {
   familyProductsForWarehouse,
   importedOrderProductMatch,
   orderIdentityPriority,
+  outboundInventoryAvailableQuantity,
   outboundInventoryProductForWarehouse,
   routingSupplierOffersForFamily,
   selectImportedOrderProduct,
@@ -209,6 +210,9 @@ test("outbound can consume stock reserved for the same order line", async () => 
   const order = {
     fulfillmentRoutes: [{ type: "warehouse", status: "allocated", lineIndex: 0, warehouseId: "si2", productId: "tv-product" }],
   };
+
+  assert.equal(outboundInventoryAvailableQuantity(product.warehouseStock[0], true), 1);
+  assert.equal(outboundInventoryAvailableQuantity(product.warehouseStock[0], false), 0);
 
   const originalSimilarity = postgres.readProductSimilarityGroup;
   const originalReadProducts = postgres.readProductsByKeys;
