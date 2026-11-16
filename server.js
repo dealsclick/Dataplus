@@ -80218,6 +80218,20 @@ function isTikTokOAuthCallbackRequest(req) {
   return isTikTokAuthorizationCallbackUrl(req.url, `http://${req.headers.host || 'localhost'}`);
 }
 
+const TIKTOK_OAUTH_RECOVERY_COOKIE = 'dataplus_tiktok_oauth_recovery';
+
+function setTikTokOAuthRecoveryCookie(req, res, environment) {
+  const forwardedProtocol = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  const secure = forwardedProtocol === 'https' || req.socket?.encrypted ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `${TIKTOK_OAUTH_RECOVERY_COOKIE}=${encodeURIComponent(environment)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600${secure}`);
+}
+
+function clearTikTokOAuthRecoveryCookie(req, res) {
+  const forwardedProtocol = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  const secure = forwardedProtocol === 'https' || req.socket?.encrypted ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `${TIKTOK_OAUTH_RECOVERY_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`);
+}
+
 async function handleTikTokStart(req, res) {
   if (String(req.method || 'GET').toUpperCase() !== 'GET') return sendHtml(res, 405, '<h1>Method not allowed</h1>');
   await hydrateAuthSessionsStore();
@@ -80257,10 +80271,38 @@ async function handleTikTokCallback(req, res) {
   const credentials = getTikTokCredentials();
   const state = url.searchParams.get('state');
   if (!state) {
+    const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
+    const actor = currentAuthUser(req, settings);
+    const returnedAppKey = String(url.searchParams.get('app_key') || '').trim();
+    const { tiktokAuthorizationEnvironmentForAppKey } = require('./lib/tiktok-oauth');
+    const environment = tiktokAuthorizationEnvironmentForAppKey(returnedAppKey, {
+      productionAppKey: credentials.get('production').appKey,
+      developmentAppKey: credentials.get('development').appKey
+    });
+    const scope = notificationScope(req);
+    if (actor
+      && userCan(actor, 'channels.settings', 'credentials')
+      && scope.tenantId === LEGACY_TENANT
+      && scope.companyId === LEGACY_COMPANY
+      && environment
+      && cookieValue(req, TIKTOK_OAUTH_RECOVERY_COOKIE) !== environment) {
+      setTikTokOAuthRecoveryCookie(req, res, environment);
+      const restart = new URL('/auth/tiktok/start', `http://${req.headers.host || 'localhost'}`);
+      restart.searchParams.set('environment', environment);
+      restart.searchParams.set('returnTo', '/channels?channel=TikTok Shop');
+      appendChannelApiLog({
+        channel: 'TikTok Shop', transport: 'OAuth', method: 'GET', path: '/auth/tiktok/callback',
+        operation: 'Recover TikTok seller authorization', statusCode: 303, ok: true,
+        message: `Restarted ${environment} seller authorization with DataPlus security state.`
+      });
+      res.writeHead(303, { Location: `${restart.pathname}${restart.search}`, 'Cache-Control': 'no-store' });
+      return res.end();
+    }
     const message = 'TikTok returned authorization without the DataPlus security state, so no tokens were saved. Set the TikTok Shop redirect URL to https://dataplusapp.duckdns.org/auth/tiktok/callback, then reconnect from DataPlus Channels.';
     appendChannelApiLog({ channel: 'TikTok Shop', transport: 'OAuth', method: 'GET', path: '/auth/tiktok/callback', operation: 'TikTok seller authorization', statusCode: 400, ok: false, message: 'TikTok callback was missing DataPlus authorization state; no tokens were saved.' });
     return sendHtml(res, 400, tiktokAuthorizationResultHtml({ success: false, message }));
   }
+  clearTikTokOAuthRecoveryCookie(req, res);
   let authorization;
   try {
     authorization = credentials.consumeAuthorization(state, {

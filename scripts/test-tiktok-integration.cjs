@@ -5,7 +5,12 @@ const path = require('node:path');
 
 const { tiktokSignature } = require('../lib/tiktok-client');
 const { createTikTokCredentials } = require('../lib/tiktok-credentials');
-const { exchangeAuthorizationCode, isTikTokAuthorizationCallbackUrl, sellerAuthorizationUrl } = require('../lib/tiktok-oauth');
+const {
+  exchangeAuthorizationCode,
+  isTikTokAuthorizationCallbackUrl,
+  sellerAuthorizationUrl,
+  tiktokAuthorizationEnvironmentForAppKey
+} = require('../lib/tiktok-oauth');
 const { componentRows, mapTikTokOrder, mapTikTokReturn } = require('../lib/tiktok-mappers');
 const { EVENT_TOPICS, reconcileOperation, verifyTikTokShopWebhook, webhookEntity, webhookIdentity, webhookTopic } = require('../lib/tiktok-webhooks');
 const {
@@ -111,6 +116,10 @@ async function main() {
   assert.equal(isTikTokAuthorizationCallbackUrl('/?app_key=app-key&code=auth-code'), false);
   assert.equal(isTikTokAuthorizationCallbackUrl('/?code=auth-code&state=ebay-state'), false);
   assert.equal(isTikTokAuthorizationCallbackUrl('/auth/ebay/callback?code=auth-code&state=production.state'), false);
+  assert.equal(tiktokAuthorizationEnvironmentForAppKey('production-key', { productionAppKey: 'production-key', developmentAppKey: 'development-key' }), 'production');
+  assert.equal(tiktokAuthorizationEnvironmentForAppKey('development-key', { productionAppKey: 'production-key', developmentAppKey: 'development-key' }), 'development');
+  assert.equal(tiktokAuthorizationEnvironmentForAppKey('unknown-key', { productionAppKey: 'production-key', developmentAppKey: 'development-key' }), '');
+  assert.equal(tiktokAuthorizationEnvironmentForAppKey('shared-key', { productionAppKey: 'shared-key', developmentAppKey: 'shared-key' }), 'production');
   const tiktokChannelSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'tiktok-channel.tsx'), 'utf8');
   assert.equal(tiktokChannelSource.includes('onSave(channel.id, { settings:'), false, 'TikTok channel settings must use the flat PATCH /api/channels/:id contract.');
   const exchanged = await exchangeAuthorizationCode({
