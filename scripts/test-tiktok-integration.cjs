@@ -8,6 +8,7 @@ const { createTikTokCredentials } = require('../lib/tiktok-credentials');
 const {
   exchangeAuthorizationCode,
   isTikTokAuthorizationCallbackUrl,
+  recoverTikTokAuthorizationState,
   sellerAuthorizationUrl,
   tiktokAuthorizationEnvironmentForAppKey
 } = require('../lib/tiktok-oauth');
@@ -81,11 +82,12 @@ async function main() {
     assert.equal(credentials.status('production').configured, true);
     assert.equal(credentials.fingerprint('production'), credentials.fingerprint('production'));
     credentials.updateTokens('production', { open_id: 'seller-a', access_token: 'seller-a-access', refresh_token: 'seller-a-refresh', expires_in: 3600 });
-    credentials.selectShop('production', { id: 'shop-a', name: 'Dealsclick', cipher: 'cipher-a', region: 'US' }, 'seller-a');
+    credentials.selectShop('production', { id: 'shop-a', name: 'Dealsclick', code: 'DEALSCLICK-US', cipher: 'cipher-a', region: 'US' }, 'seller-a');
     credentials.updateTokens('production', { open_id: 'seller-b', access_token: 'seller-b-access', refresh_token: 'seller-b-refresh', expires_in: 3600 });
     credentials.selectShop('production', { id: 'shop-b', name: 'Island Supply', cipher: 'cipher-b', region: 'US' }, 'seller-b');
     assert.deepEqual(credentials.accounts('production').map(account => account.id).filter(id => id.startsWith('seller-')).sort(), ['seller-a', 'seller-b']);
     assert.equal(credentials.get('production', 'seller-a').shopName, 'Dealsclick');
+    assert.equal(credentials.get('production', 'seller-a').shopCode, 'DEALSCLICK-US');
     assert.equal(credentials.get('production', 'seller-b').shopName, 'Island Supply');
     credentials.setActiveAccount('production', 'seller-a');
     assert.equal(credentials.status('production').activeAccountId, 'seller-a');
@@ -99,6 +101,10 @@ async function main() {
       /different seller account/i
     );
     assert.equal(credentials.get('production', 'seller-a').accessToken, 'seller-a-renewed');
+    const removed = credentials.removeAccount('production', 'seller-b');
+    assert.equal(removed.account.shopName, 'Island Supply');
+    assert.equal(credentials.accounts('production').some(account => account.id === 'seller-b'), false);
+    assert.equal(credentials.status('production').activeAccountId, 'seller-a');
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -120,12 +126,26 @@ async function main() {
   assert.equal(tiktokAuthorizationEnvironmentForAppKey('development-key', { productionAppKey: 'production-key', developmentAppKey: 'development-key' }), 'development');
   assert.equal(tiktokAuthorizationEnvironmentForAppKey('unknown-key', { productionAppKey: 'production-key', developmentAppKey: 'development-key' }), '');
   assert.equal(tiktokAuthorizationEnvironmentForAppKey('shared-key', { productionAppKey: 'shared-key', developmentAppKey: 'shared-key' }), 'production');
+  const configuredAppKeys = { productionAppKey: 'production-key', developmentAppKey: 'development-key' };
+  const signedRecoveryState = 'production.v2.payload.signature';
+  assert.equal(recoverTikTokAuthorizationState({ state: signedRecoveryState, recoveryState: '', appKey: '', configured: configuredAppKeys }), signedRecoveryState);
+  assert.equal(recoverTikTokAuthorizationState({ state: '', recoveryState: signedRecoveryState, appKey: 'production-key', configured: configuredAppKeys }), signedRecoveryState);
+  assert.equal(recoverTikTokAuthorizationState({ state: '', recoveryState: signedRecoveryState, appKey: 'development-key', configured: configuredAppKeys }), '');
+  assert.equal(recoverTikTokAuthorizationState({ state: '', recoveryState: 'development.v2.payload.signature', appKey: 'shared-key', configured: { productionAppKey: 'shared-key', developmentAppKey: 'shared-key' } }), 'development.v2.payload.signature');
+  assert.equal(recoverTikTokAuthorizationState({ state: '', recoveryState: 'production', appKey: 'production-key', configured: configuredAppKeys }), '');
+  assert.equal(recoverTikTokAuthorizationState({ state: '', recoveryState: 'production.legacy-state', appKey: 'production-key', configured: configuredAppKeys }), '');
   const tiktokChannelSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'tiktok-channel.tsx'), 'utf8');
   assert.equal(tiktokChannelSource.includes('onSave(channel.id, { settings:'), false, 'TikTok channel settings must use the flat PATCH /api/channels/:id contract.');
   assert.equal(tiktokChannelSource.includes('Add another TikTok account'), true, 'TikTok settings must expose a clear multi-account authorization action.');
   assert.equal(tiktokChannelSource.includes('Use account'), true, 'TikTok settings must expose explicit seller-account selection.');
+  assert.equal(tiktokChannelSource.includes('accounts/remove'), true, 'TikTok settings must allow a seller account to be disconnected.');
+  assert.equal(tiktokChannelSource.includes('Shop ID'), true, 'TikTok settings must display the selected shop ID.');
+  assert.equal(tiktokChannelSource.includes('Shop code'), true, 'TikTok settings must display the selected shop code.');
   assert.equal(tiktokChannelSource.includes('Shared TikTok app credentials'), true, 'TikTok settings must distinguish app credentials from seller accounts.');
   assert.equal(tiktokChannelSource.includes('Saved securely'), true, 'TikTok settings must explain that saved app secrets are not displayed.');
+  const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.equal(serverSource.includes('setTikTokOAuthRecoveryCookie(req, res, authorization.state)'), true, 'TikTok authorization must preserve its signed one-time state in the browser before redirecting to TikTok.');
+  assert.equal(serverSource.includes('Restarted ${environment} seller authorization with DataPlus security state.'), false, 'A missing TikTok state must be recovered from the original signed attempt instead of starting a loop.');
   const exchanged = await exchangeAuthorizationCode({
     appKey: 'app-key', appSecret: 'app-secret', authCode: 'auth-code',
     fetchImpl: async url => {

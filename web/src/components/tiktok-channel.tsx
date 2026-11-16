@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react"
-import { BarChart3, Boxes, CheckCircle2, ExternalLink, Loader2, Play, Plus, Radio, RefreshCw, Save, ShieldCheck, Webhook } from "lucide-react"
+import { BarChart3, Boxes, CheckCircle2, ExternalLink, Loader2, MoreHorizontal, Play, Plus, Radio, RefreshCw, Save, ShieldCheck, Trash2, Webhook } from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
@@ -78,6 +80,7 @@ export function TikTokChannel({
   const [historicalBackfill, setHistoricalBackfill] = useState(true)
   const [credentials, setCredentials] = useState({ appKey: "", appSecret: "", serviceId: "" })
   const [skuText, setSkuText] = useState("")
+  const [disconnectTarget, setDisconnectTarget] = useState<Json | null>(null)
   const rules = useMemo(() => ({ ...(channel.settings || {}), ...edits }), [channel.settings, edits])
 
   const refresh = async () => {
@@ -283,7 +286,38 @@ export function TikTokChannel({
                 </Button>
               </div>
               {!canConnect && <p className="px-3 py-3 text-xs text-muted-foreground">Save the app key, app secret, and Service ID below before adding a seller account.</p>}
-              {accounts.length > 0 && <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Shop</TableHead><TableHead>Region</TableHead><TableHead>Connection</TableHead><TableHead>Token</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader><TableBody>{accounts.map((account: Json) => <TableRow key={account.id}><TableCell><div className="flex items-center gap-2"><span className="font-medium">{account.label || account.shopName || account.id}</span>{account.active && <Badge variant="secondary">Selected</Badge>}</div><p className="max-w-80 truncate text-xs text-muted-foreground">{account.shopId ? `Shop ID ${account.shopId}` : `Seller ID ${account.id}`}</p></TableCell><TableCell>{account.region || "US"}</TableCell><TableCell><Badge variant={account.verified ? "default" : account.shopSelected ? "outline" : "destructive"}>{account.verified ? "Verified" : account.shopSelected ? "Verify" : "Shop needed"}</Badge></TableCell><TableCell className="whitespace-nowrap text-xs text-muted-foreground">{account.accessTokenExpiresAt ? new Date(account.accessTokenExpiresAt).toLocaleDateString() : "Not available"}</TableCell><TableCell><div className="flex justify-end gap-2">{!account.active && <Button size="sm" variant="outline" disabled={busy} onClick={() => void run(async () => { const result = await request("accounts/select", { accountId: account.id }); await refresh(); await Promise.all([refreshLive(), refreshWorkspace()]); return result })}>Use account</Button>}<Button size="sm" variant="outline" disabled={busy || !canConnect} onClick={() => void connectSeller(String(account.id))}><RefreshCw className="size-4" /> Reconnect</Button></div></TableCell></TableRow>)}</TableBody></Table></div>}
+              {accounts.length > 0 && <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader><TableRow><TableHead>Shop</TableHead><TableHead>Region</TableHead><TableHead>Connection</TableHead><TableHead>Token</TableHead><TableHead className="w-14 text-right">Actions</TableHead></TableRow></TableHeader>
+                  <TableBody>{accounts.map((account: Json) => {
+                    const shops = Array.isArray(account.shops) ? account.shops : []
+                    const selectableShops = shops.filter((shop: Json) => Boolean(shop.cipher))
+                    const selectedShop = shops.find((shop: Json) => String(shop.id || "") === String(account.shopId || ""))
+                    const displayedShop = selectedShop || (shops.length === 1 ? shops[0] : null)
+                    const shopName = account.shopName || displayedShop?.name || account.label || "Shop selection needed"
+                    const shopId = account.shopId || displayedShop?.id || ""
+                    const shopCode = account.shopCode || displayedShop?.code || ""
+                    return <TableRow key={account.id}>
+                      <TableCell className="min-w-72 align-top">
+                        <div className="flex flex-wrap items-center gap-2"><span className="font-medium">{shopName}</span>{account.active && <Badge variant="secondary">Selected</Badge>}</div>
+                        {shopId && <p className="mt-1 text-xs text-muted-foreground">Shop ID <span className="font-mono text-foreground">{shopId}</span></p>}
+                        {shopCode && <p className="text-xs text-muted-foreground">Shop code <span className="font-mono text-foreground">{shopCode}</span></p>}
+                        <p className="max-w-96 truncate text-xs text-muted-foreground">Seller account <span className="font-mono">{account.id}</span></p>
+                        {selectableShops.length > 1 && <Select value={selectedShop?.cipher || ""} onValueChange={shopCipher => void run(async () => {
+                          await request("shops/select", { accountId: account.id, shopCipher })
+                          const result = await request("connection/verify", { accountId: account.id })
+                          await refresh()
+                          return result
+                        })}><SelectTrigger className="mt-2 max-w-md"><SelectValue placeholder="Choose an authorized shop" /></SelectTrigger><SelectContent>{selectableShops.map((shop: Json) => <SelectItem key={shop.cipher} value={shop.cipher}>{shop.name || shop.code || shop.id} · {shop.id || "No shop ID"}</SelectItem>)}</SelectContent></Select>}
+                      </TableCell>
+                      <TableCell className="align-top">{account.region || displayedShop?.region || "US"}</TableCell>
+                      <TableCell className="align-top"><Badge variant={account.verified ? "default" : account.shopSelected ? "outline" : shops.length ? "secondary" : "destructive"}>{account.verified ? "Verified" : account.shopSelected ? "Verify" : shops.length ? "Choose shop" : "Shop needed"}</Badge></TableCell>
+                      <TableCell className="whitespace-nowrap align-top text-xs text-muted-foreground">{account.accessTokenExpiresAt ? new Date(account.accessTokenExpiresAt).toLocaleDateString() : "Not available"}</TableCell>
+                      <TableCell className="align-top text-right"><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" disabled={busy} aria-label={`Actions for ${shopName}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{!account.active && <DropdownMenuItem onSelect={() => void run(async () => { const result = await request("accounts/select", { accountId: account.id }); await refresh(); await Promise.all([refreshLive(), refreshWorkspace()]); return result })}>Use account</DropdownMenuItem>}<DropdownMenuItem disabled={!canConnect} onSelect={() => void connectSeller(String(account.id))}><RefreshCw className="size-4" /> Reconnect</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onSelect={() => setDisconnectTarget({ ...account, displayName: shopName })}><Trash2 className="size-4" /> Disconnect</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell>
+                    </TableRow>
+                  })}</TableBody>
+                </Table>
+              </div>}
             </section>
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div>
@@ -303,7 +337,6 @@ export function TikTokChannel({
               <Button variant="outline" disabled={busy || !canSaveCredentials} onClick={() => void run(saveCredentials)}><Save className="size-4" /> Save app credentials</Button>
               {configured && <Button variant="outline" disabled={busy || dirty} onClick={() => void run(verify)}><ShieldCheck className="size-4" /> Verify connection</Button>}
             </div>
-            {Array.isArray(status.connection?.shops) && status.connection.shops.length > 1 && <label className="grid max-w-lg gap-1.5 text-sm">Authorized shop<Select value={status.shopCipher || ""} onValueChange={shopCipher => void run(async () => { const result = await request("shops/select", { accountId: status.activeAccountId || "", shopCipher }); await refresh(); return result })}><SelectTrigger><SelectValue placeholder="Choose a shop" /></SelectTrigger><SelectContent>{status.connection.shops.map((shop: Json) => <SelectItem key={shop.cipher} value={shop.cipher}>{shop.name || shop.code || shop.id}</SelectItem>)}</SelectContent></Select></label>}
             {status.accessTokenExpiresAt && <p className="text-xs text-muted-foreground">Access token expires {new Date(status.accessTokenExpiresAt).toLocaleString()}. DataPlus securely renews it with the generated refresh token.</p>}
             <a className="inline-flex items-center gap-1 text-sm underline" href="https://partner.tiktokshop.com/docv2/page/authorization-overview" target="_blank" rel="noreferrer">TikTok Shop authorization guide <ExternalLink className="size-3.5" /></a>
           </TabsContent>
@@ -396,6 +429,12 @@ export function TikTokChannel({
             <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Area</TableHead><TableHead>State</TableHead><TableHead>API</TableHead><TableHead>Notes</TableHead></TableRow></TableHeader><TableBody>{(status.capabilities || []).map((row: Json) => <TableRow key={row.key}><TableCell className="font-medium">{row.label}</TableCell><TableCell><Badge variant={row.state === "ready" ? "default" : "outline"}>{row.state === "ready" ? "Available" : "Guarded foundation"}</Badge></TableCell><TableCell className="whitespace-nowrap text-sm">{row.api}</TableCell><TableCell className="min-w-72 text-sm text-muted-foreground">{row.note || "Available after authorization and its feature gate are enabled."}</TableCell></TableRow>)}</TableBody></Table></div>
           </TabsContent>
         </Tabs>
+        <AlertDialog open={Boolean(disconnectTarget)} onOpenChange={open => { if (!open) setDisconnectTarget(null) }}>
+          <AlertDialogContent>
+            <AlertDialogHeader><AlertDialogTitle>Disconnect TikTok account?</AlertDialogTitle><AlertDialogDescription>DataPlus will remove the saved access and refresh tokens for {String(disconnectTarget?.displayName || "this shop")}. Imported orders, jobs, and historical evidence will remain available.</AlertDialogDescription></AlertDialogHeader>
+            <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { const target = disconnectTarget; setDisconnectTarget(null); if (!target) return; void run(async () => { const result = await request("accounts/remove", { accountId: target.id }); await refresh(); await Promise.all([refreshLive(), refreshWorkspace()]); onRefresh?.(); return result }) }}>Disconnect</AlertDialogAction></AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </CardContent>
     </Card>
   )
