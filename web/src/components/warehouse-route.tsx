@@ -2649,22 +2649,6 @@ function WarehouseAuditPanel({
   const purchaseOrderExpectedLines = Array.isArray(current?.purchaseOrderExpectedLines) ? current.purchaseOrderExpectedLines as Array<Record<string, unknown>> : [];
   const receivingExpectedLines = purchaseOrderExpectedLines.length ? purchaseOrderExpectedLines : receivingReviewLines;
   const baseAuditItems: Array<Record<string, unknown> & { auditItemKind: string }> = [...(Array.isArray(current?.lines) ? current.lines as Array<Record<string, unknown>> : []).map(row => ({ ...row, auditItemKind: "known" })), ...(Array.isArray(current?.unknownBarcodes) ? current.unknownBarcodes as Array<Record<string, unknown>> : []).map(row => ({ ...row, auditItemKind: "unknown" }))];
-  const recentReceivingActivity = baseAuditItems.map((row) => {
-    const contributors = Array.isArray(row.receivingContributors) ? row.receivingContributors as Array<Record<string, unknown>> : [];
-    const latestContributor = [...contributors].sort((left, right) => new Date(String(right.lastScannedAt || 0)).getTime() - new Date(String(left.lastScannedAt || 0)).getTime())[0];
-    const scannedAt = String(row.lastScannedAt || row.scannedAt || row.firstScannedAt || "");
-    return {
-      key: String(row.id || `${String(row.sku || row.barcode || "item")}::${String(row.locationBin || "")}`),
-      title: String(row.title || row.createdProductTitle || (row.auditItemKind === "unknown" ? "Unmatched product" : row.sku || "Received item")),
-      sku: String(row.selectedSupplierSku || row.sku || row.createdProductSku || ""),
-      barcode: String(row.selectedSupplierUpc || row.barcode || row.upc || ""),
-      image: String(row.image || ""),
-      bin: String(row.locationBin || ""),
-      count: Number(row.countedQty ?? row.count ?? 0),
-      user: String(row.lastScannedBy || latestContributor?.user || "Warehouse user"),
-      scannedAt,
-    };
-  }).filter((row) => row.scannedAt).sort((left, right) => new Date(right.scannedAt).getTime() - new Date(left.scannedAt).getTime()).slice(0, 8);
   const matchedReceivingIds = new Set<string>();
   const receivingAuditItems = baseAuditItems.map((row) => {
     const poLines = receivingExpectedLines.filter((candidate) => receivingLineMatch(row, candidate));
@@ -2680,6 +2664,10 @@ function WarehouseAuditPanel({
   });
   const expectedOnlyItems = receivingExpectedLines.filter((line) => !matchedReceivingIds.has(String(line.id))).map((line) => ({ ...line, auditItemKind: "po_expected", receivingPoLine: line, receivingMatchBasis: "", barcode: line.upc, selectedVendorSku: line.vendorItemNumber, selectedManufacturerSku: line.manufacturerSku, title: line.description || line.title, countedQty: 0 }));
   const sortedItems = sortWarehouseAuditRows([...receivingAuditItems, ...expectedOnlyItems], itemSort, true);
+  const receivingScannedUnits = baseAuditItems.reduce((sum, line) => sum + Number(line.countedQty ?? line.count ?? 0), 0);
+  const receivingMatchedLines = receivingAuditItems.filter((line) => Boolean(line.receivingPoLine)).length;
+  const receivingExtraLines = receivingAuditItems.filter((line) => !line.receivingPoLine && Number(line.countedQty ?? line.count ?? 0) > 0);
+  const receivingExtraUnits = receivingExtraLines.reduce((sum, line) => sum + Number(line.countedQty ?? line.count ?? 0), 0);
   const isManualExternalReceipt = ["external_po_receipt", "receiving_inventory"].includes(String(current?.reason || ""));
   const recentPoMatchedItems = sortedItems.filter((line) => Array.isArray(line.recentOpenPurchaseOrders) && line.recentOpenPurchaseOrders.length > 0);
   const recentOpenPurchaseOrders = [...new Map(recentPoMatchedItems.flatMap((line) => line.recentOpenPurchaseOrders as Array<Record<string, unknown>>).map((purchaseOrder) => [String(purchaseOrder.purchaseOrderId || ""), purchaseOrder])).values()];
@@ -2812,10 +2800,13 @@ function WarehouseAuditPanel({
   return (
     <><Card className="warehouse-audit-panel">
       {(!mobile || !current) && <CardHeader>
-        <CardTitle className="text-base">Warehouse audit</CardTitle>
+        <CardTitle className="text-base">{isLinkedPurchaseOrderReceipt ? "PO receiving" : isPurchaseOrderRecount ? "PO recount" : "Warehouse audit"}</CardTitle>
         <CardDescription>
-          Start a count, scan UPCs with a phone camera or keyboard-wedge
-          scanner, then apply verified inventory counts.
+          {isLinkedPurchaseOrderReceipt
+            ? "Scan products, compare them with the purchase order, and post one verified receipt."
+            : isPurchaseOrderRecount
+              ? "Recount the usable stock remaining from this purchase order without adding inventory."
+              : "Start a count, scan UPCs with a phone camera or keyboard-wedge scanner, then apply verified inventory counts."}
         </CardDescription>
       </CardHeader>}
       <CardContent className="grid gap-3">
@@ -2897,23 +2888,16 @@ function WarehouseAuditPanel({
                 <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setBinLabelsOpen(true)}><Printer className="size-4" /> Print bin labels</DropdownMenuItem><DropdownMenuItem onSelect={() => void shareAuditLink()}><Share2 className="size-4" /> Share audit link</DropdownMenuItem>{activeBin && auditStatus === "in_progress" && <DropdownMenuItem disabled={busy || clearBinBusy} onSelect={requestClearBin}><X className="size-4" /> Clear bin</DropdownMenuItem>}{!mobile && desktopAuditTools && <DropdownMenuItem onSelect={() => setAuditToolsOpen(true)}><FileUp className="size-4" /> Import stock / eBay tools</DropdownMenuItem>}{!isLinkedPurchaseOrderReceipt && !isPurchaseOrderRecount && <DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem>}<DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
               </div>
             </div>
-            {!mobile && isReceivingAudit && ["in_progress", "pending_review"].includes(auditStatus) && <section data-testid="receiving-live-activity" className="rounded-md border bg-card">
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
-                <div>
-                  <div className="flex items-center gap-2"><Activity className="size-4 text-emerald-600" /><p className="font-medium">Live receiving activity</p></div>
-                  <p className="mt-1 text-xs text-muted-foreground">Shared PO progress updates automatically every 6 seconds.</p>
-                </div>
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {activeReceivingParticipants.length ? activeReceivingParticipants.map((participant) => <Badge key={`activity-${String(participant.user)}`} variant="success"><Users className="mr-1 size-3" />{String(participant.user)} · {numberLabel(Number(participant.scannedUnits || 0))} units</Badge>) : <Badge variant="outline">No active scanners</Badge>}
-                </div>
+            {!mobile && isReceivingAudit && ["in_progress", "pending_review"].includes(auditStatus) && <section data-testid="receiving-progress" className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 px-4 py-3">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <div className="flex items-center gap-2"><Activity className="size-4 text-emerald-600" /><p className="font-medium">Receiving progress</p></div>
+                <Badge variant="secondary">{numberLabel(receivingScannedUnits)} units scanned</Badge>
+                {isLinkedPurchaseOrderReceipt && <Badge variant="outline">{numberLabel(receivingMatchedLines)} of {numberLabel(receivingExpectedLines.length)} PO lines matched</Badge>}
+                {receivingExtraLines.length > 0 && <Badge className="border-amber-400 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">{numberLabel(receivingExtraUnits)} extra units · {numberLabel(receivingExtraLines.length)} SKUs</Badge>}
               </div>
-              <div className="divide-y">
-                {recentReceivingActivity.map((item) => <div key={item.key} className="grid grid-cols-[2.5rem_minmax(0,1fr)] items-center gap-3 px-4 py-2.5 md:grid-cols-[2.5rem_minmax(0,1fr)_auto]">
-                  {item.image ? <button type="button" className="size-10 overflow-hidden rounded border bg-muted" title="Open product image" data-no-image-preview onClick={() => setItemImage({ src: item.image, title: item.title })}><img src={item.image} alt="" className="size-full object-cover" /></button> : <span className="grid size-10 place-items-center rounded border bg-muted text-muted-foreground"><Boxes className="size-4" /></span>}
-                  <div className="min-w-0"><p className="truncate text-sm font-medium" title={item.title}>{item.title}</p><p className="truncate font-mono text-xs text-muted-foreground">{item.sku || item.barcode || "Unmatched item"}{item.bin ? ` · ${item.bin}` : ""}</p></div>
-                  <div className="col-span-2 flex items-center justify-between gap-4 pl-[3.25rem] md:col-span-1 md:min-w-64 md:justify-end md:pl-0"><p className="text-sm font-medium">{numberLabel(item.count)} <span className="font-normal text-muted-foreground">counted</span></p><div className="min-w-0 text-right"><p className="truncate text-xs font-medium">{item.user}</p><p className="text-[11px] text-muted-foreground">{dateLabel(item.scannedAt)}</p></div></div>
-                </div>)}
-                {!recentReceivingActivity.length && <p className="px-4 py-5 text-center text-sm text-muted-foreground">No products have been scanned yet.</p>}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-xs text-muted-foreground">Updates every 6 seconds</span>
+                {activeReceivingParticipants.length ? activeReceivingParticipants.map((participant) => <Badge key={`activity-${String(participant.user)}`} variant="success"><Users className="mr-1 size-3" />{String(participant.user)} · {numberLabel(Number(participant.scannedUnits || 0))} units</Badge>) : <Badge variant="outline">No active scanners</Badge>}
               </div>
             </section>}
             {isMarketplacePurposeAudit && auditStatus === "completed" && <div className="rounded-md border border-blue-500/30 bg-blue-500/10 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">{isLiveSellingAudit ? `${String(current.liveChannelLabel || (current.liveChannel === "tiktok_live" ? "TikTok Live" : "eBay Live"))} items prepared` : "Warehouse shadows ready"}</p><p className="mt-1 text-xs text-muted-foreground">{numberLabel(marketplaceShadows.length)} reusable internal shadow SKU{marketplaceShadows.length === 1 ? "" : "s"} tied to {String(current.warehouseName)}. Manufacturer part numbers remain the channel-facing merchant SKUs.</p></div>{Number(current.lastEbayShadowLaunchJobNumber || 0) > 0 && <Badge variant="outline">Job #{numberLabel(Number(current.lastEbayShadowLaunchJobNumber))}</Badge>}</div>{marketplaceShadows.length > 0 && <div className="mt-3 grid max-h-40 gap-2 overflow-y-auto">{marketplaceShadows.map((shadow) => <div key={String(shadow.shadowId || shadow.shadowSku)} className="flex flex-wrap items-center gap-2 rounded-md border bg-background/80 px-3 py-2 text-xs"><Badge variant="secondary" className="font-mono">Internal {String(shadow.shadowSku || "Shadow")}</Badge><Badge variant="outline" className="font-mono">Merchant {String(shadow.merchantSku || shadow.channelSku || "MPN needed")}</Badge>{Boolean(shadow.contentSourceSku) && <span className="text-muted-foreground">Content from {String(shadow.contentSourceSku)}</span>}</div>)}</div>}{marketplaceShadowBlocked.length > 0 && <Alert className="mt-3 border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>{numberLabel(marketplaceShadowBlocked.length)} item{marketplaceShadowBlocked.length === 1 ? " needs" : "s need"} review</AlertTitle><AlertDescription>DataPlus could not prepare these items automatically because a manufacturer SKU is missing or conflicts with another product.</AlertDescription></Alert>}{isLiveSellingAudit && String(current.liveChannel || "") === "tiktok_live" && <p className="mt-3 text-xs text-muted-foreground">TikTok requires the product to be published before it can be assigned to a LIVE room. This audit prepares the product identity and inventory candidate; it does not silently publish or schedule the item.</p>}</div>}
