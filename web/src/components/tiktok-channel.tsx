@@ -323,7 +323,7 @@ export function TikTokChannel({
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div>
                 <p className="text-sm font-medium">Shared TikTok app credentials</p>
-                <p className="text-xs text-muted-foreground">The app key and Service ID apply to every seller account above. The saved app secret is encrypted and never displayed.</p>
+                <p className="text-xs text-muted-foreground">The app key, Service ID, and approved API permissions apply to every seller account above. The developer enables permissions in Partner Center; each seller then authorizes or reconnects their shop. The saved app secret is encrypted and never displayed.</p>
               </div>
               <Badge variant="secondary">Shared across seller accounts</Badge>
             </div>

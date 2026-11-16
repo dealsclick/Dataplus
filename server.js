@@ -80355,9 +80355,14 @@ async function handleTikTokCallback(req, res) {
     return sendHtml(res, 200, tiktokAuthorizationResultHtml({ success: true, message, returnTo: authorization.returnTo }));
   } catch (error) {
     appendChannelApiLog({ channel: 'TikTok Shop', transport: 'OAuth', method: 'GET', path: '/auth/tiktok/callback', operation: 'Complete TikTok seller authorization', statusCode: apiErrorStatus(error), ok: false, message: error.message });
-    const message = tokensStored
-      ? `TikTok generated the seller tokens, but connection verification failed: ${error.message}. Use Verify connection in DataPlus to retry.`
-      : error.message;
+    const missingShopScope = Number(error.upstreamCode || 0) === 105005
+      || /seller\.authorization\.info|Shop Authorized Information|not been granted any access scope/i.test(String(error.message || ''));
+    const reason = String(error.message || 'TikTok Shop connection verification failed').replace(/[.\s]+$/, '');
+    const message = tokensStored && missingShopScope
+      ? 'TikTok generated the seller tokens, but the DataPlus developer app is missing Shop Authorized Information (seller.authorization.info). Enable it in TikTok Shop Partner Center under App & Service > Manage API, then return to DataPlus and choose Reconnect for this seller account. The seller cannot enable this permission from Seller Center.'
+      : tokensStored
+        ? `TikTok generated the seller tokens, but connection verification failed: ${reason}. Use Verify connection in DataPlus to retry.`
+        : error.message;
     return sendHtml(res, apiErrorStatus(error), tiktokAuthorizationResultHtml({ success: false, message, returnTo: authorization.returnTo }));
   }
 }
