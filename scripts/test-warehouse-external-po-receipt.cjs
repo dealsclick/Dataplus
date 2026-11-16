@@ -8,6 +8,8 @@ const db = fs.readFileSync(path.join(root, 'db.js'), 'utf8');
 const warehouseUi = fs.readFileSync(path.join(root, 'web', 'src', 'components', 'warehouse-route.tsx'), 'utf8');
 const purchasingUi = fs.readFileSync(path.join(root, 'web', 'src', 'components', 'purchasing-route.tsx'), 'utf8');
 const purchaseOrderUi = fs.readFileSync(path.join(root, 'web', 'src', 'components', 'purchasing-workspaces.tsx'), 'utf8');
+const dialogUi = fs.readFileSync(path.join(root, 'web', 'src', 'components', 'ui', 'dialog.tsx'), 'utf8');
+const alertDialogUi = fs.readFileSync(path.join(root, 'web', 'src', 'components', 'ui', 'alert-dialog.tsx'), 'utf8');
 
 assert.match(server, /external_po_receipt:\s*"External PO receipt"/, 'server accepts the external PO receipt audit reason');
 assert.doesNotMatch(server, /Enter the PO number from the external system\./, 'server allows a manual inbound receipt without an external PO identity');
@@ -20,6 +22,7 @@ assert.match(server, /previouslyAllocatedQty/, 'receipt allocation retries subtr
 assert.match(server, /body\.allocateOpenOrders === true/, 'PO receipt allocation runs only when the operator explicitly selects it');
 assert.match(server, /extraItemStatus:\s*extraItem \? "unexpected_on_selected_po"/, 'PO receipts persist unexpected products as extra items');
 assert.match(server, /findOpenPurchaseOrdersExpectingSkus/, 'PO extra-item receipts check whether another open PO expects each SKU');
+assert.match(server, /inventoryMultiplier[\s\S]*\(\?:PK\|PC\)/, 'pack and piece PO identities preserve their physical inventory multiplier');
 assert.match(server, /RECENT_RECEIVING_PO_WINDOW_DAYS = 7/, 'manual and external receiving use a seven-day open-PO window');
 assert.match(server, /withRecentOpenPurchaseOrderMatches/, 'manual and external receiving enrich scanned lines with recent open PO matches');
 assert.match(server, /warehouseReceivingOnly: true/, 'manual receiving excludes direct-to-customer POs from warehouse suggestions');
@@ -59,6 +62,11 @@ assert.match(warehouseUi, /compressEvidenceImage/, 'packing-slip photos are comp
 assert.match(warehouseUi, /Packing slip optional/, 'the UI explains that packing-slip evidence is optional');
 assert.doesNotMatch(warehouseUi, /Add at least one packing-slip photo or file before finishing this receipt/, 'the UI does not block completion without a packing slip');
 assert.match(warehouseUi, /Extra item[\s\S]*Expected on another open PO/, 'linked PO receiving flags extra items and shows other open PO expectations');
+assert.match(warehouseUi, /This is not an inventory-availability warning/, 'the extra-unit warning distinguishes an unexpected PO line from missing inventory');
+assert.match(warehouseUi, /Math\.floor\(remaining \/ inventoryMultiplier\)/, 'piece scans are converted into complete PO pack units before receipt posting');
+assert.match(warehouseUi, /sm:!max-w-6xl/, 'the finish-receiving workflow uses a wide desktop dialog');
+assert.match(dialogUi, /sm:max-w-2xl/, 'ordinary dialogs default to a readable desktop width');
+assert.match(alertDialogUi, /data-\[size=default\]:max-w-xl/, 'confirmation dialogs default to a readable desktop width');
 assert.match(warehouseUi, /Found in recent PO/, 'manual receiving displays a dedicated recent-PO match column');
 assert.match(warehouseUi, /recentOpenPurchaseOrders[\s\S]*\/purchase-orders\//, 'each detected recent PO opens its purchase-order detail');
 assert.match(warehouseUi, /Ready to post, not received yet/, 'the receipt preview clearly distinguishes saved scans from posted inventory');

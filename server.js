@@ -59988,7 +59988,18 @@ async function handleApi(req, res) {
       : [];
     const linkedProductsBySku = new Map((linkedProducts || []).map((product) => [String(product.sku || "").trim().toLowerCase(), product]));
     let purchaseOrderExpectedLines = linkedPurchaseOrder ? (linkedPurchaseOrder.items || []).map((line, lineIndex) => {
-      const product = linkedProductsBySku.get(String(line.sku || "").trim().toLowerCase()) || {};
+      const lineSku = String(line.sku || "").trim();
+      const product = linkedProductsBySku.get(lineSku.toLowerCase())
+        || (linkedProducts || []).find((candidate) => inventorySkuMatch(lineSku, candidate).matches)
+        || {};
+      const skuInventoryMatch = inventorySkuMatch(lineSku, product);
+      const purchaseUnitSuffix = lineSku.match(/(?:-|\b)(\d+)(?:PK|PC)$/i);
+      const inventoryMultiplier = Math.max(
+        1,
+        Number(skuInventoryMatch.multiplier || 1),
+        purchaseUnitSuffix ? Number(purchaseUnitSuffix[1] || 1) : 1,
+        purchaseUnitSuffix ? purchaseReceiptInventoryMultiplier(product) : 1
+      );
       return {
         id: String(line.id || `${linkedPurchaseOrder.id}:${lineIndex}`),
         lineIndex,
@@ -60002,6 +60013,7 @@ async function handleApi(req, res) {
         orderedQty: Number(line.qty || 0),
         receivedQty: Number(line.receivedQty || 0),
         expectedQty: purchaseOrderOpenQuantity(line),
+        inventoryMultiplier,
         poNumber: String(linkedPurchaseOrder.poNumber || ""),
         inventoryPurpose: normalizeInventoryPurpose(line.inventoryPurpose, inventoryPurpose),
         liveChannel: normalizeLiveInventoryChannel(line.liveChannel || liveChannel)
@@ -66530,6 +66542,11 @@ async function handleApi(req, res) {
       .map((item) => ({
         sku: String(item.sku || "").trim(),
         title: String(item.title || item.sku || "Extra item").trim(),
+        barcode: String(item.barcode || item.upc || "").trim(),
+        upc: String(item.upc || item.barcode || "").trim(),
+        manufacturerSku: String(item.manufacturerSku || "").trim(),
+        vendorSku: String(item.vendorSku || "").trim(),
+        sourceAuditLineId: String(item.sourceAuditLineId || "").trim(),
         qtyReceived: Math.max(0, Number(item.qtyReceived || 0))
       }))
       .filter((item) => item.sku && item.qtyReceived > 0);
@@ -78947,7 +78964,16 @@ async function handleApi(req, res) {
     if (!po) return notFound(res);
     const body = await parseBody(req);
     const requested = (Array.isArray(body.items) ? body.items : [])
-      .map((item) => ({ sku: String(item.sku || "").trim(), title: String(item.title || item.sku || "Extra item").trim(), qtyReceived: Math.max(0, Number(item.qtyReceived || 0)) }))
+      .map((item) => ({
+        sku: String(item.sku || "").trim(),
+        title: String(item.title || item.sku || "Extra item").trim(),
+        barcode: String(item.barcode || item.upc || "").trim(),
+        upc: String(item.upc || item.barcode || "").trim(),
+        manufacturerSku: String(item.manufacturerSku || "").trim(),
+        vendorSku: String(item.vendorSku || "").trim(),
+        sourceAuditLineId: String(item.sourceAuditLineId || "").trim(),
+        qtyReceived: Math.max(0, Number(item.qtyReceived || 0))
+      }))
       .filter((item) => item.sku && item.qtyReceived > 0);
     const expectationRows = openPurchaseOrderExpectationsFromState(db.purchaseOrders, requested.map((item) => item.sku), po.id);
     const expectationsBySku = new Map();
