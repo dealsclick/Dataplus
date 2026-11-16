@@ -1087,46 +1087,50 @@ async function checkScheduledTemuOrderImport(force = false) {
   const channel = (stateDb.connections || []).find(entry => String(entry.name || "").toLowerCase() === "temu");
   const settings = channel?.settings || {};
   if (!channel || settings.channelEnabled === false || settings.orderDownloadEnabled === false || !settings.temuOrderImportEnabled) return false;
-  if (await hasActiveOperationTask(['temu-order-import', 'temu-order-status', 'temu-order-enrichment'])) return false;
   const now = new Date(nowMs), today = localDateKey(now);
   const scheduleState = docs.channelTemuOrderImportSchedules || {};
-  for (const [mode, prefix] of [['intake', 'temuOrderImport'], ['status', 'temuOrderStatus'], ['enrichment', 'temuOrderEnrichment']]) {
-    if (!settings[prefix + 'ScheduleEnabled']) continue;
-    const dueSlot = dueScheduleSlot(settings, prefix + 'Schedule', now);
-    if (!dueSlot) continue;
-    const scheduleId = `${channel.id || "temu"}:${mode}:${today}:${dueSlot}`;
-    const previous = scheduleState[scheduleId] || {};
-    if (previous.lastRunDate === today || previous.lastAttemptedDate === today) continue;
-    try {
-      const limit = settings[prefix + 'Limit'] || 250;
-      const queueDb = mode === 'status'
-        ? { ...stateDb, orders: await postgres.listOpenMarketplaceOrderStatusCandidates('Temu', { limit: 50000 }) || [] }
-        : stateDb;
-      const sweep = mode === 'status'
-        ? require('../lib/temu-order-phases').selectOpenStatusSweep(queueDb.orders || [], {
+  const accounts = (dataplus.publicTemuAccounts(stateDb).accounts || []).filter(account => account.configured);
+  for (const account of accounts) {
+    for (const [mode, prefix] of [['intake', 'temuOrderImport'], ['status', 'temuOrderStatus'], ['enrichment', 'temuOrderEnrichment']]) {
+      if (!settings[prefix + 'ScheduleEnabled']) continue;
+      const dueSlot = dueScheduleSlot(settings, prefix + 'Schedule', now);
+      if (!dueSlot) continue;
+      const scheduleId = `${channel.id || "temu"}:${account.id}:${mode}:${today}:${dueSlot}`;
+      const previous = scheduleState[scheduleId] || {};
+      if (previous.lastRunDate === today || previous.lastAttemptedDate === today) continue;
+      try {
+        const limit = settings[prefix + 'Limit'] || 250;
+        const accountOrders = mode === 'status'
+          ? (await postgres.listOpenMarketplaceOrderStatusCandidates('Temu', { limit: 50000 }) || []).filter(order => String(order.channelAccountId || '') === String(account.id) || (!order.channelAccountId && account.active))
+          : [];
+        const queueDb = mode === 'status' ? { ...stateDb, orders: accountOrders } : stateDb;
+        const offsetKey = `openStatusSweepOffset:${account.id}`;
+        const sweep = mode === 'status'
+          ? require('../lib/temu-order-phases').selectOpenStatusSweep(queueDb.orders || [], {
+            limit,
+            offset: scheduleState[offsetKey] || 0
+          })
+          : null;
+        const result = await dataplus.queueTemuOrderImportJob(queueDb, {
+          accountId: account.id,
+          mode, lookbackDays: settings[prefix + 'LookbackDays'] || 7,
           limit,
-          offset: scheduleState.openStatusSweepOffset || 0
-        })
-        : null;
-      const result = await dataplus.queueTemuOrderImportJob(queueDb, {
-        mode, lookbackDays: settings[prefix + 'LookbackDays'] || 7,
-        limit,
-        startDate: settings.temuOrderImportStartDate || "", includeCanceled: mode !== 'intake',
-        ...(sweep?.parentOrderSnList.length ? { parentOrderSnList: sweep.parentOrderSnList } : {})
-      }, { scheduled: true, scheduleKey: scheduleId });
-      // An occupied worker is not a completed schedule slot; retry after that job ends.
-      if (result.duplicate) return false;
-      if (sweep) scheduleState.openStatusSweepOffset = sweep.nextOffset;
-      scheduleState[scheduleId] = {
-        channelId: channel.id, mode, time: dueSlot, lastRunDate: today, lastRunAt: now.toISOString(), lastJobId: result.job?.id,
-        ...(sweep ? { openOrderCandidateCount: sweep.candidateCount, targetedOrderCount: sweep.parentOrderSnList.length } : {})
-      };
-      await postgres.writeStateDocuments({ channelTemuOrderImportSchedules: scheduleState });
-      return true;
-    } catch (error) {
-      scheduleState[scheduleId] = { mode, lastAttemptedDate: today, lastError: error.message };
-      await postgres.writeStateDocuments({ channelTemuOrderImportSchedules: scheduleState });
-      dataplus.appendChannelApiLog({ channel: "Temu", transport: "Scheduler", method: "IMPORT", path: "temu-orders", operation: `Scheduled Temu ${mode}`, statusCode: 502, ok: false, message: error.message });
+          startDate: settings.temuOrderImportStartDate || "", includeCanceled: mode !== 'intake',
+          ...(sweep?.parentOrderSnList.length ? { parentOrderSnList: sweep.parentOrderSnList } : {})
+        }, { accountId: account.id, scheduled: true, scheduleKey: scheduleId });
+        if (result.duplicate) continue;
+        if (sweep) scheduleState[offsetKey] = sweep.nextOffset;
+        scheduleState[scheduleId] = {
+          channelId: channel.id, accountId: account.id, accountName: account.label, mode, time: dueSlot, lastRunDate: today, lastRunAt: now.toISOString(), lastJobId: result.job?.id,
+          ...(sweep ? { openOrderCandidateCount: sweep.candidateCount, targetedOrderCount: sweep.parentOrderSnList.length } : {})
+        };
+        await postgres.writeStateDocuments({ channelTemuOrderImportSchedules: scheduleState });
+        return true;
+      } catch (error) {
+        scheduleState[scheduleId] = { accountId: account.id, mode, lastAttemptedDate: today, lastError: error.message };
+        await postgres.writeStateDocuments({ channelTemuOrderImportSchedules: scheduleState });
+        dataplus.appendChannelApiLog({ channel: "Temu", transport: "Scheduler", method: "IMPORT", path: "temu-orders", operation: `Scheduled Temu ${mode} for ${account.label || account.id}`, statusCode: 502, ok: false, message: error.message });
+      }
     }
   }
   return false;
@@ -1145,47 +1149,55 @@ async function checkScheduledTemuReturnImport(force = false) {
   const dueSlot = dueScheduleSlot(settings, "temuReturnSyncSchedule", now);
   if (!dueSlot) return false;
   const today = localDateKey(now);
-  const scheduleId = `${channel.id || "temu"}:returns:${today}:${dueSlot}`;
   const scheduleState = docs.channelTemuReturnImportSchedules && typeof docs.channelTemuReturnImportSchedules === "object" ? docs.channelTemuReturnImportSchedules : {};
-  const previous = scheduleState[scheduleId] || {};
-  if (previous.lastRunDate === today) return false;
   const lookbackDays = Math.max(1, Math.min(365, Number(settings.temuReturnSyncLookbackDays || 30) || 30));
   const since = new Date(nowMs - lookbackDays * 86400000).toISOString().slice(0, 10);
-  try {
-    const result = await dataplus.queueTemuReturnImportJob(stateDb, { since, until: nowMs }, {
-      scheduled: true,
-      scheduleKey: scheduleId,
-      operation: "Scheduled Temu return reconciliation"
-    });
-    if (result.duplicate) return false;
-    scheduleState[scheduleId] = {
-      ...previous,
-      channelId: channel.id || "",
-      channelName: channel.name || "Temu",
-      time: dueSlot,
-      lookbackDays,
-      lastRunDate: today,
-      lastRunAt: now.toISOString(),
-      lastJobId: result.job?.id || "",
-      lastError: ""
-    };
-    await postgres.writeStateDocuments({ channelTemuReturnImportSchedules: scheduleState });
-    console.log(`[${WORKER_ID}] queued scheduled Temu return reconciliation for ${dueSlot} (${result.job?.id || "unknown"})`);
-    return true;
-  } catch (error) {
-    scheduleState[scheduleId] = {
-      ...previous,
-      channelId: channel.id || "",
-      channelName: channel.name || "Temu",
-      time: dueSlot,
-      lastAttemptedAt: now.toISOString(),
-      lastError: error.message || "Unable to reconcile Temu returns."
-    };
-    await postgres.writeStateDocuments({ channelTemuReturnImportSchedules: scheduleState });
-    dataplus.appendChannelApiLog({ channel: "Temu", transport: "Scheduler", method: "IMPORT", path: "temu-returns", operation: "Scheduled Temu return reconciliation", statusCode: 502, ok: false, message: error.message || "Unable to reconcile Temu returns." });
-    console.error(`[${WORKER_ID}] scheduled Temu return reconciliation failed:`, error.message || error);
-    return false;
+  const accounts = (dataplus.publicTemuAccounts(stateDb).accounts || []).filter(account => account.configured);
+  for (const account of accounts) {
+    const scheduleId = `${channel.id || "temu"}:${account.id}:returns:${today}:${dueSlot}`;
+    const previous = scheduleState[scheduleId] || {};
+    if (previous.lastRunDate === today) continue;
+    try {
+      const result = await dataplus.queueTemuReturnImportJob(stateDb, { accountId: account.id, since, until: nowMs }, {
+        accountId: account.id,
+        scheduled: true,
+        scheduleKey: scheduleId,
+        operation: "Scheduled Temu return reconciliation"
+      });
+      if (result.duplicate) continue;
+      scheduleState[scheduleId] = {
+        ...previous,
+        channelId: channel.id || "",
+        channelName: channel.name || "Temu",
+        accountId: account.id,
+        accountName: account.label,
+        time: dueSlot,
+        lookbackDays,
+        lastRunDate: today,
+        lastRunAt: now.toISOString(),
+        lastJobId: result.job?.id || "",
+        lastError: ""
+      };
+      await postgres.writeStateDocuments({ channelTemuReturnImportSchedules: scheduleState });
+      console.log(`[${WORKER_ID}] queued scheduled Temu return reconciliation for ${account.label || account.id} at ${dueSlot} (${result.job?.id || "unknown"})`);
+      return true;
+    } catch (error) {
+      scheduleState[scheduleId] = {
+        ...previous,
+        channelId: channel.id || "",
+        channelName: channel.name || "Temu",
+        accountId: account.id,
+        accountName: account.label,
+        time: dueSlot,
+        lastAttemptedAt: now.toISOString(),
+        lastError: error.message || "Unable to reconcile Temu returns."
+      };
+      await postgres.writeStateDocuments({ channelTemuReturnImportSchedules: scheduleState });
+      dataplus.appendChannelApiLog({ channel: "Temu", transport: "Scheduler", method: "IMPORT", path: "temu-returns", operation: `Scheduled Temu return reconciliation for ${account.label || account.id}`, statusCode: 502, ok: false, message: error.message || "Unable to reconcile Temu returns." });
+      console.error(`[${WORKER_ID}] scheduled Temu return reconciliation failed:`, error.message || error);
+    }
   }
+  return false;
 }
 
 async function checkScheduledEbayPriceInventorySync(force = false) {

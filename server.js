@@ -20539,7 +20539,7 @@ async function findActiveDuplicateImportJob(db = {}, attrs = {}) {
   }) || null;
 }
 
-async function findActiveImportJobByWorkerTask(db = {}, workerTask = "") {
+async function findActiveImportJobByWorkerTask(db = {}, workerTask = "", filters = {}) {
   const task = String(workerTask || "").trim();
   if (!task) return null;
   const jobs = postgres.isPostgresEnabled()
@@ -20547,7 +20547,9 @@ async function findActiveImportJobByWorkerTask(db = {}, workerTask = "") {
     : mergedImportJobs(db);
   return (jobs || []).find((job) => {
     const status = String(job.status || "").toLowerCase();
-    return ["queued", "running"].includes(status) && String(job.workerTask || "").trim() === task;
+    return ["queued", "running"].includes(status)
+      && String(job.workerTask || "").trim() === task
+      && (!filters.accountId || !job.workerPayload?.accountId || String(job.workerPayload.accountId) === String(filters.accountId));
   }) || null;
 }
 
@@ -23833,6 +23835,12 @@ function getTikTokCredentials() {
   return tiktokCredentials;
 }
 
+let temuCredentials;
+function getTemuCredentials() {
+  if (!temuCredentials) temuCredentials = require('./lib/temu-credentials').createTemuCredentials({ directory: DATA_DIR });
+  return temuCredentials;
+}
+
 let tiktokMarketplace;
 function getTikTokMarketplace() {
   if (!tiktokMarketplace) tiktokMarketplace = require('./lib/tiktok-marketplace').createTikTokMarketplace({
@@ -23848,7 +23856,12 @@ function getTikTokMarketplace() {
       return base ? `${base}/api/webhooks/tiktok` : '';
     },
     canManageCredentials: user => userCan(user, 'channels.settings', 'credentials'),
-    findActive: task => findActiveImportJobByWorkerTask({}, task),
+    findActive: async (task, accountId = '') => {
+      const jobs = await postgres.readOperationJobs(500).catch(() => []);
+      return jobs.find(job => ['queued', 'running'].includes(String(job.status || '').toLowerCase())
+        && String(job.workerTask || job.raw?.workerTask || '') === String(task || '')
+        && String(job.workerPayload?.accountId || job.raw?.workerPayload?.accountId || '') === String(accountId || '')) || null;
+    },
     createJob: async attrs => {
       const db = await readDbFast({ skipInventory: true });
       const job = createImportJob(db, attrs);
@@ -26733,22 +26746,27 @@ async function readChannelJobQueueState() {
 async function queueTemuReturnImportJob(db, body = {}, options = {}) {
   const channel = requireEnabledChannel(db, "Temu");
   if (!channel.settings?.temuReturnSyncEnabled && !options.ignoreDisabled) throw new Error("Enable Temu return sync in Channel Settings before importing returns.");
-  const active = await findActiveImportJobByWorkerTask(db, "temu-return-import");
+  const account = getTemuConfig(db, body.accountId || options.accountId);
+  if (!account.accountId || !account.accessToken) throw new Error("Connect and select a Temu shop before importing returns.");
+  const active = await findActiveImportJobByWorkerTask(db, "temu-return-import", { accountId: account.accountId });
   if (active) return { duplicate: true, job: active };
   const since = String(body.since || `${new Date().getFullYear()}-01-01`);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(since) || !Number.isFinite(Date.parse(since)) || Date.parse(since) > Date.now()) throw new Error("Enter a valid past start date.");
   const until = Number(body.until || Date.now());
   if (!Number.isFinite(until) || until < Date.parse(since)) throw new Error("Enter a valid return import end date.");
-  const operation = options.operation || "Temu return import";
+  const operation = `${options.operation || "Temu return import"} - ${account.accountName || account.mallId || account.accountId}`;
   const job = createImportJob(db, {
     section: "Operations", category: "Returns", operation, direction: "import",
     status: "queued", phase: "queued", workerTask: "temu-return-import", workerPayload: {
+      accountId: account.accountId,
+      accountName: account.accountName || account.mallId || account.accountId,
+      credentialKey: account.credentialKey,
       since,
       until,
       scheduled: options.scheduled === true,
       scheduleKey: options.scheduleKey || ""
     },
-    fileName: "temu-returns-import-results.csv", message: `Temu return import queued from ${since}.`
+    fileName: "temu-returns-import-results.csv", message: `Temu return import queued for ${account.accountName || account.mallId} from ${since}.`
   });
   upsertImportJobStore(job);
   await postgres.upsertOperationJob(job);
@@ -26768,7 +26786,9 @@ async function runTemuReturnImportWorkerJob(job) {
           if (!channel.settings?.temuReturnSyncEnabled) throw new Error("Temu return sync is disabled.");
         } catch (error) { error.channelDisabled = true; throw error; }
         try {
-          const response = await temuRequest(type, payload, { db, allowErrorResult: true, timeoutMs: 45000 });
+          const account = getTemuConfig(db, job.workerPayload.accountId);
+          if (!account.accountId || account.credentialKey !== job.workerPayload.credentialKey) throw new Error("The Temu shop credentials changed after this return job was queued.");
+          const response = await temuRequest(type, payload, { db, accountId: account.accountId, allowErrorResult: true, timeoutMs: 45000 });
           const result = temuReturnResponse(response, type);
           appendChannelApiLog({ channel: "Temu", transport: "API", method: "POST", path: type, operation: "Import Temu returns", statusCode: 200, ok: true, jobId: job.id });
           return result;
@@ -26780,7 +26800,7 @@ async function runTemuReturnImportWorkerJob(job) {
       progress: async ({ scanned, imported, linked, windowEnd }) => persistWorkerImportJob(job, { processedRows: scanned, changed: imported, missingCount: imported - linked, message: `${imported} Temu returns imported; ${linked} linked. Scanning through ${new Date(windowEnd * 1000).toISOString().slice(0, 10)}.`, lastProgressAt: new Date().toISOString() }),
       save: async (detail, logistics) => {
         const order = await postgres.readChannelOrderForReturn("Temu", { orderId: detail.parentOrderSn });
-        const record = await postgres.upsertImportedReturn(temuReturnRecord(detail, logistics, order, order ? orderLineItems(order) : []));
+        const record = await postgres.upsertImportedReturn({ ...temuReturnRecord(detail, logistics, order, order ? orderLineItems(order) : []), channelAccountId: job.workerPayload.accountId, channelAccountName: job.workerPayload.accountName });
         if (order) {
           reconcileOrderReturns(order, [record]);
           normalizeSourceOrderCompletion(order);
@@ -29492,16 +29512,44 @@ function temuChannelSettings(db = {}) {
   return channel ? normalizeChannel(channel).settings || {} : {};
 }
 
-function getTemuConfig(db = {}) {
+function legacyTemuAccount(db = {}, settings = temuChannelSettings(db)) {
+  return {
+    accessToken: settings.temuAccessToken || db.connectorState?.temuAccessToken || process.env.TEMU_ACCESS_TOKEN || "",
+    refreshToken: db.connectorState?.temuRefreshToken || "",
+    accessTokenExpiresAt: db.connectorState?.temuAccessTokenExpiresAt || "",
+    mallId: settings.temuMallId || db.connectorState?.temuMallId || "",
+    apiScopeList: db.connectorState?.temuApiScopeList || []
+  };
+}
+
+function getTemuConfig(db = {}, accountId = "") {
   const settings = temuChannelSettings(db);
+  const account = getTemuCredentials().get(accountId, legacyTemuAccount(db, settings));
   return {
     endpoint: settings.temuEndpoint || process.env.TEMU_ENDPOINT || "https://openapi-b-us.temu.com/openapi/router",
     authorizationUrl: settings.temuAuthorizationUrl || process.env.TEMU_AUTHORIZATION_URL || "https://seller.temu.com/open-platform/client-manage/authorization",
     appKey: settings.temuAppKey || process.env.TEMU_APP_KEY || "",
     appSecret: settings.temuAppSecret || process.env.TEMU_APP_SECRET || "",
-    accessToken: settings.temuAccessToken || db.connectorState?.temuAccessToken || process.env.TEMU_ACCESS_TOKEN || "",
-    mallId: settings.temuMallId || db.connectorState?.temuMallId || "",
+    accessToken: account.accessToken || "",
+    refreshToken: account.refreshToken || "",
+    mallId: account.mallId || "",
+    accountId: account.accountId || "",
+    accountName: account.mallName || account.label || account.mallId || account.accountId || "",
+    credentialKey: account.accountId ? getTemuCredentials().fingerprint(account.accountId, legacyTemuAccount(db, settings)) : "",
     pageSize: Math.max(1, Math.min(100, Number(settings.temuOrderPageSize || process.env.TEMU_ORDER_PAGE_SIZE || 50) || 50))
+  };
+}
+
+function publicTemuAccounts(db = {}) {
+  const settings = temuChannelSettings(db);
+  const credentialStatus = getTemuCredentials().status(legacyTemuAccount(db, settings));
+  return {
+    ...credentialStatus,
+    appConfigured: Boolean((settings.temuAppKey || process.env.TEMU_APP_KEY) && (settings.temuAppSecret || process.env.TEMU_APP_SECRET)),
+    accounts: credentialStatus.accounts.map(account => ({
+      ...account,
+      connectionOk: account.id === credentialStatus.activeAccountId ? settings.temuConnectionOk === true : null
+    }))
   };
 }
 
@@ -29520,7 +29568,13 @@ function temuCallbackUrlFromRequest(req) {
 }
 
 function buildTemuAuthorizationUrl(db = {}, options = {}) {
-  const config = getTemuConfig(db);
+  const requestedAccountId = String(options.accountId || "").trim();
+  const config = getTemuConfig(db, requestedAccountId);
+  if (requestedAccountId && config.accountId !== requestedAccountId) {
+    const error = new Error("Choose an existing Temu shop or add a new one.");
+    error.statusCode = 400;
+    throw error;
+  }
   if (!config.appKey) {
     const error = new Error("Temu app key is required before starting seller authorization.");
     error.statusCode = 400;
@@ -29540,7 +29594,8 @@ function buildTemuAuthorizationUrl(db = {}, options = {}) {
       redirectUri,
       sessionToken: options.sessionToken,
       returnTo: options.returnTo,
-      defaultReturnTo: "/channels?channel=Temu"
+      defaultReturnTo: "/channels?channel=Temu",
+      data: { accountId: requestedAccountId }
     })
     : crypto.randomBytes(16).toString("hex");
   if (!options.sessionToken) {
@@ -29552,7 +29607,7 @@ function buildTemuAuthorizationUrl(db = {}, options = {}) {
   authUrl.searchParams.set("appKey", config.appKey);
   authUrl.searchParams.set("redirect_uri", redirectUri);
   authUrl.searchParams.set("state", state);
-  return { authUrl: authUrl.toString(), redirectUri, state };
+  return { authUrl: authUrl.toString(), redirectUri, state, accountId: requestedAccountId };
 }
 
 function clearTemuOAuthState(connectorState = {}) {
@@ -29604,7 +29659,7 @@ function temuSign(params, appSecret) {
 }
 
 async function temuRequest(type, payload = {}, options = {}) {
-  const config = getTemuConfig(options.db);
+  const config = getTemuConfig(options.db, options.accountId);
   const accessToken = options.accessToken ?? config.accessToken;
   const missing = [
     ["TEMU_APP_KEY", config.appKey],
@@ -29673,7 +29728,7 @@ function findTokenPayload(response) {
   return response;
 }
 
-async function exchangeTemuCode(db, code) {
+async function exchangeTemuCode(db, code, accountId = "") {
   const trimmedCode = String(code || "").trim();
   if (!trimmedCode) throw new Error("Temu authorization code is required.");
 
@@ -29690,12 +29745,14 @@ async function exchangeTemuCode(db, code) {
     throw new Error(`Temu token exchange did not return an access token: ${JSON.stringify(response).slice(0, 240)}`);
   }
 
+  const connectedAccount = getTemuCredentials().updateTokens(payload, accountId, legacyTemuAccount(db));
   db.connectorState = db.connectorState || {};
   db.connectorState.temuAccessToken = accessToken;
-  db.connectorState.temuRefreshToken = payload.refresh_token || payload.refreshToken || db.connectorState.temuRefreshToken || "";
-  db.connectorState.temuMallId = payload.mall_id || payload.mallId || payload.mallIdList?.[0] || "";
-  db.connectorState.temuAccessTokenExpiresAt = payload.expiredTime ? new Date(Number(payload.expiredTime) * 1000).toISOString() : db.connectorState.temuAccessTokenExpiresAt || "";
-  db.connectorState.temuApiScopeList = Array.isArray(payload.apiScopeList) ? payload.apiScopeList : db.connectorState.temuApiScopeList || [];
+  db.connectorState.temuRefreshToken = connectedAccount.refreshToken || "";
+  db.connectorState.temuMallId = connectedAccount.mallId || "";
+  db.connectorState.temuAccessTokenExpiresAt = connectedAccount.accessTokenExpiresAt || "";
+  db.connectorState.temuApiScopeList = connectedAccount.apiScopeList || [];
+  db.connectorState.temuActiveAccountId = connectedAccount.accountId;
   db.connectorState.temuTokenCreatedAt = new Date().toISOString();
   delete db.connectorState.temuOauthState;
   delete db.connectorState.temuOauthStateExpiresAt;
@@ -29707,8 +29764,7 @@ async function exchangeTemuCode(db, code) {
     connection.settings = {
       ...DEFAULT_CHANNEL_SETTINGS,
       ...(connection.settings || {}),
-      temuAccessToken: accessToken,
-      temuMallId: String(db.connectorState.temuMallId || ""),
+      temuMallId: String(connectedAccount.mallId || ""),
       temuConnectionOk: true,
       temuConnectionVerifiedAt: new Date().toISOString(),
       temuConnectionVerificationMessage: "Temu access token generated from seller authorization."
@@ -29724,11 +29780,11 @@ async function exchangeTemuCode(db, code) {
     createdAt: new Date().toISOString()
   });
   await writeDb(db);
-  return { mallId: db.connectorState.temuMallId, authorized: true };
+  return { accountId: connectedAccount.accountId, mallId: connectedAccount.mallId, accountName: connectedAccount.mallName || connectedAccount.label || connectedAccount.mallId, authorized: true };
 }
 
-async function testTemuConnection(db = {}) {
-  const config = getTemuConfig(db);
+async function testTemuConnection(db = {}, options = {}) {
+  const config = getTemuConfig(db, options.accountId);
   const connectorState = mergedConnectorState(db);
   const now = new Date().toISOString();
   const status = {
@@ -29738,6 +29794,8 @@ async function testTemuConnection(db = {}) {
     hasAccessToken: Boolean(config.accessToken),
     endpoint: config.endpoint,
     appKeyPreview: credentialPreview(config.appKey),
+    accountId: config.accountId || "",
+    accountName: config.accountName || config.mallId || "",
     mallId: config.mallId || connectorState.temuMallId || "",
     latestOrderSync: connectorState.temuLastOrderSync || "",
     verifiedAt: now,
@@ -29757,7 +29815,7 @@ async function testTemuConnection(db = {}) {
         pageSize: 1,
         updateAtStart: nowSeconds - 3600,
         updateAtEnd: nowSeconds
-      }, { db, allowErrorResult: true });
+      }, { db, accountId: config.accountId, allowErrorResult: true });
       const sampleOrder = firstArrayFrom(listResponse)[0] || {};
       const sampleOrderSn = extractTemuOrderSn(sampleOrder);
       const scopeWarnings = [];
@@ -29773,7 +29831,7 @@ async function testTemuConnection(db = {}) {
           ["combined_shipment", "bg.order.combinedshipment.list.get", { parentOrderSn: sampleOrderSn }],
         ]) {
           try {
-            const response = await temuRequest(check[1], check[2], { db, allowErrorResult: true });
+            const response = await temuRequest(check[1], check[2], { db, accountId: config.accountId, allowErrorResult: true });
             if (check[0] === "detail") sampleDetail = response;
           } catch (error) {
             const message = `${check[0]}: ${error.message}`;
@@ -29784,7 +29842,7 @@ async function testTemuConnection(db = {}) {
         const sampleChildOrderSns = [...new Set(childItemsFromTemuPayload(sampleDetail, sampleOrder).map((item) => String(valueAt(item, ["orderSn", "order_sn"], "")).trim()).filter(Boolean))];
         if (sampleChildOrderSns.length) {
           try {
-            await temuRequest("bg.order.customization.get", { orderSnList: sampleChildOrderSns }, { db, allowErrorResult: true });
+            await temuRequest("bg.order.customization.get", { orderSnList: sampleChildOrderSns }, { db, accountId: config.accountId, allowErrorResult: true });
           } catch (error) {
             const message = `customization: ${error.message}`;
             if (!/do not contain a custom type order/i.test(message)) scopeWarnings.push(message);
@@ -29994,9 +30052,9 @@ function childItemsFromTemuPayload(...payloads) {
 }
 
 async function optionalTemuOrderRequest(type, payload, context = {}) {
-  const { db, parentOrderSn, label, errors = [], orderErrors = [], suppressErrorPatterns = [] } = context;
+  const { db, accountId, parentOrderSn, label, errors = [], orderErrors = [], suppressErrorPatterns = [] } = context;
   try {
-    const response = await temuRequest(type, payload, { db, allowErrorResult: true });
+    const response = await temuRequest(type, payload, { db, accountId, allowErrorResult: true });
     if (response?.success === false) throw new Error(`Temu API error ${response.errorCode}: ${response.errorMsg}`);
     return response;
   } catch (error) {
@@ -41852,11 +41910,17 @@ async function importTemuOrders(db, options = {}) {
   const mode = orderMode(options);
   const syncKey = `temu${mode[0].toUpperCase() + mode.slice(1)}LastOrderSync`;
   db.connectorState = db.connectorState || {};
+  const accountConfig = getTemuConfig(db, options.accountId);
+  if (!accountConfig.accountId || !accountConfig.accessToken) throw new Error("The selected Temu shop is no longer connected.");
+  if (options.credentialKey && options.credentialKey !== accountConfig.credentialKey) throw new Error("The Temu shop credentials changed after this job was queued. Queue a new import.");
+  const accountSyncStates = db.connectorState.temuAccountSyncStates && typeof db.connectorState.temuAccountSyncStates === "object"
+    ? db.connectorState.temuAccountSyncStates : {};
+  const accountSyncState = { ...(accountSyncStates[accountConfig.accountId] || {}) };
   const cursorKey = `${syncKey}Cursor`;
-  const cursor = options.forceLookback === false && !options.fetchAll && !options.repairBlind && !options.parentOrderSnList?.length ? db.connectorState[cursorKey] : null;
+  const cursor = options.forceLookback === false && !options.fetchAll && !options.repairBlind && !options.parentOrderSnList?.length ? accountSyncState[cursorKey] : null;
   const now = Number(cursor?.to) || Math.floor(Date.now() / 1000);
   const settings = temuChannelSettings(db);
-  const lastSync = Number(db.connectorState[syncKey] || 0);
+  const lastSync = Number(accountSyncState[syncKey] || 0);
   const lookbackDays = Math.max(1, Math.min(365, Number(options.lookbackDays || 30) || 30));
   const fetchAll = options.fetchAll === true || String(options.fetchAll).toLowerCase() === "true" || String(options.limit || "").toLowerCase() === "all";
   const limit = fetchAll ? Number.MAX_SAFE_INTEGER : Math.max(1, Math.min(5000, Number(options.limit || 250) || 250));
@@ -41864,7 +41928,7 @@ async function importTemuOrders(db, options = {}) {
   const lookbackStart = options.forceLookback === false && lastSync ? Math.max(0, lastSync - 3600) : now - lookbackDays * 24 * 3600;
   const updateAtStart = Number(cursor?.from) || Math.min(now, configuredStart ? Math.max(configuredStart, lookbackStart) : lookbackStart);
   const includeCanceled = options.includeCanceled === true || String(options.includeCanceled).toLowerCase() === "true";
-  const config = getTemuConfig(db);
+  const config = accountConfig;
   const pageSize = Math.min(100, Math.max(1, config.pageSize || 50));
   const repairBlind = options.repairBlind === true || String(options.repairBlind).toLowerCase() === "true";
   const removeUnpaidExisting = options.removeUnpaidExisting === true || String(options.removeUnpaidExisting).toLowerCase() === "true";
@@ -41934,7 +41998,7 @@ async function importTemuOrders(db, options = {}) {
   const batchedPages = fetchAll && !targetedRefresh && !repairBlind ? temuOrderPages({
     start: updateAtStart, end: now, pageSize,
     request: async (payload) => {
-      const response = await temuRequest("bg.order.list.v2.get", payload, { db, allowErrorResult: true, timeoutMs: 45000 });
+      const response = await temuRequest("bg.order.list.v2.get", payload, { db, accountId: accountConfig.accountId, allowErrorResult: true, timeoutMs: 45000 });
       if (response.success === false) throw new Error(`Temu API error ${response.errorCode}: ${response.errorMsg}`);
       return response;
     },
@@ -41963,7 +42027,7 @@ async function importTemuOrders(db, options = {}) {
           pageNumber: 1,
           pageSize: Math.max(1, Math.min(100, targetedChunk.length)),
           parentOrderSnList: targetedChunk
-        }, { db, allowErrorResult: true });
+        }, { db, accountId: accountConfig.accountId, allowErrorResult: true });
         const returnedRows = targetedListResponse?.success === false ? [] : firstArrayFrom(targetedListResponse);
         const returnedByOrder = new Map(returnedRows.map((row) => [extractTemuOrderSn(row), row]));
         listResponse = { rows: targetedChunk.map((parentOrderSn) => returnedByOrder.get(parentOrderSn) || { parentOrderSn }) };
@@ -41977,7 +42041,7 @@ async function importTemuOrders(db, options = {}) {
           pageSize,
           updateAtStart,
           updateAtEnd: now
-        }, { db, allowErrorResult: true });
+        }, { db, accountId: accountConfig.accountId, allowErrorResult: true });
     const listPayloadRoot = temuPayload(listResponse);
     if (listResponse?.success === false) throw new Error(`Temu list failed: ${listResponse.errorMsg || listResponse.errorCode}`);
     const totalItemNum = Number(valueAt(listPayloadRoot, ["totalItemNum", "totalItemCount", "totalCount", "total", "count"], 0)) || 0;
@@ -42123,10 +42187,10 @@ async function importTemuOrders(db, options = {}) {
       let customization = {};
       const orderErrors = [];
       try {
-        if (parentOrderSn) detail = await temuRequest("bg.order.detail.v2.get", { parentOrderSn }, { db, allowErrorResult: true });
+        if (parentOrderSn) detail = await temuRequest("bg.order.detail.v2.get", { parentOrderSn }, { db, accountId: accountConfig.accountId, allowErrorResult: true });
       } catch (error) {
         try {
-          if (parentOrderSn) detail = await temuRequest("bg.order.detail.get", { parentOrderSn }, { db, allowErrorResult: true });
+          if (parentOrderSn) detail = await temuRequest("bg.order.detail.get", { parentOrderSn }, { db, accountId: accountConfig.accountId, allowErrorResult: true });
         } catch (fallbackError) {
           const message = `detail ${parentOrderSn || "unknown"}: ${fallbackError.message || error.message}`;
           errors.push(message);
@@ -42138,9 +42202,9 @@ async function importTemuOrders(db, options = {}) {
         fetched++; skipped++; await reportTemuImportProgress(); continue;
       }
       if (parentOrderSn && mode === "intake") {
-        amount = await optionalTemuOrderRequest("bg.order.amount.query", { parentOrderSn }, { db, parentOrderSn, label: "amount", errors, orderErrors });
+        amount = await optionalTemuOrderRequest("bg.order.amount.query", { parentOrderSn }, { db, accountId: accountConfig.accountId, parentOrderSn, label: "amount", errors, orderErrors });
         if (!Object.keys(temuPayload(amount)).length) {
-          amountV2 = await optionalTemuOrderRequest("temu.order.amount.v2.query", { parentOrderSn }, { db, parentOrderSn, label: "amount_v2", errors, orderErrors });
+          amountV2 = await optionalTemuOrderRequest("temu.order.amount.v2.query", { parentOrderSn }, { db, accountId: accountConfig.accountId, parentOrderSn, label: "amount_v2", errors, orderErrors });
         }
         if (!Object.keys(temuPayload(amount)).length && !Object.keys(temuPayload(amountV2)).length) {
           errors.push(`amount ${parentOrderSn}: unavailable; new order deferred to avoid importing an incorrect total`);
@@ -42148,41 +42212,41 @@ async function importTemuOrders(db, options = {}) {
         }
       }
       if (parentOrderSn && mode !== "status") {
-        shipping = await optionalTemuOrderRequest("bg.order.shippinginfo.v2.get", { parentOrderSn }, { db, parentOrderSn, label: "shipping", errors, orderErrors });
-        decryptShipping = await optionalTemuOrderRequest("bg.order.decryptshippinginfo.get", { parentOrderSn }, { db, parentOrderSn, label: "decrypt_shipping", errors, orderErrors });
+        shipping = await optionalTemuOrderRequest("bg.order.shippinginfo.v2.get", { parentOrderSn }, { db, accountId: accountConfig.accountId, parentOrderSn, label: "shipping", errors, orderErrors });
+        decryptShipping = await optionalTemuOrderRequest("bg.order.decryptshippinginfo.get", { parentOrderSn }, { db, accountId: accountConfig.accountId, parentOrderSn, label: "decrypt_shipping", errors, orderErrors });
       }
       if (parentOrderSn && mode === "enrichment") {
         unshippedPackage = await optionalTemuOrderRequest("bg.order.unshipped.package.get", { parentOrderSn }, {
-          db, parentOrderSn, label: "unshipped_package", errors, orderErrors,
+          db, accountId: accountConfig.accountId, parentOrderSn, label: "unshipped_package", errors, orderErrors,
           suppressErrorPatterns: [/BUSINESS_SERVICE_ERROR/i]
         });
-        combinedShipment = await optionalTemuOrderRequest("bg.order.combinedshipment.list.get", { parentOrderSn }, { db, parentOrderSn, label: "combined_shipment", errors, orderErrors });
+        combinedShipment = await optionalTemuOrderRequest("bg.order.combinedshipment.list.get", { parentOrderSn }, { db, accountId: accountConfig.accountId, parentOrderSn, label: "combined_shipment", errors, orderErrors });
       }
       const childOrderSns = [...new Set(childItemsFromTemuPayload(detail, listOrder).map((item) => String(valueAt(item, ["orderSn", "order_sn"], "")).trim()).filter(Boolean))];
       if (parentOrderSn && mode === "enrichment") {
         logisticsShipmentV2 = await optionalTemuOrderRequest("bg.logistics.shipment.v2.get", { parentOrderSn, orderSn: childOrderSns[0] || "" }, {
-          db, parentOrderSn, label: "logistics_shipment_v2", errors, orderErrors,
+          db, accountId: accountConfig.accountId, parentOrderSn, label: "logistics_shipment_v2", errors, orderErrors,
           suppressErrorPatterns: [/NOT_IN_IP_WHITE_LIST/i, /BUSINESS_SERVICE_ERROR/i, /not.*passed/i]
         });
         const packageSnList = extractTemuPackageSns(unshippedPackage, combinedShipment, logisticsShipmentV2, detail, listOrder);
         if (packageSnList.length) {
           shipmentResult = await optionalTemuOrderRequest("bg.logistics.shipment.result.get", { packageSnList }, {
-            db, parentOrderSn, label: "shipment_result", errors, orderErrors,
+            db, accountId: accountConfig.accountId, parentOrderSn, label: "shipment_result", errors, orderErrors,
             suppressErrorPatterns: [/NOT_IN_IP_WHITE_LIST/i, /BUSINESS_SERVICE_ERROR/i]
           });
           trackingInfo = await optionalTemuOrderRequest("temu.track.trackinginfo.get", { packageSn: packageSnList[0], packageSnList }, {
-            db, parentOrderSn, label: "tracking_info", errors, orderErrors,
+            db, accountId: accountConfig.accountId, parentOrderSn, label: "tracking_info", errors, orderErrors,
             suppressErrorPatterns: [/NOT_IN_IP_WHITE_LIST/i, /BUSINESS_SERVICE_ERROR/i]
           });
           labelList = await optionalTemuOrderRequest("temu.logistics.label.list.get", { parentOrderSn, packageSnList }, {
-            db, parentOrderSn, label: "label_list", errors, orderErrors,
+            db, accountId: accountConfig.accountId, parentOrderSn, label: "label_list", errors, orderErrors,
             suppressErrorPatterns: [/NOT_IN_IP_WHITE_LIST/i, /BUSINESS_SERVICE_ERROR/i]
           });
         }
       }
       if (childOrderSns.length && mode === "enrichment") {
         customization = await optionalTemuOrderRequest("bg.order.customization.get", { orderSnList: childOrderSns }, {
-          db, parentOrderSn, label: "customization", errors, orderErrors,
+          db, accountId: accountConfig.accountId, parentOrderSn, label: "customization", errors, orderErrors,
           suppressErrorPatterns: [/do not contain a custom type order/i]
         });
       }
@@ -42198,6 +42262,8 @@ async function importTemuOrders(db, options = {}) {
         labelList,
         customization
       });
+      mappedOrder.channelAccountId = accountConfig.accountId;
+      mappedOrder.channelAccountName = accountConfig.accountName || accountConfig.mallId || accountConfig.accountId;
       if (restoringDeletedHistoricalOrder) {
         mappedOrder.id = existingSnapshot.id;
         mappedOrder.internalOrderNumber = existingSnapshot.internalOrderNumber || existingSnapshot.orderNumber || "";
@@ -42278,8 +42344,9 @@ async function importTemuOrders(db, options = {}) {
   await reportTemuImportProgress(true);
 
   const checkpointComplete = !repairBlind && !targetedRefresh && exhausted && !errors.length;
-  if (options.historicalBackfill !== true && checkpointComplete) { db.connectorState[syncKey] = now; delete db.connectorState[cursorKey]; }
-  else if (options.historicalBackfill !== true && !repairBlind && !targetedRefresh && !fetchAll && !errors.length) db.connectorState[cursorKey] = { from: updateAtStart, to: now, page: pageNumber, offset: pageOffset };
+  if (options.historicalBackfill !== true && checkpointComplete) { accountSyncState[syncKey] = now; delete accountSyncState[cursorKey]; }
+  else if (options.historicalBackfill !== true && !repairBlind && !targetedRefresh && !fetchAll && !errors.length) accountSyncState[cursorKey] = { from: updateAtStart, to: now, page: pageNumber, offset: pageOffset };
+  db.connectorState.temuAccountSyncStates = { ...accountSyncStates, [accountConfig.accountId]: accountSyncState };
   const channel = (db.connections || []).find((entry) => String(entry.name || "").trim().toLowerCase() === "temu");
   if (channel) {
     if (options.historicalBackfill !== true && checkpointComplete) channel.lastSync = now;
@@ -42300,6 +42367,12 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
   const label = { intake: 'Temu new order intake', status: 'Temu order status reconciliation', enrichment: 'Temu order enrichment' }[mode];
   const channel = requireEnabledChannel(db, "Temu");
   const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
+  const account = getTemuConfig(db, body.accountId || options.accountId);
+  if (!account.accountId || !account.accessToken) {
+    const error = new Error("Connect and select a Temu shop before importing orders.");
+    error.statusCode = 409;
+    throw error;
+  }
   if (settings.orderDownloadEnabled === false || !settings.temuOrderImportEnabled) {
     const error = new Error("Enable order downloads and Temu order imports in Channel Settings before importing orders.");
     error.statusCode = 400;
@@ -42320,6 +42393,9 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
     .filter(Boolean))]
     .slice(0, orderSnLimit);
   const workerPayload = {
+    accountId: account.accountId,
+    accountName: account.accountName || account.mallId || account.accountId,
+    credentialKey: account.credentialKey,
     mode,
     lookbackDays,
     limit,
@@ -42338,12 +42414,12 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
   };
   const operation = options.operation || label;
   for (const task of ['temu-order-import', 'temu-order-status', 'temu-order-enrichment']) {
-    const activeImport = await findActiveImportJobByWorkerTask(db, task);
+    const activeImport = await findActiveImportJobByWorkerTask(db, task, { accountId: account.accountId });
     if (activeImport) return { duplicate: true, job: activeImport, workerPayload };
   }
   const duplicate = await findActiveDuplicateImportJob(db, {
     section: "Operations",
-    operation,
+    operation: `${operation} - ${account.accountName || account.mallId || account.accountId}`,
     direction: "import",
     fileName: "temu-orders-import-results.csv",
     workerTask,
@@ -42365,9 +42441,9 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
     workerPayload: shouldRunJobsInline() ? {} : workerPayload,
     message: workerPayload.historicalBackfill
       ? parentOrderSnList.length
-        ? `Temu historical order repair queued for ${parentOrderSnList.length.toLocaleString()} specified marketplace orders. Existing orders will be skipped and operational side effects are disabled.`
-        : `Temu historical order backfill queued for the last ${lookbackDays} days. Existing orders will be skipped and operational side effects are disabled.`
-      : `${label} queued; ${fetchAll ? 'all matching orders' : `up to ${limit} orders`}.`
+        ? `${account.accountName || account.mallId} historical order repair queued for ${parentOrderSnList.length.toLocaleString()} specified marketplace orders. Existing orders will be skipped and operational side effects are disabled.`
+        : `${account.accountName || account.mallId} historical order backfill queued for the last ${lookbackDays} days. Existing orders will be skipped and operational side effects are disabled.`
+      : `${label} queued for ${account.accountName || account.mallId}; ${fetchAll ? 'all matching orders' : `up to ${limit} orders`}.`
   });
   upsertImportJobStore(job);
   if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
@@ -74775,6 +74851,21 @@ async function handleApi(req, res) {
     return sendJson(res, 202, { queued: !result.duplicate, duplicate: result.duplicate, job: normalizeImportJob(result.job), message: result.duplicate ? `An inactive inventory job is already running (${result.job.jobNumber || result.job.id}). This request was not queued; wait for completion and retry.` : result.job.message });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/temu/accounts") {
+    const db = await readDbFast({ skipInventory: true });
+    return sendJson(res, 200, publicTemuAccounts(db));
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/temu/accounts/select") {
+    if (!userCan(authUser, "channels.settings", "credentials")) return sendJson(res, 403, { error: "Channel credential permission is required." });
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    const status = getTemuCredentials().setActiveAccount(body.accountId, legacyTemuAccount(db));
+    db.connectorState = { ...(db.connectorState || {}), temuActiveAccountId: status.activeAccountId };
+    await writeDb(normalizeDb({ ...db, inventory: [] }));
+    return sendJson(res, 200, { ...publicTemuAccounts(db), message: "Temu shop selected." });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/temu/exchange-code" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });
@@ -74787,6 +74878,7 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true });
     const result = buildTemuAuthorizationUrl(db, {
       redirectUri: temuCallbackUrlFromRequest(req),
+      accountId: url.searchParams.get("accountId"),
       returnTo: url.searchParams.get("returnTo"),
       sessionToken: oauthSessionToken(req, "Temu")
     });
@@ -74794,8 +74886,9 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/temu/connection/test" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
     const db = await readDbFast({ skipInventory: true });
-    const result = await testTemuConnection(db);
+    const result = await testTemuConnection(db, { accountId: body.accountId });
     await writeDb(normalizeDb({ ...db, inventory: [] }));
     return sendJson(res, 200, result);
   }
@@ -76690,6 +76783,7 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/temu/auth-url") {
     const result = buildTemuAuthorizationUrl(db, {
       redirectUri: temuCallbackUrlFromRequest(req),
+      accountId: url.searchParams.get("accountId"),
       returnTo: url.searchParams.get("returnTo"),
       sessionToken: oauthSessionToken(req, "Temu")
     });
@@ -76697,7 +76791,8 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "POST" && url.pathname === "/api/temu/connection/test") {
-    const result = await testTemuConnection(db);
+    const body = await parseBody(req);
+    const result = await testTemuConnection(db, { accountId: body.accountId });
     await writeDb(db);
     const normalized = normalizeDb(await readDb({ skipInventory: postgres.isPostgresEnabled() }));
     return sendJson(res, 200, { ...result, state: publicState(normalized) });
@@ -80140,6 +80235,7 @@ async function handleTikTokStart(req, res) {
   const authorization = credentials.beginAuthorization(environment, {
     actorId: actor.id,
     actorName: actor.name || actor.username,
+    accountId: url.searchParams.get('accountId'),
     returnTo: url.searchParams.get('returnTo'),
     sessionToken: oauthSessionToken(req, 'TikTok Shop')
   });
@@ -80193,15 +80289,15 @@ async function handleTikTokCallback(req, res) {
       authCode: code,
       log: appendChannelApiLog
     });
-    credentials.updateTokens(authorization.environment, tokens);
+    const connectedAccount = credentials.updateTokens(authorization.environment, tokens, authorization.accountId);
     tokensStored = true;
-    const verified = await getTikTokMarketplace().verifyConnection();
+    const verified = await getTikTokMarketplace().verifyConnection(connectedAccount.accountId);
     const shopLabel = verified.shops?.find(shop => shop.id === verified.selectedShopId)?.name
       || (verified.shops?.length === 1 ? verified.shops[0]?.name || '' : '');
     const message = shopLabel ? `TikTok Shop connected to ${shopLabel}. Tokens will renew automatically.` : 'TikTok Shop seller authorization saved and verified. Tokens will renew automatically.';
     void recordUserActivity(req, { id: authorization.actorId, name: authorization.actorName || 'DataPlus user' }, {
       eventType: 'channel', action: 'Connected TikTok Shop seller account', entityType: 'channel', entityId: 'tiktok-shop',
-      metadata: { environment: authorization.environment, shopCount: verified.shops?.length || 0 }
+      metadata: { environment: authorization.environment, accountId: connectedAccount.accountId, shopCount: verified.shops?.length || 0 }
     });
     return sendHtml(res, 200, tiktokAuthorizationResultHtml({ success: true, message, returnTo: authorization.returnTo }));
   } catch (error) {
@@ -80223,9 +80319,10 @@ async function handleTemuCallback(req, res) {
   db.connectorState = { ...(db.connectorState || {}), ...readConnectorStateSync() };
 
   let returnTo = "/channels?channel=Temu";
+  let accountId = "";
   try {
-    returnTo = String(stateToken || "").startsWith("v2.")
-      ? channelOAuthState.validateState({
+    if (String(stateToken || "").startsWith("v2.")) {
+      const authorization = channelOAuthState.validateState({
         provider: "Temu",
         clientId: getTemuConfig(db).appKey,
         signingSecret: getTemuConfig(db).appSecret,
@@ -80233,8 +80330,13 @@ async function handleTemuCallback(req, res) {
         sessionToken: oauthSessionToken(req, "Temu"),
         state: stateToken,
         defaultReturnTo: "/channels?channel=Temu"
-      }).returnTo
-      : validateLegacyTemuOAuthState(db.connectorState, stateToken);
+      });
+      returnTo = authorization.returnTo;
+      accountId = String(authorization.data?.accountId || "").trim();
+    } else {
+      returnTo = validateLegacyTemuOAuthState(db.connectorState, stateToken);
+      accountId = getTemuCredentials().status(legacyTemuAccount(db)).activeAccountId || "";
+    }
   } catch (stateError) {
     return sendHtml(res, 400, `
       <!doctype html>
@@ -80267,7 +80369,7 @@ async function handleTemuCallback(req, res) {
   }
 
   try {
-    const result = await exchangeTemuCode(db, code);
+    const result = await exchangeTemuCode(db, code, accountId);
     return sendHtml(res, 200, `
       <!doctype html>
       <script>
@@ -80308,6 +80410,7 @@ async function handleTemuStart(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const result = buildTemuAuthorizationUrl(db, {
     redirectUri: temuCallbackUrlFromRequest(req),
+    accountId: url.searchParams.get("accountId"),
     returnTo: url.searchParams.get("returnTo"),
     sessionToken: oauthSessionToken(req, "Temu")
   });
@@ -81358,6 +81461,7 @@ module.exports = {
   queueShopifyVariantPricePushJob,
   queueShopifyOrderImportJob,
   queueShopifySkuMapSyncJob,
+  publicTemuAccounts,
   queueTemuOrderImportJob,
   reconcileStoredDuplicateTemuOrders,
   voidStoredDuplicateOrders,

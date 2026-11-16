@@ -154,6 +154,7 @@ function ChannelDetail({
   const [temuSetupGuideSaving, setTemuSetupGuideSaving] = useState(false)
   const [temuSetupGuideDraft, setTemuSetupGuideDraft] = useState({ downloadOrders: true, lookbackDays: "30", startDate: "", limit: "250", includeCanceled: false, prepareSkuMapping: true, enableSchedule: false, scheduleEveryHours: "12" })
   const [temuConnectionTest, setTemuConnectionTest] = useState<{ ok?: boolean; configured?: boolean; liveApiChecked?: boolean; hasAccessToken?: boolean; endpoint?: string; appKeyPreview?: string; mallId?: string; latestOrderSync?: string; verifiedAt?: string; message?: string } | null>(null)
+  const [temuAccounts, setTemuAccounts] = useState<{ activeAccountId?: string; encryptedStorageReady?: boolean; accounts?: Array<{ id: string; label?: string; mallId?: string; mallName?: string; configured?: boolean; active?: boolean; accessTokenExpiresAt?: string; connectionOk?: boolean | null }> }>({ accounts: [] })
   const [temuTestingConnection, setTemuTestingConnection] = useState(false)
   const [temuConnecting, setTemuConnecting] = useState(false)
   const [temuWarehouses, setTemuWarehouses] = useState<Array<{ id: string; name: string; isDefault?: boolean; buyShippingEnabled?: boolean }>>([])
@@ -236,11 +237,11 @@ function ChannelDetail({
   const temuConnectionMessage = temuConnectionTest?.message || String(settings.temuConnectionVerificationMessage || "")
   const temuConnectionVerifiedAt = temuConnectionTest?.verifiedAt || String(settings.temuConnectionVerifiedAt || "")
   const temuLatestOrderSync = temuConnectionTest?.latestOrderSync || String(settings.temuLastOrderSync || (channel as Record<string, unknown>).lastSync || "")
-  const temuHasLiveToken = Boolean(temuAccessTokenConfigured || temuConnectionTest?.hasAccessToken)
+  const activeTemuAccount = (temuAccounts.accounts || []).find((account) => account.id === temuAccounts.activeAccountId)
+  const temuHasLiveToken = Boolean(activeTemuAccount?.configured || temuAccessTokenConfigured || temuConnectionTest?.hasAccessToken)
   const temuCanRunLive = temuHasLiveToken || Boolean(channel.connected)
   const temuSetupGuideCompleted = Boolean(settings.temuInitialSetupGuideCompleted)
   const temuSetupGuideLabel = temuSetupGuideCompleted ? "Relaunch setup guide" : "Launch setup guide"
-  const temuAuthActionLabel = temuCanRunLive ? "Reconnect Temu" : "Connect Temu"
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
   const allowedChannelTabs = new Set(["overview", "connection", "operations", "setup", "actions", "rules", "mappings", "attributes", "variants", "skus", "logs"])
   const [activeTab, setActiveTab] = useState(allowedChannelTabs.has(requestedTab || "") ? String(requestedTab) : "overview")
@@ -263,10 +264,12 @@ function ChannelDetail({
     setEditing(false)
     setTemuConnectionTest(null)
     setTemuWarehouses([])
+    setTemuAccounts({ accounts: [] })
   }, [channel.id])
 
   useEffect(() => {
     if (!isTemu) return
+    void loadTemuAccounts()
     void loadTemuWarehouses(false)
   }, [isTemu, channel.id])
 
@@ -336,6 +339,7 @@ function ChannelDetail({
       if (payload.type === "dataplus:temu-authorized") {
         toast.success(payload.message || "Temu seller account connected.")
         setTemuConnectionTest(null)
+        void loadTemuAccounts()
         onRefreshData()
         if (!temuSetupGuideCompleted) openTemuSetupGuide()
       }
@@ -349,6 +353,17 @@ function ChannelDetail({
 
   function update(field: string, value: unknown) {
     setDraft((current) => ({ ...current, [field]: value }))
+  }
+
+  async function loadTemuAccounts() {
+    try {
+      const result = await api<typeof temuAccounts>("/api/temu/accounts")
+      setTemuAccounts(result || { accounts: [] })
+      return result
+    } catch {
+      setTemuAccounts({ accounts: [] })
+      return null
+    }
   }
 
   async function loadTemuWarehouses(notify = true) {
@@ -745,6 +760,7 @@ function ChannelDetail({
       const result = await api<{ job?: ImportJob; duplicate?: boolean; message?: string }>("/api/temu/orders/import", {
         method: "POST",
         body: JSON.stringify({
+          accountId: temuAccounts.activeAccountId || "",
           lookbackDays: Math.max(1, Math.min(365, Number(temuOrderImportDraft.lookbackDays || 30) || 30)),
           limit: Math.max(1, Math.min(5000, Number(temuOrderImportDraft.limit || 250) || 250)),
           startDate: String(temuOrderImportDraft.startDate || ""),
@@ -767,6 +783,7 @@ function ChannelDetail({
       const result = await api<{ job?: ImportJob; duplicate?: boolean; message?: string }>("/api/temu/orders/import", {
         method: "POST",
         body: JSON.stringify({
+          accountId: temuAccounts.activeAccountId || "",
           repairBlind: true,
           limit: Math.max(1, Math.min(5000, Number(settings.temuOrderImportLimit || 250) || 250)),
           includeCanceled: true,
@@ -787,6 +804,7 @@ function ChannelDetail({
       const result = await api<{ job?: ImportJob; duplicate?: boolean; message?: string }>("/api/temu/orders/refresh-statuses", {
         method: "POST",
         body: JSON.stringify({
+          accountId: temuAccounts.activeAccountId || "",
           lookbackDays: 3,
           limit: Math.max(1, Math.min(1000, Number(settings.temuOrderImportLimit || 500) || 500))
         })
@@ -804,7 +822,7 @@ function ChannelDetail({
     setTemuOrderImportSaving(true)
     try {
       const result = await api<{ message?: string }>("/api/temu/orders/import", {
-        method: "POST", body: JSON.stringify({ mode: "enrichment", lookbackDays: settings.temuOrderEnrichmentLookbackDays || 7, limit: settings.temuOrderEnrichmentLimit || 250 })
+        method: "POST", body: JSON.stringify({ accountId: temuAccounts.activeAccountId || "", mode: "enrichment", lookbackDays: settings.temuOrderEnrichmentLookbackDays || 7, limit: settings.temuOrderEnrichmentLimit || 250 })
       })
       toast.success(result.message || "Temu enrichment queued.")
       await onRefreshData()
@@ -847,6 +865,7 @@ function ChannelDetail({
         const result = await api<{ job?: ImportJob; duplicate?: boolean; message?: string }>("/api/temu/orders/import", {
           method: "POST",
           body: JSON.stringify({
+            accountId: temuAccounts.activeAccountId || "",
             lookbackDays,
             limit,
             startDate: temuSetupGuideDraft.startDate,
@@ -876,7 +895,7 @@ function ChannelDetail({
     }
     setTemuTestingConnection(true)
     try {
-      const result = await api<typeof temuConnectionTest>("/api/temu/connection/test", { method: "POST", body: JSON.stringify({}) })
+      const result = await api<typeof temuConnectionTest>("/api/temu/connection/test", { method: "POST", body: JSON.stringify({ accountId: temuAccounts.activeAccountId || "" }) })
       setTemuConnectionTest(result || null)
       if (result?.ok) toast.success(result.message || "Temu connection settings verified.")
       else toast.error(result?.message || "Temu connection test failed.")
@@ -888,14 +907,15 @@ function ChannelDetail({
     }
   }
 
-  async function connectTemuSeller() {
+  async function connectTemuSeller(accountId = "") {
     if (hasUnsavedChannelChanges) {
       toast.error("Save Temu connection changes before connecting.")
       return
     }
     setTemuConnecting(true)
     try {
-      const result = await api<{ authUrl?: string; redirectUri?: string }>("/api/temu/auth-url")
+      const query = accountId ? `?accountId=${encodeURIComponent(accountId)}` : ""
+      const result = await api<{ authUrl?: string; redirectUri?: string }>(`/api/temu/auth-url${query}`)
       if (!result.authUrl) throw new Error("Temu authorization URL was not returned.")
       const popup = window.open(result.authUrl, "dataplus-temu-auth", "popup,width=860,height=820")
       if (!popup) window.location.assign(result.authUrl)
@@ -1226,9 +1246,10 @@ function ChannelDetail({
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button variant={temuCanRunLive ? "outline" : "default"} onClick={() => void connectTemuSeller()} disabled={temuConnecting || hasUnsavedChannelChanges || !temuCredentialsConfigured}>
-                  {temuConnecting ? <Loader2 className="size-4 animate-spin" /> : temuCanRunLive ? <RotateCcw className="size-4" /> : <ExternalLink className="size-4" />}
-                  {temuAuthActionLabel}
+                  {temuConnecting ? <Loader2 className="size-4 animate-spin" /> : <ExternalLink className="size-4" />}
+                  Add Temu shop
                 </Button>
+                {activeTemuAccount && <Button variant="outline" onClick={() => void connectTemuSeller(activeTemuAccount.id)} disabled={temuConnecting || hasUnsavedChannelChanges || !temuCredentialsConfigured}><RotateCcw className="size-4" /> Reconnect selected</Button>}
                 <Button variant="outline" onClick={() => void testTemuConnection()} disabled={temuTestingConnection || hasUnsavedChannelChanges || !temuCredentialsConfigured}>
                   {temuTestingConnection ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />}
                   Test connection
@@ -1241,6 +1262,10 @@ function ChannelDetail({
               </div>
             </CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {(temuAccounts.accounts || []).length > 0 && <div className="col-span-full overflow-hidden rounded-md border">
+                <div className="border-b px-3 py-2"><p className="text-sm font-medium">Temu shops</p><p className="text-xs text-muted-foreground">Every shop has its own encrypted token, order checkpoint, and marketplace jobs.</p></div>
+                <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Shop</TableHead><TableHead>Mall ID</TableHead><TableHead>Connection</TableHead><TableHead>Token</TableHead></TableRow></TableHeader><TableBody>{(temuAccounts.accounts || []).map((account) => <TableRow key={account.id} className={account.active ? "bg-muted/40" : "cursor-pointer"} onClick={() => { if (!account.active && !temuConnecting) void api<typeof temuAccounts>("/api/temu/accounts/select", { method: "POST", body: JSON.stringify({ accountId: account.id }) }).then((result) => { setTemuAccounts(result); setTemuConnectionTest(null); void loadTemuWarehouses(false); toast.success("Temu shop selected.") }).catch((error) => toast.error(error instanceof Error ? error.message : "Unable to select Temu shop.")) }}><TableCell><div className="flex items-center gap-2"><span className="font-medium">{account.label || account.mallName || account.mallId || account.id}</span>{account.active && <Badge variant="secondary">Selected</Badge>}</div></TableCell><TableCell>{account.mallId || "Not returned"}</TableCell><TableCell><Badge variant={account.configured ? "default" : "destructive"}>{account.configured ? "Connected" : "Needs authorization"}</Badge></TableCell><TableCell className="whitespace-nowrap text-xs text-muted-foreground">{account.accessTokenExpiresAt ? dateLabel(account.accessTokenExpiresAt) : "Not available"}</TableCell></TableRow>)}</TableBody></Table></div>
+              </div>}
               <Detail label="API credentials" value={temuCredentialsConfigured ? "Configured" : "Missing"} />
               <Detail label="App key" value={temuAppKeyConfigured ? "Configured" : "Missing"} />
               <Detail label="Seller connection" value={temuCanRunLive ? "Connected" : "Not connected"} />
@@ -1253,7 +1278,7 @@ function ChannelDetail({
               <Field label="App key"><Input disabled={!editing} value={String(settings.temuAppKey || "")} placeholder={temuAppKeyConfigured ? "Configured - enter a value only to replace it" : "Required"} onChange={(event) => update("temuAppKey", event.target.value)} /></Field>
               <Field label="App secret"><Input disabled={!editing} type="password" value={String(settings.temuAppSecret || "")} placeholder={temuAppSecretConfigured ? "Configured - enter a value only to replace it" : "Required"} onChange={(event) => update("temuAppSecret", event.target.value)} /></Field>
               <Field label="Access token override"><Input disabled={!editing} type="password" value={String(settings.temuAccessToken || "")} placeholder={temuGeneratedTokenLabel} onChange={(event) => update("temuAccessToken", event.target.value)} /><p className="text-xs text-muted-foreground">Usually auto-populated by Connect Temu. Paste a token here only when Temu provides one manually or a reconnect needs a temporary override.</p></Field>
-              <Field label="Mall ID"><Input disabled value={String(temuConnectionTest?.mallId || settings.temuMallId || "")} placeholder="Generated by Temu after connection" readOnly /><p className="text-xs text-muted-foreground">Auto-populated from the connected Temu mall account when Temu returns it.</p></Field>
+              <Field label="Mall ID"><Input disabled value={String(temuConnectionTest?.mallId || activeTemuAccount?.mallId || settings.temuMallId || "")} placeholder="Generated by Temu after connection" readOnly /><p className="text-xs text-muted-foreground">Auto-populated from the selected Temu shop.</p></Field>
               <Field label="Order page size"><Input disabled={!editing} type="number" min="1" max="100" value={String(settings.temuOrderPageSize ?? 50)} onChange={(event) => update("temuOrderPageSize", Number(event.target.value || 50))} /></Field>
               <Field label="OAuth callback URL"><Input disabled value={`${window.location.origin}/auth/temu/callback`} readOnly /></Field>
               <div className={`rounded-md border p-3 text-sm md:col-span-2 xl:col-span-3 ${temuConnectionTest?.ok || settings.temuConnectionOk ? "border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-100" : "bg-muted/20 text-muted-foreground"}`}>

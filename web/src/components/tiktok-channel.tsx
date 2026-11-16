@@ -189,7 +189,7 @@ export function TikTokChannel({
     return result
   }
 
-  const connectSeller = async () => {
+  const connectSeller = async (accountId = "") => {
     const popup = window.open("", "dataplus-tiktok-auth", "popup,width=860,height=820")
     setBusy(true)
     setError("")
@@ -201,7 +201,8 @@ export function TikTokChannel({
       setEdits({})
       onRefresh?.()
       const returnTo = `${window.location.pathname}${window.location.search}`
-      const authPath = `/auth/tiktok/start?environment=${encodeURIComponent(environment)}&returnTo=${encodeURIComponent(returnTo)}`
+      const accountQuery = accountId ? `&accountId=${encodeURIComponent(accountId)}` : ""
+      const authPath = `/auth/tiktok/start?environment=${encodeURIComponent(environment)}&returnTo=${encodeURIComponent(returnTo)}${accountQuery}`
       if (popup) popup.location.href = authPath
       else window.location.assign(authPath)
       setMessage("App credentials saved. Complete seller authorization in the TikTok Shop window.")
@@ -219,13 +220,14 @@ export function TikTokChannel({
       await onSave(channel.id, { channelEnabled: true })
       setEdits(current => ({ ...current, channelEnabled: true }))
     }
-    const result = await request("connection/verify", {})
+    const result = await request("connection/verify", { accountId: status.activeAccountId || "" })
     await refresh()
     onRefresh?.()
     return result
   }
 
   const queue = async (operation: string, extra: Json = {}) => request(`jobs/${operation}`, {
+    accountId: status.activeAccountId || "",
     startDate: dateRange.startDate,
     endDate: dateRange.endDate,
     historicalBackfill: operation === "orders" && historicalBackfill,
@@ -236,6 +238,8 @@ export function TikTokChannel({
   const configured = status.configured === true
   const appConfigured = status.appConfigured === true
   const verified = status.connection?.verified === true
+  const accounts = Array.isArray(status.accounts) ? status.accounts : []
+  const activeAccount = accounts.find((account: Json) => account.id === status.activeAccountId)
   const dirty = Object.keys(edits).length > 0
   const keysSaved = Boolean(status.appKey) && status.appSecretConfigured === true
   const canSaveCredentials = status.encryptedStorageReady === true
@@ -277,10 +281,15 @@ export function TikTokChannel({
             </div>
             <div className="flex flex-wrap gap-2">
               <Button variant="outline" disabled={busy || !canSaveCredentials} onClick={() => void run(saveCredentials)}><Save className="size-4" /> Save app credentials</Button>
-              <Button disabled={busy || !canConnect} onClick={() => void connectSeller()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />} {configured ? "Reconnect TikTok Shop" : "Connect TikTok Shop"}</Button>
+              <Button disabled={busy || !canConnect} onClick={() => void connectSeller()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />} Add seller account</Button>
+              {activeAccount && <Button variant="outline" disabled={busy || !canConnect} onClick={() => void connectSeller(String(activeAccount.id))}><RefreshCw className="size-4" /> Reconnect selected</Button>}
               {configured && <Button variant="outline" disabled={busy || dirty} onClick={() => void run(verify)}><ShieldCheck className="size-4" /> Verify connection</Button>}
             </div>
-            {Array.isArray(status.connection?.shops) && status.connection.shops.length > 1 && <label className="grid max-w-lg gap-1.5 text-sm">Authorized shop<Select value={status.shopCipher || ""} onValueChange={shopCipher => void run(async () => { const result = await request("shops/select", { shopCipher }); await refresh(); return result })}><SelectTrigger><SelectValue placeholder="Choose a shop" /></SelectTrigger><SelectContent>{status.connection.shops.map((shop: Json) => <SelectItem key={shop.cipher} value={shop.cipher}>{shop.name || shop.code || shop.id}</SelectItem>)}</SelectContent></Select></label>}
+            {accounts.length > 0 && <div className="rounded-md border">
+              <div className="border-b px-3 py-2"><p className="text-sm font-medium">Seller accounts</p><p className="text-xs text-muted-foreground">Each shop keeps its own authorization, selected storefront, schedules, jobs, and sync checkpoints.</p></div>
+              <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Shop</TableHead><TableHead>Region</TableHead><TableHead>Connection</TableHead><TableHead>Token</TableHead></TableRow></TableHeader><TableBody>{accounts.map((account: Json) => <TableRow key={account.id} className={account.active ? "bg-muted/40" : "cursor-pointer"} onClick={() => { if (!account.active && !busy) void run(async () => { const result = await request("accounts/select", { accountId: account.id }); await refresh(); await Promise.all([refreshLive(), refreshWorkspace()]); return result }) }}><TableCell><div className="flex items-center gap-2"><span className="font-medium">{account.label || account.shopName || account.id}</span>{account.active && <Badge variant="secondary">Selected</Badge>}</div><p className="max-w-80 truncate text-xs text-muted-foreground">{account.shopId || account.id}</p></TableCell><TableCell>{account.region || "US"}</TableCell><TableCell><Badge variant={account.verified ? "default" : account.shopSelected ? "outline" : "destructive"}>{account.verified ? "Verified" : account.shopSelected ? "Verify" : "Shop needed"}</Badge></TableCell><TableCell className="whitespace-nowrap text-xs text-muted-foreground">{account.accessTokenExpiresAt ? new Date(account.accessTokenExpiresAt).toLocaleDateString() : "Not available"}</TableCell></TableRow>)}</TableBody></Table></div>
+            </div>}
+            {Array.isArray(status.connection?.shops) && status.connection.shops.length > 1 && <label className="grid max-w-lg gap-1.5 text-sm">Authorized shop<Select value={status.shopCipher || ""} onValueChange={shopCipher => void run(async () => { const result = await request("shops/select", { accountId: status.activeAccountId || "", shopCipher }); await refresh(); return result })}><SelectTrigger><SelectValue placeholder="Choose a shop" /></SelectTrigger><SelectContent>{status.connection.shops.map((shop: Json) => <SelectItem key={shop.cipher} value={shop.cipher}>{shop.name || shop.code || shop.id}</SelectItem>)}</SelectContent></Select></label>}
             {status.accessTokenExpiresAt && <p className="text-xs text-muted-foreground">Access token expires {new Date(status.accessTokenExpiresAt).toLocaleString()}. DataPlus securely renews it with the generated refresh token.</p>}
             <a className="inline-flex items-center gap-1 text-sm underline" href="https://partner.tiktokshop.com/docv2/page/authorization-overview" target="_blank" rel="noreferrer">TikTok Shop authorization guide <ExternalLink className="size-3.5" /></a>
           </TabsContent>
@@ -305,7 +314,7 @@ export function TikTokChannel({
             <label className="flex max-w-2xl items-center justify-between gap-4 rounded-md border p-3"><span className="min-w-0"><span className="block text-sm font-medium">Historical order backfill</span><span className="block text-xs text-muted-foreground">New orders in this manual range are saved for reporting only. They will not route fulfillment, reserve inventory, create purchase demand, or buy labels.</span></span><Switch checked={historicalBackfill} onCheckedChange={setHistoricalBackfill} /></label>
             <div className="flex flex-wrap gap-2"><Button disabled={busy || !verified || rules.tiktokOrdersEnabled !== true} onClick={() => void run(() => queue("orders"))}><Play className="size-4" /> Import orders</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokReturnsEnabled !== true} onClick={() => void run(() => queue("returns"))}>Import returns</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokSettlementImportEnabled !== true} onClick={() => void run(() => queue("settlements"))}>Import statements</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokCatalogEnabled !== true} onClick={() => void run(() => queue("products"))}>Reconcile products</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokMessagesEnabled !== true} onClick={() => void run(() => queue("messages"))}>Sync conversations</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokCatalogEnabled !== true} onClick={() => void run(() => queue("commerce"))}>Sync commerce setup</Button></div>
             <p className="text-xs text-muted-foreground">Scheduled order sync remains operational. Historical imports skip existing orders and are marked as non-operational.</p>
-            <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Job</TableHead><TableHead>Operation</TableHead><TableHead>Status</TableHead><TableHead>Updated</TableHead></TableRow></TableHeader><TableBody>{(status.recentJobs || []).map((row: Json) => <TableRow key={row.id}><TableCell><a className="underline" href="/jobs">#{row.jobNumber || row.id}</a></TableCell><TableCell>{row.operation}</TableCell><TableCell><Badge variant={row.status === "success" ? "default" : row.status === "failed" ? "destructive" : "outline"}>{row.status}</Badge></TableCell><TableCell className="whitespace-nowrap text-muted-foreground">{row.at ? new Date(row.at).toLocaleString() : "-"}</TableCell></TableRow>)}{!status.recentJobs?.length && <TableRow><TableCell colSpan={4} className="py-8 text-center text-muted-foreground">No TikTok jobs yet.</TableCell></TableRow>}</TableBody></Table></div>
+            <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Job</TableHead><TableHead>Shop</TableHead><TableHead>Operation</TableHead><TableHead>Status</TableHead><TableHead>Updated</TableHead></TableRow></TableHeader><TableBody>{(status.recentJobs || []).map((row: Json) => <TableRow key={row.id}><TableCell><a className="underline" href="/jobs">#{row.jobNumber || row.id}</a></TableCell><TableCell>{row.accountName || "Legacy account"}</TableCell><TableCell>{row.operation}</TableCell><TableCell><Badge variant={row.status === "success" ? "default" : row.status === "failed" ? "destructive" : "outline"}>{row.status}</Badge></TableCell><TableCell className="whitespace-nowrap text-muted-foreground">{row.at ? new Date(row.at).toLocaleString() : "-"}</TableCell></TableRow>)}{!status.recentJobs?.length && <TableRow><TableCell colSpan={5} className="py-8 text-center text-muted-foreground">No TikTok jobs yet.</TableCell></TableRow>}</TableBody></Table></div>
           </TabsContent>
 
           <TabsContent value="catalog" className="space-y-4">

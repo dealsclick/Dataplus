@@ -75,6 +75,25 @@ async function main() {
     assert.equal(credentials.get('production').refreshToken, 'refresh-token');
     assert.equal(credentials.status('production').configured, true);
     assert.equal(credentials.fingerprint('production'), credentials.fingerprint('production'));
+    credentials.updateTokens('production', { open_id: 'seller-a', access_token: 'seller-a-access', refresh_token: 'seller-a-refresh', expires_in: 3600 });
+    credentials.selectShop('production', { id: 'shop-a', name: 'Dealsclick', cipher: 'cipher-a', region: 'US' }, 'seller-a');
+    credentials.updateTokens('production', { open_id: 'seller-b', access_token: 'seller-b-access', refresh_token: 'seller-b-refresh', expires_in: 3600 });
+    credentials.selectShop('production', { id: 'shop-b', name: 'Island Supply', cipher: 'cipher-b', region: 'US' }, 'seller-b');
+    assert.deepEqual(credentials.accounts('production').map(account => account.id).filter(id => id.startsWith('seller-')).sort(), ['seller-a', 'seller-b']);
+    assert.equal(credentials.get('production', 'seller-a').shopName, 'Dealsclick');
+    assert.equal(credentials.get('production', 'seller-b').shopName, 'Island Supply');
+    credentials.setActiveAccount('production', 'seller-a');
+    assert.equal(credentials.status('production').activeAccountId, 'seller-a');
+    const reconnectAuthorization = credentials.beginAuthorization('production', { accountId: 'seller-a', actorId: 'user-1', actorName: 'Luis', returnTo: '/channels?channel=TikTok%20Shop', sessionToken });
+    assert.equal(credentials.consumeAuthorization(reconnectAuthorization.state, { sessionToken }).accountId, 'seller-a');
+    credentials.updateTokens('production', { open_id: 'seller-a', access_token: 'seller-a-renewed', refresh_token: 'seller-a-refresh-renewed', expires_in: 3600 }, 'seller-a');
+    assert.equal(credentials.get('production', 'seller-a').accessToken, 'seller-a-renewed');
+    assert.equal(credentials.get('production', 'seller-b').accessToken, 'seller-b-access');
+    assert.throws(
+      () => credentials.updateTokens('production', { open_id: 'seller-b', access_token: 'wrong-account-token' }, 'seller-a'),
+      /different seller account/i
+    );
+    assert.equal(credentials.get('production', 'seller-a').accessToken, 'seller-a-renewed');
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
