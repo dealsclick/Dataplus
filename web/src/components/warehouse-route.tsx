@@ -30,6 +30,7 @@ import { ReturnReceiving } from "./return-receiving"
 import { VendorCreateDialog } from "./vendor-create-dialog"
 import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
 import { purchaseOrderUrl } from "../lib/purchase-order-url"
+import { canonicalWarehouseAuditReference, warehouseAuditMatchesKey, warehouseAuditUrl } from "../lib/warehouse-audit-url"
 import { loadAppBootstrap, loadAppReferences } from "../lib/app-state"
 import { compressEvidenceImage, startFastBarcodeScanner } from "../lib/fast-barcode-scanner"
 import { Detail, Field, PageHeader } from "./app-ui"
@@ -648,7 +649,7 @@ function InboundReceivingLauncher({ mobile = false, operatorName = "Warehouse" }
       })
       if (!result.audit?.id) throw new Error("The inbound receiving workspace could not be created.")
       toast.success(result.message || (mode === "purchase_order" ? "PO receiving started." : "Inbound receiving started."))
-      window.location.assign(`${mobile ? "/warehouse/mobile/audits" : "/warehouse/audits"}/${encodeURIComponent(String(result.audit.id))}`)
+      window.location.assign(warehouseAuditUrl(result.audit.auditNumber, result.audit.id, mobile))
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to start inbound receiving.")
     } finally {
@@ -681,7 +682,7 @@ function InboundReceivingLauncher({ mobile = false, operatorName = "Warehouse" }
       <CardContent className="grid gap-2">
         {recentPurchaseOrders.map((po) => {
           const activeAuditId = String(po.activeReceivingAudit?.auditId || "")
-          const href = activeAuditId ? `/warehouse/mobile/audits/${encodeURIComponent(activeAuditId)}` : `/warehouse/mobile/receiving/${encodeURIComponent(po.id)}`
+          const href = activeAuditId ? warehouseAuditUrl(po.activeReceivingAudit?.auditNumber, activeAuditId, true) : `/warehouse/mobile/receiving/${encodeURIComponent(po.id)}`
           const status = activeAuditId ? "receiving" : String(po.status || "received").replace(/_/g, " ")
           const activeReceivers = (po.activeReceivingAudit?.activeReceivers || []).filter((receiver) => new Date(String(receiver.lastActiveAt || 0)).getTime() >= Date.now() - 2 * 60 * 1000).map((receiver) => String(receiver.user || "").trim()).filter(Boolean)
           return <a key={po.id} href={href} className="flex min-w-0 items-start justify-between gap-3 rounded-md border p-3 hover:bg-muted/50">
@@ -894,9 +895,10 @@ function WarehouseAuditHistory({ mobile = false }: { mobile?: boolean } = {}) {
     const value = String(audit.status || "unknown")
     return <Badge variant={value === "in_progress" ? "info" : value === "pending_review" ? "warning" : value === "completed" ? "success" : value === "locked" ? "destructive" : "outline"}>{value === "in_progress" ? "In progress" : value === "pending_review" ? "Review" : value === "completed" ? "Completed" : value === "locked" ? "Locked" : value.replace(/_/g, " ")}</Badge>
   }
-  const auditHref = (audit: Record<string, unknown>) => `${mobile ? "/warehouse/mobile/audits" : "/warehouse/audits"}/${encodeURIComponent(String(audit.id))}`
+  const auditHref = (audit: Record<string, unknown>) => warehouseAuditUrl(audit.auditNumber, audit.id, mobile)
+  const auditLabel = (audit: Record<string, unknown>) => canonicalWarehouseAuditReference(audit.auditNumber, audit.id || "Audit")
   const auditActions = (audit: Record<string, unknown>) => <div className="flex shrink-0 items-center justify-end gap-1">
-    <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" aria-label={`More options for ${String(audit.auditNumber || "audit")}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
+    <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" aria-label={`More options for ${auditLabel(audit)}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <DropdownMenuItem asChild><a href={auditHref(audit)}><Eye className="size-4" />Open audit</a></DropdownMenuItem>
         <DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(audit.id))}/export`}><FileDown className="size-4" />Export CSV</a></DropdownMenuItem>
@@ -927,7 +929,7 @@ function WarehouseAuditHistory({ mobile = false }: { mobile?: boolean } = {}) {
 
         <div className={cn("divide-y", !mobile && "sm:hidden")} data-testid="audit-register-cards">
           {sortedAudits.map((audit) => <article key={String(audit.id)} className="space-y-2 px-4 py-3">
-            <div className="flex items-center justify-between gap-2"><a className="inline-flex min-h-11 min-w-0 items-center truncate font-semibold text-primary underline-offset-4 hover:underline" href={auditHref(audit)}>{String(audit.auditNumber || "Audit")}</a>{auditStatus(audit)}</div>
+            <div className="flex items-center justify-between gap-2"><a className="inline-flex min-h-11 min-w-0 items-center truncate font-semibold text-primary underline-offset-4 hover:underline" href={auditHref(audit)}>{auditLabel(audit)}</a>{auditStatus(audit)}</div>
             <WarehouseAuditType audit={audit} />
             <p className="truncate text-sm text-muted-foreground">{String(audit.warehouseName || "Warehouse")}{audit.supplierName ? ` · ${String(audit.supplierName)}` : ""}</p>
             <div className="flex items-center justify-between gap-2"><p className="min-w-0 text-xs"><span className="font-medium">{numberLabel(Number(audit.lineCount ?? 0))}</span> counted <span className="px-1 text-muted-foreground">·</span> <span className={Number(audit.unknownBarcodeCount || 0) ? "font-medium text-amber-700 dark:text-amber-300" : "text-muted-foreground"}>{numberLabel(Number(audit.unknownBarcodeCount || 0))} unknown</span></p>{auditActions(audit)}</div>
@@ -939,7 +941,7 @@ function WarehouseAuditHistory({ mobile = false }: { mobile?: boolean } = {}) {
         <div className={cn("hidden overflow-x-auto", !mobile && "sm:block")}>
           <Table><TableHeader><TableRow><TableHead>Audit</TableHead><TableHead>Type / reference</TableHead><TableHead>Warehouse</TableHead><TableHead>Supplier</TableHead><TableHead>Counter / reviewer</TableHead><TableHead>Status</TableHead><TableHead>Counted</TableHead><TableHead>Unknown</TableHead><TableHead>Started</TableHead><TableHead>Completed</TableHead><TableHead className="text-right">Action</TableHead></TableRow></TableHeader><TableBody>
             {sortedAudits.map((audit) => <TableRow key={String(audit.id)}>
-              <TableCell><a className="font-medium text-primary hover:underline" href={auditHref(audit)}>{String(audit.auditNumber || "Audit")}</a></TableCell>
+              <TableCell><a className="font-medium text-primary hover:underline" href={auditHref(audit)}>{auditLabel(audit)}</a></TableCell>
               <TableCell className="min-w-48"><WarehouseAuditType audit={audit} /></TableCell>
               <TableCell>{String(audit.warehouseName || "-")}</TableCell>
               <TableCell>{String(audit.supplierName || "-")}</TableCell>
@@ -1531,10 +1533,17 @@ function WarehouseAuditPanel({
     active ||
     audits.find((audit) =>
       auditId
-        ? String(audit.id) === auditId
+        ? warehouseAuditMatchesKey(audit, auditId)
         : String(audit.status) === "in_progress",
     ) ||
     null;
+  useEffect(() => {
+    if (!auditId || !resumedAudit) return;
+    const canonicalPath = warehouseAuditUrl(resumedAudit.auditNumber, resumedAudit.id, mobile);
+    if (window.location.pathname !== canonicalPath) {
+      window.history.replaceState(window.history.state, "", `${canonicalPath}${window.location.search}${window.location.hash}`);
+    }
+  }, [auditId, mobile, resumedAudit?.id, resumedAudit?.auditNumber]);
   const applyAuditUpdate = (audit: Record<string, unknown>) => {
     // Keep the scanner responsive even while the audit-register refresh finishes.
     const previousAudit = (active || resumedAudit || {}) as Record<string, unknown>;
@@ -1779,7 +1788,7 @@ function WarehouseAuditPanel({
       toast.success(result.message || "Warehouse audit started.");
       if (createOnly && result.audit?.id) {
         window.location.assign(
-          `${mobile ? "/warehouse/mobile/audits" : "/warehouse/audits"}/${encodeURIComponent(String(result.audit.id))}`,
+          warehouseAuditUrl(result.audit.auditNumber, result.audit.id, mobile),
         );
         return;
       }
@@ -2389,7 +2398,7 @@ function WarehouseAuditPanel({
     const url = new URL(`/warehouse/${mobile ? "mobile/" : ""}audits/${encodeURIComponent(String(resumedAudit.id))}`, window.location.origin).href;
     if (navigator.share) {
       try {
-        await navigator.share({ title: `Warehouse audit ${String(resumedAudit.auditNumber || "")}`, url });
+        await navigator.share({ title: `Warehouse audit ${canonicalWarehouseAuditReference(resumedAudit.auditNumber, resumedAudit.id)}`, url });
         return;
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") return;
@@ -2838,7 +2847,7 @@ function WarehouseAuditPanel({
           <>
             <div className="flex flex-col items-stretch gap-3 rounded-md border bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <p className="font-medium">{String(current.auditNumber)}</p>
+                <p className="font-medium">{canonicalWarehouseAuditReference(current.auditNumber, current.id)}</p>
                 <p className="text-xs text-muted-foreground">
                   {String(current.warehouseName)} · {numberLabel(lines.length)}{" "}
                   catalog SKUs counted · {numberLabel(unknowns.length)} unknown

@@ -3044,6 +3044,11 @@ async function readWarehouseAudits() {
   }));
 }
 
+function normalizedWarehouseAuditLookupNumbers(value) {
+  const match = String(value || "").trim().match(/^(?:(?:audit|a)[\s#_-]*)?(\d+)$/i);
+  return match ? [`a-${match[1]}`, `audit-${match[1]}`] : [];
+}
+
 async function listWarehouseAuditsPage(options = {}) {
   const client = getPool();
   if (!client) return { audits: [], total: 0, page: 1, pageSize: 25, totalPages: 1 };
@@ -3079,14 +3084,18 @@ async function listWarehouseAuditsPage(options = {}) {
   }
   if (search) {
     values.push(`%${search}%`);
+    const searchPatternIndex = values.length;
+    values.push(normalizedWarehouseAuditLookupNumbers(search));
+    const auditReferenceIndex = values.length;
     conditions.push(`(
-      lower(coalesce(a.audit_number, a.audit_payload->>'auditNumber', a.audit_id, '')) like $${values.length}
-      or lower(coalesce(a.audit_payload->>'linkedPurchaseOrderNumber', '')) like $${values.length}
-      or lower(coalesce(a.audit_payload->>'externalPurchaseOrderNumber', '')) like $${values.length}
-      or lower(coalesce(a.audit_payload->>'supplierName', '')) like $${values.length}
-      or lower(coalesce(a.audit_payload->>'warehouseName', '')) like $${values.length}
-      or lower(coalesce(a.audit_payload->>'createdBy', '')) like $${values.length}
-      or lower(coalesce(a.audit_payload->>'reviewer', '')) like $${values.length}
+      lower(coalesce(a.audit_number, a.audit_payload->>'auditNumber', a.audit_id, '')) like $${searchPatternIndex}
+      or lower(coalesce(a.audit_number, a.audit_payload->>'auditNumber', '')) = any($${auditReferenceIndex}::text[])
+      or lower(coalesce(a.audit_payload->>'linkedPurchaseOrderNumber', '')) like $${searchPatternIndex}
+      or lower(coalesce(a.audit_payload->>'externalPurchaseOrderNumber', '')) like $${searchPatternIndex}
+      or lower(coalesce(a.audit_payload->>'supplierName', '')) like $${searchPatternIndex}
+      or lower(coalesce(a.audit_payload->>'warehouseName', '')) like $${searchPatternIndex}
+      or lower(coalesce(a.audit_payload->>'createdBy', '')) like $${searchPatternIndex}
+      or lower(coalesce(a.audit_payload->>'reviewer', '')) like $${searchPatternIndex}
     )`);
   }
   const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
@@ -3143,13 +3152,16 @@ async function readWarehouseAudit(auditId = "") {
   const normalizedAuditId = String(auditId || "").trim();
   if (!client || !normalizedAuditId) return null;
   await initRelationalSchema();
+  const normalizedAuditNumbers = normalizedWarehouseAuditLookupNumbers(normalizedAuditId);
   const auditResult = await client.query(`
     select audit_id, audit_payload, created_at, updated_at
     from warehouse_audits
-    where audit_id = $1 or lower(coalesce(audit_number, '')) = lower($1)
-    order by (audit_id = $1) desc
+    where audit_id = $1
+      or lower(coalesce(audit_number, audit_payload->>'auditNumber', '')) = lower($1)
+      or lower(coalesce(audit_number, audit_payload->>'auditNumber', '')) = any($2::text[])
+    order by (audit_id = $1) desc, (lower(coalesce(audit_number, audit_payload->>'auditNumber', '')) = lower($1)) desc
     limit 1
-  `, [normalizedAuditId]);
+  `, [normalizedAuditId, normalizedAuditNumbers]);
   const row = auditResult.rows[0];
   if (!row) return null;
   const linesResult = await client.query(`
@@ -14736,7 +14748,7 @@ async function quickSearchProducts(query, options = {}) {
 async function quickSearchOperations(query, options = {}) {
   const client = getPool();
   const value = nullableString(query);
-  if (!client || !value) return { orders: [], purchaseOrders: [] };
+  if (!client || !value) return { orders: [], purchaseOrders: [], audits: [] };
   await initRelationalSchema();
 
   const limit = Math.max(1, Math.min(20, Number(options.limit || 10)));
@@ -14744,7 +14756,10 @@ async function quickSearchOperations(query, options = {}) {
   const compact = normalized.replace(/[^a-z0-9]+/g, "");
   const startsWith = `${normalized}%`;
   const compactStartsWith = compact ? `${compact}%` : "__no_purchase_order_match__%";
-  const [orders, purchaseOrders] = await Promise.all([
+  const auditCompact = compact.replace(/^audit/, "a");
+  const normalizedAuditCompact = /^\d+$/.test(auditCompact) ? `a${auditCompact}` : auditCompact;
+  const auditStartsWith = /^a\d+$/.test(normalizedAuditCompact) ? `${normalizedAuditCompact}%` : "__no_warehouse_audit_match__%";
+  const [orders, purchaseOrders, audits] = await Promise.all([
     client.query(`
       select o.order_id, o.order_number, o.internal_order_number, o.marketplace_order_id,
         o.buyer, o.status, o.source, o.channel_source,
@@ -14791,9 +14806,29 @@ async function quickSearchOperations(query, options = {}) {
       order by case when regexp_replace(lower(coalesce(po.po_number, '')), '[^a-z0-9]+', '', 'g') = $1 then 0 else 1 end,
         coalesce(po.created_at, po.updated_at) desc
       limit $3
-    `, [compact, compactStartsWith, limit])
+    `, [compact, compactStartsWith, limit]),
+    client.query(`
+      select a.audit_id, coalesce(a.audit_number, a.audit_payload->>'auditNumber', a.audit_id) as audit_number,
+        coalesce(a.status, a.audit_payload->>'status', '') as status,
+        coalesce(a.audit_payload->>'warehouseName', '') as warehouse_name,
+        coalesce(a.audit_payload->>'supplierName', '') as supplier_name,
+        coalesce(a.audit_payload->>'reasonLabel', '') as reason_label,
+        coalesce(a.updated_at, a.created_at) as activity_at,
+        'Warehouse audit' as match_label
+      from warehouse_audits a
+      where regexp_replace(
+        regexp_replace(lower(coalesce(a.audit_number, a.audit_payload->>'auditNumber', '')), '^audit', 'a'),
+        '[^a-z0-9]+', '', 'g'
+      ) like $1
+      order by case when regexp_replace(
+        regexp_replace(lower(coalesce(a.audit_number, a.audit_payload->>'auditNumber', '')), '^audit', 'a'),
+        '[^a-z0-9]+', '', 'g'
+      ) = $2 then 0 else 1 end,
+        coalesce(a.updated_at, a.created_at) desc
+      limit $3
+    `, [auditStartsWith, normalizedAuditCompact, limit])
   ]);
-  return { orders: orders.rows, purchaseOrders: purchaseOrders.rows };
+  return { orders: orders.rows, purchaseOrders: purchaseOrders.rows, audits: audits.rows };
 }
 
 function normalizedPurchaseOrderLookupNumber(value) {
@@ -22239,6 +22274,7 @@ module.exports = {
   searchUniversal,
   quickSearchProducts,
   quickSearchOperations,
+  normalizedWarehouseAuditLookupNumbers,
   readOrderByKey,
   readOrderFinancialSummary,
   readChannelOrderForReturn,

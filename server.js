@@ -32956,6 +32956,12 @@ function externalOperationalPoIdentifierKeys(value = "") {
   return [...new Set([exact, withoutLeadingZeros].filter(Boolean))];
 }
 
+function shortWarehouseAuditReference(value = "", fallbackId = "") {
+  const reference = String(value || "").trim();
+  const match = reference.match(/^(?:(?:audit|a)[\s#_-]*)?(\d+)$/i);
+  return match ? `A-${match[1]}` : String(fallbackId || reference).trim();
+}
+
 function warehouseAuditSupplierIdentity(value = "") {
   return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
@@ -57505,7 +57511,7 @@ async function handleApi(req, res) {
     const query = String(url.searchParams.get("q") || "").trim();
     const limit = Math.max(1, Math.min(20, Number(url.searchParams.get("limit") || 10) || 10));
     if (query.length < 2) return sendJson(res, 200, { results: [] });
-    let rows = { orders: [], purchaseOrders: [] };
+    let rows = { orders: [], purchaseOrders: [], audits: [] };
     if (postgres.isPostgresEnabled()) {
       rows = await postgres.quickSearchOperations(query, { limit });
     } else {
@@ -57520,6 +57526,11 @@ async function handleApi(req, res) {
         .some(startsWithLookup)).slice(0, limit);
       rows.purchaseOrders = (db.purchaseOrders || []).filter((po) => [po.poNumber, po.ctechId, po.externalPoNumber, po.supplierOrderNumber]
         .some(startsWithLookup)).slice(0, limit);
+      const auditNeedle = shortWarehouseAuditReference(query).toLowerCase();
+      rows.audits = (db.warehouseAudits || []).filter((audit) => {
+        const auditReference = shortWarehouseAuditReference(audit.auditNumber, audit.id).toLowerCase();
+        return auditReference.startsWith(auditNeedle) || [audit.auditNumber, audit.id].some(startsWithLookup);
+      }).slice(0, limit);
     }
     const results = [
       ...(rows.orders || []).map((order) => ({
@@ -57541,7 +57552,20 @@ async function handleApi(req, res) {
         subtitle: [po.supplier, po.ctech_id || po.ctechId || po.externalPoNumber ? `CTech ${po.ctech_id || po.ctechId || po.externalPoNumber}` : "", po.supplier_order_number || po.supplierOrderNumber ? `Supplier ${po.supplier_order_number || po.supplierOrderNumber}` : "", po.warehouse_name || po.warehouseName, po.status].filter(Boolean).join(" · "),
         matchLabel: String(po.match_label || "Purchase order"),
         href: `/purchase-orders/${encodeURIComponent(String(po.po_id || po.id || ""))}`
-      }))
+      })),
+      ...(rows.audits || []).map((audit) => {
+        const id = String(audit.audit_id || audit.id || "");
+        const title = shortWarehouseAuditReference(audit.audit_number || audit.auditNumber, id);
+        return {
+          type: "audit",
+          id,
+          title,
+          marketplaceNumber: "",
+          subtitle: [audit.reason_label || audit.reasonLabel, audit.warehouse_name || audit.warehouseName, audit.supplier_name || audit.supplierName, String(audit.status || "").replace(/_/g, " ")].filter(Boolean).join(" · "),
+          matchLabel: String(audit.match_label || "Warehouse audit"),
+          href: `/warehouse/audits/${encodeURIComponent(title || id)}`
+        };
+      })
     ].filter((result) => result.id).slice(0, limit * 2);
     return sendJson(res, 200, { results });
   }
