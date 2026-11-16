@@ -122,6 +122,8 @@ async function main() {
   assert.equal(tiktokAuthorizationEnvironmentForAppKey('shared-key', { productionAppKey: 'shared-key', developmentAppKey: 'shared-key' }), 'production');
   const tiktokChannelSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'tiktok-channel.tsx'), 'utf8');
   assert.equal(tiktokChannelSource.includes('onSave(channel.id, { settings:'), false, 'TikTok channel settings must use the flat PATCH /api/channels/:id contract.');
+  assert.equal(tiktokChannelSource.includes('Add another TikTok account'), true, 'TikTok settings must expose a clear multi-account authorization action.');
+  assert.equal(tiktokChannelSource.includes('Use account'), true, 'TikTok settings must expose explicit seller-account selection.');
   const exchanged = await exchangeAuthorizationCode({
     appKey: 'app-key', appSecret: 'app-secret', authCode: 'auth-code',
     fetchImpl: async url => {

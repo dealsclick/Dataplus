@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { BarChart3, Boxes, CheckCircle2, ExternalLink, Loader2, Play, Radio, RefreshCw, Save, ShieldCheck, Webhook } from "lucide-react"
+import { BarChart3, Boxes, CheckCircle2, ExternalLink, Loader2, Play, Plus, Radio, RefreshCw, Save, ShieldCheck, Webhook } from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -239,7 +239,6 @@ export function TikTokChannel({
   const appConfigured = status.appConfigured === true
   const verified = status.connection?.verified === true
   const accounts = Array.isArray(status.accounts) ? status.accounts : []
-  const activeAccount = accounts.find((account: Json) => account.id === status.activeAccountId)
   const dirty = Object.keys(edits).length > 0
   const keysSaved = Boolean(status.appKey) && status.appSecretConfigured === true
   const canSaveCredentials = status.encryptedStorageReady === true
@@ -272,6 +271,20 @@ export function TikTokChannel({
           <TabsContent value="connection" className="space-y-4">
             <div className="flex flex-wrap items-center gap-2"><Badge variant={verified ? "default" : "outline"}>{verified ? "Verified" : configured ? "Authorized - verify connection" : appConfigured ? "App saved - authorization needed" : keysSaved ? "Keys saved - Service ID needed" : "Not configured"}</Badge><span className="text-sm text-muted-foreground">{status.environment || "production"} · {status.shopName || "No shop selected"}</span></div>
             {!status.encryptedStorageReady && <Alert variant="destructive"><ShieldCheck className="size-4" /><AlertTitle>Credential encryption key required</AlertTitle><AlertDescription>Set <code>DATAPLUS_CREDENTIALS_ENCRYPTION_KEY</code> in the deployment secret store before saving credentials.</AlertDescription></Alert>}
+            <section className="rounded-md border" aria-labelledby="tiktok-seller-accounts-heading">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b px-3 py-3">
+                <div className="min-w-0">
+                  <p id="tiktok-seller-accounts-heading" className="text-sm font-medium">Seller accounts</p>
+                  <p className="text-xs text-muted-foreground">{accounts.length ? `${accounts.length} connected · choose which shop DataPlus should use.` : "No TikTok seller account is connected."}</p>
+                </div>
+                <Button disabled={busy || !canConnect} onClick={() => void connectSeller()}>
+                  {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                  {accounts.length ? "Add another TikTok account" : "Add TikTok account"}
+                </Button>
+              </div>
+              {!canConnect && <p className="px-3 py-3 text-xs text-muted-foreground">Save the app key, app secret, and Service ID below before adding a seller account.</p>}
+              {accounts.length > 0 && <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Shop</TableHead><TableHead>Region</TableHead><TableHead>Connection</TableHead><TableHead>Token</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader><TableBody>{accounts.map((account: Json) => <TableRow key={account.id}><TableCell><div className="flex items-center gap-2"><span className="font-medium">{account.label || account.shopName || account.id}</span>{account.active && <Badge variant="secondary">Selected</Badge>}</div><p className="max-w-80 truncate text-xs text-muted-foreground">{account.shopId || account.id}</p></TableCell><TableCell>{account.region || "US"}</TableCell><TableCell><Badge variant={account.verified ? "default" : account.shopSelected ? "outline" : "destructive"}>{account.verified ? "Verified" : account.shopSelected ? "Verify" : "Shop needed"}</Badge></TableCell><TableCell className="whitespace-nowrap text-xs text-muted-foreground">{account.accessTokenExpiresAt ? new Date(account.accessTokenExpiresAt).toLocaleDateString() : "Not available"}</TableCell><TableCell><div className="flex justify-end gap-2">{!account.active && <Button size="sm" variant="outline" disabled={busy} onClick={() => void run(async () => { const result = await request("accounts/select", { accountId: account.id }); await refresh(); await Promise.all([refreshLive(), refreshWorkspace()]); return result })}>Use account</Button>}<Button size="sm" variant="outline" disabled={busy || !canConnect} onClick={() => void connectSeller(String(account.id))}><RefreshCw className="size-4" /> Reconnect</Button></div></TableCell></TableRow>)}</TableBody></Table></div>}
+            </section>
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="grid gap-1.5 text-sm">Environment<Select value={String(rules.tiktokEnvironment || "production")} onValueChange={value => update("tiktokEnvironment", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="production">Production</SelectItem><SelectItem value="development">Development shop</SelectItem></SelectContent></Select></label>
               <label className="grid gap-1.5 text-sm">App key<Input autoComplete="off" value={credentials.appKey} onChange={event => setCredentials(current => ({ ...current, appKey: event.target.value }))} /></label>
@@ -281,14 +294,8 @@ export function TikTokChannel({
             </div>
             <div className="flex flex-wrap gap-2">
               <Button variant="outline" disabled={busy || !canSaveCredentials} onClick={() => void run(saveCredentials)}><Save className="size-4" /> Save app credentials</Button>
-              <Button disabled={busy || !canConnect} onClick={() => void connectSeller()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />} Add seller account</Button>
-              {activeAccount && <Button variant="outline" disabled={busy || !canConnect} onClick={() => void connectSeller(String(activeAccount.id))}><RefreshCw className="size-4" /> Reconnect selected</Button>}
               {configured && <Button variant="outline" disabled={busy || dirty} onClick={() => void run(verify)}><ShieldCheck className="size-4" /> Verify connection</Button>}
             </div>
-            {accounts.length > 0 && <div className="rounded-md border">
-              <div className="border-b px-3 py-2"><p className="text-sm font-medium">Seller accounts</p><p className="text-xs text-muted-foreground">Each shop keeps its own authorization, selected storefront, schedules, jobs, and sync checkpoints.</p></div>
-              <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Shop</TableHead><TableHead>Region</TableHead><TableHead>Connection</TableHead><TableHead>Token</TableHead></TableRow></TableHeader><TableBody>{accounts.map((account: Json) => <TableRow key={account.id} className={account.active ? "bg-muted/40" : "cursor-pointer"} onClick={() => { if (!account.active && !busy) void run(async () => { const result = await request("accounts/select", { accountId: account.id }); await refresh(); await Promise.all([refreshLive(), refreshWorkspace()]); return result }) }}><TableCell><div className="flex items-center gap-2"><span className="font-medium">{account.label || account.shopName || account.id}</span>{account.active && <Badge variant="secondary">Selected</Badge>}</div><p className="max-w-80 truncate text-xs text-muted-foreground">{account.shopId || account.id}</p></TableCell><TableCell>{account.region || "US"}</TableCell><TableCell><Badge variant={account.verified ? "default" : account.shopSelected ? "outline" : "destructive"}>{account.verified ? "Verified" : account.shopSelected ? "Verify" : "Shop needed"}</Badge></TableCell><TableCell className="whitespace-nowrap text-xs text-muted-foreground">{account.accessTokenExpiresAt ? new Date(account.accessTokenExpiresAt).toLocaleDateString() : "Not available"}</TableCell></TableRow>)}</TableBody></Table></div>
-            </div>}
             {Array.isArray(status.connection?.shops) && status.connection.shops.length > 1 && <label className="grid max-w-lg gap-1.5 text-sm">Authorized shop<Select value={status.shopCipher || ""} onValueChange={shopCipher => void run(async () => { const result = await request("shops/select", { accountId: status.activeAccountId || "", shopCipher }); await refresh(); return result })}><SelectTrigger><SelectValue placeholder="Choose a shop" /></SelectTrigger><SelectContent>{status.connection.shops.map((shop: Json) => <SelectItem key={shop.cipher} value={shop.cipher}>{shop.name || shop.code || shop.id}</SelectItem>)}</SelectContent></Select></label>}
             {status.accessTokenExpiresAt && <p className="text-xs text-muted-foreground">Access token expires {new Date(status.accessTokenExpiresAt).toLocaleString()}. DataPlus securely renews it with the generated refresh token.</p>}
             <a className="inline-flex items-center gap-1 text-sm underline" href="https://partner.tiktokshop.com/docv2/page/authorization-overview" target="_blank" rel="noreferrer">TikTok Shop authorization guide <ExternalLink className="size-3.5" /></a>
