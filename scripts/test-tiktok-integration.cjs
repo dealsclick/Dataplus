@@ -88,8 +88,12 @@ async function main() {
   assert.equal(isTikTokAuthorizationCallbackUrl('/?auth_code=auth-code&state=production.v2.payload.signature'), true);
   assert.equal(isTikTokAuthorizationCallbackUrl('/?error=access_denied&state=development.v2.payload.signature'), true);
   assert.equal(isTikTokAuthorizationCallbackUrl('/?auth_code=auth-code&state=production.legacy-state'), true);
+  assert.equal(isTikTokAuthorizationCallbackUrl('/?app_key=app-key&code=auth-code&locale=en&shop_region=US'), true);
+  assert.equal(isTikTokAuthorizationCallbackUrl('/?app_key=app-key&code=auth-code'), false);
   assert.equal(isTikTokAuthorizationCallbackUrl('/?code=auth-code&state=ebay-state'), false);
   assert.equal(isTikTokAuthorizationCallbackUrl('/auth/ebay/callback?code=auth-code&state=production.state'), false);
+  const tiktokChannelSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'tiktok-channel.tsx'), 'utf8');
+  assert.equal(tiktokChannelSource.includes('onSave(channel.id, { settings:'), false, 'TikTok channel settings must use the flat PATCH /api/channels/:id contract.');
   const exchanged = await exchangeAuthorizationCode({
     appKey: 'app-key', appSecret: 'app-secret', authCode: 'auth-code',
     fetchImpl: async url => {

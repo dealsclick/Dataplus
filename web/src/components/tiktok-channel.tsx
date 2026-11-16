@@ -168,7 +168,7 @@ export function TikTokChannel({
 
   const update = (key: string, value: unknown) => setEdits(current => ({ ...current, [key]: value }))
   const saveSettings = async () => {
-    await onSave(channel.id, { settings: edits })
+    await onSave(channel.id, edits)
     setEdits({})
     onRefresh?.()
     await refresh()
@@ -178,7 +178,7 @@ export function TikTokChannel({
   const saveCredentials = async () => {
     const environment = rules.tiktokEnvironment === "development" ? "development" : "production"
     const result = await request("credentials", { environment, ...credentials })
-    await onSave(channel.id, { settings: { tiktokEnvironment: environment } })
+    await onSave(channel.id, { tiktokEnvironment: environment })
     setEdits(current => {
       const next = { ...current }
       delete next.tiktokEnvironment
@@ -197,7 +197,7 @@ export function TikTokChannel({
     try {
       const environment = rules.tiktokEnvironment === "development" ? "development" : "production"
       await request("credentials", { environment, ...credentials })
-      await onSave(channel.id, { settings: { ...edits, channelEnabled: true, tiktokEnvironment: environment } })
+      await onSave(channel.id, { ...edits, channelEnabled: true, tiktokEnvironment: environment })
       setEdits({})
       onRefresh?.()
       const returnTo = `${window.location.pathname}${window.location.search}`
@@ -216,7 +216,7 @@ export function TikTokChannel({
 
   const verify = async () => {
     if (rules.channelEnabled !== true) {
-      await onSave(channel.id, { settings: { channelEnabled: true } })
+      await onSave(channel.id, { channelEnabled: true })
       setEdits(current => ({ ...current, channelEnabled: true }))
     }
     const result = await request("connection/verify", {})

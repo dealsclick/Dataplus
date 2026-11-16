@@ -80159,9 +80159,15 @@ async function handleTikTokCallback(req, res) {
   await hydrateAuthSessionsStore();
   const url = new URL(req.url, `http://${req.headers.host}`);
   const credentials = getTikTokCredentials();
+  const state = url.searchParams.get('state');
+  if (!state) {
+    const message = 'TikTok returned authorization without the DataPlus security state, so no tokens were saved. Set the TikTok Shop redirect URL to https://dataplusapp.duckdns.org/auth/tiktok/callback, then reconnect from DataPlus Channels.';
+    appendChannelApiLog({ channel: 'TikTok Shop', transport: 'OAuth', method: 'GET', path: '/auth/tiktok/callback', operation: 'TikTok seller authorization', statusCode: 400, ok: false, message: 'TikTok callback was missing DataPlus authorization state; no tokens were saved.' });
+    return sendHtml(res, 400, tiktokAuthorizationResultHtml({ success: false, message }));
+  }
   let authorization;
   try {
-    authorization = credentials.consumeAuthorization(url.searchParams.get('state'), {
+    authorization = credentials.consumeAuthorization(state, {
       sessionToken: oauthSessionToken(req, 'TikTok Shop')
     });
   } catch (error) {
