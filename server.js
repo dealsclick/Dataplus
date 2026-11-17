@@ -32907,29 +32907,41 @@ function externalOperationalPoDate(text, label) {
 function parseExternalOperationalPoText(text = "") {
   const source = String(text || "").replace(/\u00a0/g, " ");
   const lines = source.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const detailHeaderIndex = lines.findIndex((line) => /MFG\.\s*ACCT#.*\bTERMS\b.*\bEXPECTED DATE\b/i.test(line));
+  const detailLine = detailHeaderIndex >= 0 ? String(lines[detailHeaderIndex + 1] || "") : "";
+  const detailDates = detailLine.match(/\d{1,2}\/\d{1,2}\/\d{4}/g) || [];
+  const labeledAmount = (label) => {
+    const line = lines.find((candidate) => new RegExp(`^${label}\\b`, "i").test(candidate));
+    const amount = String(line || "").match(/(\(?\$?[\d,]+\.\d{2}\)?)\s*$/)?.[1] || "";
+    return externalSupplierPoNumber(amount);
+  };
   const poNumber = String(source.match(/PURCHASE\s+ORDER\s*\n\s*([^\s\t]+)\s*(?:\t|\s+)PO\s+No\./i)?.[1] || source.match(/\bPO\s*(?:No\.?|Number)\s*:?\s*([A-Z0-9-]+)/i)?.[1] || "").trim();
-  const expectedAt = externalOperationalPoDate(source, "EXPECTED DATE") || externalSupplierPoDate(source.match(/MFG\.\s*ACCT#\s*\n\s*(\d{1,2}\/\d{1,2}\/\d{4})/i)?.[1]);
+  const expectedAt = externalOperationalPoDate(source, "EXPECTED DATE") || externalSupplierPoDate(detailDates.at(-1)) || externalSupplierPoDate(source.match(/MFG\.\s*ACCT#\s*\n\s*(\d{1,2}\/\d{1,2}\/\d{4})/i)?.[1]);
   const orderedAt = externalOperationalPoDate(source, "Date") || externalSupplierPoDate(source.match(/ITEM\s*\n\s*(\d{1,2}\/\d{1,2}\/\d{4})/i)?.[1]);
-  const terms = String(source.match(/TERMS\s*\n\s*([^\n]+)/i)?.[1] || "").trim();
+  const terms = String(detailLine.match(/\b(?:NET\s*\d+|COD|PREPAID|DUE\s+ON\s+RECEIPT)\b/i)?.[0] || source.match(/TERMS\s*\n\s*([^\n]+)/i)?.[1] || "").trim();
   const shipVia = String(source.match(/SHIP VIA\s*\n\s*([^\n]+)/i)?.[1] || "").trim();
-  const manufacturerAccount = String(source.match(/ORDERED BY\s*\n\s*([^\n]+)/i)?.[1] || "").trim();
+  const manufacturerAccount = String(detailLine.match(/^([^\s]+)/)?.[1] || source.match(/ORDERED BY\s*\n\s*([^\n]+)/i)?.[1] || source.match(/MFG\.\s*ACCT#\s*\n\s*([^\s\n]+)/i)?.[1] || "").trim();
   const items = [];
   for (const line of lines) {
-    const match = line.match(/^(.+?)\s+([\d,]+\.\d{2})\s*\t\s*(\d+(?:\.\d+)?)\s+([A-Z0-9._/-]+)\s+([\d,]+\.\d{2})$/i);
-    if (!match) continue;
-    const qty = Number(match[3]);
-    const unitCost = externalSupplierPoNumber(match[5]);
-    const lineTotal = externalSupplierPoNumber(match[2]);
+    const currentTemplate = line.match(/^(\d+(?:\.\d+)?)\s+([A-Z0-9._/-]+)\s+(.+?)\s+(\$?[\d,]+\.\d{2})\s+(\$?[\d,]+\.\d{2})$/i);
+    const previousTemplate = currentTemplate ? null : line.match(/^(.+?)\s+([\d,]+\.\d{2})\s*\t\s*(\d+(?:\.\d+)?)\s+([A-Z0-9._/-]+)\s+([\d,]+\.\d{2})$/i);
+    if (!currentTemplate && !previousTemplate) continue;
+    const qty = Number(currentTemplate ? currentTemplate[1] : previousTemplate[3]);
+    const unitCost = externalSupplierPoNumber(currentTemplate ? currentTemplate[4] : previousTemplate[5]);
+    const lineTotal = externalSupplierPoNumber(currentTemplate ? currentTemplate[5] : previousTemplate[2]);
     if (!(qty > 0) || unitCost == null || lineTotal == null) continue;
     items.push({
-      description: match[1].trim(),
+      description: String(currentTemplate ? currentTemplate[3] : previousTemplate[1]).trim(),
       lineTotal,
       qty,
-      manufacturerPartNumber: match[4].trim(),
+      manufacturerPartNumber: String(currentTemplate ? currentTemplate[2] : previousTemplate[4]).trim(),
       unitCost
     });
   }
   const totals = lines.map((line) => externalSupplierPoNumber(line)).filter((value) => value != null);
+  const subtotal = labeledAmount("SUBTOTAL");
+  const shipping = labeledAmount("SHIPPING");
+  const total = labeledAmount("TOTAL");
   return {
     poNumber,
     orderedAt,
@@ -32937,9 +32949,9 @@ function parseExternalOperationalPoText(text = "") {
     terms,
     shipVia,
     manufacturerAccount,
-    subtotal: totals.length >= 3 ? totals[totals.length - 1] : items.reduce((sum, item) => sum + item.lineTotal, 0),
-    shipping: totals.length >= 3 ? totals[totals.length - 3] : 0,
-    total: totals.length >= 2 ? totals[totals.length - 2] : items.reduce((sum, item) => sum + item.lineTotal, 0),
+    subtotal: subtotal ?? (totals.length >= 3 ? totals[totals.length - 1] : items.reduce((sum, item) => sum + item.lineTotal, 0)),
+    shipping: shipping ?? (totals.length >= 3 ? totals[totals.length - 3] : 0),
+    total: total ?? (totals.length >= 2 ? totals[totals.length - 2] : items.reduce((sum, item) => sum + item.lineTotal, 0)),
     items
   };
 }
