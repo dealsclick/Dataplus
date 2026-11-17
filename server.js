@@ -6789,6 +6789,7 @@ function authAreaForPath(pathname = "") {
 function authRequirementForRequest(req, url, parts = []) {
   const pathname = url.pathname || "";
   const method = req.method || "GET";
+  if (method === "POST" && /^\/api\/inventory\/[^/]+\/clone$/.test(pathname)) return { area: "catalog.products", action: "create" };
   if (pathname === "/api/system/releases" || pathname.startsWith("/api/system/extensions")) return { area: "overview", action: "view" };
   if (pathname === "/api/fulfillment/diagnostics/client") return { area: "fulfillment", action: "view" };
   if (pathname === "/api/performance/client") return { area: "overview", action: "view" };
@@ -48882,6 +48883,129 @@ function applyInventoryPatch(item, body) {
   }
 }
 
+function copyCatalogCloneFields(target, source, fields = []) {
+  for (const field of fields) {
+    if (source[field] === undefined) continue;
+    const value = source[field];
+    target[field] = value && typeof value === "object"
+      ? JSON.parse(JSON.stringify(value))
+      : value;
+  }
+  return target;
+}
+
+function cloneCatalogProduct(source = {}, input = {}, actor = "DataPlus operator") {
+  const sourceSku = String(source.sku || source.id || "").trim();
+  const sku = String(input.newSku || input.sku || "").trim();
+  if (!sourceSku) throw new Error("The source product needs a SKU before it can be duplicated.");
+  if (!sku) throw new Error("Enter a new SKU for the duplicate product.");
+
+  const copyContent = input.copyContent !== false;
+  const copyMedia = input.copyMedia !== false;
+  const copyShipping = input.copyShipping !== false;
+  const copyIdentifiers = input.copyIdentifiers === true;
+  const now = new Date().toISOString();
+  const title = String(input.title || source.title || source.marketplaceTitle || sku).trim() || sku;
+  const clone = {
+    id: crypto.randomUUID(),
+    sku,
+    title,
+    marketplaceTitle: title,
+    brand: String(source.brand || ""),
+    manufacturer: String(source.manufacturer || ""),
+    condition: String(source.condition || "New"),
+    uom: String(source.uom || "EA"),
+    uomQty: Math.max(1, Number(source.uomQty || source.uom_qty || 1) || 1),
+    packageQuantity: String(source.packageQuantity || source.uomQty || source.uom_qty || 1),
+    active: false,
+    status: "Draft",
+    toBeDiscontinued: source.toBeDiscontinued === true,
+    qty: 0,
+    stockQty: 0,
+    reserved: 0,
+    available: 0,
+    reorderPoint: 0,
+    cost: 0,
+    sourceCost: 0,
+    sellUnitCost: 0,
+    price: 0,
+    websitePrice: 0,
+    fobPrice: 0,
+    listPrice: 0,
+    msrp: 0,
+    supplier: "",
+    vendor: "",
+    supplierCode: "",
+    vendorSku: "",
+    sourceSku: "",
+    externalId: "",
+    warehouseStock: [],
+    inventoryByLocation: {},
+    serialUnits: [],
+    allocations: [],
+    suppliers: [],
+    supplierOffers: [],
+    supplierMatches: [],
+    vendorOffers: [],
+    sourceCatalogMatches: [],
+    identifiers: [],
+    aliases: [],
+    shadowSkus: [],
+    systemVariants: [],
+    channelStatuses: {},
+    channelSellingStatus: {},
+    replenishable: false,
+    replenishableQty: 0,
+    catalogAttentionRequired: true,
+    catalogAttentionStatus: "open",
+    catalogAttentionReason: `Duplicated from ${sourceSku}. Review identity, supplier coverage, pricing, inventory, and channel settings before activation.`,
+    createdAt: now,
+    updatedAt: now,
+    createdBy: String(actor || "DataPlus operator"),
+    createdMethod: "Manual SKU duplication",
+    createdSource: "Catalog SKU clone",
+    createdSourceDetail: `Cloned from ${sourceSku}`,
+    source: "catalog-clone",
+    cloneSourceProductId: String(source.id || ""),
+    cloneSourceSku: sourceSku,
+    clonedAt: now,
+    clonedBy: String(actor || "DataPlus operator"),
+    cloneOptions: { copyContent, copyMedia, copyShipping, copyIdentifiers }
+  };
+
+  if (copyContent) {
+    copyCatalogCloneFields(clone, source, [
+      "marketplaceTitle", "category", "mainCategory", "sourceCategory", "vendorCategory",
+      "categoryVerified", "shortDescription", "longDescription", "bulletPoints", "tags",
+      "seoKeywords", "wildcardSearch", "unspsc", "keyFeaturesRaw", "features",
+      "attributes", "attributeValues", "specifications", "additionalAttributes",
+      "certifications", "warranty", "returnable", "countryOfOrigin", "showProp65",
+      "prop65Message"
+    ]);
+  }
+  if (copyMedia) {
+    copyCatalogCloneFields(clone, source, ["images", "defaultImage", "uploadedImage", "originalImage", "media"]);
+  }
+  if (copyShipping) {
+    copyCatalogCloneFields(clone, source, [
+      "itemHeight", "itemLength", "itemWeight", "itemWidth", "packageHeight", "packageLength",
+      "packageWeight", "packageWidth", "dimensionalWeight", "shippingClass", "shippingMethod",
+      "shippingClassOverride", "shippingOverrideReason", "shippingPackageOverride",
+      "packageDimensionsLocked", "shipAlone", "hazardous", "sdsUrl", "originalSdsUrl",
+      "restrictedStates", "shipMode", "groundEligible", "parcelEligible", "freightRequired"
+    ]);
+  }
+  if (copyIdentifiers) {
+    copyCatalogCloneFields(clone, source, ["barcode", "upc", "gtin", "mfrPartNumber"]);
+  } else {
+    clone.barcode = "";
+    clone.upc = "";
+    clone.gtin = "";
+    clone.mfrPartNumber = "";
+  }
+  return clone;
+}
+
 function ensureInventoryWarehouseStock(item, warehouse) {
   item.warehouseStock = Array.isArray(item.warehouseStock) ? item.warehouseStock : [];
   let row = item.warehouseStock.find((entry) => entry.warehouseId === warehouse.id);
@@ -57431,6 +57555,49 @@ async function handleApi(req, res) {
     const sourceMap = await sourceCatalogExportFallbackMap([item]);
     const pricedItem = mergeSourceCatalogExportFallback(item, sourceMap.get(String(item.sku || "").toLowerCase()));
     return sendJson(res, 200, { mode: item.channelPriceModes?.[channel.id] || "inherit", effective: resolvePricePolicy(item, db, channel), floors: sourcePriceFloors(pricedItem) });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "clone" && parts.length === 4 && postgres.isPostgresEnabled()) {
+    if (!userCan(authUser, "catalog.products", "create")) return sendJson(res, 403, { error: "Catalog product creation permission is required." });
+    const body = await parseBody(req);
+    const source = await postgres.readProductByKey(decodeURIComponent(parts[2]));
+    if (!source) return notFound(res);
+    const newSku = String(body.newSku || body.sku || "").trim();
+    if (!newSku) return sendJson(res, 400, { error: "Enter a new SKU for the duplicate product." });
+    if (newSku.length > 100 || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(newSku)) {
+      return sendJson(res, 400, { error: "Use 1-100 letters, numbers, periods, underscores, or hyphens for the new SKU." });
+    }
+    const title = String(body.title || source.title || source.marketplaceTitle || newSku).trim();
+    if (!title) return sendJson(res, 400, { error: "Enter a product title for the duplicate SKU." });
+    if (title.length > 500) return sendJson(res, 400, { error: "Product title must be 500 characters or fewer." });
+    const existing = await postgres.readProductByKey(newSku);
+    if (existing) return sendJson(res, 409, { error: `${newSku} already resolves to catalog SKU ${existing.sku || existing.id}. Choose a different SKU.` });
+
+    const actor = authUser?.name || authUser?.username || authUser?.id || "DataPlus operator";
+    const item = cloneCatalogProduct(source, {
+      newSku,
+      title,
+      copyContent: body.copyContent !== false,
+      copyMedia: body.copyMedia !== false,
+      copyShipping: body.copyShipping !== false,
+      copyIdentifiers: body.copyIdentifiers === true
+    }, actor);
+    const saved = await postgres.upsertProductsFromState([item], { insertOnly: true, includeOffers: false });
+    if (Number(saved.inserted || 0) !== 1) return sendJson(res, 409, { error: `${newSku} was created by another request. Refresh the catalog before trying again.` });
+    const persisted = await postgres.readProductByKey(newSku);
+    await redisCache.deleteByPrefix("dataplus:products:");
+    await redisCache.deleteByPrefix("dataplus:product-detail:");
+    void recordUserActivity(req, authUser, {
+      action: "duplicate catalog SKU",
+      path: url.pathname,
+      entityType: "product",
+      entityId: persisted?.id || item.id,
+      metadata: { sourceSku: source.sku || source.id, newSku }
+    });
+    return sendJson(res, 201, {
+      item: persisted || item,
+      message: `${newSku} was created as an inactive draft copied from ${source.sku || source.id}.`
+    });
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
@@ -82461,6 +82628,7 @@ module.exports = {
   recoverTemuFulfillmentBatch,
   recoverExistingTemuLabelsForOrders,
   ebayTradingErrorMessage,
+  cloneCatalogProduct,
   syncDropshipShipmentToChannel,
   syncPurchasedMarketplaceShipment,
   syncPurchasedShipmentGroupMembers,

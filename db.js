@@ -15317,7 +15317,7 @@ async function readExistingProductSkus(skus = []) {
 
 async function upsertProductsFromState(items = [], options = {}) {
   const pool = getPool();
-  if (!pool) return { enabled: false, products: 0, vendors: 0, identifiers: 0, offers: 0 };
+  if (!pool) return { enabled: false, products: 0, inserted: 0, vendors: 0, identifiers: 0, offers: 0 };
   await initRelationalSchema();
   const client = await pool.connect();
   const products = [];
@@ -15337,7 +15337,7 @@ async function upsertProductsFromState(items = [], options = {}) {
     aliases.push(...aliasRecordsFromState(item));
     shadowSkus.push(...shadowSkuRecordsFromState(item));
     const offer = offerRecordFromState(item);
-    if (offer) offers.push(offer);
+    if (offer && options.includeOffers !== false) offers.push(offer);
   }
 
   const batchSize = Math.max(100, Math.min(2000, Number(options.batchSize || 1000)));
@@ -15536,6 +15536,7 @@ async function upsertProductsFromState(items = [], options = {}) {
   return {
     enabled: true,
     products: products.length,
+    inserted: insertedIds.size,
     vendors: vendorMap.size,
     identifiers: identifiers.length,
     aliases: aliases.length,
