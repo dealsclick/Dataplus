@@ -66113,8 +66113,22 @@ async function handleApi(req, res) {
         for (const item of body.items) await stageCatalogUomChange(item);
       } else {
         const bySku = new Map((po.items || []).map((line) => [String(line.sku || "").toLowerCase(), line]));
-        for (const item of Array.isArray(body.items) ? body.items : []) {
-          const line = bySku.get(String(item.sku || "").toLowerCase());
+        const byLineIdentity = new Map();
+        for (const line of po.items || []) {
+          const lineId = String(line.id || "").trim();
+          const routeId = String(line.routeId || "").trim();
+          if (lineId) byLineIdentity.set(`id:${lineId}`, line);
+          if (routeId) byLineIdentity.set(`route:${routeId}`, line);
+        }
+        for (const [submittedIndex, item] of (Array.isArray(body.items) ? body.items : []).entries()) {
+          const requestedSku = String(item.sku || "").toLowerCase();
+          const itemId = String(item.id || "").trim();
+          const routeId = String(item.routeId || "").trim();
+          const positionalLine = (po.items || [])[submittedIndex];
+          const line = (itemId ? byLineIdentity.get(`id:${itemId}`) : null)
+            || (routeId ? byLineIdentity.get(`route:${routeId}`) : null)
+            || (positionalLine && String(positionalLine.sku || "").toLowerCase() === requestedSku ? positionalLine : null)
+            || bySku.get(requestedSku);
           const requestedQty = Number(item.qty || 0);
           if (!line || !Number.isFinite(requestedQty)) continue;
           const uomSelection = purchaseOrderUomSelection(line, line, item);
