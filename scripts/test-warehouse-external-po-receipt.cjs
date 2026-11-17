@@ -108,6 +108,7 @@ assert.match(db, /createdWithinDays[\s\S]*make_interval\(days => \$3::integer\)/
 assert.match(purchasingUi, /Receiving now[\s\S]*Receipt not posted yet/, 'the purchasing queue displays active warehouse receiving work');
 assert.match(purchasingUi, /Active: \$\{activeUsers\.join/, 'the purchasing queue identifies all users active on a PO');
 assert.match(purchaseOrderUi, /PO receiving in progress[\s\S]*activeReceivingAudit\.scannedUnits/, 'the PO detail displays live scan progress');
+assert.match(purchaseOrderUi, /const openReceiving = \(\) => \{ void startScannedReceiving\(\) \}/, 'PO receive actions open the same linked warehouse receiving audit');
 assert.match(purchaseOrderUi, /scanned, not (?:yet )?posted/, 'the PO detail distinguishes pending scanner progress from posted receipt quantities');
 assert.match(purchaseOrderUi, /Extra items received with this PO[\s\S]*Scanned, not posted[\s\S]*Received as extra/, 'the PO detail displays extra items before and after receipt posting');
 assert.match(purchaseOrderUi, /<TableHead[^>]*>Ordered<\/TableHead>[\s\S]*<TableHead[^>]*>Scanned<\/TableHead>[\s\S]*<TableHead[^>]*>Received<\/TableHead>/, 'desktop PO quantities use separate ordered, scanned, and received columns');
