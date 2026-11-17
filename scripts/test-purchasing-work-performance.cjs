@@ -60,7 +60,10 @@ assert.doesNotMatch(purchasing, /api<LiteState>\("\/api\/state\?lite=1"\)/, "pur
 assert.match(purchasing, /historyLoadingScope === "canceled"/, "large canceled history loads must show progress");
 assert.match(purchasing, /purchasingTabs = new Set\([^\n]+"rejected"/, "the rejected PO tab must remain reachable");
 assert.match(purchasing, /api\/purchasing\/purchase-order-search/, "the main purchasing search must query every PO queue");
-assert.match(purchasing, /All purchase-order results/, "global PO matches must be visible without switching tabs");
+assert.match(purchasing, /Find SKU on any PO/, "the global PO search must clearly support SKU lookup");
+assert.match(purchasing, /purchaseOrderMatchingLines\(po, query\)/, "global PO results must identify the matching SKU lines");
+assert.match(purchasing, /Ordered \{numberLabel\(ordered\)\}.*Received \{numberLabel\(received\)\}.*Open \{numberLabel\(open\)\}/, "SKU matches must show ordered, received, and open quantities");
+assert.match(purchasing, /CatalogImage src=\{purchaseOrderLineImage\(line\)\}/, "SKU search results must show product images");
 assert.match(purchaseOrderDetail, /sm:!max-w-\[96rem\]/, "the PO edit dialog must use the wide desktop layout");
 
 console.log("Purchasing workspace performance checks passed.");

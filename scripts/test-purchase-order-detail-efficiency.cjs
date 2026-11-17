@@ -51,6 +51,7 @@ assert.match(poEditor, /const itemIndex = index/, "existing PO rows must edit by
 assert.doesNotMatch(poEditor, /String\(candidate\.sku\) === sku/, "duplicate SKU rows must not update together");
 assert.match(poEditor, /Confirm Each ordering with the supplier/, "Each overrides need one clear supplier-confirmation warning");
 assert.match(poEditor, /Estimated merchandise/, "the PO editor should summarize the live merchandise total");
+assert.match(poEditor, /CatalogImage src=\{purchaseOrderLineImage\(item\)\}/, "every PO editor row must reserve a product image");
 
 const poDetailStart = purchasingWorkspaces.indexOf("function PurchaseOrderDetailPage");
 const poDetailPage = purchasingWorkspaces.slice(poDetailStart, poDetailStart + 50000);
