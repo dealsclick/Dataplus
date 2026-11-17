@@ -1827,12 +1827,12 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
       <TabsContent value="source" className="mt-4 grid gap-4">{section("Source catalog & audit", "Raw supplier fields and import history remain available for review.", <><ProductChangesTable rows={product.recentChanges || []} /><div className="mt-4 overflow-hidden rounded-md border"><Table><TableHeader><TableRow><TableHead>Source field</TableHead><TableHead>Value</TableHead></TableRow></TableHeader><TableBody>{sourceRows.map(([key, value]) => <TableRow key={key}><TableCell className="w-64 font-medium">{key}</TableCell><TableCell className="max-w-xl whitespace-pre-wrap break-words">{typeof value === "object" ? JSON.stringify(value) : String(value ?? "-")}</TableCell></TableRow>)}{!sourceRows.length && <TableRow><TableCell colSpan={2} className="py-8 text-center text-muted-foreground">No raw source fields are stored for this product.</TableCell></TableRow>}</TableBody></Table></div></>)}</TabsContent>
     </Tabs><ProductEditorDialog open={editorOpen} onOpenChange={setEditorOpen} initialTab={productTab === "content" ? "content" : productTab === "pricing" || productTab === "inventory" ? "pricing" : productTab === "shipping" ? "shipping" : productTab === "source" ? "audit" : "basics"} draft={draft} setDraft={setDraft} saving={saving} onSave={save} />
     <Dialog open={cloneOpen} onOpenChange={(open) => { if (!cloneSaving) setCloneOpen(open) }}>
-      <DialogContent className="max-h-[94dvh] overflow-y-auto sm:max-w-3xl">
-        <DialogHeader>
+      <DialogContent className="flex max-h-[94dvh] flex-col overflow-hidden p-0 sm:max-w-3xl">
+        <DialogHeader className="border-b px-5 py-4 sm:px-6">
           <DialogTitle>Duplicate SKU</DialogTitle>
           <DialogDescription>Create an independent catalog product from {product.sku || sku}. The duplicate starts inactive and must be reviewed before it can be sold.</DialogDescription>
         </DialogHeader>
-        <div className="grid gap-5">
+        <div className="grid min-h-0 flex-1 gap-5 overflow-y-auto px-5 py-5 sm:px-6">
           <div className="flex min-w-0 items-center gap-3 rounded-md border bg-muted/20 p-3">
             <div className="grid size-16 shrink-0 place-items-center overflow-hidden rounded-md border bg-background">{product.defaultImage || imageUrls[0] ? <img src={product.defaultImage || imageUrls[0]} alt="" className="size-full object-contain p-1" /> : <Boxes className="size-6 text-muted-foreground" />}</div>
             <div className="min-w-0"><p className="truncate text-sm font-medium">{product.title || product.marketplaceTitle || "Untitled product"}</p><p className="mt-1 font-mono text-xs text-muted-foreground">Source SKU: {product.sku || sku}</p></div>
@@ -1862,7 +1862,7 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
           </Alert>
           <div className="rounded-md border border-amber-500/35 bg-amber-500/10 p-3"><p className="text-sm font-medium text-amber-900 dark:text-amber-100">Always starts clean</p><p className="mt-1 text-xs leading-5 text-amber-800 dark:text-amber-200">Zero physical stock, zero reserved quantity, no cost or selling price, no supplier offers, no aliases or shadows, and no Shopify, eBay, Temu, TikTok, Walmart, or Whatnot listing IDs.</p></div>
         </div>
-        <DialogFooter><Button variant="outline" disabled={cloneSaving} onClick={() => setCloneOpen(false)}>Cancel</Button><Button disabled={cloneSaving || !cloneDraft.sku.trim() || !cloneDraft.title.trim()} onClick={() => void saveClone()}>{cloneSaving ? <Loader2 className="size-4 animate-spin" /> : <Copy className="size-4" />} Create duplicate</Button></DialogFooter>
+        <DialogFooter className="border-t bg-background px-5 py-4 sm:px-6"><Button variant="outline" disabled={cloneSaving} onClick={() => setCloneOpen(false)}>Cancel</Button><Button disabled={cloneSaving || !cloneDraft.sku.trim() || !cloneDraft.title.trim()} onClick={() => void saveClone()}>{cloneSaving ? <Loader2 className="size-4 animate-spin" /> : <Copy className="size-4" />} Create duplicate</Button></DialogFooter>
       </DialogContent>
     </Dialog>
     <Dialog open={Boolean(relationshipMode)} onOpenChange={(open) => { if (!open) setRelationshipMode(null) }}>
