@@ -28,6 +28,9 @@ assert.match(vendorWorkspaces, /Supplier provides inbound tracking/, "vendor pro
 assert.match(purchasingWorkspaces, /> Mark inbound</, "placed PO details must expose the inbound action");
 assert.match(purchasingWorkspaces, /<DropdownMenuLabel>Supplier and shipping<\/DropdownMenuLabel>/, "PO actions must be grouped for scanning");
 assert.match(purchasingWorkspaces, /<DropdownMenuLabel>Fulfillment<\/DropdownMenuLabel>/, "PO fulfillment actions must have their own group");
+assert.match(purchasingWorkspaces, /> Set inventory purpose<\/DropdownMenuItem>/, "PO actions must expose the inventory purpose directly");
+assert.match(purchasingWorkspaces, /Reusable across live sessions/, "the PO purpose dialog must explain that one PO can supply multiple live sessions");
+assert.match(purchasingWorkspaces, /value: "whatnot_live", label: "Whatnot"/, "PO live destinations must include Whatnot");
 assert.match(purchasingWorkspaces, /purchaseOrderCtechNumber\(po\)/, "a CTech PO number must count as supplier submission evidence in the UI");
 assert.match(server, /if \(po\.ctechId \|\| po\.ctech_id\) return true;/, "a CTech PO number must always count as supplier submission evidence on the server");
 assert.match(server, /The CTech reference confirms buyer approval and supplier submission\./, "saving a CTech PO number must audit its approval and submission meaning");

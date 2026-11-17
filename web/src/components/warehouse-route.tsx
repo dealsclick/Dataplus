@@ -1171,6 +1171,7 @@ const warehouseAuditReasonOptions = [
 const liveInventoryChannelOptions = [
   { value: "ebay_live", label: "eBay Live" },
   { value: "tiktok_live", label: "TikTok Live" },
+  { value: "whatnot_live", label: "Whatnot" },
 ] as const;
 
 const warehouseUomOptions = [

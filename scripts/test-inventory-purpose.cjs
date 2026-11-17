@@ -24,6 +24,7 @@ assert.equal(normalizeInventoryPurpose("orders"), "customer_orders");
 assert.equal(normalizeInventoryPurpose("live orders"), "live_selling");
 assert.equal(normalizeLiveInventoryChannel("TikTok Shop"), "tiktok_live");
 assert.equal(normalizeLiveInventoryChannel("eBay Live"), "ebay_live");
+assert.equal(normalizeLiveInventoryChannel("Whatnot"), "whatnot_live");
 
 {
   const progress = purchaseOrderReceivingProgressFromAudit({
@@ -97,11 +98,16 @@ assert.deepEqual(purchaseOrderPurposeForOrders([{ salesOrigin: "tiktok_live" }])
   assert.equal(po.items[0].liveChannel, "tiktok_live");
   assert.deepEqual(purchaseOrderPurposeForRecord(po), {
     inventoryPurpose: "live_selling",
-    inventoryPurposeLabel: "Live orders",
+    inventoryPurposeLabel: "Live sessions",
     liveChannel: "tiktok_live",
     liveChannelLabel: "TikTok Live"
   });
 }
+
+assert.deepEqual(purchaseOrderPurposeForOrders([{ salesOrigin: "whatnot_live" }]), {
+  inventoryPurpose: "live_selling",
+  liveChannel: "whatnot_live"
+});
 
 {
   const db = baseDb();

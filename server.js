@@ -13382,12 +13382,13 @@ function generatedReceiptSerial(po, vendor, receivedAt, sku, unitIndex = 1) {
 const INVENTORY_PURPOSE_LABELS = Object.freeze({
   stock: "In stock",
   customer_orders: "Customer orders",
-  live_selling: "Live orders"
+  live_selling: "Live sessions"
 });
 
 const LIVE_INVENTORY_CHANNEL_LABELS = Object.freeze({
   ebay_live: "eBay Live",
-  tiktok_live: "TikTok Live"
+  tiktok_live: "TikTok Live",
+  whatnot_live: "Whatnot"
 });
 
 function normalizeInventoryPurpose(value, fallback = "stock") {
@@ -13402,6 +13403,7 @@ function normalizeLiveInventoryChannel(value) {
   const key = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
   if (["ebay", "ebay_live"].includes(key)) return "ebay_live";
   if (["tiktok", "tiktok_shop", "tiktok_live"].includes(key)) return "tiktok_live";
+  if (["whatnot", "whatnot_live"].includes(key)) return "whatnot_live";
   return "";
 }
 
@@ -13409,6 +13411,7 @@ function liveInventoryChannelForOrder(order = {}) {
   const origin = String(order.salesOrigin || order.external?.salesOrigin || order.channelType || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
   if (order.isEbayLive === true || order.ebayLive?.isLive === true || order.external?.isEbayLive === true || origin === "ebay_live") return "ebay_live";
   if (order.isTikTokLive === true || order.tiktokLive?.isLive === true || order.external?.isTikTokLive === true || origin === "tiktok_live") return "tiktok_live";
+  if (order.isWhatnotLive === true || order.whatnotLive?.isLive === true || order.external?.isWhatnotLive === true || origin === "whatnot_live") return "whatnot_live";
   return "";
 }
 

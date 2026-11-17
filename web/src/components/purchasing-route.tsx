@@ -65,12 +65,13 @@ const PURCHASING_PAGE_SIZE = 25
 const purchaseOrderPurposeOptions = [
   { value: "stock", label: "In stock", description: "Replenishment kept available in the warehouse." },
   { value: "customer_orders", label: "Customer orders", description: "Inventory purchased for existing unfilled orders." },
-  { value: "live_selling", label: "Live orders", description: "Inventory reserved for live selling; assign its destination now or later." },
+  { value: "live_selling", label: "Live sessions", description: "Inventory intended for one or more live sessions; assign a channel now or later." },
 ]
 
 const liveInventoryChannelOptions = [
   { value: "ebay_live", label: "eBay Live" },
   { value: "tiktok_live", label: "TikTok Live" },
+  { value: "whatnot_live", label: "Whatnot" },
 ]
 
 function pooledSupplierKey(row: Record<string, unknown>) {

@@ -112,20 +112,22 @@ const quotePdfVersions = [
 const purchaseOrderPurposeOptions = [
   { value: "stock", label: "In stock" },
   { value: "customer_orders", label: "Customer orders" },
-  { value: "live_selling", label: "Live orders" },
+  { value: "live_selling", label: "Live sessions" },
 ]
 
 const liveInventoryChannelOptions = [
   { value: "ebay_live", label: "eBay Live" },
   { value: "tiktok_live", label: "TikTok Live" },
+  { value: "whatnot_live", label: "Whatnot" },
 ]
 
 function purchaseOrderPurposeLabel(po: Record<string, unknown>) {
   const liveChannel = String(po.liveChannel || "")
   if (liveChannel === "ebay_live") return "eBay Live"
   if (liveChannel === "tiktok_live") return "TikTok Live"
+  if (liveChannel === "whatnot_live") return "Whatnot"
   if (String(po.inventoryPurpose || "") === "customer_orders") return "Customer orders"
-  if (String(po.inventoryPurpose || "") === "live_selling") return "Live orders"
+  if (String(po.inventoryPurpose || "") === "live_selling") return "Live sessions"
   return "In stock"
 }
 
@@ -2099,6 +2101,8 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
   const [linkOrderPreview, setLinkOrderPreview] = useState<{ results?: Array<Record<string, unknown>>; missingReferences?: string[]; linkedOrderCount?: number; message?: string } | null>(null)
   const [linkOrderBusy, setLinkOrderBusy] = useState(false)
   const [editingOpen, setEditingOpen] = useState(false)
+  const [purposeOpen, setPurposeOpen] = useState(false)
+  const [purposeDraft, setPurposeDraft] = useState({ inventoryPurpose: "stock", liveChannel: "", amendmentReason: "" })
   const [financialOpen, setFinancialOpen] = useState(false)
   const [acknowledgementOpen, setAcknowledgementOpen] = useState(false)
   const [returnToDropshipsOpen, setReturnToDropshipsOpen] = useState(false)
@@ -2472,6 +2476,37 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
     })
     setEditingOpen(true)
   }
+  const openPurposeEditor = () => {
+    setPurposeDraft({
+      inventoryPurpose: String(po.inventoryPurpose || (Array.isArray(po.orderIds) && po.orderIds.length ? "customer_orders" : "stock")),
+      liveChannel: String(po.liveChannel || ""),
+      amendmentReason: ""
+    })
+    setPurposeOpen(true)
+  }
+  const savePurpose = async () => {
+    const inventoryPurpose = purposeDraft.inventoryPurpose || "stock"
+    const liveChannel = inventoryPurpose === "live_selling" ? purposeDraft.liveChannel : ""
+    const changed = inventoryPurpose !== String(po.inventoryPurpose || (Array.isArray(po.orderIds) && po.orderIds.length ? "customer_orders" : "stock"))
+      || liveChannel !== String(po.liveChannel || "")
+    if (!changed) return
+    if (purchaseOrderHasSubmission(po) && !purposeDraft.amendmentReason.trim()) {
+      toast.error("Enter a reason for changing the purpose of a PO already sent to the supplier.")
+      return
+    }
+    setSaving(true)
+    try {
+      const result = await api<{ purchaseOrder?: Record<string, unknown> }>(`/api/purchase-orders/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ inventoryPurpose, liveChannel, amendmentReason: purposeDraft.amendmentReason.trim(), user: operatorName })
+      })
+      if (result.purchaseOrder) setData((current) => ({ ...current, purchaseOrder: result.purchaseOrder }))
+      else await load()
+      toast.success(inventoryPurpose === "live_selling" ? "PO marked for live sessions." : "PO inventory purpose updated.")
+      setPurposeOpen(false)
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to update the PO inventory purpose.") }
+    finally { setSaving(false) }
+  }
   const addBlankEditLine = () => {
     setEditDraft((current) => ({
       ...current,
@@ -2746,6 +2781,28 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
       </AlertDialogContent>
     </AlertDialog>
   )
+  const currentPurpose = String(po.inventoryPurpose || (Array.isArray(po.orderIds) && po.orderIds.length ? "customer_orders" : "stock"))
+  const selectedPurposeChannel = purposeDraft.inventoryPurpose === "live_selling" ? purposeDraft.liveChannel : ""
+  const purposeChanged = purposeDraft.inventoryPurpose !== currentPurpose || selectedPurposeChannel !== String(po.liveChannel || "")
+  const purposeDialog = (
+    <Dialog open={purposeOpen} onOpenChange={(open) => { if (!saving) setPurposeOpen(open) }}>
+      <DialogContent className="w-[calc(100%-1rem)] max-w-2xl sm:w-full">
+        <DialogHeader>
+          <DialogTitle>Set inventory purpose</DialogTitle>
+          <DialogDescription>Tell purchasing and the warehouse why this inventory was ordered. The purpose remains attached to the PO lines and receiving history.</DialogDescription>
+        </DialogHeader>
+        <div className="grid gap-4">
+          <Field label="Inventory purpose"><Select value={purposeDraft.inventoryPurpose} onValueChange={(inventoryPurpose) => setPurposeDraft((current) => ({ ...current, inventoryPurpose, liveChannel: inventoryPurpose === "live_selling" ? current.liveChannel : "" }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{purchaseOrderPurposeOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></Field>
+          {purposeDraft.inventoryPurpose === "live_selling" ? <>
+            <Field label="Live destination (optional)"><Select value={purposeDraft.liveChannel || "unassigned"} onValueChange={(liveChannel) => setPurposeDraft((current) => ({ ...current, liveChannel: liveChannel === "unassigned" ? "" : liveChannel }))}><SelectTrigger><SelectValue placeholder="Assign later" /></SelectTrigger><SelectContent><SelectItem value="unassigned">Assign later</SelectItem>{liveInventoryChannelOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></Field>
+            <Alert className="border-pink-500/40 bg-pink-500/10"><PackageCheck className="size-4" /><AlertTitle>Reusable across live sessions</AlertTitle><AlertDescription>This marks the inventory for live selling without consuming it or locking the PO to one event. The same PO can supply multiple eBay Live, TikTok Live, or Whatnot sessions, and a channel can be assigned later.</AlertDescription></Alert>
+          </> : null}
+          {purchaseOrderHasSubmission(po) && purposeChanged ? <Field label="Reason for supplier amendment"><Textarea value={purposeDraft.amendmentReason} onChange={(event) => setPurposeDraft((current) => ({ ...current, amendmentReason: event.target.value }))} placeholder="Explain why the inventory purpose changed" /></Field> : null}
+        </div>
+        <DialogFooter><Button variant="outline" disabled={saving} onClick={() => setPurposeOpen(false)}>Cancel</Button><Button disabled={saving || !purposeChanged || (purchaseOrderHasSubmission(po) && !purposeDraft.amendmentReason.trim())} onClick={() => void savePurpose()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save purpose</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
   if (mobile && !loading) return <div className="grid gap-4">
     <h1 className="text-xl font-semibold">{String(po.poNumber || id)}</h1>
     <p>{String(po.supplier || "")} · {String(po.warehouseName || "")}</p>
@@ -2755,6 +2812,7 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
       {receivedByNotice}
       <p className="text-sm text-muted-foreground">{String(po.status || "").replaceAll("_", " ")} · {lines.reduce((total, line) => total + purchaseOrderLineRemaining(line), 0)} units remaining</p>
       <div className="flex flex-wrap gap-2">
+        <Button variant="outline" disabled={saving} onClick={openPurposeEditor}><PackageCheck className="size-4" /> Set purpose</Button>
         {canReopenPurchaseOrder ? <Button variant="outline" disabled={saving} onClick={() => { setStatusChangeNote(""); setStatusChangeAction("reopen") }}><RotateCcw className="size-4" /> Reopen PO</Button> : canClosePurchaseOrder ? <Button variant="outline" disabled={saving || activeReceivingInProgress} onClick={() => { setStatusChangeNote(""); setStatusChangeAction("close") }}><Archive className="size-4" /> {activeReceivingInProgress ? "Finish receiving before closing" : "Close PO"}</Button> : null}
         <Button disabled={saving || ["received", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(po.status).toLowerCase())} onClick={openReceiving}>Scan / receive items</Button>
         <Button variant="outline" disabled={["received", "closed", "completed", "canceled", "cancelled", "rejected", "superseded", "deleted"].includes(String(po.status || "").toLowerCase())} onClick={() => { setLinkOrderReferences(""); setLinkOrderPreview(null); setLinkOrdersOpen(true) }}><Link2 className="size-4" /> Link orders</Button>
@@ -2776,7 +2834,7 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
           {lineReceivers.length ? <p className="text-xs text-muted-foreground">Received by {lineReceivers.join(", ")}</p> : null}
         </CardContent></Card>
       })}
-      {receivingDialog}{receiptCorrectionDialog}{deletePoDialog}{linkOrdersDialog}{statusChangeDialog}
+      {receivingDialog}{receiptCorrectionDialog}{deletePoDialog}{linkOrdersDialog}{statusChangeDialog}{purposeDialog}
     </>}
   </div>
   if (loading) return <div className="grid gap-3"><Skeleton className="h-28" /><Skeleton className="h-64" /></div>
@@ -2858,6 +2916,7 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
     <PageHeader eyebrow="Purchasing / Purchase order" title={String(po.poNumber || id)} description={`${String(po.supplier || "Unassigned supplier")} to ${String(po.warehouseName || "unassigned destination")}`} action={<div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href="/purchasing">Back</a></Button><Button size="sm" variant="outline" disabled={refreshing} onClick={() => void load()}>{refreshing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} {refreshing ? "Refreshing" : "Refresh"}</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" disabled={saving}><SlidersHorizontal className="size-4" /> Actions <ChevronDown className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="max-h-[min(36rem,calc(100vh-2rem))] w-72 overflow-y-auto">
       <DropdownMenuLabel>Purchase order</DropdownMenuLabel>
       <DropdownMenuItem onClick={openEditor}><Pencil className="size-4" /> Edit PO</DropdownMenuItem>
+      <DropdownMenuItem onClick={openPurposeEditor}><PackageCheck className="size-4" /> Set inventory purpose</DropdownMenuItem>
       <DropdownMenuItem disabled={draftMissingFields.length > 0 || purchaseOrderHasSubmission(po) || String(((po.approval || {}) as Record<string, unknown>).status || "").toLowerCase() === "approved"} onClick={() => void updateStatus("approve")}><CheckCircle2 className="size-4" /> Approve PO</DropdownMenuItem>
       {supplierSubmissionEnabled ? <DropdownMenuItem disabled={draftMissingFields.length > 0 || purchaseOrderHasSubmission(po)} onClick={() => void submit()}><SendHorizontal className="size-4" /> Submit to supplier</DropdownMenuItem> : null}
       <DropdownMenuSeparator />
@@ -3063,7 +3122,7 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
     <Dialog open={inboundTrackingOpen} onOpenChange={setInboundTrackingOpen}><DialogContent><DialogHeader><DialogTitle>{po.trackingNumber ? "Edit inbound tracking" : "Add inbound tracking"}</DialogTitle><DialogDescription>Record the supplier shipment to the receiving warehouse. This moves the PO into Receiving without fulfilling a customer order or changing inventory until a warehouse receipt is completed.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Carrier"><Select value={inboundTracking.carrier} onValueChange={(carrier) => setInboundTracking((current) => ({ ...current, carrier, service: "" }))}><SelectTrigger><SelectValue placeholder="Carrier auto-detects" /></SelectTrigger><SelectContent>{purchaseOrderTrackingCarriers.filter((carrier) => carrier !== "Other").map((carrier) => <SelectItem key={carrier} value={carrier}>{carrier}</SelectItem>)}</SelectContent></Select></Field><Field label="Service"><Select value={inboundTracking.service} onValueChange={(service) => setInboundTracking((current) => ({ ...current, service }))}><SelectTrigger><SelectValue placeholder="Choose service" /></SelectTrigger><SelectContent>{inboundServiceOptions.map((service) => <SelectItem key={service} value={service}>{service}</SelectItem>)}</SelectContent></Select></Field><Field label="Tracking number"><Input autoFocus value={inboundTracking.trackingNumber} onChange={(event) => setInboundTracking((current) => detectedTrackingUpdate(current, event.target.value, fulfillmentCarriers))} />{detectTrackingCarrier(inboundTracking.trackingNumber) ? <p className="mt-1 text-xs text-emerald-600">Detected {detectTrackingCarrier(inboundTracking.trackingNumber)}</p> : null}</Field><Field label="Supplier ship date"><Input type="date" value={inboundTracking.shipDate} onChange={(event) => setInboundTracking((current) => ({ ...current, shipDate: event.target.value }))} /></Field><Field label="Expected arrival"><Input type="date" value={inboundTracking.expectedAt} onChange={(event) => setInboundTracking((current) => ({ ...current, expectedAt: event.target.value }))} /></Field></div><DialogFooter><Button variant="outline" onClick={() => setInboundTrackingOpen(false)}>Cancel</Button><Button disabled={saving || !inboundTracking.carrier || !inboundTracking.service || !inboundTracking.trackingNumber.trim()} onClick={() => void saveInboundTracking()}>{saving ? <Loader2 className="size-4 animate-spin" /> : null} Save inbound tracking</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={reminderOpen} onOpenChange={setReminderOpen}><DialogContent className="max-w-2xl"><DialogHeader><DialogTitle>Supplier overdue reminder</DialogTitle><DialogDescription>{Boolean(reminderPreview.overdue) ? "This PO is past its expected arrival date." : "You can send this reminder manually before the PO becomes overdue."}</DialogDescription></DialogHeader><div className="grid gap-3"><Field label="To"><Input readOnly value={String(reminderPreview.recipient || "No supplier email address")} /></Field><Field label="Subject"><Input readOnly value={String(reminderPreview.subject || "")} /></Field><Field label="Message"><Textarea readOnly className="min-h-40" value={String(reminderPreview.text || "")} /></Field>{Array.isArray(reminderPreview.missing) && reminderPreview.missing.length > 0 && <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{(reminderPreview.missing as string[]).join(" ")}</div>}</div><DialogFooter><Button variant="outline" onClick={() => setReminderOpen(false)}>Close</Button><Button disabled={saving || reminderPreview.ready !== true} onClick={() => void sendReminder()}>{saving ? <Loader2 className="size-4 animate-spin" /> : "Send reminder"}</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={documentOpen} onOpenChange={setDocumentOpen}><DialogContent><DialogHeader><DialogTitle>Link PO document</DialogTitle><DialogDescription>Add a supplier quote, acknowledgement, invoice, or other document URL to this purchase order.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="Document name"><Input value={documentDraft.name} onChange={(event) => setDocumentDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Supplier acknowledgement" /></Field><Field label="Document URL"><Input value={documentDraft.url} onChange={(event) => setDocumentDraft((current) => ({ ...current, url: event.target.value }))} placeholder="https://..." /></Field><Field label="Document type"><Input value={documentDraft.type} onChange={(event) => setDocumentDraft((current) => ({ ...current, type: event.target.value }))} /></Field><Field label="Note"><Textarea value={documentDraft.note} onChange={(event) => setDocumentDraft((current) => ({ ...current, note: event.target.value }))} placeholder="Optional internal note" /></Field></div><DialogFooter><Button variant="outline" onClick={() => setDocumentOpen(false)}>Cancel</Button><Button disabled={saving || !documentDraft.name || !documentDraft.url} onClick={() => void saveDocument()}>Link document</Button></DialogFooter></DialogContent></Dialog>
-    {receivingDialog}
+    {receivingDialog}{purposeDialog}
     <Dialog open={editingOpen} onOpenChange={(open) => { setEditingOpen(open); if (!open) setEditCatalogOpen(false) }}>
       <DialogContent className="flex h-[min(94dvh,58rem)] w-[calc(100vw-1rem)] max-w-none flex-col gap-0 overflow-hidden p-0 sm:w-[calc(100vw-2rem)] sm:!max-w-[96rem]">
         <DialogHeader className="shrink-0 border-b px-5 py-4 pr-12">
