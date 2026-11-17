@@ -13578,6 +13578,115 @@ function manualPurchaseOrderDraftIssues(po = {}, db = {}) {
   return [...new Set(issues)];
 }
 
+function positivePurchaseInteger(value, fallback = 0) {
+  const number = Math.floor(Number(value || 0));
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function purchaseOrderUomLabel(uom = "", uomQty = 1) {
+  const quantity = positivePurchaseInteger(uomQty, 1);
+  const code = String(uom || "").trim().toUpperCase();
+  if (quantity === 1) return code && !["EA", "EACH", "PC", "PCS"].includes(code) ? `${code} (1 pc)` : "Each (1 pc)";
+  if (["CS", "CASE", "CT", "CARTON"].includes(code)) return `Case of ${quantity}`;
+  return `Pack of ${quantity}`;
+}
+
+function purchaseOrderIncrement(...records) {
+  const values = records.flatMap((record) => {
+    if (!record || typeof record !== "object") return [];
+    const source = record.raw && typeof record.raw === "object" ? record.raw : {};
+    return [
+      record.purchaseMultiple,
+      record.purchase_multiple,
+      record.supplierPurchaseMultiple,
+      record.supplier_purchase_multiple,
+      record.minQuantity,
+      record.min_quantity,
+      record.quantityIncrements,
+      record.quantity_increments,
+      source.purchaseMultiple,
+      source.purchase_multiple,
+      source.supplierPurchaseMultiple,
+      source.supplier_purchase_multiple,
+      source.minQuantity,
+      source.min_quantity,
+      source.quantityIncrements,
+      source.quantity_increments
+    ];
+  }).map((value) => positivePurchaseInteger(value, 0)).filter(Boolean);
+  return values.length ? Math.max(...values) : 1;
+}
+
+function purchaseOrderUomSelection(product = {}, source = product, raw = {}) {
+  const override = product?.purchasingUomOverride && typeof product.purchasingUomOverride === "object"
+    ? product.purchasingUomOverride
+    : {};
+  const sourceRaw = source?.raw && typeof source.raw === "object" ? source.raw : {};
+  const sourceUom = String(raw?.supplierUom || override.sourceUom || source?.uom || sourceRaw.uom || product?.uom || raw?.uom || "EA").trim() || "EA";
+  const sourceUomQty = positivePurchaseInteger(raw?.supplierUomQty || override.sourceUomQty || source?.uomQty || source?.uom_qty || sourceRaw.uomQty || sourceRaw.uom_qty || product?.uomQty || product?.uom_qty || raw?.uomQty, 1);
+  const requestedMode = String(raw?.purchaseUomMode || (override.locked === true ? override.mode : "supplier") || "supplier").trim().toLowerCase();
+  const mode = requestedMode === "each" ? "each" : "supplier";
+  const uom = mode === "each" ? "EA" : sourceUom;
+  const uomQty = mode === "each" ? 1 : sourceUomQty;
+  const supplierPurchaseMultiple = purchaseOrderIncrement(source, product, raw);
+  const purchaseMultiple = mode === "each" ? 1 : supplierPurchaseMultiple;
+  return {
+    mode,
+    uom,
+    uomQty,
+    label: purchaseOrderUomLabel(uom, uomQty),
+    supplierUom: sourceUom,
+    supplierUomQty: sourceUomQty,
+    supplierUomLabel: purchaseOrderUomLabel(sourceUom, sourceUomQty),
+    supplierPurchaseMultiple,
+    purchaseMultiple
+  };
+}
+
+function applyProductPurchasingUomOverride(product = {}, action = "", actor = "DataPlus buyer") {
+  const normalizedAction = String(action || "").trim().toLowerCase();
+  if (!product || !["lock_each", "restore_supplier"].includes(normalizedAction)) return product;
+  const current = product.purchasingUomOverride && typeof product.purchasingUomOverride === "object"
+    ? product.purchasingUomOverride
+    : {};
+  const sourceUom = String(current.sourceUom || product.uom || "EA").trim() || "EA";
+  const sourceUomQty = positivePurchaseInteger(current.sourceUomQty || product.uomQty || product.uom_qty, 1);
+  const now = new Date().toISOString();
+  if (normalizedAction === "lock_each") {
+    product.purchasingUomOverride = {
+      ...current,
+      locked: true,
+      mode: "each",
+      uom: "EA",
+      uomQty: 1,
+      sourceUom,
+      sourceUomQty,
+      sourceUomLabel: purchaseOrderUomLabel(sourceUom, sourceUomQty),
+      updatedAt: now,
+      updatedBy: String(actor || "DataPlus buyer")
+    };
+    product.uom = "EA";
+    product.uomQty = 1;
+  } else {
+    product.purchasingUomOverride = {
+      ...current,
+      locked: false,
+      mode: "supplier",
+      uom: sourceUom,
+      uomQty: sourceUomQty,
+      sourceUom,
+      sourceUomQty,
+      sourceUomLabel: purchaseOrderUomLabel(sourceUom, sourceUomQty),
+      updatedAt: now,
+      updatedBy: String(actor || "DataPlus buyer")
+    };
+    product.uom = sourceUom;
+    product.uomQty = sourceUomQty;
+  }
+  product.updatedAt = now;
+  return product;
+}
+
 function normalizeManualPurchaseOrderItems(rawItems = [], options = {}) {
   const allowIncompleteDraft = options.allowIncompleteDraft === true;
   return (Array.isArray(rawItems) ? rawItems : []).map((raw, index) => {
@@ -13585,7 +13694,7 @@ function normalizeManualPurchaseOrderItems(rawItems = [], options = {}) {
     const source = String(raw?.source || (raw?.catalogProduct === true ? "catalog" : "manual_line"));
     const unresolvedCatalogLine = source === "external_po_pdf" && raw?.catalogProduct !== true;
     const requestedQty = Number(raw?.qty);
-    const purchaseMultiple = Math.max(1, Math.floor(Number(raw?.purchaseMultiple || 1)));
+    const purchaseMultiple = positivePurchaseInteger(raw?.purchaseMultiple, 1);
     const qty = Number.isFinite(requestedQty) && requestedQty > 0 && purchaseMultiple > 1
       ? Math.ceil(requestedQty / purchaseMultiple) * purchaseMultiple
       : requestedQty;
@@ -13605,6 +13714,13 @@ function normalizeManualPurchaseOrderItems(rawItems = [], options = {}) {
       manufacturer: String(raw?.manufacturer || "").trim(),
       qty: Number.isFinite(qty) ? qty : 0,
       purchaseMultiple,
+      supplierPurchaseMultiple: positivePurchaseInteger(raw?.supplierPurchaseMultiple || purchaseMultiple, purchaseMultiple),
+      purchaseUomMode: String(raw?.purchaseUomMode || "supplier") === "each" ? "each" : "supplier",
+      uom: String(raw?.uom || "EA").trim() || "EA",
+      uomQty: positivePurchaseInteger(raw?.uomQty, 1),
+      purchaseUomLabel: String(raw?.purchaseUomLabel || purchaseOrderUomLabel(raw?.uom, raw?.uomQty)).trim(),
+      supplierUom: String(raw?.supplierUom || raw?.uom || "EA").trim() || "EA",
+      supplierUomQty: positivePurchaseInteger(raw?.supplierUomQty || raw?.uomQty, 1),
       estimatedUnitCost: Number.isFinite(estimatedUnitCost) ? estimatedUnitCost : 0,
       receivedQty: Math.max(0, Number(raw?.receivedQty || 0)),
       remainingQty: Math.max(0, (Number.isFinite(qty) ? qty : 0) - Math.max(0, Number(raw?.receivedQty || 0))),
@@ -13640,21 +13756,20 @@ function purchaseOrderCatalogAddition(po = {}, product = {}, raw = {}) {
   }
 
   const source = supplierRecord || product;
-  const purchaseMultiple = Math.max(1, ...[
-    source?.purchaseMultiple,
-    source?.uomQty,
-    source?.uom_qty,
-    source?.minQuantity,
-    source?.min_quantity,
-    source?.quantityIncrements,
-    source?.quantity_increments,
-    product?.purchaseMultiple,
-    product?.uomQty,
-    raw?.purchaseMultiple
-  ].map((value) => Math.floor(Number(value || 0))).filter((value) => Number.isFinite(value) && value > 0));
+  const uomSelection = purchaseOrderUomSelection(product, source, raw);
+  const purchaseMultiple = uomSelection.purchaseMultiple;
   const requestedQty = Number(raw?.qty || purchaseMultiple);
   const qty = Math.ceil(Math.max(1, requestedQty) / purchaseMultiple) * purchaseMultiple;
-  const estimatedUnitCost = Number(source?.cost ?? source?.unitCost ?? product?.cost ?? raw?.estimatedUnitCost ?? 0);
+  const manualCostProvided = raw?.estimatedUnitCost !== undefined && raw?.estimatedUnitCost !== null && raw?.estimatedUnitCost !== ""
+    || raw?.unitCost !== undefined && raw?.unitCost !== null && raw?.unitCost !== ""
+    || raw?.cost !== undefined && raw?.cost !== null && raw?.cost !== "";
+  const manualCost = Number(raw?.estimatedUnitCost ?? raw?.unitCost ?? raw?.cost);
+  if (manualCostProvided && (!Number.isFinite(manualCost) || manualCost < 0)) {
+    throw new Error(`Enter a valid unit cost for ${sku}.`);
+  }
+  const estimatedUnitCost = manualCostProvided
+    ? manualCost
+    : Number(source?.cost ?? source?.unitCost ?? product?.cost ?? 0);
   const [line] = normalizeManualPurchaseOrderItems([{
     ...raw,
     id: crypto.randomUUID(),
@@ -13670,8 +13785,14 @@ function purchaseOrderCatalogAddition(po = {}, product = {}, raw = {}) {
     receivedQty: 0,
     source: "manual_po_addition",
     catalogProduct: true,
-    uom: String(source?.uom || product?.uom || raw?.uom || "").trim(),
-    uomQty: purchaseMultiple
+    purchaseUomMode: uomSelection.mode,
+    uom: uomSelection.uom,
+    uomQty: uomSelection.uomQty,
+    purchaseUomLabel: uomSelection.label,
+    supplierUom: uomSelection.supplierUom,
+    supplierUomQty: uomSelection.supplierUomQty,
+    supplierUomLabel: uomSelection.supplierUomLabel,
+    supplierPurchaseMultiple: uomSelection.supplierPurchaseMultiple
   }]);
   line.customerDemandQty = 0;
   line.purchaseSurplusQty = qty;
@@ -14767,7 +14888,8 @@ function supplierPurchaseMultiple(route = {}, orderLine = {}) {
     if (route.vendorSku && offer.vendorSku && String(offer.vendorSku).toLowerCase() !== String(route.vendorSku).toLowerCase()) return false;
     return true;
   }) || {};
-  return Math.max(1, productUomQty(route), productUomQty(selectedOffer), productUomQty(orderLine));
+  if ([route, selectedOffer, orderLine].some((record) => String(record?.purchaseUomMode || "").toLowerCase() === "each")) return 1;
+  return purchaseOrderIncrement(route, selectedOffer, orderLine);
 }
 
 function supplierPurchaseQuantity(demandQty, purchaseMultiple = 1) {
@@ -14953,6 +15075,10 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
       const customerDemandQty = Math.max(0, Number(route.qty || 0));
       const purchaseMultiple = supplierPurchaseMultiple(route, orderLine);
       const purchaseQty = supplierPurchaseQuantity(customerDemandQty, purchaseMultiple);
+      const uomSelection = purchaseOrderUomSelection(orderLine, route, {
+        purchaseUomMode: route.purchaseUomMode || orderLine.purchaseUomMode,
+        purchaseMultiple
+      });
       po.items.push({
         sku: route.sku,
         title: route.title,
@@ -14961,8 +15087,14 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
         customerDemandQty,
         purchaseMultiple,
         purchaseSurplusQty: Math.max(0, purchaseQty - customerDemandQty),
-        uom: String(route.uom || orderLine.uom || ""),
-        uomQty: purchaseMultiple,
+        purchaseUomMode: uomSelection.mode,
+        uom: uomSelection.uom,
+        uomQty: uomSelection.uomQty,
+        purchaseUomLabel: uomSelection.label,
+        supplierUom: uomSelection.supplierUom,
+        supplierUomQty: uomSelection.supplierUomQty,
+        supplierUomLabel: uomSelection.supplierUomLabel,
+        supplierPurchaseMultiple: uomSelection.supplierPurchaseMultiple,
         unitCost,
         estimatedUnitCost: unitCost,
         supplier: route.vendorName || po.supplier || "",
@@ -15694,7 +15826,14 @@ function recordPurchaseOrderAmendment(po, before, reason, user) {
       supplier: po.supplier || "",
       warehouseName: po.warehouseName || "",
       expectedAt: po.expectedAt || "",
-      items: (po.items || []).map((line) => ({ sku: line.sku, qty: Number(line.qty || 0), receivedQty: Number(line.receivedQty || 0) }))
+      items: (po.items || []).map((line) => ({
+        sku: line.sku,
+        qty: Number(line.qty || 0),
+        receivedQty: Number(line.receivedQty || 0),
+        unitCost: Number(line.unitCost ?? line.estimatedUnitCost ?? 0),
+        uom: String(line.uom || ""),
+        uomQty: positivePurchaseInteger(line.uomQty, 1)
+      }))
     },
     createdAt: new Date().toISOString(),
     createdBy: user || "Luis"
@@ -57563,6 +57702,10 @@ async function handleApi(req, res) {
       qty: Number(product.qty || 0),
       uom: String(product.uom || product.raw?.uom || ""),
       uomQty: Number(product.uom_qty ?? product.uomQty ?? product.raw?.uomQty ?? product.raw?.uom_qty ?? 1),
+      supplierUom: String(product.raw?.purchasingUomOverride?.sourceUom || product.uom || product.raw?.uom || ""),
+      supplierUomQty: Number(product.raw?.purchasingUomOverride?.sourceUomQty ?? product.uom_qty ?? product.uomQty ?? product.raw?.uomQty ?? product.raw?.uom_qty ?? 1),
+      purchasingUomLocked: product.raw?.purchasingUomOverride?.locked === true,
+      purchasingUomMode: String(product.raw?.purchasingUomOverride?.locked === true ? product.raw?.purchasingUomOverride?.mode || "each" : "supplier"),
       minQuantity: Number(product.min_quantity ?? product.minQuantity ?? product.raw?.minQuantity ?? product.raw?.min_quantity ?? 0),
       quantityIncrements: Number(product.quantity_increments ?? product.quantityIncrements ?? product.raw?.quantityIncrements ?? product.raw?.quantity_increments ?? 0),
       image: String(product.default_image || product.defaultImage || ""),
@@ -65869,9 +66012,19 @@ async function handleApi(req, res) {
       supplier: po.supplier || "",
       warehouseName: po.warehouseName || "",
       expectedAt: po.expectedAt || "",
-      items: (po.items || []).map((line) => ({ sku: line.sku, qty: Number(line.qty || 0), receivedQty: Number(line.receivedQty || 0) }))
+      items: (po.items || []).map((line) => ({
+        sku: line.sku,
+        qty: Number(line.qty || 0),
+        receivedQty: Number(line.receivedQty || 0),
+        unitCost: Number(line.unitCost ?? line.estimatedUnitCost ?? 0),
+        uom: String(line.uom || ""),
+        uomQty: positivePurchaseInteger(line.uomQty, 1)
+      }))
     };
     let amendmentNeeded = false;
+    const purchasingUomProducts = new Map();
+    const pendingLineCostChanges = [];
+    const pendingOrderCostUpdates = new Map();
     if (body.vendorId !== undefined) {
       if (editableManualDraft && !String(body.vendorId || "").trim()) {
         po.vendorId = "";
@@ -65945,24 +66098,64 @@ async function handleApi(req, res) {
       const terminal = ["received", "closed", "canceled", "rejected", "superseded", "deleted"].includes(String(po.status || "draft").toLowerCase());
       if (terminal) return sendJson(res, 400, { error: "Closed, canceled, and fully received POs cannot be edited." });
       let addedLineCount = 0;
+      const stageCatalogUomChange = async (item = {}) => {
+        const action = String(item?.catalogUomAction || "").trim().toLowerCase();
+        const sku = String(item?.sku || "").trim();
+        if (!sku || !["lock_each", "restore_supplier"].includes(action)) return;
+        const product = purchasingUomProducts.get(sku.toLowerCase()) || await postgres.readProductByKey(sku);
+        if (!product) throw new Error(`${sku} was not found in the catalog, so its purchasing UOM could not be saved.`);
+        applyProductPurchasingUomOverride(product, action, actor);
+        purchasingUomProducts.set(sku.toLowerCase(), product);
+      };
       if (body.replaceDraftItems === true) {
         if (!editableManualDraft) return sendJson(res, 409, { error: "PO lines can only be added or removed while a manual PO is an unsubmitted draft." });
         po.items = normalizeManualPurchaseOrderItems(body.items, { allowIncompleteDraft: true });
+        for (const item of body.items) await stageCatalogUomChange(item);
       } else {
         const bySku = new Map((po.items || []).map((line) => [String(line.sku || "").toLowerCase(), line]));
         for (const item of Array.isArray(body.items) ? body.items : []) {
           const line = bySku.get(String(item.sku || "").toLowerCase());
           const requestedQty = Number(item.qty || 0);
           if (!line || !Number.isFinite(requestedQty)) continue;
-          const purchaseMultiple = Math.max(1, Math.floor(Number(line.purchaseMultiple || 1)));
+          const uomSelection = purchaseOrderUomSelection(line, line, item);
+          const purchaseMultiple = uomSelection.purchaseMultiple;
           const qty = requestedQty > 0 && purchaseMultiple > 1
             ? Math.ceil(requestedQty / purchaseMultiple) * purchaseMultiple
             : requestedQty;
           if (qty < Number(line.receivedQty || 0)) continue;
-          amendmentNeeded = amendmentNeeded || committed && Number(line.qty || 0) !== qty;
+          const uomChanged = String(line.uom || "") !== uomSelection.uom
+            || positivePurchaseInteger(line.uomQty, 1) !== uomSelection.uomQty
+            || String(line.purchaseUomMode || "supplier") !== uomSelection.mode;
+          const hasRequestedUnitCost = item?.estimatedUnitCost !== undefined
+            || item?.unitCost !== undefined
+            || item?.cost !== undefined;
+          const requestedUnitCost = Number(item?.estimatedUnitCost ?? item?.unitCost ?? item?.cost);
+          if (hasRequestedUnitCost && (!Number.isFinite(requestedUnitCost) || requestedUnitCost < 0)) {
+            return sendJson(res, 400, { error: `Enter a valid unit cost for ${line.sku || "this PO line"}.` });
+          }
+          const currentUnitCost = Number(line.unitCost ?? line.estimatedUnitCost ?? line.cost ?? 0);
+          const costChanged = hasRequestedUnitCost && Math.abs(currentUnitCost - requestedUnitCost) > 0.000001;
+          amendmentNeeded = amendmentNeeded || committed && (Number(line.qty || 0) !== qty || uomChanged || costChanged);
+          if (costChanged) {
+            pendingLineCostChanges.push({
+              lineIndex: (po.items || []).indexOf(line),
+              orderId: String(line.orderId || "").trim(),
+              unitCost: requestedUnitCost
+            });
+          }
           line.qty = qty;
+          line.purchaseMultiple = purchaseMultiple;
+          line.supplierPurchaseMultiple = uomSelection.supplierPurchaseMultiple;
+          line.purchaseUomMode = uomSelection.mode;
+          line.uom = uomSelection.uom;
+          line.uomQty = uomSelection.uomQty;
+          line.purchaseUomLabel = uomSelection.label;
+          line.supplierUom = uomSelection.supplierUom;
+          line.supplierUomQty = uomSelection.supplierUomQty;
+          line.supplierUomLabel = uomSelection.supplierUomLabel;
           line.purchaseSurplusQty = Math.max(0, qty - Number(line.customerDemandQty || 0));
           line.remainingQty = Math.max(0, qty - Number(line.receivedQty || 0));
+          await stageCatalogUomChange(item);
         }
         for (const item of Array.isArray(body.addItems) ? body.addItems : []) {
           const requestedSku = String(item?.sku || "").trim();
@@ -65979,6 +66172,7 @@ async function handleApi(req, res) {
           if (bySku.has(String(addition.sku || "").toLowerCase())) return sendJson(res, 409, { error: `${addition.sku} is already on this purchase order. Update its quantity instead.` });
           po.items = [...(po.items || []), addition];
           bySku.set(String(addition.sku || "").toLowerCase(), addition);
+          await stageCatalogUomChange(item);
           addedLineCount += 1;
         }
         amendmentNeeded = amendmentNeeded || committed && addedLineCount > 0;
@@ -65988,15 +66182,38 @@ async function handleApi(req, res) {
       po.items = applyInventoryPurposeToPoLines(po.items, purchaseOrderPurposeForRecord(po));
       addPoTimeline(po, {
         type: "edited",
-        title: body.replaceDraftItems === true ? "Draft PO lines updated" : addedLineCount ? "PO line added" : "PO quantities updated",
-        message: body.replaceDraftItems === true ? "Buyer saved the current draft line items." : addedLineCount ? `Buyer added ${addedLineCount} catalog line${addedLineCount === 1 ? "" : "s"} and saved the unreceived PO quantities.` : "Buyer updated unreceived PO quantities.",
+        title: body.replaceDraftItems === true ? "Draft PO lines updated" : addedLineCount ? "PO line added" : "PO line details updated",
+        message: body.replaceDraftItems === true ? "Buyer saved the current draft line items." : addedLineCount ? `Buyer added ${addedLineCount} catalog line${addedLineCount === 1 ? "" : "s"} and saved the unreceived PO details.` : "Buyer updated unreceived PO line details.",
         user: actor
       });
     }
+    const amendmentReason = amendmentNeeded ? String(body.amendmentReason || "").trim() : "";
+    if (amendmentNeeded && !amendmentReason) {
+      return sendJson(res, 400, { error: "A reason is required when changing a PO already sent to a supplier." });
+    }
+    if (pendingLineCostChanges.length) {
+      const linkedOrderIds = [...new Set(pendingLineCostChanges.map((change) => change.orderId).filter(Boolean))];
+      const linkedOrders = linkedOrderIds.length ? await postgres.readOrdersByIds(linkedOrderIds) : [];
+      for (const change of pendingLineCostChanges) {
+        const result = updatePurchaseOrderLineCost(po, linkedOrders, null, {
+          lineIndex: change.lineIndex,
+          unitCost: change.unitCost,
+          scope: "po_order_only",
+          user: actor
+        });
+        for (const order of result.updatedOrders || []) pendingOrderCostUpdates.set(String(order.id), order);
+      }
+    }
     if (amendmentNeeded) {
-      const reason = String(body.amendmentReason || "").trim();
-      if (!reason) return sendJson(res, 400, { error: "A reason is required when changing a PO already sent to a supplier." });
-      recordPurchaseOrderAmendment(po, before, reason, actor);
+      recordPurchaseOrderAmendment(po, before, amendmentReason, actor);
+    }
+    if (purchasingUomProducts.size) {
+      const uomUpdate = await postgres.updateProductPurchasingUomOverrides([...purchasingUomProducts.values()]);
+      if (Number(uomUpdate.products || 0) !== purchasingUomProducts.size) {
+        return sendJson(res, 409, { error: "One or more catalog purchasing UOM changes could not be saved. Refresh the PO and try again." });
+      }
+      await redisCache.deleteByPrefix("dataplus:products:");
+      await redisCache.deleteByPrefix("dataplus:product-detail:");
     }
     if (String(po.source || "") === "manual_purchasing") {
       po.draftMissingFields = manualPurchaseOrderDraftIssues(po, db);
@@ -66004,6 +66221,10 @@ async function handleApi(req, res) {
     }
     po.updatedAt = new Date().toISOString();
     await postgres.savePurchaseOrder(po);
+    for (const order of pendingOrderCostUpdates.values()) {
+      await postgres.saveOrder(order);
+      clearOrderApiCache(order.id);
+    }
     const completedAt = Date.now();
     res.setHeader("Server-Timing", `po;dur=${poReadAt - saveStartedAt}, references;dur=${referencesReadAt - poReadAt}, write;dur=${completedAt - referencesReadAt}, total;dur=${completedAt - saveStartedAt}`);
     res.setHeader("X-DataPlus-PO-Save-Ms", String(completedAt - saveStartedAt));
@@ -82161,6 +82382,10 @@ module.exports = {
   applyPurchaseOrderReceiptHistoryCorrection,
   createManualPurchaseOrder,
   purchaseOrderCatalogAddition,
+  purchaseOrderUomSelection,
+  purchaseOrderUomLabel,
+  purchaseOrderIncrement,
+  applyProductPurchasingUomOverride,
   manualPurchaseOrderDraftIssues,
   validatePurchaseOrderReceiptLines,
   purchaseOrderReceivingProgressFromAudit,

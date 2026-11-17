@@ -266,6 +266,10 @@ export type QuickProductResult = {
   qty?: number
   uom?: string
   uomQty?: number
+  supplierUom?: string
+  supplierUomQty?: number
+  purchasingUomLocked?: boolean
+  purchasingUomMode?: "supplier" | "each"
   minQuantity?: number
   quantityIncrements?: number
   image?: string
@@ -988,6 +992,17 @@ export type ProductItem = CatalogItem & {
   uomName?: string
   uomQty?: string | number
   uomDisplay?: string
+  purchasingUomOverride?: {
+    locked?: boolean
+    mode?: "supplier" | "each"
+    uom?: string
+    uomQty?: number
+    sourceUom?: string
+    sourceUomQty?: number
+    sourceUomLabel?: string
+    updatedAt?: string
+    updatedBy?: string
+  }
   isMultiUnit?: boolean
   qty?: number
   reserved?: number

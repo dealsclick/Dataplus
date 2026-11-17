@@ -120,7 +120,7 @@ function baseDb() {
 
 {
   const db = baseDb();
-  const route = { ...purchaseRoute("route-moq", "BUS265368TRV"), uom: "EA", uomQty: 6, unitCost: 5.96 };
+  const route = { ...purchaseRoute("route-moq", "BUS265368TRV"), uom: "EA", uomQty: 1, quantityIncrements: 6, unitCost: 5.96 };
   const order = orderFixture("order-moq", "89431", route.sku, { routes: [route] });
   db.orders = [order];
   const result = createSupplierPurchaseOrdersFromOrders(db, [order.id], { user: "Test buyer" });
@@ -130,6 +130,19 @@ function baseDb() {
   assert.equal(line.purchaseMultiple, 6);
   assert.equal(line.purchaseSurplusQty, 5);
   assert.equal(line.purchaseDemandLinks[0].qty, 1, "the PO should retain the original customer demand separately from the supplier quantity");
+}
+
+{
+  const db = baseDb();
+  const route = { ...purchaseRoute("route-pack", "BUS202637TRV"), uom: "PK", uomQty: 3, unitCost: 34.86 };
+  const order = orderFixture("order-pack", "89954", route.sku, { routes: [route] });
+  db.orders = [order];
+  const result = createSupplierPurchaseOrdersFromOrders(db, [order.id], { user: "Test buyer" });
+  const line = result.purchaseOrders[0].items[0];
+  assert.equal(line.qty, 1, "a three-piece UOM should create one PO unit, not three PO units");
+  assert.equal(line.uomQty, 3);
+  assert.equal(line.purchaseMultiple, 1);
+  assert.equal(line.purchaseUomLabel, "Pack of 3");
 }
 
 console.log("Purchase-order demand linking checks passed.");

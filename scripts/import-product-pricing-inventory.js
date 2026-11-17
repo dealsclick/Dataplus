@@ -100,6 +100,7 @@ function buildRecord(rawRecord) {
   const listPrice = isClearance ? numberValue(record.list_price ?? record.msrp) : null;
   const stockQty = numberValue(record.stock_qty ?? record.stockQty ?? record.qty ?? record.quantity);
   const minQuantity = numberValue(record.min_quantity ?? record.minQuantity ?? record.minimum_quantity);
+  const quantityIncrements = numberValue(record.quantity_increments ?? record.quantityIncrements);
   const toBeDiscontinued = boolOrNull(record.to_be_discontinued ?? record.toBeDiscontinued ?? record.discontinued ?? record.is_discontinued) === true;
   const vendorWebsitePrice = numberValue(record.vendor_website_price ?? record.vendorWebsitePrice);
   const price = vendorWebsitePrice > 0 ? vendorWebsitePrice : pricedFromCost(sourceCost);
@@ -144,7 +145,10 @@ function buildRecord(rawRecord) {
       stockQty,
       stockStatus: textValue(record.stock_status || record.stockStatus),
       stockUpdatedAt: textValue(record.stock_updated_at || record.stockUpdatedAt),
+      uom: textValue(record.uom),
+      uomQty: numberValue(record.uom_qty ?? record.uomQty),
       minQuantity,
+      quantityIncrements,
       default_price: record.default_price,
       default_supplier_price: record.default_supplier_price,
       default_supplier_sku: record.default_supplier_sku,
@@ -346,7 +350,9 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+if (require.main === module) main().catch((error) => {
   console.error(error);
   process.exit(1);
 });
+
+module.exports = { buildRecord };

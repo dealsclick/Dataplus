@@ -6323,6 +6323,10 @@ function leanVendorCatalogRaw(item = {}) {
     supplier: nullableString(item.supplier || item.vendor || item.defaultSupplier),
     supplierCode: nullableString(item.supplierCode),
     vendorSku: nullableString(item.vendorSku),
+    uom: nullableString(item.uom),
+    uomQty: nullableNumber(item.uomQty ?? item.uom_qty),
+    minQuantity: nullableNumber(item.minQuantity ?? item.min_quantity),
+    quantityIncrements: nullableNumber(item.quantityIncrements ?? item.quantity_increments),
     productDumpUpdatedAt: nullableString(item.productDumpUpdatedAt),
     itemKey: nullableString(item.itemKey),
     uploadedBy: nullableString(item.uploadedBy)
@@ -7151,6 +7155,8 @@ function vendorCatalogRowToState(row = {}) {
     stockStatus: row.stock_status ?? row.raw?.stockStatus,
     uom: row.uom ?? row.raw?.uom,
     uomQty: row.uom_qty ?? row.raw?.uomQty ?? row.raw?.uom_qty,
+    minQuantity: row.raw?.minQuantity ?? row.raw?.min_quantity,
+    quantityIncrements: row.raw?.quantityIncrements ?? row.raw?.quantity_increments,
     toBeDiscontinued: row.to_be_discontinued ?? row.raw?.toBeDiscontinued,
     closeoutEligible: row.to_be_discontinued ?? row.raw?.closeoutEligible,
     supplierCount: Number(row.supplier_count ?? row.raw?.supplierCount ?? 0),
@@ -15384,8 +15390,16 @@ async function upsertProductsFromState(items = [], options = {}) {
           supplier_code = excluded.supplier_code,
           active = excluded.active,
           to_be_discontinued = excluded.to_be_discontinued,
-          uom = excluded.uom,
-          uom_qty = excluded.uom_qty,
+          uom = case
+            when ${options.allowPurchasingUomOverrideUpdate ? "false" : "coalesce(products.raw->'purchasingUomOverride'->>'locked', 'false') = 'true'"}
+              then products.uom
+            else excluded.uom
+          end,
+          uom_qty = case
+            when ${options.allowPurchasingUomOverrideUpdate ? "false" : "coalesce(products.raw->'purchasingUomOverride'->>'locked', 'false') = 'true'"}
+              then products.uom_qty
+            else excluded.uom_qty
+          end,
           cost = excluded.cost,
           price = excluded.price,
           qty = excluded.qty,
@@ -15527,6 +15541,61 @@ async function upsertProductsFromState(items = [], options = {}) {
     aliases: aliases.length,
     offers: offers.length
   };
+}
+
+async function updateProductPurchasingUomOverrides(items = []) {
+  const pool = getPool();
+  if (!pool) return { enabled: false, products: 0 };
+  const records = (Array.isArray(items) ? items : []).map((item) => ({
+    product_key: nullableString(item.id || item.productId || item.product_id || item.sku),
+    uom: nullableString(item.uom) || "EA",
+    uom_qty: Math.max(1, Math.floor(Number(item.uomQty ?? item.uom_qty ?? 1) || 1)),
+    purchasing_uom_override: item.purchasingUomOverride && typeof item.purchasingUomOverride === "object"
+      ? item.purchasingUomOverride
+      : {}
+  })).filter((item) => item.product_key);
+  if (!records.length) return { enabled: true, products: 0 };
+  await initRelationalSchema();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    const result = await client.query(`
+      with incoming as (
+        select *
+        from jsonb_to_recordset($1::jsonb) as x(
+          product_key text,
+          uom text,
+          uom_qty numeric,
+          purchasing_uom_override jsonb
+        )
+      )
+      update products product
+      set
+        uom = incoming.uom,
+        uom_qty = incoming.uom_qty,
+        raw = jsonb_set(
+          jsonb_set(
+            jsonb_set(coalesce(product.raw, '{}'::jsonb), '{uom}', to_jsonb(incoming.uom), true),
+            '{uomQty}', to_jsonb(incoming.uom_qty), true
+          ),
+          '{purchasingUomOverride}', incoming.purchasing_uom_override, true
+        ),
+        updated_at = now()
+      from incoming
+      where product.product_id = incoming.product_key
+    `, [JSON.stringify(records)]);
+    if (Number(result.rowCount || 0) !== records.length) {
+      await client.query("rollback");
+      return { enabled: true, products: Number(result.rowCount || 0), complete: false };
+    }
+    await client.query("commit");
+    return { enabled: true, products: Number(result.rowCount || 0), complete: true };
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function nextReturnNumberAtomic() {
@@ -17244,6 +17313,8 @@ async function readProductByKey(key) {
       stockStatus: row.stock_status,
       uom: row.uom,
       uomQty: row.uom_qty,
+      minQuantity: row.raw?.minQuantity ?? row.raw?.min_quantity,
+      quantityIncrements: row.raw?.quantityIncrements ?? row.raw?.quantity_increments,
       toBeDiscontinued: row.to_be_discontinued,
       defaultImage: row.default_image,
       ...commercial,
@@ -22398,6 +22469,7 @@ module.exports = {
   upsertInventoryLevelsFromProducts,
   upsertProductAliasesFromState,
   upsertProductsFromState,
+  updateProductPurchasingUomOverrides,
   updateProductChannelSellingStatus,
   upsertShopifyStatusMap,
   replaceProductQualityRows,

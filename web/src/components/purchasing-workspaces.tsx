@@ -1958,10 +1958,66 @@ function compactPurchaseItemTitle(value: unknown, maxLength = 50) {
 }
 
 function quickProductPurchaseMultiple(product: QuickProductResult) {
-  const values = [product.uomQty, product.minQuantity, product.quantityIncrements]
+  const values = [product.minQuantity, product.quantityIncrements]
     .map((value) => Math.floor(Number(value || 0)))
     .filter((value) => Number.isFinite(value) && value > 1)
   return values.length ? Math.max(...values) : 1
+}
+
+function purchaseUomLabel(uom: unknown, uomQty: unknown) {
+  const quantity = Math.max(1, Math.floor(Number(uomQty || 1)))
+  const code = String(uom || "").trim().toUpperCase()
+  if (quantity === 1) return code && !["EA", "EACH", "PC", "PCS"].includes(code) ? `${code} (1 pc)` : "Each (1 pc)"
+  if (["CS", "CASE", "CT", "CARTON"].includes(code)) return `Case of ${quantity}`
+  return `Pack of ${quantity}`
+}
+
+function purchaseLineSupplierUom(line: Record<string, unknown>) {
+  const supplierUom = String(line.supplierUom || line.uom || "EA").trim() || "EA"
+  const supplierUomQty = Math.max(1, Math.floor(Number(line.supplierUomQty || line.uomQty || 1)))
+  return { supplierUom, supplierUomQty, label: purchaseUomLabel(supplierUom, supplierUomQty) }
+}
+
+function purchaseLineUomMode(line: Record<string, unknown>) {
+  if (String(line.purchaseUomMode || "").toLowerCase() === "each" || line.purchasingUomLocked === true) return "each"
+  return "supplier"
+}
+
+function purchaseLinePurchaseMultiple(line: Record<string, unknown>) {
+  if (purchaseLineUomMode(line) === "each") return 1
+  const savedMultiple = Math.max(1, Math.floor(Number(line.purchaseMultiple || 1)))
+  const explicitValues = [line.supplierPurchaseMultiple, line.minQuantity, line.quantityIncrements]
+    .map((value) => Math.floor(Number(value || 0)))
+    .filter((value) => Number.isFinite(value) && value > 1)
+  if (savedMultiple > 1) explicitValues.push(savedMultiple)
+  return explicitValues.length ? Math.max(...explicitValues) : 1
+}
+
+function withPurchaseLineUom(line: Record<string, unknown>, mode: "supplier" | "each", persistCatalogChoice = true) {
+  const source = purchaseLineSupplierUom(line)
+  const supplierPurchaseMultiple = purchaseLinePurchaseMultiple({ ...line, purchaseUomMode: "supplier" })
+  const purchaseMultiple = mode === "each" ? 1 : supplierPurchaseMultiple
+  const uom = mode === "each" ? "EA" : source.supplierUom
+  const uomQty = mode === "each" ? 1 : source.supplierUomQty
+  const receivedQty = Math.max(0, Number(line.receivedQty || 0))
+  const currentQty = Math.max(0, Number(line.qty || 0))
+  const qty = mode === "each"
+    ? Math.max(receivedQty, 1)
+    : Math.max(receivedQty, purchaseMultiple > 1 ? Math.ceil(Math.max(1, currentQty) / purchaseMultiple) * purchaseMultiple : Math.max(1, currentQty))
+  return {
+    ...line,
+    purchaseUomMode: mode,
+    uom,
+    uomQty,
+    purchaseUomLabel: purchaseUomLabel(uom, uomQty),
+    supplierUom: source.supplierUom,
+    supplierUomQty: source.supplierUomQty,
+    supplierUomLabel: source.label,
+    supplierPurchaseMultiple,
+    purchaseMultiple,
+    qty,
+    ...(persistCatalogChoice ? { catalogUomAction: mode === "each" ? "lock_each" : "restore_supplier" } : {})
+  }
 }
 
 export function purchaseOrderSalesChannel(po: Record<string, unknown>) {
@@ -2393,13 +2449,25 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
       return
     }
     const purchaseMultiple = quickProductPurchaseMultiple(product)
+    const purchasingUomMode = product.purchasingUomLocked ? "each" : "supplier"
+    const purchaseLine = withPurchaseLineUom({
+      uom: product.uom || "EA",
+      uomQty: Number(product.uomQty || 1),
+      supplierUom: product.supplierUom || product.uom || "EA",
+      supplierUomQty: Number(product.supplierUomQty || product.uomQty || 1),
+      minQuantity: product.minQuantity,
+      quantityIncrements: product.quantityIncrements,
+      purchaseMultiple,
+      purchasingUomLocked: product.purchasingUomLocked === true,
+      qty: purchaseMultiple
+    }, purchasingUomMode, false)
     setEditDraft((current) => ({
       ...current,
       items: [...(Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []), {
         id: crypto.randomUUID(),
         sku: product.sku,
         title: product.title,
-        qty: purchaseMultiple,
+        ...purchaseLine,
         estimatedUnitCost: Number(product.cost || 0),
         source: "catalog",
         catalogProduct: true,
@@ -2409,15 +2477,23 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
         brand: product.brand || "",
         manufacturer: product.manufacturer || "",
         mfrPartNumber: product.mfrPartNumber || "",
-        uom: product.uom || "",
-        uomQty: purchaseMultiple,
-        purchaseMultiple
+        minQuantity: product.minQuantity,
+        quantityIncrements: product.quantityIncrements
       }]
     }))
     setEditCatalogOpen(false)
     setEditCatalogQuery("")
     setEditCatalogResults([])
     toast.success(`${product.sku} added to the PO changes.`)
+  }
+  const updateEditLineUom = (itemIndex: number, mode: "supplier" | "each") => {
+    setEditDraft((current) => ({
+      ...current,
+      items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, index) => index === itemIndex ? withPurchaseLineUom(candidate, mode) : candidate)
+    }))
+    if (mode === "each") {
+      toast.warning("Double-check Each ordering with the supplier before saving this PO.", { duration: 8000 })
+    }
   }
   const saveEdit = async () => {
     setSaving(true)
@@ -2845,7 +2921,8 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
                   ].filter((entry) => String(entry[1] || "").trim())
                   const linkedDemandQty = Array.isArray(line.purchaseDemandLinks) ? (line.purchaseDemandLinks as Array<Record<string, unknown>>).reduce((total, link) => total + Number(link.qty || 0), 0) : 0
                   const customerDemandQty = Number(line.customerDemandQty ?? (linkedDemandQty || line.qty || 0))
-                  const purchaseMultiple = Math.max(1, Number(line.purchaseMultiple || line.uomQty || 1))
+                  const purchaseMultiple = purchaseLinePurchaseMultiple(line)
+                  const purchaseUom = String(line.purchaseUomLabel || purchaseUomLabel(line.uom, line.uomQty))
                   const purchaseSurplusQty = Math.max(0, Number(line.purchaseSurplusQty ?? Number(line.qty || 0) - customerDemandQty))
                   const pendingScanned = activeReceivingProgressForLine(line)
                   return <TableRow key={`${sku}-${index}`}>
@@ -2861,7 +2938,7 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
                       </div>
                     </TableCell>
                     <TableCell><PurchaseLineSupplier line={line} fallbackSupplier={String(po.supplier || "")} /></TableCell>
-                    <TableCell className="text-center align-top"><p className="font-semibold tabular-nums">{numberLabel(Number(line.qty || 0))}</p>{purchaseMultiple > 1 ? <p className="mt-1 text-[11px] font-medium text-amber-700 dark:text-amber-300">Multiple {numberLabel(purchaseMultiple)}</p> : null}{purchaseSurplusQty > 0 ? <p className="mt-1 text-[11px] text-muted-foreground tabular-nums">{numberLabel(customerDemandQty)} demand</p> : null}{purchaseSurplusQty > 0 ? <p className="text-[11px] text-emerald-700 dark:text-emerald-300 tabular-nums">{numberLabel(purchaseSurplusQty)} stock</p> : null}</TableCell>
+                    <TableCell className="text-center align-top"><p className="font-semibold tabular-nums">{numberLabel(Number(line.qty || 0))}</p><p className="mt-1 text-[11px] text-muted-foreground">{purchaseUom}</p>{purchaseMultiple > 1 ? <p className="text-[11px] font-medium text-amber-700 dark:text-amber-300">Buy in {numberLabel(purchaseMultiple)}s</p> : null}{purchaseSurplusQty > 0 ? <p className="mt-1 text-[11px] text-muted-foreground tabular-nums">{numberLabel(customerDemandQty)} demand</p> : null}{purchaseSurplusQty > 0 ? <p className="text-[11px] text-emerald-700 dark:text-emerald-300 tabular-nums">{numberLabel(purchaseSurplusQty)} stock</p> : null}</TableCell>
                     <TableCell className="text-center align-top"><p className={cn("font-semibold tabular-nums", pendingScanned > 0 ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground")}>{numberLabel(pendingScanned)}</p>{pendingScanned > 0 ? <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">Not posted</p> : null}</TableCell>
                     <TableCell className="text-center align-top"><p className={cn("font-semibold tabular-nums", Number(line.receivedQty || 0) > 0 ? "text-emerald-700 dark:text-emerald-300" : "text-muted-foreground")}>{numberLabel(Number(line.receivedQty || 0))}</p>{purchaseOrderLineReceiverNames(line, receipts).length ? <p className="mt-1 text-[11px] text-muted-foreground">{purchaseOrderLineReceiverNames(line, receipts).join(", ")}</p> : null}</TableCell>
                     <TableCell className="text-right font-medium tabular-nums">{moneyLabel(Number(line.unitCost ?? line.estimatedUnitCost ?? 0))}</TableCell>
@@ -2964,7 +3041,23 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
                 </div>
                 <p className="text-xs text-muted-foreground">The server verifies that the SKU belongs to this PO supplier and applies its saved cost and purchase multiple.</p>
               </div> : null}
-              {editAddedItems.length ? <div className="grid gap-2"><p className="text-sm font-medium">New lines to add</p><div className="overflow-auto rounded-md border"><Table className="min-w-[56rem]"><TableHeader><TableRow><TableHead className="w-52">SKU</TableHead><TableHead>Item</TableHead><TableHead className="w-36">Quantity</TableHead><TableHead className="w-36">Catalog cost</TableHead><TableHead className="w-16" /></TableRow></TableHeader><TableBody>{editAddedItems.map((item) => { const itemIndex = (Array.isArray(editDraft.items) ? editDraft.items as Array<Record<string, unknown>> : []).indexOf(item); const purchaseMultiple = Math.max(1, Number(item.purchaseMultiple || item.uomQty || 1)); return <TableRow key={String(item.id || item.sku)}><TableCell className="font-mono text-xs">{String(item.sku || "")}</TableCell><TableCell><div className="flex items-center gap-2">{item.defaultImage ? <CatalogImage src={String(item.defaultImage)} alt={String(item.title || item.sku || "Product")} className="size-9 shrink-0" imageClassName="p-1" /> : null}<span className="line-clamp-2" title={String(item.title || "")}>{String(item.title || item.sku || "")}</span></div></TableCell><TableCell><Input type="number" min={purchaseMultiple} step={purchaseMultiple} value={String(item.qty || purchaseMultiple)} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, index) => index === itemIndex ? { ...candidate, qty: Number(event.target.value || purchaseMultiple) } : candidate) }))} />{purchaseMultiple > 1 ? <p className="mt-1 text-[11px] font-medium text-amber-700 dark:text-amber-300">Buy in {numberLabel(purchaseMultiple)}s</p> : null}</TableCell><TableCell>{moneyLabel(Number(item.estimatedUnitCost || 0))}</TableCell><TableCell><Button size="icon" variant="ghost" title="Remove new line" onClick={() => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).filter((_, index) => index !== itemIndex) }))}><Trash2 className="size-4" /></Button></TableCell></TableRow> })}</TableBody></Table></div></div> : null}
+              {editAddedItems.length ? <div className="grid gap-2">
+                <p className="text-sm font-medium">New lines to add</p>
+                <div className="overflow-auto rounded-md border"><Table className="min-w-[68rem]"><TableHeader><TableRow><TableHead className="w-52">SKU</TableHead><TableHead>Item</TableHead><TableHead className="w-64">Default UOM</TableHead><TableHead className="w-36">Qty</TableHead><TableHead className="w-36">Unit cost</TableHead><TableHead className="w-16" /></TableRow></TableHeader><TableBody>{editAddedItems.map((item) => {
+                  const itemIndex = (Array.isArray(editDraft.items) ? editDraft.items as Array<Record<string, unknown>> : []).indexOf(item)
+                  const purchaseMultiple = purchaseLinePurchaseMultiple(item)
+                  const sourceUom = purchaseLineSupplierUom(item)
+                  const mode = purchaseLineUomMode(item)
+                  return <TableRow key={String(item.id || item.sku)}>
+                    <TableCell className="font-mono text-xs">{String(item.sku || "")}</TableCell>
+                    <TableCell><div className="flex items-center gap-2">{item.defaultImage ? <CatalogImage src={String(item.defaultImage)} alt={String(item.title || item.sku || "Product")} className="size-9 shrink-0" imageClassName="p-1" /> : null}<span className="line-clamp-2" title={String(item.title || "")}>{String(item.title || item.sku || "")}</span></div></TableCell>
+                    <TableCell><Select value={mode} onValueChange={(value) => updateEditLineUom(itemIndex, value as "supplier" | "each")}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="supplier">Supplier default: {sourceUom.label}</SelectItem>{sourceUom.supplierUomQty > 1 ? <SelectItem value="each">Each (1 pc)</SelectItem> : null}</SelectContent></Select>{mode === "each" ? <p className="mt-1 text-[11px] font-medium text-amber-700 dark:text-amber-300">Double-check with the supplier that this SKU can be ordered as one each.</p> : null}</TableCell>
+                    <TableCell><Input type="number" min={Math.max(Number(item.receivedQty || 0), purchaseMultiple)} step={purchaseMultiple} value={String(item.qty || purchaseMultiple)} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, index) => index === itemIndex ? { ...candidate, qty: Number(event.target.value || purchaseMultiple) } : candidate) }))} />{purchaseMultiple > 1 ? <p className="mt-1 text-[11px] font-medium text-amber-700 dark:text-amber-300">Buy in {numberLabel(purchaseMultiple)}s</p> : null}</TableCell>
+                    <TableCell><Input aria-label={`Unit cost for ${String(item.sku || "new PO line")}`} type="number" min="0" step="0.01" value={String(item.estimatedUnitCost ?? "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, index) => index === itemIndex ? { ...candidate, estimatedUnitCost: Number(event.target.value || 0) } : candidate) }))} /></TableCell>
+                    <TableCell><Button size="icon" variant="ghost" title="Remove new line" onClick={() => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).filter((_, index) => index !== itemIndex) }))}><Trash2 className="size-4" /></Button></TableCell>
+                  </TableRow>
+                })}</TableBody></Table></div>
+              </div> : null}
             </div> : null}
             {editableManualDraftLines ? <div className="grid gap-3">
               <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-medium">Draft line items</p><p className="text-xs text-muted-foreground">Search the catalog to add a complete SKU, or use a blank line for an item not yet in DataPlus.</p></div><Button size="sm" variant={editCatalogOpen ? "secondary" : "outline"} onClick={() => { setEditCatalogOpen((open) => !open); setEditCatalogQuery(""); setEditCatalogResults([]) }}><Plus className="size-4" /> Add SKU</Button></div>
@@ -2975,8 +3068,36 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
                 </div>
                 <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-xs text-muted-foreground">Catalog items bring their saved title, cost, supplier identifiers, and minimum purchase quantity.</p><Button size="sm" variant="ghost" onClick={addBlankEditLine}>Add unlisted SKU instead</Button></div>
               </div> : null}
-              <div className="max-h-[min(52dvh,36rem)] overflow-auto rounded-md border"><Table className="min-w-[72rem]"><TableHeader className="sticky top-0 z-10 bg-popover"><TableRow><TableHead className="w-52">SKU</TableHead><TableHead className="min-w-[28rem]">Item</TableHead><TableHead className="w-32">Quantity</TableHead><TableHead className="w-40">Unit cost</TableHead><TableHead className="w-16" /></TableRow></TableHeader><TableBody>{(Array.isArray(editDraft.items) ? editDraft.items as Array<Record<string, unknown>> : []).map((item, index) => <TableRow key={String(item.id || `draft-line-${index}`)}><TableCell><Input value={String(item.sku || "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, lineIndex) => lineIndex === index ? { ...candidate, sku: event.target.value } : candidate) }))} placeholder="SKU" /></TableCell><TableCell><div className="flex items-center gap-2">{item.defaultImage ? <CatalogImage src={String(item.defaultImage)} alt={String(item.title || item.sku || "Product")} className="size-9 shrink-0" imageClassName="p-1" /> : null}<Input value={String(item.title || "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, lineIndex) => lineIndex === index ? { ...candidate, title: event.target.value } : candidate) }))} placeholder="Product title" /></div></TableCell><TableCell><Input type="number" min="0" step="1" value={String(item.qty ?? "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, lineIndex) => lineIndex === index ? { ...candidate, qty: Number(event.target.value || 0) } : candidate) }))} />{Number(item.purchaseMultiple || item.uomQty || 0) > 1 ? <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">Buy in {numberLabel(Number(item.purchaseMultiple || item.uomQty))}s</p> : null}</TableCell><TableCell><Input type="number" min="0" step="0.01" value={String(item.estimatedUnitCost ?? "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, lineIndex) => lineIndex === index ? { ...candidate, estimatedUnitCost: Number(event.target.value || 0) } : candidate) }))} /></TableCell><TableCell><Button size="icon" variant="ghost" title="Remove line" onClick={() => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).filter((_, lineIndex) => lineIndex !== index) }))}><Trash2 className="size-4" /></Button></TableCell></TableRow>)}{!(Array.isArray(editDraft.items) && editDraft.items.length) ? <TableRow><TableCell colSpan={5} className="h-24 text-center text-muted-foreground">No items yet. Add a catalog SKU or an unlisted line.</TableCell></TableRow> : null}</TableBody></Table></div>
-            </div> : <div className="max-h-[min(52dvh,36rem)] overflow-auto rounded-md border"><Table className="min-w-[48rem] table-fixed"><TableHeader className="sticky top-0 z-10 bg-popover"><TableRow><TableHead className="w-44">SKU</TableHead><TableHead>Item</TableHead><TableHead className="w-40">Ordered quantity</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => { const sku = String(line.sku || ""); const items = Array.isArray(editDraft.items) ? editDraft.items as Array<Record<string, unknown>> : []; const item = items.find((candidate) => String(candidate.sku) === sku) || { sku, qty: Number(line.qty || 0) }; const title = String(line.title || "-"); const purchaseMultiple = Math.max(1, Number(line.purchaseMultiple || 1)); return <TableRow key={`edit-${index}`}><TableCell className="break-all font-mono text-xs">{sku}</TableCell><TableCell><p className="line-clamp-2 break-words" title={title}>{compactPurchaseItemTitle(title)}</p></TableCell><TableCell><Input type="number" min={Number(line.receivedQty || 0)} step={purchaseMultiple} value={String(item.qty || 0)} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate) => String(candidate.sku) === sku ? { ...candidate, qty: Number(event.target.value || 0) } : candidate) }))} />{purchaseMultiple > 1 ? <p className="mt-1 text-[11px] font-medium text-amber-700 dark:text-amber-300">Supplier requires multiples of {numberLabel(purchaseMultiple)}</p> : null}</TableCell></TableRow> })}</TableBody></Table></div>}
+              <div className="max-h-[min(52dvh,36rem)] overflow-auto rounded-md border"><Table className="min-w-[84rem]"><TableHeader className="sticky top-0 z-10 bg-popover"><TableRow><TableHead className="w-52">SKU</TableHead><TableHead className="min-w-[26rem]">Item</TableHead><TableHead className="w-64">Default UOM</TableHead><TableHead className="w-32">Qty</TableHead><TableHead className="w-40">Unit cost</TableHead><TableHead className="w-16" /></TableRow></TableHeader><TableBody>{(Array.isArray(editDraft.items) ? editDraft.items as Array<Record<string, unknown>> : []).map((item, index) => {
+                const purchaseMultiple = purchaseLinePurchaseMultiple(item)
+                const sourceUom = purchaseLineSupplierUom(item)
+                const mode = purchaseLineUomMode(item)
+                return <TableRow key={String(item.id || `draft-line-${index}`)}>
+                  <TableCell><Input value={String(item.sku || "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, lineIndex) => lineIndex === index ? { ...candidate, sku: event.target.value } : candidate) }))} placeholder="SKU" /></TableCell>
+                  <TableCell><div className="flex items-center gap-2">{item.defaultImage ? <CatalogImage src={String(item.defaultImage)} alt={String(item.title || item.sku || "Product")} className="size-9 shrink-0" imageClassName="p-1" /> : null}<Input value={String(item.title || "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, lineIndex) => lineIndex === index ? { ...candidate, title: event.target.value } : candidate) }))} placeholder="Product title" /></div></TableCell>
+                  <TableCell><Select value={mode} onValueChange={(value) => updateEditLineUom(index, value as "supplier" | "each")}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="supplier">Supplier default: {sourceUom.label}</SelectItem>{sourceUom.supplierUomQty > 1 ? <SelectItem value="each">Each (1 pc)</SelectItem> : null}</SelectContent></Select>{mode === "each" && item.catalogProduct === true ? <p className="mt-1 text-[11px] font-medium text-amber-700 dark:text-amber-300">Double-check with the supplier that this SKU can be ordered as one each.</p> : null}</TableCell>
+                  <TableCell><Input type="number" min={Math.max(Number(item.receivedQty || 0), purchaseMultiple)} step={purchaseMultiple} value={String(item.qty ?? "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, lineIndex) => lineIndex === index ? { ...candidate, qty: Number(event.target.value || 0) } : candidate) }))} />{purchaseMultiple > 1 ? <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">Buy in {numberLabel(purchaseMultiple)}s</p> : null}</TableCell>
+                  <TableCell><Input type="number" min="0" step="0.01" value={String(item.estimatedUnitCost ?? "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate, lineIndex) => lineIndex === index ? { ...candidate, estimatedUnitCost: Number(event.target.value || 0) } : candidate) }))} /></TableCell>
+                  <TableCell><Button size="icon" variant="ghost" title="Remove line" onClick={() => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).filter((_, lineIndex) => lineIndex !== index) }))}><Trash2 className="size-4" /></Button></TableCell>
+                </TableRow>
+              })}{!(Array.isArray(editDraft.items) && editDraft.items.length) ? <TableRow><TableCell colSpan={6} className="h-24 text-center text-muted-foreground">No items yet. Add a catalog SKU or an unlisted line.</TableCell></TableRow> : null}</TableBody></Table></div>
+            </div> : <div className="max-h-[min(52dvh,36rem)] overflow-auto rounded-md border"><Table className="min-w-[78rem] table-fixed"><TableHeader className="sticky top-0 z-10 bg-popover"><TableRow><TableHead className="w-44">SKU</TableHead><TableHead>Item</TableHead><TableHead className="w-64">Default UOM</TableHead><TableHead className="w-40">Qty</TableHead><TableHead className="w-40">Unit cost</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => {
+              const sku = String(line.sku || "")
+              const items = Array.isArray(editDraft.items) ? editDraft.items as Array<Record<string, unknown>> : []
+              const itemIndex = items.findIndex((candidate) => String(candidate.sku) === sku)
+              const item = itemIndex >= 0 ? items[itemIndex] : { ...line, sku, qty: Number(line.qty || 0) }
+              const title = String(line.title || "-")
+              const purchaseMultiple = purchaseLinePurchaseMultiple(item)
+              const sourceUom = purchaseLineSupplierUom(item)
+              const mode = purchaseLineUomMode(item)
+              return <TableRow key={`edit-${index}`}>
+                <TableCell className="break-all font-mono text-xs">{sku}</TableCell>
+                <TableCell><p className="line-clamp-2 break-words" title={title}>{compactPurchaseItemTitle(title)}</p></TableCell>
+                <TableCell><Select value={mode} onValueChange={(value) => updateEditLineUom(itemIndex, value as "supplier" | "each")}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="supplier">Supplier default: {sourceUom.label}</SelectItem>{sourceUom.supplierUomQty > 1 ? <SelectItem value="each">Each (1 pc)</SelectItem> : null}</SelectContent></Select>{mode === "each" ? <p className="mt-1 text-[11px] font-medium text-amber-700 dark:text-amber-300">Double-check with the supplier that this SKU can be ordered as one each. This choice is saved on the catalog SKU.</p> : null}</TableCell>
+                <TableCell><Input type="number" min={Math.max(Number(line.receivedQty || 0), purchaseMultiple)} step={purchaseMultiple} value={String(item.qty || 0)} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate) => String(candidate.sku) === sku ? { ...candidate, qty: Number(event.target.value || 0) } : candidate) }))} />{purchaseMultiple > 1 ? <p className="mt-1 text-[11px] font-medium text-amber-700 dark:text-amber-300">Supplier requires multiples of {numberLabel(purchaseMultiple)}</p> : null}</TableCell>
+                <TableCell><Input aria-label={`Unit cost for ${sku}`} type="number" min="0" step="0.01" value={String(item.estimatedUnitCost ?? "")} onChange={(event) => setEditDraft((current) => ({ ...current, items: (Array.isArray(current.items) ? current.items as Array<Record<string, unknown>> : []).map((candidate) => String(candidate.sku) === sku ? { ...candidate, estimatedUnitCost: Number(event.target.value || 0) } : candidate) }))} /></TableCell>
+              </TableRow>
+            })}</TableBody></Table></div>}
             <div className="grid gap-2"><Label htmlFor="po-notes">Buyer notes</Label><Textarea id="po-notes" value={String(editDraft.notes || "")} onChange={(event) => setEditDraft((current) => ({ ...current, notes: event.target.value }))} /></div>
             {poCommitted ? <div className="grid gap-2"><Label htmlFor="po-amendment-reason">Reason for supplier amendment</Label><Textarea id="po-amendment-reason" value={String(editDraft.amendmentReason || "")} onChange={(event) => setEditDraft((current) => ({ ...current, amendmentReason: event.target.value }))} placeholder="Explain what changed and why the supplier must confirm it" /></div> : null}
           </div>
