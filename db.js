@@ -14756,6 +14756,8 @@ async function quickSearchOperations(query, options = {}) {
   const compact = normalized.replace(/[^a-z0-9]+/g, "");
   const startsWith = `${normalized}%`;
   const compactStartsWith = compact ? `${compact}%` : "__no_purchase_order_match__%";
+  const ctechCompact = compact.replace(/^(?:ctechpo|ctech)/, "") || compact;
+  const ctechStartsWith = ctechCompact ? `${ctechCompact}%` : "__no_ctech_purchase_order_match__%";
   const auditCompact = compact.replace(/^audit/, "a");
   const normalizedAuditCompact = /^\d+$/.test(auditCompact) ? `a${auditCompact}` : auditCompact;
   const auditStartsWith = /^a\d+$/.test(normalizedAuditCompact) ? `${normalizedAuditCompact}%` : "__no_warehouse_audit_match__%";
@@ -14793,20 +14795,28 @@ async function quickSearchOperations(query, options = {}) {
     client.query(`
       select po.po_id, po.po_number, po.supplier, po.status, po.warehouse_name,
         po.raw->>'supplierOrderNumber' as supplier_order_number,
-        coalesce(po.raw->>'ctechId', po.raw->>'externalPoNumber') as ctech_id,
+        coalesce(
+          nullif(po.raw->>'ctechId', ''),
+          nullif(po.raw->>'ctech_id', ''),
+          nullif(po.raw->>'externalPoNumber', ''),
+          nullif(po.raw->>'external_po_number', ''),
+          nullif(po.raw#>>'{externalPlacement,externalPoNumber}', ''),
+          ''
+        ) as ctech_id,
         case when regexp_replace(lower(coalesce(po.po_number, '')), '[^a-z0-9]+', '', 'g') = $1 then 'Purchase order'
-             when regexp_replace(lower(coalesce(po.raw->>'ctechId', po.raw->>'externalPoNumber', '')), '[^a-z0-9]+', '', 'g') like $2 then 'CTech PO number'
-             when regexp_replace(lower(coalesce(po.raw->>'supplierOrderNumber', '')), '[^a-z0-9]+', '', 'g') like $2 then 'Supplier order number'
+             when regexp_replace(lower(coalesce(nullif(po.raw->>'ctechId', ''), nullif(po.raw->>'ctech_id', ''), nullif(po.raw->>'externalPoNumber', ''), nullif(po.raw->>'external_po_number', ''), nullif(po.raw#>>'{externalPlacement,externalPoNumber}', ''), '')), '[^a-z0-9]+', '', 'g') like $4 then 'CTech PO number'
+             when regexp_replace(lower(coalesce(po.raw->>'supplierOrderNumber', '')), '[^a-z0-9]+', '', 'g') like $3 then 'Supplier order number'
              else 'Purchase order' end as match_label
       from purchase_order_records po
       where lower(coalesce(po.status, '')) <> 'deleted'
-        and (regexp_replace(lower(coalesce(po.po_number, '')), '[^a-z0-9]+', '', 'g') like $2
-          or regexp_replace(lower(coalesce(po.raw->>'ctechId', po.raw->>'externalPoNumber', '')), '[^a-z0-9]+', '', 'g') like $2
-          or regexp_replace(lower(coalesce(po.raw->>'supplierOrderNumber', '')), '[^a-z0-9]+', '', 'g') like $2)
-      order by case when regexp_replace(lower(coalesce(po.po_number, '')), '[^a-z0-9]+', '', 'g') = $1 then 0 else 1 end,
+        and (regexp_replace(lower(coalesce(po.po_number, '')), '[^a-z0-9]+', '', 'g') like $3
+          or regexp_replace(lower(coalesce(nullif(po.raw->>'ctechId', ''), nullif(po.raw->>'ctech_id', ''), nullif(po.raw->>'externalPoNumber', ''), nullif(po.raw->>'external_po_number', ''), nullif(po.raw#>>'{externalPlacement,externalPoNumber}', ''), '')), '[^a-z0-9]+', '', 'g') like $4
+          or regexp_replace(lower(coalesce(po.raw->>'supplierOrderNumber', '')), '[^a-z0-9]+', '', 'g') like $3)
+      order by case when regexp_replace(lower(coalesce(po.po_number, '')), '[^a-z0-9]+', '', 'g') = $1
+                       or regexp_replace(lower(coalesce(nullif(po.raw->>'ctechId', ''), nullif(po.raw->>'ctech_id', ''), nullif(po.raw->>'externalPoNumber', ''), nullif(po.raw->>'external_po_number', ''), nullif(po.raw#>>'{externalPlacement,externalPoNumber}', ''), '')), '[^a-z0-9]+', '', 'g') = $2 then 0 else 1 end,
         coalesce(po.created_at, po.updated_at) desc
-      limit $3
-    `, [compact, compactStartsWith, limit]),
+      limit $5
+    `, [compact, ctechCompact, compactStartsWith, ctechStartsWith, limit]),
     client.query(`
       select a.audit_id, coalesce(a.audit_number, a.audit_payload->>'auditNumber', a.audit_id) as audit_number,
         coalesce(a.status, a.audit_payload->>'status', '') as status,

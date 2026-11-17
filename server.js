@@ -57581,14 +57581,16 @@ async function handleApi(req, res) {
       const db = await readDbFast();
       const needle = query.toLowerCase();
       const compactNeedle = needle.replace(/[^a-z0-9]+/g, "");
-      const startsWithLookup = (value) => {
+      const ctechNeedle = compactNeedle.replace(/^(?:ctechpo|ctech)/, "") || compactNeedle;
+      const startsWithLookup = (value, compactLookups = [compactNeedle]) => {
         const text = String(value || "").toLowerCase();
-        return text.startsWith(needle) || text.replace(/[^a-z0-9]+/g, "").startsWith(compactNeedle);
+        const compactText = text.replace(/[^a-z0-9]+/g, "");
+        return text.startsWith(needle) || compactLookups.some((lookup) => lookup && compactText.startsWith(lookup));
       };
       rows.orders = (db.orders || []).filter((order) => [order.orderNumber, order.internalOrderNumber, order.marketplaceOrderId, order.marketplaceOrderNumber, order.external?.customerOrderId, order.external?.purchaseOrderId]
         .some(startsWithLookup)).slice(0, limit);
-      rows.purchaseOrders = (db.purchaseOrders || []).filter((po) => [po.poNumber, po.ctechId, po.externalPoNumber, po.supplierOrderNumber]
-        .some(startsWithLookup)).slice(0, limit);
+      rows.purchaseOrders = (db.purchaseOrders || []).filter((po) => [po.poNumber, po.ctechId, po.ctech_id, po.externalPoNumber, po.external_po_number, po.externalPlacement?.externalPoNumber, po.supplierOrderNumber]
+        .some((value) => startsWithLookup(value, [compactNeedle, ctechNeedle]))).slice(0, limit);
       const auditNeedle = shortWarehouseAuditReference(query).toLowerCase();
       rows.audits = (db.warehouseAudits || []).filter((audit) => {
         const auditReference = shortWarehouseAuditReference(audit.auditNumber, audit.id).toLowerCase();
