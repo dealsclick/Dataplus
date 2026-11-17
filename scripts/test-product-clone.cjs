@@ -87,6 +87,20 @@ const identifierClone = cloneCatalogProduct(source, { newSku: "CLONE-IDENTIFIERS
 assert.equal(identifierClone.barcode, source.barcode);
 assert.equal(identifierClone.mfrPartNumber, source.mfrPartNumber);
 
+const supplierClone = cloneCatalogProduct(source, {
+  newSku: "CLONE-SUPPLIER",
+  supplier: { id: "supplier-2", name: "Supplier B", code: "SUP-B" },
+}, "Catalog User");
+assert.equal(supplierClone.supplierId, "supplier-2");
+assert.equal(supplierClone.supplier, "Supplier B");
+assert.equal(supplierClone.vendor, "Supplier B");
+assert.equal(supplierClone.supplierCode, "SUP-B");
+assert.equal(supplierClone.vendorSku, "");
+assert.equal(supplierClone.cost, 0);
+assert.equal(supplierClone.qty, 0);
+assert.deepEqual(supplierClone.vendorOffers, []);
+assert.match(supplierClone.catalogAttentionReason, /Add the vendor SKU/);
+
 const minimalClone = cloneCatalogProduct(source, {
   newSku: "CLONE-MINIMAL",
   copyContent: false,
@@ -105,11 +119,17 @@ const dbSource = fs.readFileSync(path.join(__dirname, "..", "db.js"), "utf8");
 const uiSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "components", "product-workspaces.tsx"), "utf8");
 assert.match(serverSource, /\/api\\\/inventory\\\/\[\^\/\]\+\\\/clone/);
 assert.match(serverSource, /userCan\(authUser, "catalog\.products", "create"\)/);
-assert.match(serverSource, /insertOnly: true, includeOffers: false/);
+assert.match(serverSource, /parts\[3\] === "clone-options"/);
+assert.match(serverSource, /Choose an active supplier for the duplicate SKU/);
+assert.match(serverSource, /insertOnly: true, includeOffers: false, includeVendors: false/);
 assert.match(dbSource, /options\.includeOffers !== false/);
+assert.match(dbSource, /options\.includeVendors !== false/);
+assert.match(dbSource, /item\.supplierId \|\| item\.vendorId/);
 assert.match(dbSource, /inserted: insertedIds\.size/);
 assert.match(uiSource, /> Duplicate SKU</);
+assert.match(uiSource, /No supplier yet/);
+assert.match(uiSource, /supplierId: cloneDraft\.supplierId/);
 assert.match(uiSource, /Independent product, not a shadow/);
 assert.match(uiSource, /Always starts clean/);
 
-console.log("Product clone: independent draft semantics, optional copy groups, API safeguards, and React controls passed.");
+console.log("Product clone: independent draft semantics, validated supplier selection, optional copy groups, API safeguards, and React controls passed.");

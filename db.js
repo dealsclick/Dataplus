@@ -6251,7 +6251,7 @@ async function writeRelationalState(state = {}) {
 }
 
 function vendorIdFor(item = {}) {
-  return nullableString(item.supplierCode || item.vendorCode || item.supplier || item.vendor)?.toLowerCase().replace(/[^a-z0-9]+/g, "-") || null;
+  return nullableString(item.supplierId || item.vendorId || item.supplierCode || item.vendorCode || item.supplier || item.vendor)?.toLowerCase().replace(/[^a-z0-9]+/g, "-") || null;
 }
 
 function productRecordFromState(item = {}) {
@@ -15332,7 +15332,7 @@ async function upsertProductsFromState(items = [], options = {}) {
     if (!product) continue;
     products.push(product);
     const vendor = vendorRecordFromState(item);
-    if (vendor) vendorMap.set(vendor.vendor_id, vendor);
+    if (vendor && options.includeVendors !== false) vendorMap.set(vendor.vendor_id, vendor);
     identifiers.push(...identifierRecordsFromState(item));
     aliases.push(...aliasRecordsFromState(item));
     shadowSkus.push(...shadowSkuRecordsFromState(item));

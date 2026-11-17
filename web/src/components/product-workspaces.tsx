@@ -1586,7 +1586,9 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
   const [ebayEditorOpen, setEbayEditorOpen] = useState(false)
   const [cloneOpen, setCloneOpen] = useState(false)
   const [cloneSaving, setCloneSaving] = useState(false)
-  const [cloneDraft, setCloneDraft] = useState({ sku: "", title: "", copyContent: true, copyMedia: true, copyShipping: true, copyIdentifiers: false })
+  const [cloneSuppliersLoading, setCloneSuppliersLoading] = useState(false)
+  const [cloneSuppliers, setCloneSuppliers] = useState<Array<Pick<Vendor, "id" | "name" | "code" | "status">>>([])
+  const [cloneDraft, setCloneDraft] = useState({ sku: "", title: "", supplierId: "", copyContent: true, copyMedia: true, copyShipping: true, copyIdentifiers: false })
   const [productTab, setProductTab] = useState("overview")
   const [saving, setSaving] = useState(false)
   const [channelStatusSaving, setChannelStatusSaving] = useState("")
@@ -1615,18 +1617,26 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
   const values = (rows: Array<[string, string]>) => <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{rows.map(([label, value]) => <Detail key={label} label={label} value={value || "-"} />)}</div>
   const mainCategory = String(product.mainCategory || product.category || "").trim()
   const vendorCategory = String(product.vendorCategory || product.sourceCategory || "").trim()
+  const selectedCloneSupplier = cloneSuppliers.find((supplier) => supplier.id === cloneDraft.supplierId)
   const openEditor = () => { setDraft({ shippingClassOverride: product.shippingClassOverride || "", shippingOverrideReason: product.shippingOverrideReason || "", shippingPackageOverride: product.shippingPackageOverride ?? product.packageDimensionsLocked === true, shipAlone: product.shipAlone === true, marketplaceTitle: product.marketplaceTitle || product.title || "", brand: product.brand || "", manufacturer: product.manufacturer || "", mfrPartNumber: product.mfrPartNumber || "", supplier: product.supplier || product.vendor || "", supplierCode: product.supplierCode || "", vendorSku: product.vendorSku || "", mainCategory: product.mainCategory || product.category || "", sourceCategory: product.sourceCategory || "", vendorCategory: product.vendorCategory || "", condition: product.condition || "New", status: product.status || "Active", barcode: product.barcode || "", externalId: product.externalId || "", unspsc: product.unspsc || "", uom: product.uom || "", uomQty: String(product.uomQty || 1), tags: (product.tags || []).join(", "), shortDescription: product.shortDescription || "", longDescription: product.longDescription || "", bulletPoints: (product.bulletPoints || []).join("\n"), seoKeywords: product.seoKeywords || "", wildcardSearch: product.wildcardSearch || "", defaultImage: catalogImageUrlValue(product.defaultImage) || imageUrls[0] || "", images: imageUrls.join("\n"), websitePrice: String(price), cost: String(product.cost ?? 0), fobPrice: String(product.fobPrice ?? 0), listPrice: String(product.listPrice ?? product.msrp ?? 0), qty: String(product.qty ?? product.stockQty ?? 0), reserved: String(product.reserved ?? 0), reorderPoint: String(product.reorderPoint || 0), minQuantity: String(product.minQuantity || ""), quantityIncrements: String(product.quantityIncrements || ""), leadTime: String(product.leadTime || product.leadtime || ""), itemLength: String(product.itemLength || 0), itemWidth: String(product.itemWidth || 0), itemHeight: String(product.itemHeight || 0), itemWeight: String(product.itemWeight || 0), packageLength: String(product.packageLength || 0), packageWidth: String(product.packageWidth || 0), packageHeight: String(product.packageHeight || 0), packageWeight: String(product.packageWeight || 0), dimensionalWeight: String(product.dimensionalWeight || 0), countryOfOrigin: product.countryOfOrigin || "", sdsUrl: product.sdsUrl || "", stockStatus: product.stockStatus || "", stockUpdatedAt: product.stockUpdatedAt || "", lastPricesUpdateAt: product.lastPricesUpdateAt || "", lastPricesUpdateBy: product.lastPricesUpdateBy || "", hazardous: Boolean(product.hazardous), active: product.active !== false, categoryVerified: Boolean(product.categoryVerified) }); setEditorOpen(true) }
   const openClone = () => {
     const sourceSku = String(product.sku || sku || "").trim()
     setCloneDraft({
       sku: sourceSku ? `${sourceSku}-COPY` : "",
       title: String(product.title || product.marketplaceTitle || sourceSku),
+      supplierId: "",
       copyContent: true,
       copyMedia: true,
       copyShipping: true,
       copyIdentifiers: false,
     })
+    setCloneSuppliers([])
+    setCloneSuppliersLoading(true)
     setCloneOpen(true)
+    void api<{ suppliers?: Array<Pick<Vendor, "id" | "name" | "code" | "status">> }>(`/api/inventory/${encodeURIComponent(sourceSku)}/clone-options`)
+      .then((result) => setCloneSuppliers(result.suppliers || []))
+      .catch((error) => toast.error(error instanceof Error ? error.message : "Unable to load suppliers."))
+      .finally(() => setCloneSuppliersLoading(false))
   }
   const saveClone = async () => {
     const newSku = cloneDraft.sku.trim()
@@ -1638,7 +1648,7 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
     try {
       const result = await api<{ item: ProductItem; message?: string }>(`/api/inventory/${encodeURIComponent(product.sku || sku)}/clone`, {
         method: "POST",
-        body: JSON.stringify({ newSku, title, copyContent: cloneDraft.copyContent, copyMedia: cloneDraft.copyMedia, copyShipping: cloneDraft.copyShipping, copyIdentifiers: cloneDraft.copyIdentifiers })
+        body: JSON.stringify({ newSku, title, supplierId: cloneDraft.supplierId, copyContent: cloneDraft.copyContent, copyMedia: cloneDraft.copyMedia, copyShipping: cloneDraft.copyShipping, copyIdentifiers: cloneDraft.copyIdentifiers })
       })
       setCloneOpen(false)
       toast.success(result.message || `${newSku} was created as an inactive draft.`)
@@ -1841,6 +1851,17 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
             <Field label="New SKU"><Input autoFocus value={cloneDraft.sku} onChange={(event) => setCloneDraft((current) => ({ ...current, sku: event.target.value }))} placeholder={`${product.sku || sku}-COPY`} /></Field>
             <Field label="Product title"><Input value={cloneDraft.title} onChange={(event) => setCloneDraft((current) => ({ ...current, title: event.target.value }))} /></Field>
           </div>
+          <div className="grid gap-1.5">
+            <Label>Supplier</Label>
+            <Select disabled={cloneSuppliersLoading} value={cloneDraft.supplierId || "none"} onValueChange={(value) => setCloneDraft((current) => ({ ...current, supplierId: value === "none" ? "" : value }))}>
+              <SelectTrigger className="w-full"><SelectValue placeholder={cloneSuppliersLoading ? "Loading suppliers..." : "No supplier yet"} /></SelectTrigger>
+              <SelectContent className="max-h-72">
+                <SelectItem value="none">No supplier yet</SelectItem>
+                {cloneSuppliers.map((supplier) => <SelectItem key={supplier.id} value={supplier.id}>{supplier.name}{supplier.code ? ` (${supplier.code})` : ""}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <p className="text-xs leading-5 text-muted-foreground">{cloneSuppliersLoading ? "Loading active suppliers..." : selectedCloneSupplier ? `${selectedCloneSupplier.name} will be assigned as the primary supplier. Vendor SKU, cost, and availability still start blank.` : "You can assign the supplier now or leave it unassigned for catalog review."}</p>
+          </div>
           <div className="grid gap-3">
             <div><p className="text-sm font-medium">Choose what to copy</p><p className="text-xs text-muted-foreground">These choices copy reusable catalog details only. They never copy inventory or marketplace ownership.</p></div>
             <div className="grid gap-2 sm:grid-cols-2">
@@ -1860,7 +1881,7 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
             <AlertTitle>Independent product, not a shadow</AlertTitle>
             <AlertDescription>The new SKU will not share inventory with {product.sku || sku}. Use Create shadow when two selling identities should draw from the same parent stock.</AlertDescription>
           </Alert>
-          <div className="rounded-md border border-amber-500/35 bg-amber-500/10 p-3"><p className="text-sm font-medium text-amber-900 dark:text-amber-100">Always starts clean</p><p className="mt-1 text-xs leading-5 text-amber-800 dark:text-amber-200">Zero physical stock, zero reserved quantity, no cost or selling price, no supplier offers, no aliases or shadows, and no Shopify, eBay, Temu, TikTok, Walmart, or Whatnot listing IDs.</p></div>
+          <div className="rounded-md border border-amber-500/35 bg-amber-500/10 p-3"><p className="text-sm font-medium text-amber-900 dark:text-amber-100">Always starts clean</p><p className="mt-1 text-xs leading-5 text-amber-800 dark:text-amber-200">Zero physical stock, zero reserved quantity, no cost or selling price, no supplier offers or availability, no aliases or shadows, and no Shopify, eBay, Temu, TikTok, Walmart, or Whatnot listing IDs.</p></div>
         </div>
         <DialogFooter className="border-t bg-background px-5 py-4 sm:px-6"><Button variant="outline" disabled={cloneSaving} onClick={() => setCloneOpen(false)}>Cancel</Button><Button disabled={cloneSaving || !cloneDraft.sku.trim() || !cloneDraft.title.trim()} onClick={() => void saveClone()}>{cloneSaving ? <Loader2 className="size-4 animate-spin" /> : <Copy className="size-4" />} Create duplicate</Button></DialogFooter>
       </DialogContent>

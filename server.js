@@ -48904,6 +48904,13 @@ function cloneCatalogProduct(source = {}, input = {}, actor = "DataPlus operator
   const copyMedia = input.copyMedia !== false;
   const copyShipping = input.copyShipping !== false;
   const copyIdentifiers = input.copyIdentifiers === true;
+  const selectedSupplier = input.supplier && typeof input.supplier === "object"
+    ? {
+        id: String(input.supplier.id || "").trim(),
+        name: String(input.supplier.name || "").trim(),
+        code: String(input.supplier.code || "").trim()
+      }
+    : null;
   const now = new Date().toISOString();
   const title = String(input.title || source.title || source.marketplaceTitle || sku).trim() || sku;
   const clone = {
@@ -48933,9 +48940,10 @@ function cloneCatalogProduct(source = {}, input = {}, actor = "DataPlus operator
     fobPrice: 0,
     listPrice: 0,
     msrp: 0,
-    supplier: "",
-    vendor: "",
-    supplierCode: "",
+    supplier: selectedSupplier?.name || "",
+    vendor: selectedSupplier?.name || "",
+    supplierId: selectedSupplier?.id || "",
+    supplierCode: selectedSupplier?.code || "",
     vendorSku: "",
     sourceSku: "",
     externalId: "",
@@ -48958,7 +48966,9 @@ function cloneCatalogProduct(source = {}, input = {}, actor = "DataPlus operator
     replenishableQty: 0,
     catalogAttentionRequired: true,
     catalogAttentionStatus: "open",
-    catalogAttentionReason: `Duplicated from ${sourceSku}. Review identity, supplier coverage, pricing, inventory, and channel settings before activation.`,
+    catalogAttentionReason: selectedSupplier
+      ? `Duplicated from ${sourceSku} for ${selectedSupplier.name}. Add the vendor SKU and review supplier coverage, pricing, inventory, and channel settings before activation.`
+      : `Duplicated from ${sourceSku}. Review identity, supplier coverage, pricing, inventory, and channel settings before activation.`,
     createdAt: now,
     updatedAt: now,
     createdBy: String(actor || "DataPlus operator"),
@@ -48970,7 +48980,7 @@ function cloneCatalogProduct(source = {}, input = {}, actor = "DataPlus operator
     cloneSourceSku: sourceSku,
     clonedAt: now,
     clonedBy: String(actor || "DataPlus operator"),
-    cloneOptions: { copyContent, copyMedia, copyShipping, copyIdentifiers }
+    cloneOptions: { copyContent, copyMedia, copyShipping, copyIdentifiers, supplierId: selectedSupplier?.id || "" }
   };
 
   if (copyContent) {
@@ -57557,6 +57567,27 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { mode: item.channelPriceModes?.[channel.id] || "inherit", effective: resolvePricePolicy(item, db, channel), floors: sourcePriceFloors(pricedItem) });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "clone-options" && parts.length === 4 && postgres.isPostgresEnabled()) {
+    if (!userCan(authUser, "catalog.products", "create")) return sendJson(res, 403, { error: "Catalog product creation permission is required." });
+    const source = await postgres.readProductByKey(decodeURIComponent(parts[2]));
+    if (!source) return notFound(res);
+    const state = await postgres.readStateFields(["vendors"], { fallbackToLegacy: false });
+    const suppliers = (state.vendors || [])
+      .filter((vendor) => {
+        const status = String(vendor.status || "active").trim().toLowerCase();
+        return !vendor.retirement && !["inactive", "retired", "disabled"].includes(status);
+      })
+      .map((vendor) => ({
+        id: String(vendor.id || "").trim(),
+        name: String(vendor.name || "").trim(),
+        code: String(vendor.code || "").trim(),
+        status: String(vendor.status || "active")
+      }))
+      .filter((vendor) => vendor.id && vendor.name)
+      .sort((left, right) => left.name.localeCompare(right.name));
+    return sendJson(res, 200, { suppliers });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "clone" && parts.length === 4 && postgres.isPostgresEnabled()) {
     if (!userCan(authUser, "catalog.products", "create")) return sendJson(res, 403, { error: "Catalog product creation permission is required." });
     const body = await parseBody(req);
@@ -57573,6 +57604,19 @@ async function handleApi(req, res) {
     const existing = await postgres.readProductByKey(newSku);
     if (existing) return sendJson(res, 409, { error: `${newSku} already resolves to catalog SKU ${existing.sku || existing.id}. Choose a different SKU.` });
 
+    const supplierId = String(body.supplierId || "").trim();
+    let supplier = null;
+    if (supplierId) {
+      const state = await postgres.readStateFields(["vendors"], { fallbackToLegacy: false });
+      const vendor = (state.vendors || []).find((candidate) => String(candidate.id || "") === supplierId);
+      const vendorStatus = String(vendor?.status || "active").trim().toLowerCase();
+      if (!vendor || vendor.retirement || ["inactive", "retired", "disabled"].includes(vendorStatus)) {
+        return sendJson(res, 400, { error: "Choose an active supplier for the duplicate SKU." });
+      }
+      supplier = { id: String(vendor.id), name: String(vendor.name || "").trim(), code: String(vendor.code || "").trim() };
+      if (!supplier.name) return sendJson(res, 400, { error: "The selected supplier is missing a name." });
+    }
+
     const actor = authUser?.name || authUser?.username || authUser?.id || "DataPlus operator";
     const item = cloneCatalogProduct(source, {
       newSku,
@@ -57580,9 +57624,10 @@ async function handleApi(req, res) {
       copyContent: body.copyContent !== false,
       copyMedia: body.copyMedia !== false,
       copyShipping: body.copyShipping !== false,
-      copyIdentifiers: body.copyIdentifiers === true
+      copyIdentifiers: body.copyIdentifiers === true,
+      supplier
     }, actor);
-    const saved = await postgres.upsertProductsFromState([item], { insertOnly: true, includeOffers: false });
+    const saved = await postgres.upsertProductsFromState([item], { insertOnly: true, includeOffers: false, includeVendors: false });
     if (Number(saved.inserted || 0) !== 1) return sendJson(res, 409, { error: `${newSku} was created by another request. Refresh the catalog before trying again.` });
     const persisted = await postgres.readProductByKey(newSku);
     await redisCache.deleteByPrefix("dataplus:products:");
@@ -57592,7 +57637,7 @@ async function handleApi(req, res) {
       path: url.pathname,
       entityType: "product",
       entityId: persisted?.id || item.id,
-      metadata: { sourceSku: source.sku || source.id, newSku }
+      metadata: { sourceSku: source.sku || source.id, newSku, supplierId: supplier?.id || "" }
     });
     return sendJson(res, 201, {
       item: persisted || item,
