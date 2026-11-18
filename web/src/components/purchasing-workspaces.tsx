@@ -397,6 +397,9 @@ export function DraftQuoteFieldDetailPage() {
   const [quoteCarriers, setQuoteCarriers] = useState<QuoteCarrierAccess[]>([])
   const [carrierPreference, setCarrierPreference] = useState<QuoteCarrierPreference>({ selectionMode: "lowest_cost", preferredProviderId: "", rateTtlMinutes: 30 })
   const [shippingOpen, setShippingOpen] = useState(false)
+  const [manualShippingOpen, setManualShippingOpen] = useState(false)
+  const [manualShippingAmount, setManualShippingAmount] = useState("")
+  const [manualShippingLabel, setManualShippingLabel] = useState("Manual shipping fee")
   const [shippingBusy, setShippingBusy] = useState(false)
   const [shippingRates, setShippingRates] = useState<QuoteCarrierRate[]>([])
   const [shippingProviderErrors, setShippingProviderErrors] = useState<Array<{ provider?: string; message?: string }>>([])
@@ -408,7 +411,7 @@ export function DraftQuoteFieldDetailPage() {
   const [supplierOptionsLoading, setSupplierOptionsLoading] = useState<Set<string>>(new Set())
   const autoEditOpenedRef = useRef(false)
   const [form, setForm] = useState({
-    buyer: "", buyerEmail: "", phone: "", source: "Manual", status: "draft", note: "", customerNote: "",
+    buyer: "", buyerEmail: "", phone: "", source: "Manual", referenceId: "", status: "draft", note: "", customerNote: "",
     salesOwner: "", nextAction: "", nextFollowUpAt: "",
     taxExempt: false, taxMode: "rate" as "rate" | "manual", taxRate: "", taxAmount: "",
     expiresAt: quoteDateAfter(30), selectedTermIds: [] as string[], customTerms: "",
@@ -540,7 +543,7 @@ export function DraftQuoteFieldDetailPage() {
     return () => { window.clearTimeout(timer); controller.abort() }
   }, [draftId, editorOpen, supplierLookupKey])
 
-  const openEditor = () => {
+  const openEditor = (section: "items" | "customer" | "delivery" | "terms" | "notes" = "customer") => {
     if (!draft) return
     if (["void", "voided"].includes(String(draft.status || "").toLowerCase())) { toast.error("Duplicate this quote to create a new active revision."); return }
     const address = (draft.shippingAddress || {}) as Record<string, unknown>
@@ -548,6 +551,7 @@ export function DraftQuoteFieldDetailPage() {
     setForm({
       buyer: String(draft.buyer || ""), buyerEmail: String(draft.buyerEmail || ""), phone: String(draft.phone || ""),
       source: String(draft.source || "Manual"), status: String(draft.status || "draft"), note: String(draft.note || ""),
+      referenceId: String(draft.marketplaceOrderNumber || draft.sourceOrderNumber || draft.sourceOrderId || ""),
       salesOwner: String(draft.salesOwner || ""), nextAction: String(draft.nextAction || ""), nextFollowUpAt: quoteLocalDateTime(draft.nextFollowUpAt),
       customerNote: String(draft.customerNote || ""), expiresAt: String(draft.expiresAt || quoteDateAfter(30)),
       taxExempt: draft.taxExempt === true, taxMode: String(draft.taxMode || "rate") === "manual" ? "manual" : "rate",
@@ -581,7 +585,7 @@ export function DraftQuoteFieldDetailPage() {
     setCatalogResults([])
     setSupplierOptionsBySku({})
     setSupplierOptionsLoading(new Set())
-    setEditorSection("customer")
+    setEditorSection(section)
     setEditorOpen(true)
   }
 
@@ -719,6 +723,7 @@ export function DraftQuoteFieldDetailPage() {
     try {
       await api(`/api/order-drafts/${encodeURIComponent(draftId)}`, { method: "PATCH", body: JSON.stringify({
         buyer: form.buyer.trim(), buyerEmail: form.buyerEmail.trim(), phone: form.phone.trim(), source: form.source, status: form.status,
+        marketplaceOrderNumber: form.referenceId.trim(),
         salesOwner: form.salesOwner.trim(), nextAction: form.nextAction.trim(), nextFollowUpAt: quoteIsoDateTime(form.nextFollowUpAt),
         taxExempt: form.taxExempt, taxMode: form.taxMode, taxRate: Number(form.taxRate || 0), taxAmount: Number(form.taxAmount || 0),
         note: form.note.trim(), customerNote: form.customerNote.trim(), expiresAt: form.expiresAt, selectedTermIds: form.selectedTermIds, customTerms: form.customTerms.trim(),
@@ -812,14 +817,28 @@ export function DraftQuoteFieldDetailPage() {
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save the shipping estimate.") }
     finally { setShippingBusy(false) }
   }
+  const saveManualShipping = async () => {
+    const amount = Number(manualShippingAmount)
+    if (!Number.isFinite(amount) || amount < 0) { toast.error("Enter a valid shipping fee."); return }
+    setShippingBusy(true)
+    try {
+      await api(`/api/order-drafts/${encodeURIComponent(draftId)}`, { method: "PATCH", body: JSON.stringify({ shippingEstimate: {
+        providerId: "manual", manual: true, carrier: "Manual", service: manualShippingLabel.trim() || "Manual shipping fee", amount, currency: "USD", quotedAt: new Date().toISOString(),
+      } }) })
+      setManualShippingOpen(false)
+      await load()
+      toast.success("Manual shipping fee added to the quote.")
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save the shipping fee.") }
+    finally { setShippingBusy(false) }
+  }
 
   const lines = Array.isArray(draft?.items) ? draft.items as Array<Record<string, unknown>> : []
   const subtotal = lines.reduce((sum, line) => sum + Number(line.price || 0) * Number(line.qty || 0), 0)
   const savedShippingEstimate = draft?.shippingEstimate && typeof draft.shippingEstimate === "object" ? draft.shippingEstimate as Record<string, unknown> : null
   const savedRateExpiresAt = Date.parse(String(savedShippingEstimate?.expiresAt || ""))
-  const savedRateExpired = Boolean(savedShippingEstimate && (!Number.isFinite(savedRateExpiresAt) || savedRateExpiresAt <= Date.now()))
+  const savedShippingManual = savedShippingEstimate?.manual === true || String(savedShippingEstimate?.providerId || "") === "manual"
+  const savedRateExpired = Boolean(savedShippingEstimate && !savedShippingManual && (!Number.isFinite(savedRateExpiresAt) || savedRateExpiresAt <= Date.now()))
   const enabledQuoteCarriers = quoteCarriers.filter((provider) => provider.enabled && provider.companyRates)
-  const enabledQuoteCarrierLabel = enabledQuoteCarriers.map((provider) => provider.name).join(", ")
   const shippingAmount = Number(savedShippingEstimate?.amount || 0)
   const taxExempt = draft?.taxExempt === true
   const taxRate = Math.max(0, Number(draft?.taxRate || 0))
@@ -892,10 +911,11 @@ export function DraftQuoteFieldDetailPage() {
   ]
 
   return <div className="grid gap-5">
+    <Dialog open={manualShippingOpen} onOpenChange={setManualShippingOpen}><DialogContent><DialogHeader><DialogTitle>Enter shipping fee</DialogTitle><DialogDescription>Add a fixed shipping charge without requesting a carrier rate. Manual fees do not expire.</DialogDescription></DialogHeader><div className="grid gap-4"><Field label="Shipping fee"><Input autoFocus type="number" min="0" step="0.01" value={manualShippingAmount} onChange={(event) => setManualShippingAmount(event.target.value)} placeholder="0.00" /></Field><Field label="Description"><Input value={manualShippingLabel} onChange={(event) => setManualShippingLabel(event.target.value)} placeholder="Manual shipping fee" /></Field></div><DialogFooter><Button variant="outline" disabled={shippingBusy} onClick={() => setManualShippingOpen(false)}>Cancel</Button><Button disabled={shippingBusy || !manualShippingAmount.trim()} onClick={() => void saveManualShipping()}>{shippingBusy ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save shipping</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={voidOpen} onOpenChange={(open) => { if (!busy) { setVoidOpen(open); if (!open) setVoidReason("") } }}><DialogContent><DialogHeader><DialogTitle>Void {String(draft?.draftNumber || "quote")}</DialogTitle><DialogDescription>The quote remains in audit history but will disappear from active search, the pipeline, and sales analytics.</DialogDescription></DialogHeader><Field label="Reason"><Textarea autoFocus value={voidReason} onChange={(event) => setVoidReason(event.target.value)} placeholder="Why is this quote being voided?" /></Field><DialogFooter><Button variant="outline" disabled={busy} onClick={() => setVoidOpen(false)}>Cancel</Button><Button variant="destructive" disabled={busy || !voidReason.trim()} onClick={() => void voidQuote()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Ban className="size-4" />} Void quote</Button></DialogFooter></DialogContent></Dialog>
     <PageHeader eyebrow="Operations / Draft quote" title={String(draft?.draftNumber || draftId || "Quote")} description="A customer proposal that remains editable until accepted and converted into an order." action={<div className="flex flex-wrap gap-2">
       <Button size="sm" variant="outline" asChild><a href="/drafts">Back to drafts</a></Button>
-      <Button size="sm" disabled={busy || !draft || isVoided} onClick={openEditor}><Pencil className="size-4" /> Edit quote</Button>
+      <Button size="sm" disabled={busy || !draft || isVoided} onClick={() => openEditor()}><Pencil className="size-4" /> Edit quote</Button>
       <Button size="sm" variant="outline" disabled={busy || !draft || isVoided} asChild><a href={`/api/order-drafts/${encodeURIComponent(draftId)}/export/email.eml?variant=standard`} target="_blank" rel="noreferrer" onClick={() => toast.success("Outlook quote draft generated with the PDF attached.")}><Mail className="size-4" /> Email quote</a></Button>
       <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" disabled={busy || !draft}><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end">
         {!isVoided && <><DropdownMenuLabel>Quote status</DropdownMenuLabel>
@@ -945,9 +965,9 @@ export function DraftQuoteFieldDetailPage() {
           return <TableRow key={`${String(line.sku)}-${index}`}><TableCell><div className="flex min-w-72 items-center gap-3"><CatalogImage src={productImage || undefined} alt={productTitle} className="size-12 shrink-0" imageClassName="p-1" /><div className="min-w-0">{line.catalogProductId ? <a className="font-mono text-xs font-semibold text-primary hover:underline" href={`/products/${encodeURIComponent(catalogSku)}`}>{String(line.sku || "-")}</a> : <p className="font-mono text-xs">{String(line.sku || "-")}</p>}<p className="mt-0.5 whitespace-normal font-medium leading-5">{productTitle}</p><div className="mt-1 flex flex-wrap items-center gap-1.5">{line.catalogProductId ? <Badge variant="outline" className={line.catalogMatchReviewRequired ? "border-amber-500/40 text-amber-700 dark:text-amber-300" : "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"}>{line.catalogMatchReviewRequired ? "Catalog candidate" : "Catalog matched"}</Badge> : <Badge variant="outline" className="border-red-500/40 text-red-700 dark:text-red-300">Not in catalog</Badge>}{line.catalogMatchBasis ? <span className="text-xs text-muted-foreground">{String(line.catalogMatchBasis)}</span> : null}</div></div></div></TableCell><TableCell><p className="font-medium">{supplierLoading ? "Loading sources..." : supplierName}</p><p className="font-mono text-xs text-muted-foreground">{supplierSku}</p><div className="mt-1 flex flex-wrap gap-1">{lineSource?.suggested && supplierOption ? <Badge variant="outline" className="border-blue-500/40 text-blue-700 dark:text-blue-300">{supplierQtyKnown && Number(supplierQty) > 0 ? "Lowest available cost" : "Lowest cost suggestion"}</Badge> : supplierOption ? <Badge variant="outline" className="border-emerald-500/40 text-emerald-700 dark:text-emerald-300">Selected source</Badge> : null}{lineSource?.options.length ? <Badge variant="outline">{lineSource.options.length} option{lineSource.options.length === 1 ? "" : "s"}</Badge> : null}</div></TableCell><TableCell>{numberLabel(Number(line.qty || 0))}</TableCell><TableCell>{Number(line.msrp || 0) > 0 ? moneyLabel(Number(line.msrp)) : "Not set"}</TableCell><TableCell>{lineMap > 0 ? moneyLabel(lineMap) : "Not set"}</TableCell><TableCell><p className={cn("font-medium", lineMap > 0 && Number(line.price || 0) < lineMap ? "text-destructive" : "")}>{moneyLabel(Number(line.price || 0))}</p>{lineMap > 0 && Number(line.price || 0) < lineMap ? <p className="text-xs text-destructive">Below MAP</p> : lineSavings > 0 ? <p className="text-xs text-emerald-600">{moneyLabel(lineSavings)} saved</p> : null}</TableCell><TableCell className="font-semibold tabular-nums">{supplierLoading && lineCost === null ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : lineCost === null ? <span className="text-muted-foreground">Not available</span> : <><span>{moneyLabel(lineCost)}</span>{lineSource?.suggested ? <span className="mt-0.5 block text-xs font-normal text-blue-600">Current suggestion</span> : null}</>}</TableCell><TableCell>{supplierLoading ? <Skeleton className="h-5 w-20" /> : supplierQtyKnown ? <><p className={cn("font-medium", Number(supplierQty) > 0 ? "text-emerald-600" : "text-destructive")}>{Number(supplierQty) > 0 ? `${numberLabel(Number(supplierQty))} available` : "Out of stock"}</p><p className="text-xs text-muted-foreground">Supplier inventory{supplierOption?.uom ? ` · ${supplierOption.uom}` : ""}</p></> : <span className="text-sm text-muted-foreground">Not reported</span>}</TableCell><TableCell className={cn("font-medium", lineProfit !== null && lineProfit < 0 ? "text-destructive" : lineProfit !== null ? "text-emerald-600" : "text-muted-foreground")}>{lineMargin === null ? "Cost needed" : `${lineMargin.toFixed(1)}% · ${moneyLabel(lineProfit)}`}</TableCell><TableCell className="font-medium">{moneyLabel(lineRevenue)}</TableCell><TableCell className="text-right"><Button size="sm" variant="outline" onClick={() => void findSimilar(line, index)}><Search className="size-4" /> Find similar</Button></TableCell></TableRow>
         })}
       </TableBody></Table></div></CardContent></Card>
-      {enabledQuoteCarriers.length ? <Card><CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Shipping estimate</CardTitle><CardDescription>Compare the shared {enabledQuoteCarrierLabel} accounts for an accurate customer quote.</CardDescription></div><Button size="sm" variant={savedShippingEstimate ? "outline" : "default"} onClick={openShippingRates}><Truck className="size-4" /> {savedShippingEstimate ? "Refresh carrier rates" : "Get carrier rates"}</Button></div></CardHeader><CardContent className="grid gap-3">{savedShippingEstimate ? <><div className="grid gap-3 text-sm sm:grid-cols-3 xl:grid-cols-6"><Detail label="Carrier / service" value={`${String(savedShippingEstimate.carrier || "Carrier")} ${String(savedShippingEstimate.service || "")}`} /><Detail label="Shipping" value={moneyLabel(shippingAmount)} /><Detail label="Sales tax" value={taxExempt ? "Tax exempt" : moneyLabel(taxAmount)} /><Detail label="Package" value={`${String((savedShippingEstimate.package as Record<string, unknown>)?.weight || "-")} lb / ${String((savedShippingEstimate.package as Record<string, unknown>)?.length || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.width || "-")} x ${String((savedShippingEstimate.package as Record<string, unknown>)?.height || "-")} in`} /><Detail label="Rate valid until" value={savedRateExpired ? "Expired - refresh required" : dateLabel(String(savedShippingEstimate.expiresAt || ""))} /><Detail label="Estimated quote total" value={moneyLabel(total)} /></div>{savedRateExpired ? <Alert variant="destructive"><Clock3 className="size-4" /><AlertTitle>Shipping rate expired</AlertTitle><AlertDescription>Refresh carrier rates before accepting or converting this quote.</AlertDescription></Alert> : null}</> : <p className="text-sm text-muted-foreground">No shipping rate has been added. Product subtotal is {moneyLabel(subtotal)} and sales tax is {taxExempt ? "exempt" : moneyLabel(taxAmount)}.</p>}</CardContent></Card> : null}
+      <Card><CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Shipping fee</CardTitle><CardDescription>Use a carrier-calculated rate or enter the customer shipping charge manually.</CardDescription></div><div className="flex flex-wrap gap-2">{enabledQuoteCarriers.length ? <Button size="sm" variant="outline" onClick={openShippingRates}><Truck className="size-4" /> {savedShippingEstimate && !savedShippingManual ? "Refresh carrier rate" : "Calculate with carrier"}</Button> : null}<Button size="sm" variant={savedShippingEstimate ? "outline" : "default"} onClick={() => { setManualShippingAmount(savedShippingEstimate ? String(savedShippingEstimate.amount || "") : ""); setManualShippingLabel(savedShippingManual ? String(savedShippingEstimate?.service || "Manual shipping fee") : "Manual shipping fee"); setManualShippingOpen(true) }}><Pencil className="size-4" /> Enter manually</Button></div></div></CardHeader><CardContent className="grid gap-3">{savedShippingEstimate ? <><div className="grid gap-3 text-sm sm:grid-cols-3 xl:grid-cols-5"><Detail label="Method" value={savedShippingManual ? String(savedShippingEstimate.service || "Manual shipping fee") : `${String(savedShippingEstimate.carrier || "Carrier")} ${String(savedShippingEstimate.service || "")}`} /><Detail label="Shipping" value={moneyLabel(shippingAmount)} /><Detail label="Sales tax" value={taxExempt ? "Tax exempt" : moneyLabel(taxAmount)} />{!savedShippingManual ? <Detail label="Rate valid until" value={savedRateExpired ? "Expired, refresh required" : dateLabel(String(savedShippingEstimate.expiresAt || ""))} /> : <Detail label="Validity" value="Manual, no expiration" />}<Detail label="Estimated quote total" value={moneyLabel(total)} /></div>{savedRateExpired ? <Alert variant="destructive"><Clock3 className="size-4" /><AlertTitle>Shipping rate expired</AlertTitle><AlertDescription>Refresh carrier rates before accepting or converting this quote.</AlertDescription></Alert> : null}</> : <p className="text-sm text-muted-foreground">No shipping fee has been added. Product subtotal is {moneyLabel(subtotal)} and sales tax is {taxExempt ? "exempt" : moneyLabel(taxAmount)}.</p>}</CardContent></Card>
           <Card>
-            <CardHeader className="pb-3"><CardTitle className="text-sm">Quote details</CardTitle><CardDescription>Notes, customer-facing terms, and recent pipeline activity.</CardDescription></CardHeader>
+            <CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Quote details</CardTitle><CardDescription>Notes, customer-facing terms, and recent pipeline activity.</CardDescription></div><Button size="sm" variant="outline" disabled={isVoided} onClick={() => openEditor("notes")}><Pencil className="size-4" /> Edit notes</Button></div></CardHeader>
             <CardContent>
               <Tabs defaultValue="notes">
                 <TabsList className="w-full justify-start overflow-x-auto"><TabsTrigger value="notes">Notes</TabsTrigger><TabsTrigger value="terms">Terms</TabsTrigger><TabsTrigger value="activity">Activity</TabsTrigger></TabsList>
@@ -975,7 +995,7 @@ export function DraftQuoteFieldDetailPage() {
               <section className="border-t pt-4"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex items-center gap-2"><MapPin className="size-4 text-muted-foreground" /><h3 className="text-sm font-semibold">Billing address</h3></div>{billingMatchesShipping ? <Badge variant="outline">Same as shipping</Badge> : null}</div><address className="mt-2 not-italic text-sm leading-6 text-muted-foreground">{billingAddressLines.length ? billingAddressLines.map((line, index) => <span key={`${line}-${index}`} className="block break-words">{line}</span>) : "No billing address provided."}</address></section>
             </CardContent>
           </Card>
-          <Card><CardHeader className="pb-3"><CardTitle className="text-sm">Quote ownership</CardTitle></CardHeader><CardContent className="grid gap-3 text-sm"><div className="flex items-start justify-between gap-3"><span className="text-muted-foreground">Sales owner</span><span className="text-right font-medium">{String(draft.salesOwner || "Unassigned")}</span></div><div className="flex items-start justify-between gap-3"><span className="text-muted-foreground">Source</span><span className="text-right font-medium">{String(draft.source || "Manual")}</span></div><div className="flex items-start justify-between gap-3"><span className="text-muted-foreground">Next follow-up</span><span className={cn("text-right font-medium", followUpDue && "text-amber-600")}>{nextFollowUpAt ? dateLabel(nextFollowUpAt) : "Not scheduled"}</span></div><div className="flex items-start justify-between gap-3"><span className="text-muted-foreground">Quote lines</span><span className="text-right font-medium">{numberLabel(lines.length)}</span></div></CardContent></Card>
+          <Card><CardHeader className="pb-3"><CardTitle className="text-sm">Quote ownership</CardTitle></CardHeader><CardContent className="grid gap-3 text-sm"><div className="flex items-start justify-between gap-3"><span className="text-muted-foreground">Sales owner</span><span className="text-right font-medium">{String(draft.salesOwner || "Unassigned")}</span></div><div className="flex items-start justify-between gap-3"><span className="text-muted-foreground">Source</span><span className="text-right font-medium">{String(draft.source || "Manual")}</span></div><div className="flex items-start justify-between gap-3"><span className="text-muted-foreground">RFQ / reference</span><span className="break-all text-right font-medium">{String(draft.marketplaceOrderNumber || draft.sourceOrderNumber || draft.sourceOrderId || "Not set")}</span></div><div className="flex items-start justify-between gap-3"><span className="text-muted-foreground">Next follow-up</span><span className={cn("text-right font-medium", followUpDue && "text-amber-600")}>{nextFollowUpAt ? dateLabel(nextFollowUpAt) : "Not scheduled"}</span></div><div className="flex items-start justify-between gap-3"><span className="text-muted-foreground">Quote lines</span><span className="text-right font-medium">{numberLabel(lines.length)}</span></div></CardContent></Card>
         </aside>
       </div>
     </>}
@@ -1174,6 +1194,7 @@ export function DraftQuoteFieldDetailPage() {
                   <Field label="Phone"><Input type="tel" value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} /></Field>
                   <Field label="Status"><Select value={form.status} onValueChange={(status) => setForm({ ...form, status })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["draft", "reviewing", "quoted", "sent", "accepted", "lost"].map((status) => <SelectItem key={status} value={status}>{status.replace(/_/g, " ")}</SelectItem>)}</SelectContent></Select></Field>
                   <Field label="Source"><Select value={form.source} onValueChange={(source) => setForm({ ...form, source })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["Manual", "Phone", "Email", "Shopify"].map((source) => <SelectItem key={source} value={source}>{source}</SelectItem>)}</SelectContent></Select></Field>
+                  <Field label="RFQ / reference ID"><Input value={form.referenceId} onChange={(event) => setForm({ ...form, referenceId: event.target.value })} placeholder="Data warehouse RFQ or reference" /></Field>
                   <Field label="Sales owner"><Input value={form.salesOwner} onChange={(event) => setForm({ ...form, salesOwner: event.target.value })} placeholder="Assigned salesperson" /></Field>
                   <Field label="Next follow-up"><Input type="datetime-local" value={form.nextFollowUpAt} onChange={(event) => setForm({ ...form, nextFollowUpAt: event.target.value })} /></Field>
                   <div className="sm:col-span-2"><Field label="Next action"><Input value={form.nextAction} onChange={(event) => setForm({ ...form, nextAction: event.target.value })} placeholder="Example: Call purchasing manager with revised pricing" /></Field></div>

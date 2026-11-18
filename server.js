@@ -19525,6 +19525,25 @@ function normalizeQuoteTax(value = {}, taxableAmount = 0) {
 function normalizeDraftShippingEstimate(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const amount = Number(value.amount);
+  const manual = value.manual === true || String(value.providerId || value.source || "").trim().toLowerCase() === "manual";
+  if (manual) {
+    if (!Number.isFinite(amount) || amount < 0) return null;
+    return {
+      providerId: "manual",
+      carrier: "Manual",
+      service: String(value.service || "Manual shipping fee").trim() || "Manual shipping fee",
+      serviceCode: "",
+      amount,
+      currency: String(value.currency || "USD").trim() || "USD",
+      deliveryDays: null,
+      deliveryEstimate: String(value.deliveryEstimate || "").trim(),
+      warehouseId: "",
+      quotedAt: String(value.quotedAt || new Date().toISOString()).trim(),
+      expiresAt: "",
+      package: null,
+      manual: true
+    };
+  }
   const packageSource = value.package && typeof value.package === "object" && !Array.isArray(value.package) ? value.package : {};
   const packageInfo = Object.fromEntries(["weight", "length", "width", "height"].map((key) => [key, Number(packageSource[key] || 0)]));
   if (!Number.isFinite(amount) || amount < 0 || Object.values(packageInfo).some((number) => !Number.isFinite(number) || number <= 0)) return null;
@@ -58773,7 +58792,7 @@ async function handleApi(req, res) {
     const query = String(url.searchParams.get("q") || "").trim();
     const limit = Math.max(1, Math.min(12, Number(url.searchParams.get("limit") || 6) || 6));
     if (query.length < 2) return sendJson(res, 200, { results: [] });
-    const cacheKey = `dataplus:universal-search:v5:${crypto.createHash("sha1").update(`${query.toLowerCase()}:${limit}`).digest("hex")}`;
+    const cacheKey = `dataplus:universal-search:v6:${crypto.createHash("sha1").update(`${query.toLowerCase()}:${limit}`).digest("hex")}`;
     const cached = await redisCache.getJson(cacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
 
@@ -58801,7 +58820,7 @@ async function handleApi(req, res) {
       returns = db.returns || [];
     }
     const draftRows = visibleQuoteDrafts(drafts).filter((draft) => (
-      [draft.draftNumber, draft.buyer, draft.buyerEmail, draft.phone, draft.id].some(includes)
+      [draft.draftNumber, draft.referenceId, draft.rfqId, draft.sourceOrderId, draft.sourceOrderNumber, draft.marketplaceOrderNumber, draft.buyer, draft.buyerEmail, draft.phone, draft.id].some(includes)
       || (Array.isArray(draft.items) && draft.items.some((item) => [item.sku, item.title].some(includes)))
     )).slice(0, limit);
     const vendorRows = (Array.isArray(vendors) ? vendors : []).filter((vendor) => (
@@ -58839,8 +58858,8 @@ async function handleApi(req, res) {
         type: "draft",
         id: String(draft.id || ""),
         title: String(draft.draftNumber || draft.id || "Draft quote"),
-        subtitle: [draft.buyer || draft.buyerEmail, draft.status || "draft"].filter(Boolean).join(" · "),
-        matchLabel: matchedField([["Quote", draft.draftNumber], ["Customer", draft.buyer], ["Customer email", draft.buyerEmail], ["SKU", (draft.items || []).map((item) => item.sku).join(" ")]]),
+        subtitle: [draft.buyer || draft.buyerEmail, draft.marketplaceOrderNumber || draft.sourceOrderNumber || draft.sourceOrderId ? `RFQ ${draft.marketplaceOrderNumber || draft.sourceOrderNumber || draft.sourceOrderId}` : "", draft.status || "draft"].filter(Boolean).join(" · "),
+        matchLabel: matchedField([["Quote", draft.draftNumber], ["RFQ / reference", draft.marketplaceOrderNumber || draft.referenceId || draft.rfqId || draft.sourceOrderNumber || draft.sourceOrderId], ["Customer", draft.buyer], ["Customer email", draft.buyerEmail], ["SKU", (draft.items || []).map((item) => item.sku).join(" ")]]),
         href: `/drafts/${encodeURIComponent(String(draft.id || draft.draftNumber || ""))}`
       })),
       ...vendorRows.map((vendor) => ({
