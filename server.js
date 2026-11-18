@@ -33844,6 +33844,146 @@ async function previewExternalOperationalPo(input = {}, db = {}) {
   };
 }
 
+function externalPurchaseOrderDraftSkuSelection(items = [], selections = []) {
+  const byLine = new Map((Array.isArray(selections) ? selections : []).map((selection) => [Number(selection?.line), selection]));
+  const requestedSkus = new Map();
+  const requests = [];
+  for (const [index, item] of (Array.isArray(items) ? items : []).entries()) {
+    if (item?.matchStatus === "matched") continue;
+    const line = Number(item?.line || index + 1);
+    const selection = byLine.get(line);
+    if (!selection) continue;
+    const identifier = String(item?.manufacturerPartNumber || item?.vendorSku || "").trim();
+    if (externalOperationalPoIdentifierKey(selection?.manufacturerPartNumber) !== externalOperationalPoIdentifierKey(identifier)) {
+      throw Object.assign(new Error(`The requested draft SKU does not match external PO line ${line}. Preview the PO again.`), { statusCode: 409 });
+    }
+    const sku = String(selection?.sku || "").trim();
+    if (!sku || sku.length > 120 || !/^[a-z0-9][a-z0-9._/-]*$/i.test(sku)) {
+      throw Object.assign(new Error(`Enter a valid draft catalog SKU for external PO line ${line}.`), { statusCode: 400 });
+    }
+    const skuKey = sku.toLowerCase();
+    if (requestedSkus.has(skuKey) && requestedSkus.get(skuKey) !== line) {
+      throw Object.assign(new Error(`${sku} is assigned to more than one external PO line. Use a unique SKU for each product.`), { statusCode: 400 });
+    }
+    requestedSkus.set(skuKey, line);
+    requests.push({
+      item,
+      line,
+      sku,
+      title: String(selection?.title || item?.description || item?.title || sku).trim(),
+      identifier
+    });
+  }
+  return requests;
+}
+
+async function createExternalPurchaseOrderDraftProducts(preview = {}, selections = [], context = {}) {
+  const items = Array.isArray(preview.items) ? preview.items : [];
+  const requests = externalPurchaseOrderDraftSkuSelection(items, selections);
+  if (!requests.length) return { items, createdProducts: [], linkedProducts: [] };
+
+  const existingProducts = await postgres.readProductsByKeys(requests.map((request) => request.sku), { includeMarketplaceIds: false, includeVendorOffers: true });
+  const existingByKey = new Map();
+  for (const product of existingProducts || []) {
+    [product?.sku, product?.id, ...(product?.aliases || []).filter((alias) => alias?.active !== false).map((alias) => alias?.aliasSku || alias?.sku)]
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean)
+      .forEach((key) => existingByKey.set(key, product));
+  }
+
+  const supplier = preview.catalogSupplier && typeof preview.catalogSupplier === "object" ? preview.catalogSupplier : preview.vendor || {};
+  const actor = String(context.actor || "DataPlus buyer").trim() || "DataPlus buyer";
+  const externalPoNumber = String(preview.document?.poNumber || "external PO").trim() || "external PO";
+  const creationRequestId = String(context.requestId || "").trim();
+  const createdProducts = [];
+  const linkedProducts = [];
+  const productByLine = new Map();
+  const creationDb = { inventory: [] };
+
+  for (const request of requests) {
+    let product = existingByKey.get(request.sku.toLowerCase()) || null;
+    let created = false;
+    if (!product) {
+      if (!request.title) throw Object.assign(new Error(`Enter a product title before creating ${request.sku}.`), { statusCode: 400 });
+      const createdResult = upsertInventoryProductFromCatalog(creationDb, {
+        sku: request.sku,
+        title: request.title,
+        marketplaceTitle: request.title,
+        vendorSku: request.identifier,
+        mfrPartNumber: request.identifier,
+        manufacturerPartNumber: request.identifier,
+        supplier: String(supplier.name || "").trim(),
+        supplierCode: String(supplier.code || supplier.supplierCode || "").trim(),
+        vendor: String(supplier.name || "").trim(),
+        cost: Number(request.item?.unitCost || 0),
+        sourceCost: Number(request.item?.unitCost || 0),
+        stockQty: 0,
+        qty: 0,
+        active: true,
+        status: "Draft",
+        condition: "New",
+        uom: "EA",
+        uomQty: 1,
+        catalogReviewStatus: "needs_details",
+        catalogAttentionRequired: true,
+        catalogAttentionStatus: "open",
+        catalogAttentionReason: `Created from CTech PO ${externalPoNumber}. Review identifiers, content, UOM, and shipping data before marketplace launch.`,
+        needsProductDetails: true,
+        systemCreatedFromPurchaseOrder: true,
+        tags: ["external-po-create", "needs-product-details"],
+        importedFrom: "external purchase order",
+        externalPurchaseOrderNumber: externalPoNumber,
+        externalPurchaseOrderLine: request.line,
+        creationRequestId
+      }, {
+        createdBy: actor,
+        createdMethod: "External PO draft SKU creation",
+        createdSource: "External purchase order",
+        createdSourceDetail: `CTech PO ${externalPoNumber} / line ${request.line}`
+      });
+      product = createdResult.item;
+      if (!product) throw Object.assign(new Error(`DataPlus could not create ${request.sku}.`), { statusCode: 400 });
+      createdProducts.push(product);
+      created = true;
+    } else {
+      linkedProducts.push(product);
+    }
+    productByLine.set(request.line, { product, created });
+  }
+
+  if (createdProducts.length) {
+    await postgres.upsertProductsFromState(createdProducts, { insertOnly: true });
+    await postgres.upsertInventoryLevelsFromProducts(createdProducts);
+    await Promise.all([
+      redisCache.deleteByPrefix("dataplus:products:"),
+      redisCache.deleteByPrefix("dataplus:product-detail:")
+    ]).catch(() => {});
+  }
+
+  for (const [index, item] of items.entries()) {
+    const linked = productByLine.get(Number(item?.line || index + 1));
+    if (!linked?.product) continue;
+    const product = linked.product;
+    Object.assign(item, {
+      sku: String(product.sku || ""),
+      title: String(product.title || product.marketplaceTitle || item.description || product.sku || ""),
+      vendorSku: String(product.vendorSku || item.vendorSku || item.manufacturerPartNumber || ""),
+      mfrPartNumber: String(product.mfrPartNumber || item.manufacturerPartNumber || ""),
+      brand: String(product.brand || item.brand || ""),
+      manufacturer: String(product.manufacturer || item.manufacturer || ""),
+      catalogUnitCost: product.cost == null ? Number(item.unitCost || 0) : Number(product.cost),
+      catalogProduct: true,
+      matchStatus: "matched",
+      matchBasis: linked.created ? "draft catalog SKU created from external PO" : "existing catalog SKU selected for external PO",
+      reviewedMatch: true,
+      resolutionStatus: "resolved",
+      catalogProductCreatedBySystem: linked.created,
+      catalogAttentionRequired: linked.created
+    });
+  }
+  return { items, createdProducts, linkedProducts };
+}
+
 async function fulfillmentProductsForOrders(orders = []) {
   const skus = [...new Set((orders || []).flatMap((order) => (order.fulfillmentRoutes || [])
     .filter((route) => ["warehouse", "purchase"].includes(String(route.type || "").toLowerCase()))
@@ -51779,6 +51919,13 @@ function normalizeCatalogProductForInventory(record) {
     wildcardSearch: sourceTextValue(record.wildcardSearch),
     tags: sourceListValue(record.tags),
     attributes: record.attributes && typeof record.attributes === "object" ? record.attributes : {},
+    catalogReviewStatus: sourceTextValue(record.catalogReviewStatus),
+    catalogAttentionRequired: record.catalogAttentionRequired === true,
+    catalogAttentionStatus: sourceTextValue(record.catalogAttentionStatus),
+    catalogAttentionReason: sourceTextValue(record.catalogAttentionReason),
+    needsProductDetails: record.needsProductDetails === true,
+    systemCreatedFromOrderImport: record.systemCreatedFromOrderImport === true,
+    systemCreatedFromPurchaseOrder: record.systemCreatedFromPurchaseOrder === true,
     productDumpCreatedAt: sourceTextValue(record.productDumpCreatedAt || record.created_at || record.createdAt),
     productDumpUpdatedAt: sourceTextValue(record.productDumpUpdatedAt || record.updated_at || record.updatedAt),
     inactiveMailedAt: sourceTextValue(record.inactiveMailedAt || record.inactive_mailed_at),
@@ -52195,6 +52342,11 @@ async function purchaseOrderWithCatalogImages(purchaseOrder = {}, db = {}) {
         manufacturerSku: line?.manufacturerSku || line?.mfrPartNumber || line?.manufacturerPartNumber || line?.mpn
           || product.manufacturerSku || product.mfrPartNumber || product.manufacturerPartNumber || product.mpn || "",
         upc: line?.upc || line?.barcode || line?.gtin || product.upc || product.barcode || product.gtin || "",
+        catalogAttentionRequired: product?.id
+          ? product.catalogAttentionRequired === true
+          : line?.catalogAttentionRequired === true,
+        catalogAttentionReason: String(product?.catalogAttentionReason || line?.catalogAttentionReason || ""),
+        catalogReviewStatus: String(product?.catalogReviewStatus || line?.catalogReviewStatus || ""),
         scanIdentifiers: scanIdentifiersBySku.get(key) || [],
         defaultImage: String(line?.defaultImage || line?.imageUrl || line?.image || "").trim()
           || imagesBySku.get(key)
@@ -67971,6 +68123,11 @@ async function handleApi(req, res) {
         const preview = await previewExternalOperationalPo(body, db);
         if (preview.duplicate) return sendJson(res, 409, { error: `CTech PO ${preview.document.poNumber} already exists as ${preview.duplicate.poNumber}.`, duplicate: preview.duplicate });
         if (!preview.readyToCreate) return sendJson(res, 400, { error: "This external PO could not be created. Confirm it has line items and is not already recorded.", preview });
+        const catalogPreparation = await createExternalPurchaseOrderDraftProducts(preview, body.missingSkuSelections, {
+          actor,
+          requestId: body.requestId
+        });
+        preview.items = catalogPreparation.items;
         await reservePurchaseOrderNumbers(db, 1);
         const po = createManualPurchaseOrder(db, {
           vendorId: body.vendorId,
@@ -67997,8 +68154,19 @@ async function handleApi(req, res) {
           catalogSupplier: preview.catalogSupplier?.name || "",
           user: actor
         });
+        if (catalogPreparation.createdProducts.length) addPoTimeline(po, {
+          type: "catalog",
+          title: "Draft catalog SKUs created",
+          message: `${catalogPreparation.createdProducts.length} missing catalog SKU${catalogPreparation.createdProducts.length === 1 ? " was" : "s were"} created from CTech PO ${preview.document.poNumber}: ${catalogPreparation.createdProducts.map((product) => product.sku).join(", ")}. Catalog review is required before marketplace launch.`,
+          user: actor
+        });
         const unresolved = Number(po.unresolvedLineCount || 0);
-        const response = { purchaseOrder: po, message: `${po.poNumber} created from CTech PO ${preview.document.poNumber}${unresolved ? ` with ${unresolved} line${unresolved === 1 ? "" : "s"} to resolve later` : ""}.` };
+        const createdSkuCount = catalogPreparation.createdProducts.length;
+        const response = {
+          purchaseOrder: po,
+          createdProducts: catalogPreparation.createdProducts.map((product) => ({ id: product.id, sku: product.sku, title: product.title })),
+          message: `${po.poNumber} created from CTech PO ${preview.document.poNumber}${createdSkuCount ? `; ${createdSkuCount} missing SKU${createdSkuCount === 1 ? " was" : "s were"} created as ${createdSkuCount === 1 ? "a draft product" : "draft products"}` : ""}${unresolved ? `; ${unresolved} line${unresolved === 1 ? "" : "s"} still need${unresolved === 1 ? "s" : ""} review` : ""}.`
+        };
         const saved = await saveIdempotentPurchaseOrderMutation(req, body, "external-po", actorIdentity, actor, { purchaseOrders: [po], state: { sequence: db.sequence || {} } }, response);
         return sendJson(res, saved.replayed ? 200 : 201, { ...saved.response, replayed: saved.replayed });
       }
@@ -83842,6 +84010,7 @@ module.exports = {
   applyVendorDistributorSettings,
   vendorCatalogLookupKeys,
   previewExternalOperationalPo,
+  createExternalPurchaseOrderDraftProducts,
   supplierDropshipConversionPlan,
   normalizeVendorFeedSchedule,
   normalizeVendor,
