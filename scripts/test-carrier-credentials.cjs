@@ -100,6 +100,11 @@ async function run() {
   assert.doesNotMatch(server, /EchoSync credentials are available only for LINQ/);
   assert.match(server, /method === "GET" \? "settings" : "settings\.security"/);
   assert.match(ui, /Verify and save/);
+  assert.match(ui, /Echo account ENumber/);
+  assert.match(ui, /name="echosync-shipper-enumber"/);
+  assert.match(ui, /data-1p-ignore="true"/);
+  assert.match(ui, /data-lpignore="true"/);
+  assert.match(ui, /data-bwignore="true"/);
   assert.match(ui, /UPS-reported scopes/);
   assert.match(ui, /DataPlus uses/);
   for (const provider of ["FedEx", "USPS", "DHL Express", "OnTrac", "Amazon Shipping"]) assert.match(server, new RegExp(provider));
