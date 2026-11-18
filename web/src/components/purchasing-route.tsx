@@ -1223,9 +1223,13 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
       const preview = await api<{ document: Record<string, unknown>; vendor: Record<string, unknown>; catalogSupplier?: Record<string, unknown> | null; file: Record<string, unknown>; duplicate?: { id?: string; poNumber?: string } | null; readyToCreate?: boolean; unresolvedLineCount?: number; items: Array<Record<string, unknown>> }>("/api/purchase-orders/external-preview", { method: "POST", body: JSON.stringify({ vendorId: createPoForm.vendorId, fileName: externalPoFile.name, pdfBase64: await externalPoBase64(externalPoFile) }) })
       setExternalPoPreview({
         ...preview,
-        items: preview.items.map((line) => line.matchStatus === "unmatched" && line.generatedSku
-          ? { ...line, createMissingSku: true, createSku: String(line.generatedSku) }
-          : line)
+        items: preview.items.map((line) => {
+          const candidates = (Array.isArray(line.candidates) ? line.candidates : []) as Array<Record<string, unknown>>
+          const cloneCandidate = candidates.length === 1 && candidates[0].requiresSupplierClone === true ? candidates[0] : null
+          return line.generatedSku && (line.matchStatus === "unmatched" || cloneCandidate)
+            ? { ...line, createMissingSku: true, createSku: String(line.generatedSku), cloneFromSku: String(cloneCandidate?.sku || "") }
+            : line
+        })
       })
     } catch (error) { setExternalPoPreview(null); toast.error(error instanceof Error ? error.message : "Unable to read this external PO.") }
     finally { setExternalPoPreviewing(false) }
@@ -1238,6 +1242,17 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
         const candidates = (Array.isArray(line.candidates) ? line.candidates : []) as Array<Record<string, unknown>>
         const match = candidates.find((candidate) => String(candidate.sku || "").toLowerCase() === sku.toLowerCase())
         if (!match) return line
+        if (match.requiresSupplierClone === true) return {
+          ...line,
+          sku: "",
+          title: String(match.title || line.description || ""),
+          matchStatus: "clone",
+          matchBasis: `Clone ${String(match.sku || "")} for ${String(current.vendor.name || "selected supplier")}`,
+          reviewedMatch: false,
+          createMissingSku: true,
+          createSku: String(line.generatedSku || ""),
+          cloneFromSku: String(match.sku || ""),
+        }
         return {
           ...line,
           sku: String(match.sku || ""),
@@ -1245,6 +1260,8 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
           matchStatus: "matched",
           matchBasis: `${String(match.matchBasis || "manufacturer part number")} (reviewed)`,
           reviewedMatch: true,
+          createMissingSku: false,
+          cloneFromSku: "",
         }
       })
       return { ...current, items, unresolvedLineCount: items.filter((line) => line.matchStatus !== "matched").length }
@@ -1258,6 +1275,17 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
         const candidates = (Array.isArray(line.candidates) ? line.candidates : []) as Array<Record<string, unknown>>
         if (candidates.length !== 1) return line
         const match = candidates[0]
+        if (match.requiresSupplierClone === true) return {
+          ...line,
+          sku: "",
+          title: String(match.title || line.description || ""),
+          matchStatus: "clone",
+          matchBasis: `Clone ${String(match.sku || "")} for ${String(current.vendor.name || "selected supplier")}`,
+          reviewedMatch: false,
+          createMissingSku: true,
+          createSku: String(line.generatedSku || ""),
+          cloneFromSku: String(match.sku || ""),
+        }
         return {
           ...line,
           sku: String(match.sku || ""),
@@ -1265,6 +1293,8 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
           matchStatus: "matched",
           matchBasis: `${String(match.matchBasis || "manufacturer part number")} (reviewed)`,
           reviewedMatch: true,
+          createMissingSku: false,
+          cloneFromSku: "",
         }
       })
       return { ...current, items, unresolvedLineCount: items.filter((line) => line.matchStatus !== "matched").length }
@@ -1277,6 +1307,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     } : current)
   }
   const externalPoDraftSkuCount = externalPoPreview?.items.filter((line) => line.matchStatus !== "matched" && line.createMissingSku === true && String(line.createSku || "").trim()).length || 0
+  const externalPoCloneSkuCount = externalPoPreview?.items.filter((line) => line.matchStatus !== "matched" && line.createMissingSku === true && String(line.createSku || "").trim() && String(line.cloneFromSku || "").trim()).length || 0
   const externalPoFollowUpCount = externalPoPreview?.items.filter((line) => line.matchStatus !== "matched" && !(line.createMissingSku === true && String(line.createSku || "").trim())).length || 0
   const saveExternalPo = async () => {
     if (!createPoForm.vendorId || !createPoForm.warehouseId || !externalPoFile || !externalPoPreview?.readyToCreate) return toast.error("Preview a valid PDF before adding this purchase order.")
@@ -1289,7 +1320,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
         .map((line, index) => ({ line: Number(line.line || index + 1), manufacturerPartNumber: String(line.manufacturerPartNumber || ""), sku: String(line.sku || "") }))
       const missingSkuSelections = externalPoPreview.items
         .filter((line) => line.matchStatus !== "matched" && line.createMissingSku === true && String(line.createSku || "").trim())
-        .map((line, index) => ({ line: Number(line.line || index + 1), manufacturerPartNumber: String(line.manufacturerPartNumber || ""), sku: String(line.createSku || "").trim(), title: String(line.description || line.title || "").trim() }))
+        .map((line, index) => ({ line: Number(line.line || index + 1), manufacturerPartNumber: String(line.manufacturerPartNumber || ""), sku: String(line.createSku || "").trim(), title: String(line.description || line.title || "").trim(), cloneFromSku: String(line.cloneFromSku || "").trim() }))
       const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ requestId, external: true, vendorId: createPoForm.vendorId, warehouseId: createPoForm.warehouseId, notes: createPoForm.notes, inventoryPurpose: createPoForm.inventoryPurpose, liveChannel: createPoForm.liveChannel, fileName: externalPoFile.name, pdfBase64: await externalPoBase64(externalPoFile), selectedMatches, missingSkuSelections, user: operatorName }) })
       const poId = String(result.purchaseOrder?.id || "")
       toast.success(result.message || "External purchase order added.")
@@ -1773,7 +1804,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
             {externalPoPreview ? <div className="grid gap-4">
               <div className="grid gap-3 rounded-md border bg-muted/20 p-4 sm:grid-cols-2 lg:grid-cols-6"><Detail label="CTech PO #" value={String(externalPoPreview.document.poNumber || "-")} /><Detail label="Supplier" value={String(externalPoPreview.vendor.name || "-")} />{externalPoPreview.catalogSupplier ? <Detail label="Catalog SKUs" value={String(externalPoPreview.catalogSupplier.name || "-")} /> : null}<Detail label="PO date" value={String(externalPoPreview.document.orderedAt || "-")} /><Detail label="Expected" value={String(externalPoPreview.document.expectedAt || "-")} /><Detail label="Total" value={moneyLabel(Number(externalPoPreview.document.total || 0))} /></div>
               {externalPoPreview.duplicate ? <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>PO already exists</AlertTitle><AlertDescription>CTech PO {String(externalPoPreview.document.poNumber || "")} is already linked to {String(externalPoPreview.duplicate.poNumber || "an existing DataPlus PO")}.</AlertDescription></Alert> : null}
-              {externalPoPreview.items.some((line) => line.matchStatus !== "matched" && Array.isArray(line.candidates) && line.candidates.length === 1) ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-blue-500/30 bg-blue-500/10 p-3"><div><p className="text-sm font-medium">Unique manufacturer-part matches found</p><p className="text-xs text-muted-foreground">Review and apply catalog SKUs whose MPN matches after spaces, dashes, and punctuation are removed.</p></div><Button type="button" size="sm" variant="outline" onClick={applyUniqueExternalPoMatches}><ListChecks className="size-4" /> Use unique MPN matches</Button></div> : null}
+              {externalPoPreview.items.some((line) => line.matchStatus !== "matched" && Array.isArray(line.candidates) && line.candidates.length === 1) ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-blue-500/30 bg-blue-500/10 p-3"><div><p className="text-sm font-medium">Supplier-specific product matches found</p><p className="text-xs text-muted-foreground">Existing {String(externalPoPreview.vendor.name || "supplier")} records will be reused. Matches owned by another supplier will be copied into new draft SKUs for {String(externalPoPreview.vendor.name || "this supplier")}.</p></div><Button type="button" size="sm" variant="outline" onClick={applyUniqueExternalPoMatches}><ListChecks className="size-4" /> Resolve unique matches</Button></div> : null}
               <div className="max-h-80 overflow-auto rounded-md border">
                 <Table>
                   <TableHeader className="sticky top-0 z-10 bg-background"><TableRow><TableHead>ITEM / MPN</TableHead><TableHead className="min-w-56">Matched SKU</TableHead><TableHead>Description</TableHead><TableHead>Match</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">Unit cost</TableHead><TableHead className="text-right">Total</TableHead></TableRow></TableHeader>
@@ -1781,17 +1812,20 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
                     const candidates = (Array.isArray(line.candidates) ? line.candidates : []) as Array<Record<string, unknown>>
                     const reviewable = candidates.length > 0 && (line.matchStatus !== "matched" || line.reviewedMatch === true)
                     const willCreateDraft = line.matchStatus !== "matched" && line.createMissingSku === true && Boolean(String(line.createSku || "").trim())
+                    const cloneFromSku = String(line.cloneFromSku || "").trim()
+                    const selectedCandidateSku = cloneFromSku || (line.reviewedMatch === true ? String(line.sku || "") : "")
+                    const supplierName = String(externalPoPreview.vendor.name || "selected supplier")
                     return <TableRow key={`${String(line.manufacturerPartNumber)}-${index}`} className={willCreateDraft ? "bg-amber-500/10 hover:bg-amber-500/15" : undefined}>
                       <TableCell className="font-mono text-xs">{String(line.manufacturerPartNumber || "-")}</TableCell>
-                      <TableCell>{reviewable ? <Select value={line.reviewedMatch === true ? String(line.sku || "") : undefined} onValueChange={(sku) => chooseExternalPoMatch(index, sku)}><SelectTrigger className="h-8 min-w-52"><SelectValue placeholder={candidates.length === 1 ? "Review suggested SKU" : "Choose catalog SKU"} /></SelectTrigger><SelectContent>{candidates.map((candidate) => <SelectItem key={String(candidate.sku)} value={String(candidate.sku)}><span className="font-mono text-xs">{String(candidate.sku)}</span>{candidate.supplier ? <span className="ml-2 text-xs text-muted-foreground">{String(candidate.supplier)}</span> : null}</SelectItem>)}</SelectContent></Select> : line.sku ? <a className="font-mono text-xs font-medium text-primary hover:underline" href={`/products/${encodeURIComponent(String(line.sku))}`} target="_blank" rel="noreferrer">{String(line.sku)}</a> : line.matchStatus === "unmatched" ? <div className="grid min-w-64 gap-1.5"><div className="flex items-center gap-2"><Checkbox checked={line.createMissingSku === true} onCheckedChange={(checked) => updateExternalPoDraftSku(index, { createMissingSku: checked === true })} aria-label={`Create draft SKU for ${String(line.manufacturerPartNumber || `line ${index + 1}`)}`} /><Input className="h-8 font-mono text-xs" value={String(line.createSku || line.generatedSku || "")} disabled={line.createMissingSku !== true} onChange={(event) => updateExternalPoDraftSku(index, { createSku: event.target.value })} placeholder="New DataPlus SKU" /></div><span className="text-xs text-muted-foreground">Create as draft catalog product</span></div> : <span className="text-destructive">Not found</span>}</TableCell>
+                      <TableCell>{reviewable ? <div className="grid min-w-72 gap-1.5"><Select value={selectedCandidateSku || undefined} onValueChange={(sku) => chooseExternalPoMatch(index, sku)}><SelectTrigger className="h-8"><SelectValue placeholder={candidates.length === 1 ? "Review suggested product" : "Choose source product"} /></SelectTrigger><SelectContent>{candidates.map((candidate) => <SelectItem key={String(candidate.sku)} value={String(candidate.sku)}><span className="font-mono text-xs">{candidate.requiresSupplierClone === true ? `Clone ${String(candidate.sku)}` : String(candidate.sku)}</span>{candidate.supplier ? <span className="ml-2 text-xs text-muted-foreground">{String(candidate.supplier)}{candidate.requiresSupplierClone === true ? ` as ${supplierName}` : ""}</span> : null}</SelectItem>)}</SelectContent></Select>{cloneFromSku ? <div className="grid gap-1"><div className="flex items-center gap-2"><Checkbox checked={line.createMissingSku === true} onCheckedChange={(checked) => updateExternalPoDraftSku(index, { createMissingSku: checked === true })} aria-label={`Clone ${cloneFromSku} for ${supplierName}`} /><Input className="h-8 font-mono text-xs" value={String(line.createSku || line.generatedSku || "")} disabled={line.createMissingSku !== true} onChange={(event) => updateExternalPoDraftSku(index, { createSku: event.target.value })} placeholder={`New ${supplierName} DataPlus SKU`} /></div><span className="text-xs text-muted-foreground">Copies product data from {cloneFromSku}. PO vendor SKU: <span className="font-mono">{String(line.manufacturerPartNumber || "-")}</span>.</span></div> : null}</div> : line.sku ? <a className="font-mono text-xs font-medium text-primary hover:underline" href={`/products/${encodeURIComponent(String(line.sku))}`} target="_blank" rel="noreferrer">{String(line.sku)}</a> : line.matchStatus === "unmatched" ? <div className="grid min-w-64 gap-1.5"><div className="flex items-center gap-2"><Checkbox checked={line.createMissingSku === true} onCheckedChange={(checked) => updateExternalPoDraftSku(index, { createMissingSku: checked === true })} aria-label={`Create draft SKU for ${String(line.manufacturerPartNumber || `line ${index + 1}`)}`} /><Input className="h-8 font-mono text-xs" value={String(line.createSku || line.generatedSku || "")} disabled={line.createMissingSku !== true} onChange={(event) => updateExternalPoDraftSku(index, { createSku: event.target.value })} placeholder="New DataPlus SKU" /></div><span className="text-xs text-muted-foreground">Create as draft catalog product</span></div> : <span className="text-destructive">Not found</span>}</TableCell>
                       <TableCell className="max-w-72"><p className="truncate" title={String(line.description || "")}>{String(line.description || "-")}</p></TableCell>
-                      <TableCell><Badge variant={line.matchStatus === "matched" ? "success" : line.createMissingSku === true && String(line.createSku || "").trim() ? "warning" : line.matchStatus === "review" || line.matchStatus === "ambiguous" ? "secondary" : "destructive"}>{line.matchStatus === "matched" ? String(line.matchBasis || "Matched") : line.createMissingSku === true && String(line.createSku || "").trim() ? "Create draft SKU" : line.matchStatus === "review" ? "Review MPN match" : line.matchStatus === "ambiguous" ? "Choose catalog SKU" : "No catalog match"}</Badge></TableCell>
+                      <TableCell><Badge variant={line.matchStatus === "matched" ? "success" : line.createMissingSku === true && String(line.createSku || "").trim() ? "warning" : line.matchStatus === "review" || line.matchStatus === "ambiguous" ? "secondary" : "destructive"}>{line.matchStatus === "matched" ? String(line.matchBasis || "Matched") : line.createMissingSku === true && String(line.createSku || "").trim() ? cloneFromSku ? `Clone for ${supplierName}` : "Create draft SKU" : line.matchStatus === "review" ? "Review MPN match" : line.matchStatus === "ambiguous" ? "Choose source product" : "No catalog match"}</Badge></TableCell>
                       <TableCell className="text-right">{numberLabel(Number(line.qty || 0))}</TableCell><TableCell className="text-right">{moneyLabel(Number(line.unitCost || 0))}</TableCell><TableCell className="text-right font-medium">{moneyLabel(Number(line.lineTotal || 0))}</TableCell>
                     </TableRow>
                   })}</TableBody>
                 </Table>
               </div>
-              {externalPoPreview.duplicate ? null : externalPoDraftSkuCount > 0 || externalPoFollowUpCount > 0 ? <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>{externalPoDraftSkuCount > 0 ? `${numberLabel(externalPoDraftSkuCount)} draft catalog SKU${externalPoDraftSkuCount === 1 ? "" : "s"} will be created` : "Ready to add with SKU follow-up"}</AlertTitle><AlertDescription>{externalPoDraftSkuCount > 0 ? `The new SKU${externalPoDraftSkuCount === 1 ? "" : "s"} will use the PO title, supplier identifiers, and unit cost with zero starting inventory.` : ""}{externalPoFollowUpCount > 0 ? ` ${numberLabel(externalPoFollowUpCount)} line${externalPoFollowUpCount === 1 ? " still needs" : "s still need"} a catalog match before received stock can post.` : ""}</AlertDescription></Alert> : <Alert><CheckCircle2 className="size-4" /><AlertTitle>Ready to add</AlertTitle><AlertDescription>All {numberLabel(externalPoPreview.items.length)} line{externalPoPreview.items.length === 1 ? "" : "s"} matched. DataPlus will preserve the CTech PO number and create a separate internal DataPlus PO number.</AlertDescription></Alert>}
+              {externalPoPreview.duplicate ? null : externalPoDraftSkuCount > 0 || externalPoFollowUpCount > 0 ? <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>{externalPoDraftSkuCount > 0 ? `${numberLabel(externalPoDraftSkuCount)} supplier draft SKU${externalPoDraftSkuCount === 1 ? "" : "s"} will be created` : "Ready to add with SKU follow-up"}</AlertTitle><AlertDescription>{externalPoCloneSkuCount > 0 ? `${numberLabel(externalPoCloneSkuCount)} will copy existing product content into a separate ${String(externalPoPreview.vendor.name || "supplier")} SKU. ` : ""}{externalPoDraftSkuCount > externalPoCloneSkuCount ? `${numberLabel(externalPoDraftSkuCount - externalPoCloneSkuCount)} will start from the PO title and supplier identifier. ` : ""}{externalPoDraftSkuCount > 0 ? "Every new SKU starts as Draft with zero inventory and uses the PO unit cost." : ""}{externalPoFollowUpCount > 0 ? ` ${numberLabel(externalPoFollowUpCount)} line${externalPoFollowUpCount === 1 ? " still needs" : "s still need"} a catalog decision before received stock can post.` : ""}</AlertDescription></Alert> : <Alert><CheckCircle2 className="size-4" /><AlertTitle>Ready to add</AlertTitle><AlertDescription>All {numberLabel(externalPoPreview.items.length)} line{externalPoPreview.items.length === 1 ? "" : "s"} matched. DataPlus will preserve the CTech PO number and create a separate internal DataPlus PO number.</AlertDescription></Alert>}
             </div> : null}
             <FormField><FieldLabel>Internal notes</FieldLabel><Textarea className="min-h-20" value={createPoForm.notes} onChange={(event) => setCreatePoForm((current) => ({ ...current, notes: event.target.value }))} placeholder="Optional import or receiving context" /></FormField>
           </div> : <div className="grid gap-5">

@@ -50,6 +50,7 @@ const { matchExternalOperationalPoItems, catalogVendorForSupplier, applyVendorDi
     assert.equal(preview[0].sku, "");
     assert.equal(preview[0].candidates.length, 1);
     assert.equal(preview[0].candidates[0].sku, "BUS142489TRV");
+    assert.equal(preview[0].candidates[0].requiresSupplierClone, true);
     assert.equal(preview[1].matchStatus, "ambiguous");
     assert.equal(preview[1].candidates.length, 2);
 
@@ -57,12 +58,11 @@ const { matchExternalOperationalPoItems, catalogVendorForSupplier, applyVendorDi
       { line: 1, manufacturerPartNumber: "48324094", sku: "BUS142489TRV" },
       { line: 2, manufacturerPartNumber: "48-32-4403", sku: "BUS175222DIB" },
     ]);
-    assert.equal(reviewed[0].matchStatus, "matched");
-    assert.equal(reviewed[0].sku, "BUS142489TRV");
-    assert.equal(reviewed[0].reviewedMatch, true);
-    assert.match(reviewed[0].matchBasis, /reviewed/);
-    assert.equal(reviewed[1].matchStatus, "matched");
-    assert.equal(reviewed[1].sku, "BUS175222DIB");
+    assert.equal(reviewed[0].matchStatus, "review");
+    assert.equal(reviewed[0].sku, "");
+    assert.equal(reviewed[0].reviewedMatch, false);
+    assert.equal(reviewed[1].matchStatus, "ambiguous");
+    assert.equal(reviewed[1].sku, "");
 
     const rejectedInjection = await matchExternalOperationalPoItems(vendor, sourceItems, [
       { line: 1, manufacturerPartNumber: "48-32-4094", sku: "NOT-A-CANDIDATE" },

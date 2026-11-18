@@ -33782,9 +33782,10 @@ async function matchExternalOperationalPoItems(vendor, items = [], selectedMatch
     const bestRank = candidates.length ? Number(candidates[0].match_rank || 99) : 99;
     const best = candidates.filter((candidate) => Number(candidate.match_rank || 99) === bestRank);
     const selected = selectedByLine.get(index + 1);
-    const reviewedMatch = selected && selected.identifierKey === identifierKey
+    const reviewedCandidate = selected && selected.identifierKey === identifierKey
       ? best.find((candidate) => String(candidate.sku || "").trim().toLowerCase() === selected.sku)
       : null;
+    const reviewedMatch = reviewedCandidate && Number(reviewedCandidate.match_rank || 99) < 3 ? reviewedCandidate : null;
     const automaticMatch = bestRank < 3 && best.length === 1 ? best[0] : null;
     const match = reviewedMatch || automaticMatch;
     const reviewRequired = !match && bestRank === 3 && best.length > 0;
@@ -33801,7 +33802,13 @@ async function matchExternalOperationalPoItems(vendor, items = [], selectedMatch
       matchBasis: String(match ? `${match.match_basis}${reviewedMatch ? " (reviewed)" : ""}` : ""),
       matchStatus: match ? "matched" : reviewRequired && best.length === 1 ? "review" : best.length > 1 ? "ambiguous" : "unmatched",
       reviewedMatch: Boolean(reviewedMatch),
-      candidates: best.slice(0, 8).map((candidate) => ({ sku: candidate.sku, title: candidate.title, supplier: candidate.supplier, matchBasis: candidate.match_basis }))
+      candidates: best.slice(0, 8).map((candidate) => ({
+        sku: candidate.sku,
+        title: candidate.title,
+        supplier: candidate.supplier,
+        matchBasis: candidate.match_basis,
+        requiresSupplierClone: Number(candidate.match_rank || 99) >= 3
+      }))
     };
   });
 }
@@ -33866,15 +33873,50 @@ function externalPurchaseOrderDraftSkuSelection(items = [], selections = []) {
       throw Object.assign(new Error(`${sku} is assigned to more than one external PO line. Use a unique SKU for each product.`), { statusCode: 400 });
     }
     requestedSkus.set(skuKey, line);
+    const cloneFromSku = String(selection?.cloneFromSku || "").trim();
+    if (cloneFromSku) {
+      const cloneCandidate = (Array.isArray(item?.candidates) ? item.candidates : []).find((candidate) => (
+        candidate?.requiresSupplierClone === true
+        && String(candidate?.sku || "").trim().toLowerCase() === cloneFromSku.toLowerCase()
+      ));
+      if (!cloneCandidate) {
+        throw Object.assign(new Error(`${cloneFromSku} is not an approved supplier-clone source for external PO line ${line}. Preview the PO again.`), { statusCode: 409 });
+      }
+    }
     requests.push({
       item,
       line,
       sku,
       title: String(selection?.title || item?.description || item?.title || sku).trim(),
-      identifier
+      identifier,
+      cloneFromSku
     });
   }
   return requests;
+}
+
+function externalPurchaseOrderProductBelongsToSupplier(product = {}, supplier = {}) {
+  const supplierIds = new Set([supplier.id, supplier.vendorId]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean));
+  const supplierNames = new Set([supplier.name, supplier.code, supplier.supplierCode]
+    .map((value) => warehouseAuditSupplierIdentity(value))
+    .filter(Boolean));
+  const candidates = [
+    product,
+    ...(Array.isArray(product.vendorOffers) ? product.vendorOffers : []),
+    ...(Array.isArray(product.suppliers) ? product.suppliers : [])
+  ];
+  return candidates.some((candidate) => {
+    const ids = [candidate?.supplierId, candidate?.vendorId]
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean);
+    if (ids.some((value) => supplierIds.has(value))) return true;
+    return [candidate?.supplier, candidate?.supplierName, candidate?.vendor, candidate?.vendorName, candidate?.supplierCode]
+      .map((value) => warehouseAuditSupplierIdentity(value))
+      .filter(Boolean)
+      .some((value) => supplierNames.has(value));
+  });
 }
 
 async function createExternalPurchaseOrderDraftProducts(preview = {}, selections = [], context = {}) {
@@ -33882,16 +33924,21 @@ async function createExternalPurchaseOrderDraftProducts(preview = {}, selections
   const requests = externalPurchaseOrderDraftSkuSelection(items, selections);
   if (!requests.length) return { items, createdProducts: [], linkedProducts: [] };
 
-  const existingProducts = await postgres.readProductsByKeys(requests.map((request) => request.sku), { includeMarketplaceIds: false, includeVendorOffers: true });
+  const existingProducts = await postgres.readProductsByKeys(
+    [...new Set(requests.flatMap((request) => [request.sku, request.cloneFromSku]).filter(Boolean))],
+    { includeMarketplaceIds: false, includeVendorOffers: true }
+  );
   const existingByKey = new Map();
+  const productsBySku = new Map();
   for (const product of existingProducts || []) {
+    if (product?.sku) productsBySku.set(String(product.sku).trim().toLowerCase(), product);
     [product?.sku, product?.id, ...(product?.aliases || []).filter((alias) => alias?.active !== false).map((alias) => alias?.aliasSku || alias?.sku)]
       .map((value) => String(value || "").trim().toLowerCase())
       .filter(Boolean)
       .forEach((key) => existingByKey.set(key, product));
   }
 
-  const supplier = preview.catalogSupplier && typeof preview.catalogSupplier === "object" ? preview.catalogSupplier : preview.vendor || {};
+  const supplier = preview.vendor && typeof preview.vendor === "object" ? preview.vendor : preview.catalogSupplier || {};
   const actor = String(context.actor || "DataPlus buyer").trim() || "DataPlus buyer";
   const externalPoNumber = String(preview.document?.poNumber || "external PO").trim() || "external PO";
   const creationRequestId = String(context.requestId || "").trim();
@@ -33903,52 +33950,98 @@ async function createExternalPurchaseOrderDraftProducts(preview = {}, selections
   for (const request of requests) {
     let product = existingByKey.get(request.sku.toLowerCase()) || null;
     let created = false;
+    if (product && !externalPurchaseOrderProductBelongsToSupplier(product, supplier)) {
+      throw Object.assign(new Error(`${request.sku} already belongs to another supplier. Enter a different ${String(supplier.name || "supplier-specific").trim()} SKU for external PO line ${request.line}.`), { statusCode: 409 });
+    }
     if (!product) {
       if (!request.title) throw Object.assign(new Error(`Enter a product title before creating ${request.sku}.`), { statusCode: 400 });
-      const createdResult = upsertInventoryProductFromCatalog(creationDb, {
-        sku: request.sku,
-        title: request.title,
-        marketplaceTitle: request.title,
-        vendorSku: request.identifier,
-        mfrPartNumber: request.identifier,
-        manufacturerPartNumber: request.identifier,
-        supplier: String(supplier.name || "").trim(),
-        supplierCode: String(supplier.code || supplier.supplierCode || "").trim(),
-        vendor: String(supplier.name || "").trim(),
-        cost: Number(request.item?.unitCost || 0),
-        sourceCost: Number(request.item?.unitCost || 0),
-        stockQty: 0,
-        qty: 0,
-        active: true,
-        status: "Draft",
-        condition: "New",
-        uom: "EA",
-        uomQty: 1,
-        catalogReviewStatus: "needs_details",
-        catalogAttentionRequired: true,
-        catalogAttentionStatus: "open",
-        catalogAttentionReason: `Created from CTech PO ${externalPoNumber}. Review identifiers, content, UOM, and shipping data before marketplace launch.`,
-        needsProductDetails: true,
-        systemCreatedFromPurchaseOrder: true,
-        tags: ["external-po-create", "needs-product-details"],
-        importedFrom: "external purchase order",
-        externalPurchaseOrderNumber: externalPoNumber,
-        externalPurchaseOrderLine: request.line,
-        creationRequestId
-      }, {
-        createdBy: actor,
-        createdMethod: "External PO draft SKU creation",
-        createdSource: "External purchase order",
-        createdSourceDetail: `CTech PO ${externalPoNumber} / line ${request.line}`
-      });
-      product = createdResult.item;
+      const cloneSource = request.cloneFromSku ? productsBySku.get(request.cloneFromSku.toLowerCase()) : null;
+      if (request.cloneFromSku && !cloneSource) {
+        throw Object.assign(new Error(`${request.cloneFromSku} is no longer available to clone for external PO line ${request.line}. Preview the PO again.`), { statusCode: 409 });
+      }
+      if (cloneSource) {
+        product = cloneCatalogProduct(cloneSource, {
+          newSku: request.sku,
+          title: request.title,
+          copyContent: true,
+          copyMedia: true,
+          copyShipping: true,
+          copyIdentifiers: true,
+          supplier: {
+            id: String(supplier.id || "").trim(),
+            name: String(supplier.name || "").trim(),
+            code: String(supplier.code || supplier.supplierCode || "").trim()
+          }
+        }, actor);
+        Object.assign(product, {
+          vendorSku: request.identifier,
+          sourceSku: request.identifier,
+          mfrPartNumber: request.identifier || product.mfrPartNumber,
+          manufacturerPartNumber: request.identifier || product.mfrPartNumber,
+          cost: Number(request.item?.unitCost || 0),
+          sourceCost: Number(request.item?.unitCost || 0),
+          fobPrice: Number(request.item?.unitCost || 0),
+          catalogReviewStatus: "needs_details",
+          catalogAttentionRequired: true,
+          catalogAttentionStatus: "open",
+          catalogAttentionReason: `Cloned from ${cloneSource.sku} for ${String(supplier.name || "the selected supplier").trim()} from CTech PO ${externalPoNumber}. Verify the supplier SKU, cost, UOM, and identifiers before activation.`,
+          needsProductDetails: true,
+          systemCreatedFromPurchaseOrder: true,
+          tags: [...new Set([...(Array.isArray(product.tags) ? product.tags : []), "external-po-create", "supplier-specific-clone", "needs-product-details"])],
+          importedFrom: "external purchase order",
+          externalPurchaseOrderNumber: externalPoNumber,
+          externalPurchaseOrderLine: request.line,
+          creationRequestId,
+          createdMethod: "External PO supplier-specific clone",
+          createdSource: "External purchase order",
+          createdSourceDetail: `CTech PO ${externalPoNumber} / line ${request.line} / cloned from ${cloneSource.sku}`
+        });
+      } else {
+        const createdResult = upsertInventoryProductFromCatalog(creationDb, {
+          sku: request.sku,
+          title: request.title,
+          marketplaceTitle: request.title,
+          vendorSku: request.identifier,
+          mfrPartNumber: request.identifier,
+          manufacturerPartNumber: request.identifier,
+          supplier: String(supplier.name || "").trim(),
+          supplierCode: String(supplier.code || supplier.supplierCode || "").trim(),
+          vendor: String(supplier.name || "").trim(),
+          cost: Number(request.item?.unitCost || 0),
+          sourceCost: Number(request.item?.unitCost || 0),
+          stockQty: 0,
+          qty: 0,
+          active: false,
+          status: "Draft",
+          condition: "New",
+          uom: "EA",
+          uomQty: 1,
+          catalogReviewStatus: "needs_details",
+          catalogAttentionRequired: true,
+          catalogAttentionStatus: "open",
+          catalogAttentionReason: `Created from CTech PO ${externalPoNumber}. Review identifiers, content, UOM, and shipping data before marketplace launch.`,
+          needsProductDetails: true,
+          systemCreatedFromPurchaseOrder: true,
+          tags: ["external-po-create", "needs-product-details"],
+          importedFrom: "external purchase order",
+          externalPurchaseOrderNumber: externalPoNumber,
+          externalPurchaseOrderLine: request.line,
+          creationRequestId
+        }, {
+          createdBy: actor,
+          createdMethod: "External PO draft SKU creation",
+          createdSource: "External purchase order",
+          createdSourceDetail: `CTech PO ${externalPoNumber} / line ${request.line}`
+        });
+        product = createdResult.item;
+      }
       if (!product) throw Object.assign(new Error(`DataPlus could not create ${request.sku}.`), { statusCode: 400 });
       createdProducts.push(product);
       created = true;
     } else {
       linkedProducts.push(product);
     }
-    productByLine.set(request.line, { product, created });
+    productByLine.set(request.line, { product, created, cloneFromSku: request.cloneFromSku });
   }
 
   if (createdProducts.length) {
@@ -33974,10 +34067,13 @@ async function createExternalPurchaseOrderDraftProducts(preview = {}, selections
       catalogUnitCost: product.cost == null ? Number(item.unitCost || 0) : Number(product.cost),
       catalogProduct: true,
       matchStatus: "matched",
-      matchBasis: linked.created ? "draft catalog SKU created from external PO" : "existing catalog SKU selected for external PO",
+      matchBasis: linked.cloneFromSku
+        ? `supplier-specific draft cloned from ${linked.cloneFromSku}`
+        : linked.created ? "draft catalog SKU created from external PO" : "existing catalog SKU selected for external PO",
       reviewedMatch: true,
       resolutionStatus: "resolved",
       catalogProductCreatedBySystem: linked.created,
+      catalogProductClonedFromSku: linked.cloneFromSku || "",
       catalogAttentionRequired: linked.created
     });
   }
