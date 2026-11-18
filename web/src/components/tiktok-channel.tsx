@@ -9,6 +9,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Skeleton } from "@/components/ui/skeleton"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -74,6 +75,7 @@ export function TikTokChannel({
   onRefresh?: () => void
 }) {
   const [status, setStatus] = useState<Json>({})
+  const [statusLoading, setStatusLoading] = useState(true)
   const [liveStatus, setLiveStatus] = useState<Json>({ metrics: {}, sessions: [], analytics: {}, attribution: {} })
   const [liveLoading, setLiveLoading] = useState(false)
   const [workspace, setWorkspace] = useState<Json>({ commerce: [], affiliate: [], promotions: [], engagement: [], webhooks: {} })
@@ -84,6 +86,7 @@ export function TikTokChannel({
   const [error, setError] = useState("")
   const [message, setMessage] = useState("")
   const [job, setJob] = useState<Json | null>(null)
+  const [setupRun, setSetupRun] = useState<Json | null>(null)
   const [dateRange, setDateRange] = useState({ startDate: defaultStart(), endDate: defaultEnd() })
   const [historicalBackfill, setHistoricalBackfill] = useState(true)
   const [credentials, setCredentials] = useState({ appKey: "", appSecret: "", serviceId: "" })
@@ -135,20 +138,9 @@ export function TikTokChannel({
       setStatus(next)
       setCredentials({ appKey: next.appKey || "", appSecret: "", serviceId: next.serviceId || "" })
     }).catch(reason => active && setError(reason instanceof Error ? reason.message : "TikTok status could not load."))
+      .finally(() => active && setStatusLoading(false))
     return () => { active = false }
   }, [channel.id, channel.settings?.tiktokEnvironment])
-
-  useEffect(() => {
-    let active = true
-    request("live").then(next => active && setLiveStatus(next)).catch(() => {})
-    return () => { active = false }
-  }, [channel.id])
-
-  useEffect(() => {
-    let active = true
-    request("workspace").then(next => active && setWorkspace(next)).catch(() => {})
-    return () => { active = false }
-  }, [channel.id])
 
   useEffect(() => {
     const receiveAuthorization = (event: MessageEvent) => {
@@ -267,7 +259,8 @@ export function TikTokChannel({
       enableOperationalSync: initialSetup.enableOperationalSync,
       configureWebhooks: initialSetup.enableOperationalSync && initialSetup.configureWebhooks,
     })
-    await Promise.all([refresh(), refreshWorkspace()])
+    setSetupRun(result)
+    await refresh()
     onRefresh?.()
     return result
   }
@@ -297,6 +290,8 @@ export function TikTokChannel({
   const setupDatesValid = initialSetup.historyMode === "none" || Boolean(selectedHistoryStart && selectedHistoryStart < initialSetup.operationalStartDate)
   const ongoingSyncReady = rules.tiktokOrdersEnabled === true && rules.tiktokOrderScheduleEnabled === true
   const setupStatus = onboarding?.startedAt && ongoingSyncReady ? "Ongoing sync active" : onboarding?.startedAt ? "Setup started" : "Setup needed"
+  const setupJobsRunning = activeJobs.some((row: Json) => ["tiktok-products", "tiktok-orders", "tiktok-webhook-setup"].includes(String(row.task || ""))
+    && ["queued", "pending", "running", "processing", "stopping"].includes(String(row.status || "").toLowerCase()))
   const dirty = Object.keys(edits).length > 0
   const keysSaved = Boolean(status.appKey) && status.appSecretConfigured === true
   const canSaveCredentials = status.encryptedStorageReady === true
@@ -305,6 +300,20 @@ export function TikTokChannel({
   const canConnect = canSaveCredentials && Boolean(credentials.serviceId.trim())
   const callbackUrl = typeof window === "undefined" ? "/auth/tiktok/callback" : `${window.location.origin}/auth/tiktok/callback`
   const missingShopScope = /seller\.authorization\.info|Shop Authorized Information/i.test(error)
+
+  useEffect(() => {
+    if (!setupJobsRunning) return
+    const timer = window.setInterval(() => {
+      void refresh().catch(() => {})
+    }, 4000)
+    return () => window.clearInterval(timer)
+  }, [setupJobsRunning, status.activeAccountId])
+
+  const changeTab = (value: string) => {
+    setTab(value)
+    if (value === "live" && !liveStatus.syncedAt && !liveLoading) void refreshLive().catch(() => {})
+    if (["analytics", "webhooks", "fulfillment"].includes(value) && !workspaceLoading) void refreshWorkspace().catch(() => {})
+  }
 
   return (
     <Card className="min-w-0">
@@ -322,13 +331,25 @@ export function TikTokChannel({
         {error && <Alert variant="destructive"><AlertTitle>{missingShopScope ? "TikTok API permission required" : "TikTok Shop action failed"}</AlertTitle><AlertDescription>{error}{missingShopScope && <span className="mt-2 block">After TikTok approves or saves the permission, use the seller account Actions menu and choose <strong>Reconnect</strong>. <a className="underline" href="https://partner.tiktokshop.com/docv2/page/6507ead7b99d5302be949ba9" target="_blank" rel="noreferrer">View TikTok's required scope</a>.</span>}</AlertDescription></Alert>}
         {message && <Alert><CheckCircle2 className="size-4" /><AlertTitle>Update</AlertTitle><AlertDescription>{message}</AlertDescription></Alert>}
         {job && <p className="text-sm"><a className="font-medium underline" href="/jobs">Job #{job.jobNumber || job.id}</a> is {job.status}. Progress and row-level evidence are available in Jobs.</p>}
+        {setupRun && <Alert>
+          <ListChecks className="size-4" />
+          <AlertTitle>Shop setup submitted</AlertTitle>
+          <AlertDescription className="space-y-2">
+            <p>{setupRun.message || "The selected setup plan was submitted."}</p>
+            {Array.isArray(setupRun.steps) && setupRun.steps.length > 0 && <div className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3">{setupRun.steps.map((step: Json, index: number) => <div key={`${String(step.label || "step")}-${index}`} className="rounded-md border bg-background/60 px-3 py-2">
+              <div className="flex items-center justify-between gap-2"><span className="font-medium">{step.label || "Setup step"}</span><Badge variant={step.status === "failed" ? "destructive" : step.status === "already_running" ? "secondary" : "outline"}>{String(step.status || "queued").replaceAll("_", " ")}</Badge></div>
+              {step.jobNumber && <a className="mt-1 block underline" href="/jobs">Job #{step.jobNumber}</a>}
+            </div>)}</div>}
+            {Array.isArray(setupRun.warnings) && setupRun.warnings.length > 0 && <p className="text-amber-700 dark:text-amber-300">{setupRun.warnings.join(" ")}</p>}
+          </AlertDescription>
+        </Alert>}
         {dirty && <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm"><span>Feature changes are not saved yet.</span><div className="flex gap-2"><Button size="sm" disabled={busy} onClick={() => void run(saveSettings)}><Save className="size-4" /> Save</Button><Button size="sm" variant="outline" onClick={() => setEdits({})}>Discard</Button></div></div>}
 
-        <Tabs value={tab} onValueChange={setTab}>
+        <Tabs value={tab} onValueChange={changeTab}>
           <div className="overflow-x-auto"><TabsList className="h-auto min-w-max justify-start"><TabsTrigger value="connection">Connection</TabsTrigger><TabsTrigger value="features">Features</TabsTrigger><TabsTrigger value="sync">Sync</TabsTrigger><TabsTrigger value="catalog">Catalog</TabsTrigger><TabsTrigger value="analytics">Analytics</TabsTrigger><TabsTrigger value="live">LIVE</TabsTrigger><TabsTrigger value="webhooks">Webhooks</TabsTrigger><TabsTrigger value="fulfillment">Shipping</TabsTrigger><TabsTrigger value="capabilities">API access</TabsTrigger></TabsList></div>
 
           <TabsContent value="connection" className="space-y-4">
-            <div className="flex flex-wrap items-center gap-2"><Badge variant={verified ? "default" : "outline"}>{verified ? "Verified" : configured ? "Authorized - verify connection" : appConfigured ? "App saved - authorization needed" : keysSaved ? "Keys saved - Service ID needed" : "Not configured"}</Badge><span className="text-sm text-muted-foreground">{status.environment || "production"} · {status.shopName || (status.activeAccountId ? "Seller authorized - shop selection pending" : "No seller account")}</span></div>
+            {statusLoading ? <div className="flex items-center gap-3" role="status"><Loader2 className="size-4 animate-spin" /><Skeleton className="h-6 w-72 max-w-full" /><span className="sr-only">Loading connected TikTok shops</span></div> : <div className="flex flex-wrap items-center gap-2"><Badge variant={verified ? "default" : "outline"}>{verified ? "Verified" : configured ? "Authorized - verify connection" : appConfigured ? "App saved - authorization needed" : keysSaved ? "Keys saved - Service ID needed" : "Not configured"}</Badge><span className="text-sm text-muted-foreground">{status.environment || "production"} · {status.shopName || (status.activeAccountId ? "Seller authorized - shop selection pending" : "No seller account")}</span></div>}
             {verified && <section className="overflow-hidden rounded-md border" aria-labelledby="tiktok-initial-setup-heading">
               <div className="flex flex-wrap items-start justify-between gap-3 border-b bg-muted/20 px-4 py-3">
                 <div className="min-w-0">
@@ -348,6 +369,7 @@ export function TikTokChannel({
                   <div className="min-w-0"><p className="text-xs text-muted-foreground">{label}</p><p className="truncate text-sm font-medium capitalize">{value}</p></div>
                 </div>)}
               </div>
+              {onboarding?.startedAt && <div className="border-b bg-muted/10 px-4 py-2 text-xs text-muted-foreground">Last submitted {dateLabel(onboarding.startedAt)}. {onboarding.importHistory ? `Historical range ${String(onboarding.historyStartDate || "").slice(0, 10)} through ${String(onboarding.historyEndDate || "").slice(0, 10)}.` : "No historical range selected."} Operational orders begin {String(onboarding.operationalStartDate || "").slice(0, 10)}.</div>}
               <div className="space-y-4 p-4">
                 <div className="grid gap-3 lg:grid-cols-3">
                   <label className="flex min-w-0 items-center justify-between gap-4 rounded-md border p-3"><span className="min-w-0"><span className="block text-sm font-medium">Match existing listings</span><span className="block text-xs text-muted-foreground">Download TikTok products and link exact seller SKUs. Unmatched listings remain visible for review.</span></span><Switch checked={initialSetup.reconcileCatalog} onCheckedChange={value => setInitialSetup(current => ({ ...current, reconcileCatalog: value }))} /></label>
@@ -359,8 +381,8 @@ export function TikTokChannel({
                 </div>
                 {initialSetup.historyMode !== "none" && <div className={`flex items-start gap-2 rounded-md border px-3 py-2 text-xs ${setupDatesValid ? "text-muted-foreground" : "border-destructive/50 text-destructive"}`}><History className="mt-0.5 size-4 shrink-0" /><span>{setupDatesValid ? `Reporting history: ${selectedHistoryStart} through the day before ${initialSetup.operationalStartDate}. Operational order handling starts ${initialSetup.operationalStartDate}.` : "Choose a historical start date before the operational order date."}</span></div>}
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <p className="text-xs text-muted-foreground">Each connected TikTok shop keeps its own setup record, order checkpoint, jobs, and listing evidence.</p>
-                  <Button disabled={busy || !setupDatesValid || (!initialSetup.reconcileCatalog && initialSetup.historyMode === "none" && !initialSetup.enableOperationalSync)} onClick={() => void run(startInitialSetup)}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} {onboarding?.startedAt ? "Run setup again" : "Start shop setup"}</Button>
+                  <p className="text-xs text-muted-foreground">Each shop keeps its own setup record, checkpoint, and jobs. Repeating a wider history range checks the same TikTok order IDs and imports only missing history.</p>
+                  <Button disabled={busy || setupJobsRunning || !setupDatesValid || (!initialSetup.reconcileCatalog && initialSetup.historyMode === "none" && !initialSetup.enableOperationalSync)} onClick={() => void run(startInitialSetup)}>{busy || setupJobsRunning ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} {setupJobsRunning ? "Setup running" : onboarding?.startedAt ? "Run setup again" : "Start shop setup"}</Button>
                 </div>
               </div>
             </section>}

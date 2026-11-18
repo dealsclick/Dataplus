@@ -19,6 +19,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 import { CompanyManualChannels } from "./manual-channels"
 import { EbayOperations } from "./ebay-operations"
+import { TikTokChannel } from "./tiktok-channel"
 import { api, dateLabel, numberLabel } from "../lib/client-api"
 import { ContextActions, Detail, Field, PageHeader, ToggleField } from "./app-ui"
 import {
@@ -29,7 +30,6 @@ import type {
 } from "../App"
 
 const WalmartChannel = lazy(() => import("./walmart-channel").then((module) => ({ default: module.WalmartChannel })))
-const TikTokChannel = lazy(() => import("./tiktok-channel").then((module) => ({ default: module.TikTokChannel })))
 function ChannelsPage({
   channels,
   warehouses,

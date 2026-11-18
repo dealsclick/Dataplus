@@ -147,6 +147,8 @@ async function main() {
   assert.equal(tiktokChannelSource.includes('Historical sales'), true, 'TikTok setup must separate reporting history from operational orders.');
   assert.equal(tiktokChannelSource.includes('Operational orders begin'), true, 'TikTok setup must collect an explicit operational start date.');
   assert.equal(tiktokChannelSource.includes('setup/initial'), true, 'TikTok setup must persist and queue the selected per-shop plan.');
+  assert.equal(tiktokChannelSource.includes('Shop setup submitted'), true, 'TikTok setup must display the submitted steps and job evidence.');
+  assert.equal(tiktokChannelSource.includes('Setup running'), true, 'TikTok setup must make active setup work visible and prevent an ambiguous duplicate submission.');
   const tiktokMarketplaceSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'tiktok-marketplace.js'), 'utf8');
   assert.equal(tiktokMarketplaceSource.includes('launchOverrides:'), true, 'TikTok launch jobs must retain live-session merchant SKU and quantity overrides.');
   assert.equal(tiktokMarketplaceSource.includes('seller_sku: merchantSku'), true, 'TikTok live-session launches must use the reviewed manufacturer SKU as seller SKU.');
@@ -161,6 +163,7 @@ async function main() {
   assert.equal(tiktokMarketplaceSource.includes('fulfillmentOrder, fulfillmentServices, previewPackage, createPackage, shippingDocument'), true, 'TikTok fulfillment must expose the complete order-to-label workflow.');
   assert.equal(tiktokMarketplaceSource.includes("status: Number(match?.matched || 0) > 0 ? 'linked' : 'needs_mapping'"), true, 'TikTok catalog reconciliation must expose unmatched seller SKUs for review.');
   assert.equal(tiktokMarketplaceSource.includes("action === 'setup/initial'"), true, 'TikTok must expose the initial setup endpoint.');
+  assert.equal(tiktokMarketplaceSource.includes("status: result.duplicate ? 'already_running' : 'queued'"), true, 'TikTok setup must report when an existing active job was retained instead of claiming a new run.');
   const workerSource = fs.readFileSync(path.join(__dirname, 'dataplus-worker.js'), 'utf8');
   assert.equal(workerSource.includes('recoverInterruptedTikTokOrderJobs({ workerId: WORKER_ID })'), true, 'The replacement TikTok worker must requeue an orphaned order import after deployment.');
   const supervisorSource = fs.readFileSync(path.join(__dirname, 'dataplus-worker-supervisor.js'), 'utf8');
