@@ -3284,6 +3284,37 @@ async function saveWarehouseAudit(audit = {}, options = {}) {
   return replaceWarehouseAudits([audit], { ...options, preserveOthers: true });
 }
 
+async function createLiveSessionWithAudit(session = {}, audit = {}) {
+  const pool = getPool();
+  const sessionId = nullableString(session.id);
+  const auditId = nullableString(audit.id);
+  if (!pool || !sessionId || !auditId) return false;
+  await initRelationalSchema();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await replaceWarehouseAudits([audit], { client, preserveOthers: true });
+    await client.query(`
+      insert into entity_documents (collection, entity_id, position, data, updated_at)
+      values (
+        'liveSessions',
+        $1,
+        coalesce((select max(position) + 1 from entity_documents where collection = 'liveSessions'), 0),
+        $2::jsonb,
+        now()
+      )
+    `, [sessionId, JSON.stringify({ ...session, id: sessionId })]);
+    await client.query("delete from state_documents where doc_key = 'liveSessions'");
+    await client.query("commit");
+    return true;
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function saveWarehouseAuditMetadata(audit = {}, options = {}) {
   const pool = getPool();
   const auditId = nullableString(audit.id);
@@ -4082,6 +4113,7 @@ const STATE_DOCUMENT_KEYS = [
   "returns",
   "cancellations",
   "customers",
+  "liveSessions",
   "purchaseOrders",
   "vendors",
   "brands",
@@ -4134,6 +4166,7 @@ const ENTITY_DOCUMENT_COLLECTIONS = new Set([
   "returns",
   "cancellations",
   "customers",
+  "liveSessions",
   "purchaseOrders",
   "vendors",
   "brands",
@@ -22447,6 +22480,7 @@ module.exports = {
   readWarehouseAudit,
   replaceWarehouseAudits,
   saveWarehouseAudit,
+  createLiveSessionWithAudit,
   saveWarehouseAuditMetadata,
   touchWarehouseAuditReceivingParticipant,
   applyWarehouseAuditScan,

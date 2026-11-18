@@ -6778,7 +6778,7 @@ function authAreaForPath(pathname = "") {
   if (/^\/api\/(orders|order-drafts|drafts|returns|customers|search)/.test(pathname)) return "orders";
   if (/^\/api\/(fulfillment|shipments|pick-lists)/.test(pathname)) return "fulfillment";
   if (/^\/api\/(purchase-orders|purchasing|vendors\/[^/]+\/purchase)/.test(pathname)) return "purchasing";
-  if (/^\/api\/(warehouse|warehouse-audits|inventory|warehouses|barcodes)/.test(pathname)) return "warehouse";
+  if (/^\/api\/(warehouse|warehouse-audits|live-sessions|inventory|warehouses|barcodes)/.test(pathname)) return "warehouse";
   if (/^\/api\/(catalog|products|categories|source-catalog|attribute|brands|vendors)/.test(pathname)) return pathname.includes("/vendors") ? "vendors" : pathname.includes("/brands") ? "brands" : "catalog";
   if (/^\/api\/(channels|shopify|ebay|temu|tiktok|walmart|webhooks)/.test(pathname)) return "channels";
   if (/^\/api\/(import-jobs|jobs)/.test(pathname)) return "jobs";
@@ -6798,6 +6798,9 @@ function authRequirementForRequest(req, url, parts = []) {
   if (pathname.startsWith("/api/accounting/")) return { area: "orders.accounting", action: accountingPermission(method, pathname) };
   const area = authAreaForPath(pathname);
   if (!area) return { area, action: "view" };
+  if (pathname.startsWith("/api/live-sessions")) {
+    return { area: "warehouse.audits", action: method === "GET" || method === "HEAD" ? "view" : "audit" };
+  }
   if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
     if (pathname.startsWith('/api/walmart/')) return { area: 'channels.walmart', action: 'view' };
     if (/\.csv$|\/export\b|\/export\//.test(pathname)) return { area, action: "export" };
@@ -13406,6 +13409,56 @@ function normalizeLiveInventoryChannel(value) {
   if (["tiktok", "tiktok_shop", "tiktok_live"].includes(key)) return "tiktok_live";
   if (["whatnot", "whatnot_live"].includes(key)) return "whatnot_live";
   return "";
+}
+
+function canonicalLiveSessionReference(value, fallback = "") {
+  const reference = String(value || "").trim();
+  const sequence = reference.match(/^(?:(?:live|ls)[\s#_-]*)?(\d+)$/i);
+  if (sequence) return `LS-${sequence[1]}`;
+  return String(fallback || reference).trim();
+}
+
+function liveSessionAuditUrl(audit = {}, mobile = false) {
+  const auditNumber = String(audit.auditNumber || "").trim();
+  const sequence = auditNumber.match(/^(?:(?:audit|a)[\s#_-]*)?(\d+)$/i);
+  const key = sequence ? `A-${sequence[1]}` : String(audit.id || auditNumber).trim();
+  return `${mobile ? "/warehouse/mobile/audits" : "/warehouse/audits"}/${encodeURIComponent(key)}`;
+}
+
+function liveSessionWithAudit(session = {}, audit = null) {
+  const knownLines = Array.isArray(audit?.lines) ? audit.lines : [];
+  const unknownLines = Array.isArray(audit?.unknownBarcodes) ? audit.unknownBarcodes : [];
+  const scannedUnits = [...knownLines, ...unknownLines].reduce((sum, line) => (
+    sum + Math.max(0, Number(line?.countedQty ?? line?.count ?? 0))
+  ), 0);
+  const auditStatus = String(audit?.status || "").toLowerCase();
+  const status = auditStatus === "completed"
+    ? "ready"
+    : auditStatus === "pending_review"
+      ? "review"
+      : auditStatus === "in_progress"
+        ? "counting"
+        : String(session.status || "draft");
+  return {
+    ...session,
+    sessionNumber: canonicalLiveSessionReference(session.sessionNumber, session.id),
+    status,
+    updatedAt: audit?.updatedAt || session.updatedAt || session.createdAt || "",
+    channel: normalizeLiveInventoryChannel(session.channel || session.liveChannel),
+    channelLabel: LIVE_INVENTORY_CHANNEL_LABELS[normalizeLiveInventoryChannel(session.channel || session.liveChannel)] || "Not assigned",
+    scannedSkus: knownLines.length,
+    unknownBarcodes: unknownLines.length,
+    scannedUnits,
+    audit: audit ? {
+      id: audit.id,
+      auditNumber: audit.auditNumber,
+      status: audit.status,
+      url: liveSessionAuditUrl(audit),
+      mobileUrl: liveSessionAuditUrl(audit, true),
+      lines: knownLines,
+      unknownBarcodes: unknownLines
+    } : null
+  };
 }
 
 function liveInventoryChannelForOrder(order = {}) {
@@ -60124,6 +60177,107 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "live-sessions" && postgres.isPostgresEnabled()) {
+    const [sessions, audits] = await Promise.all([
+      postgres.readEntityDocumentCollectionFast("liveSessions"),
+      postgres.readWarehouseAudits()
+    ]);
+    const auditsById = new Map((audits || []).map((audit) => [String(audit.id || ""), audit]));
+    const rows = (sessions || []).map((session) => {
+      const audit = auditsById.get(String(session.linkedAuditId || "")) || null;
+      return liveSessionWithAudit(session, audit);
+    }).sort((left, right) => new Date(String(right.updatedAt || right.createdAt || 0)).getTime() - new Date(String(left.updatedAt || left.createdAt || 0)).getTime());
+    const requestedKey = decodeURIComponent(String(parts[2] || "")).trim();
+    if (requestedKey) {
+      const canonicalKey = canonicalLiveSessionReference(requestedKey).toLowerCase();
+      const session = rows.find((row) => String(row.id || "").toLowerCase() === requestedKey.toLowerCase()
+        || canonicalLiveSessionReference(row.sessionNumber, row.id).toLowerCase() === canonicalKey);
+      if (!session) return notFound(res);
+      return sendJson(res, 200, { session });
+    }
+    return sendJson(res, 200, { sessions: rows });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/live-sessions" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const sourceType = String(body.sourceType || "extra_items").trim().toLowerCase();
+    if (sourceType !== "extra_items") return sendJson(res, 400, { error: "This release supports session creation from scanned extra items." });
+    const db = await readDbFast({ skipInventory: true });
+    const requestedWarehouse = String(body.warehouseId || body.warehouseName || "").trim().toLowerCase();
+    const warehouse = (db.warehouses || []).find((row) => String(row.id || "").toLowerCase() === requestedWarehouse || String(row.name || "").toLowerCase() === requestedWarehouse) || null;
+    if (!warehouse || !isPhysicalWarehouse(warehouse) || warehouse.allowAudits === false) {
+      return sendJson(res, 400, { error: "Choose a physical warehouse that allows inventory audits." });
+    }
+    const [sessions, audits] = await Promise.all([
+      postgres.readEntityDocumentCollectionFast("liveSessions"),
+      postgres.readWarehouseAudits()
+    ]);
+    const highestSession = Math.max(100, ...(sessions || []).map((session) => Number(String(session.sessionNumber || "").replace(/\D/g, "")) || 0));
+    const highestAudit = Math.max(122, ...(audits || []).map((audit) => Number(String(audit.auditNumber || "").replace(/\D/g, "")) || 0));
+    const now = new Date().toISOString();
+    const actor = String(body.user || authUser?.name || authUser?.username || "Warehouse user").trim() || "Warehouse user";
+    const sessionId = crypto.randomUUID();
+    const sessionNumber = `LS-${highestSession + 1}`;
+    const auditId = crypto.randomUUID();
+    const auditNumber = `AUDIT-${highestAudit + 1}`;
+    const channel = normalizeLiveInventoryChannel(body.channel || body.liveChannel);
+    const title = String(body.title || "").trim().slice(0, 160) || `${sessionNumber} extra items`;
+    const session = {
+      id: sessionId,
+      sessionNumber,
+      title,
+      status: "counting",
+      sourceType,
+      sourceLabel: "Scanned extra items",
+      channel,
+      channelLabel: LIVE_INVENTORY_CHANNEL_LABELS[channel] || "Not assigned",
+      warehouseId: String(warehouse.id || ""),
+      warehouseName: String(warehouse.name || "Warehouse"),
+      linkedAuditId: auditId,
+      linkedAuditNumber: auditNumber,
+      notes: String(body.notes || "").trim().slice(0, 2000),
+      createdAt: now,
+      createdBy: actor,
+      updatedAt: now
+    };
+    const audit = {
+      id: auditId,
+      auditNumber,
+      status: "in_progress",
+      reason: "live_selling_inventory",
+      reasonLabel: "Live selling inventory",
+      inventoryPurpose: "live_selling",
+      inventoryPurposeLabel: INVENTORY_PURPOSE_LABELS.live_selling,
+      liveChannel: channel,
+      liveChannelLabel: LIVE_INVENTORY_CHANNEL_LABELS[channel] || "",
+      liveSessionId: sessionId,
+      liveSessionNumber: sessionNumber,
+      liveSessionTitle: title,
+      liveSessionLinkedAt: now,
+      extraItemsOnly: true,
+      warehouseId: String(warehouse.id || ""),
+      warehouseName: String(warehouse.name || "Warehouse"),
+      lines: [],
+      unknownBarcodes: [],
+      receivingDocuments: [],
+      packingSlipReview: null,
+      createdAt: now,
+      createdBy: actor,
+      reviewer: ""
+    };
+    await postgres.createLiveSessionWithAudit(session, audit);
+    void recordUserActivity(req, authUser, { eventType: "warehouse", action: "Created live session from extra items", entityType: "live_session", entityId: sessionId, path: `/live-sessions/${sessionNumber}` });
+    const hydrated = liveSessionWithAudit(session, audit);
+    return sendJson(res, 201, {
+      session: hydrated,
+      audit,
+      sessionUrl: `/live-sessions/${encodeURIComponent(sessionNumber)}`,
+      auditUrl: liveSessionAuditUrl(audit),
+      mobileAuditUrl: liveSessionAuditUrl(audit, true),
+      message: `${sessionNumber} created. Scan the extra items into ${auditNumber}.`
+    });
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "image" && postgres.isPostgresEnabled()) {
     const mediaKey = String(url.searchParams.get("key") || "image").trim().toLowerCase();
     if (!/^image(?:-[2-8])?$/.test(mediaKey)) return sendJson(res, 400, { error: "Invalid warehouse image key." });
@@ -61856,7 +62010,7 @@ async function handleApi(req, res) {
       marketplaceShadowSummary = await ensureWarehouseAuditShadows(audit, auditWarehouse, products);
       audit.marketplaceShadowSummary = marketplaceShadowSummary;
     }
-    if (String(audit.reason || "") === "live_selling_inventory" && products.length) {
+    if (String(audit.reason || "") === "live_selling_inventory" && products.length && normalizeLiveInventoryChannel(audit.liveChannel)) {
       marketplaceShadowSummary = await ensureWarehouseLiveChannelShadows(audit, auditWarehouse, products);
       audit.marketplaceShadowSummary = marketplaceShadowSummary;
     }
@@ -82673,6 +82827,9 @@ module.exports = {
   recoverTemuFulfillmentBatch,
   recoverExistingTemuLabelsForOrders,
   ebayTradingErrorMessage,
+  canonicalLiveSessionReference,
+  liveSessionAuditUrl,
+  liveSessionWithAudit,
   cloneCatalogProduct,
   syncDropshipShipmentToChannel,
   syncPurchasedMarketplaceShipment,

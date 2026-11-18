@@ -26,6 +26,7 @@ Pencil,
 Play,
 Puzzle,
 RefreshCw,
+RadioTower,
 RotateCcw,
 Save,
 ScanBarcode,
@@ -75,6 +76,7 @@ const MessagesRoute = lazy(() => import("./components/messages-route").then((mod
 const SettingsPage = lazy(() => import("./components/settings-route").then((module) => ({ default: module.SettingsPage })))
 const WarehouseWorkspace = lazy(() => import("./components/warehouse-route").then((module) => ({ default: module.WarehouseWorkspace })))
 const WarehouseMobileRoute = lazy(() => import("./components/warehouse-route").then((module) => ({ default: module.WarehouseMobileRoute })))
+const LiveSessionsRoute = lazy(() => import("./components/live-sessions-route").then((module) => ({ default: module.LiveSessionsRoute })))
 const loadFulfillmentRoute = () => import("./components/fulfillment-route")
 const FulfillmentPage = lazy(() => loadFulfillmentRoute().then((module) => ({ default: module.FulfillmentPage })))
 const ShippingBatchesPage = lazy(() => loadFulfillmentRoute().then((module) => ({ default: module.ShippingBatchesPage })))
@@ -142,7 +144,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 
-type AppView = "order-imports" | "order-review" | "accounting" | "shipping-disputes" | "sales-reports" | "shipping-reports" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "inventory-reports" | "operations" | "customers" | "customer-detail" | "messages" | "warehouse" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "return-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "wiki" | "extensions" | "settings"
+type AppView = "order-imports" | "order-review" | "accounting" | "shipping-disputes" | "sales-reports" | "shipping-reports" | "overview" | "jobs" | "job-detail" | "channels" | "catalog" | "inventory-reports" | "operations" | "customers" | "customer-detail" | "messages" | "warehouse" | "live-sessions" | "fulfillment" | "purchasing" | "po-detail" | "order-detail" | "return-detail" | "draft-detail" | "product-detail" | "inventory-detail" | "category-detail" | "vendors" | "brands" | "brand-detail" | "ai-chat" | "wiki" | "extensions" | "settings"
 
 type FulfillmentRateRefreshItem = {
   orderId: string
@@ -1506,6 +1508,7 @@ const navGroups: Array<{ label: string; items: NavigationItem[] }> = [
       { id: "fulfillment", label: "Fulfillment", icon: Truck },
       { id: "purchasing", label: "Purchasing", icon: Archive },
       { id: "warehouse", label: "Warehouse", icon: Warehouse },
+      { id: "live-sessions", label: "Live Sessions", icon: RadioTower },
       { id: "accounting", label: "Accounting", icon: FileText },
       { id: "shipping-disputes", label: "Shipping Disputes", icon: FileWarning },
     ],
@@ -1572,6 +1575,7 @@ const warehouseSidebarItems: Array<{ label: string; path: string; icon: React.Co
   { label: "Receiving", path: "/warehouse/receiving", icon: Archive },
   { label: "Outbound", path: "/warehouse/outbound", icon: ScanBarcode },
   { label: "Warehouse Audits", path: "/warehouse/audits", icon: CheckCircle2 },
+  { label: "Live Sessions", path: "/live-sessions", icon: RadioTower },
   { label: "Bins", path: "/warehouse/bins", icon: Boxes },
   { label: "Fulfillment", path: "/fulfillment", icon: Truck },
 ]
@@ -1600,6 +1604,7 @@ const viewPaths: Record<AppView, string> = {
   "customer-detail": "/customers",
   messages: "/messages",
   warehouse: "/warehouse/warehouses",
+  "live-sessions": "/live-sessions",
   fulfillment: "/fulfillment",
   purchasing: "/purchasing",
   "po-detail": "/purchasing",
@@ -1638,6 +1643,7 @@ function viewFromPath(pathname = "/"): AppView {
   if (/^\/returns\/[^/]+$/.test(path)) return "return-detail"
   if (path.startsWith("/drafts/")) return "draft-detail"
   if (["/orders", "/drafts", "/returns"].some((prefix) => path.startsWith(prefix))) return "operations"
+  if (path.startsWith("/live-sessions")) return "live-sessions"
   if (path.startsWith("/warehouse")) return "warehouse"
   if (path.startsWith("/fulfillment")) return "fulfillment"
   if (path.startsWith("/purchasing")) return "purchasing"
@@ -1663,7 +1669,7 @@ function appReferencesForView(view: AppView, warehouseMobile = false): AppRefere
   if (["overview", "jobs", "brands", "brand-detail"].includes(view)) references.add("vendors")
   if (view === "vendors") references.add("vendorDetails")
   if (["channels", "catalog", "product-detail", "jobs"].includes(view)) references.add("connections")
-  if (view === "channels" || warehouseMobile) references.add("warehouses")
+  if (view === "channels" || view === "live-sessions" || warehouseMobile) references.add("warehouses")
   if (view === "settings") references.add("systemSettings")
   return [...references]
 }
@@ -1739,6 +1745,7 @@ const viewPermissionArea: Record<AppView, string> = {
   "customer-detail": "orders",
   messages: "orders",
   warehouse: "warehouse.locations",
+  "live-sessions": "warehouse.audits",
   fulfillment: "fulfillment.work",
   purchasing: "purchasing.queue",
   "po-detail": "purchasing.po",
@@ -2856,6 +2863,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
     { label: "Products", view: "catalog" as AppView, path: "/products" },
     { label: "Inventory reports", view: "inventory-reports" as AppView, path: "/inventory/reports" },
     { label: "Warehouse", view: "warehouse" as AppView, path: "/warehouse" },
+    { label: "Live Sessions", view: "live-sessions" as AppView, path: "/live-sessions" },
     { label: "Jobs", view: "jobs" as AppView, path: "/jobs" },
     { label: "Channels", view: "channels" as AppView, path: "/channels" },
     { label: "Wiki", view: "wiki" as AppView, path: "/workspace/wiki" },
@@ -3179,6 +3187,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                 {view === "sales-reports" && <SalesReportsPage />}
                 {view === "shipping-reports" && <ShippingReportsPage />}
                 {view === "warehouse" && <WarehouseWorkspace warehouses={state.warehouses || []} />}
+                {view === "live-sessions" && <LiveSessionsRoute warehouses={state.warehouses || []} operatorName={authUser.name || authUser.username || "Warehouse user"} />}
                 {view === "fulfillment" && (window.location.pathname.replace(/\/+$/, "") === "/fulfillment/batches" ? <ShippingBatchesPage /> : <FulfillmentPage />)}
                 {view === "purchasing" && <PurchasingRouter operatorName={authUser.name || authUser.username || "Buyer"} />}
                 {view === "po-detail" && <PurchaseOrderDetailPage operatorName={authUser.name || authUser.username || "Buyer"} />}
