@@ -21469,38 +21469,29 @@ async function readProductQualitySummary() {
 }
 
 async function readOperationalSummary() {
-  const client = getPool();
-  if (!client) return null;
+  const pool = getPool();
+  if (!pool) return null;
   await initRelationalSchema();
-  const result = await client.query(`
-    with product_summary as (
-      select
-        count(*)::int as inventory_count,
-        coalesce(sum(
-          case
-            when coalesce(qty, 0) - (
-              case when coalesce(raw ->> 'reserved', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
-                then (raw ->> 'reserved')::numeric
-                else 0
-              end
-            ) <= (
-              case when coalesce(raw ->> 'reorderPoint', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
-                then (raw ->> 'reorderPoint')::numeric
-                else 0
-              end
-            )
-            then 1
-            else 0
-          end
-        ), 0)::int as low_stock,
-        coalesce(sum(
-          case when coalesce(raw ->> 'reserved', '') ~ '^-?[0-9]+(\\.[0-9]+)?$'
-            then (raw ->> 'reserved')::numeric
-            else 0
-          end
-        ), 0) as reserved
-      from products
-    ),
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("set local statement_timeout = '10000ms'");
+    const result = await client.query(`
+      with inventory_by_product as (
+        select product_id, coalesce(sum(reserved), 0) as reserved
+        from inventory_levels
+        group by product_id
+      ),
+      product_summary as (
+        select
+          count(*)::int as inventory_count,
+          count(*) filter (
+            where coalesce(products.qty, 0) - coalesce(inventory_by_product.reserved, 0) <= 0
+          )::int as low_stock,
+          coalesce(sum(inventory_by_product.reserved), 0) as reserved
+        from products
+        left join inventory_by_product on inventory_by_product.product_id = products.product_id
+      ),
     order_summary as (
       select
         count(*) filter (
@@ -21546,21 +21537,29 @@ async function readOperationalSummary() {
       customer_summary.repeat_customers as "repeatCustomers",
       po_summary.purchase_order_count as "purchaseOrderCount",
       po_summary.open_purchase_orders as "openPurchaseOrders"
-    from product_summary, order_summary, customer_summary, po_summary
-  `);
-  const row = result.rows[0] || {};
-  return {
-    inventoryCount: Number(row.inventoryCount || 0),
-    openOrders: Number(row.openOrders || 0),
-    lowStock: Number(row.lowStock || 0),
-    reserved: Number(row.reserved || 0),
-    sales: Number(row.sales || 0),
-    profit: Number(row.profit || 0),
-    customerCount: Number(row.customerCount || 0),
-    repeatCustomers: Number(row.repeatCustomers || 0),
-    purchaseOrderCount: Number(row.purchaseOrderCount || 0),
-    openPurchaseOrders: Number(row.openPurchaseOrders || 0)
-  };
+      from product_summary, order_summary, customer_summary, po_summary
+    `);
+    await client.query("commit");
+    const row = result.rows[0] || {};
+    return {
+      inventoryCount: Number(row.inventoryCount || 0),
+      openOrders: Number(row.openOrders || 0),
+      lowStock: Number(row.lowStock || 0),
+      reserved: Number(row.reserved || 0),
+      sales: Number(row.sales || 0),
+      profit: Number(row.profit || 0),
+      customerCount: Number(row.customerCount || 0),
+      repeatCustomers: Number(row.repeatCustomers || 0),
+      purchaseOrderCount: Number(row.purchaseOrderCount || 0),
+      openPurchaseOrders: Number(row.openPurchaseOrders || 0)
+    };
+  } catch (error) {
+    try { await client.query("rollback"); } catch {}
+    if (String(error?.code || "") === "57014") return null;
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function closePool() {
