@@ -13444,6 +13444,7 @@ function liveSessionWithAudit(session = {}, audit = null) {
         ? "counting"
         : savedStatus;
   const storedItems = Array.isArray(session.items) ? session.items : [];
+  const sourceType = String(session.sourceType || "").toLowerCase();
   const auditItems = knownLines.filter((line) => String(line.sku || "").trim()).map((line, index) => {
     const countedQty = Math.max(0, Number(line.countedQty ?? line.count ?? 0));
     const sourceLineId = String(line.id || `${audit?.id || "audit"}:line:${index}`);
@@ -13479,7 +13480,38 @@ function liveSessionWithAudit(session = {}, audit = null) {
       linkedOutboundScanIds: storedItem.linkedOutboundScanIds || []
     });
   });
-  const shouldUseAuditItems = ["extra_items", "warehouse_audit"].includes(String(session.sourceType || "").toLowerCase()) && knownLines.length > 0;
+  const sourceAuditItems = sourceType === "warehouse_audit" && knownLines.length > 0
+    ? storedItems.map((storedItem) => {
+      const sourceLine = knownLines.find((line) => String(line.id || "") === String(storedItem.sourceLineId || storedItem.id || ""))
+        || knownLines.find((line) => String(line.sku || "").trim().toLowerCase() === String(storedItem.sku || "").trim().toLowerCase())
+        || null;
+      if (!sourceLine) return liveSessionLedger.itemMetrics(storedItem);
+      const countedQty = Math.max(0, Number(sourceLine.countedQty ?? sourceLine.count ?? 0));
+      const reservedQty = Math.max(0, Number(storedItem.reservedQty || 0));
+      return liveSessionLedger.itemMetrics({
+        ...storedItem,
+        productId: String(sourceLine.productId || storedItem.productId || ""),
+        sku: String(sourceLine.sku || storedItem.sku || ""),
+        catalogSku: String(sourceLine.sku || storedItem.catalogSku || storedItem.sku || ""),
+        title: String(sourceLine.title || sourceLine.description || storedItem.title || sourceLine.sku || "Live inventory item"),
+        image: String(sourceLine.image || storedItem.image || ""),
+        upc: String(sourceLine.upc || sourceLine.barcode || storedItem.upc || storedItem.barcode || ""),
+        barcode: String(sourceLine.barcode || sourceLine.upc || storedItem.barcode || storedItem.upc || ""),
+        manufacturerSku: String(sourceLine.manufacturerSku || sourceLine.manufacturerPartNumber || sourceLine.mfrPartNumber || sourceLine.mpn || storedItem.manufacturerSku || ""),
+        supplierSku: String(sourceLine.supplierSku || sourceLine.vendorSku || sourceLine.sourceSku || storedItem.supplierSku || ""),
+        unitCost: Number(sourceLine.unitCost ?? sourceLine.cost ?? storedItem.unitCost ?? 0),
+        receivedQty: auditStatus === "completed" ? countedQty : 0,
+        incomingQty: auditStatus === "completed" ? 0 : countedQty,
+        sourceAvailableQty: countedQty,
+        requestedQty: Number(storedItem.requestedQty || reservedQty),
+        reservedQty,
+        shortageQty: Math.max(Number(storedItem.shortageQty || 0), reservedQty - countedQty)
+      });
+    })
+    : storedItems;
+  const measuredItems = sourceType === "extra_items" && knownLines.length > 0
+    ? auditItems
+    : sourceAuditItems;
   const measured = liveSessionLedger.sessionTotals({
     ...session,
     sessionNumber: canonicalLiveSessionReference(session.sessionNumber, session.id),
@@ -13490,7 +13522,7 @@ function liveSessionWithAudit(session = {}, audit = null) {
     scannedSkus: knownLines.length,
     unknownBarcodes: unknownLines.length,
     scannedUnits,
-    items: shouldUseAuditItems ? auditItems : (Array.isArray(session.items) ? session.items : []),
+    items: measuredItems,
     audit: audit ? {
       id: audit.id,
       auditNumber: audit.auditNumber,
@@ -60378,6 +60410,7 @@ async function handleApi(req, res) {
 
   if (req.method === "GET" && url.pathname === "/api/live-sessions/references" && postgres.isPostgresEnabled()) {
     const scope = liveSessionScope(req);
+    if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
     const [allSessions, audits, purchaseOrders, db] = await Promise.all([
       postgres.readEntityDocumentCollectionFast("liveSessions"),
       postgres.readWarehouseAudits(),
@@ -60427,8 +60460,112 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "GET" && url.pathname === "/api/live-sessions/source-preview" && postgres.isPostgresEnabled()) {
+    const sourceType = String(url.searchParams.get("sourceType") || "").trim().toLowerCase();
+    const sourceId = String(url.searchParams.get("sourceId") || "").trim();
+    if (!["purchase_order", "warehouse_audit", "previous_session"].includes(sourceType) || !sourceId) {
+      return sendJson(res, 400, { error: "Choose a purchase order, warehouse audit, or previous live session." });
+    }
+    const scope = liveSessionScope(req);
+    if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
+    const allSessions = await postgres.readEntityDocumentCollectionFast("liveSessions");
+    const scopedSessions = liveSessionRowsForScope(allSessions, scope);
+    let source = null;
+    let sourceItems = [];
+    let availabilityAudit = null;
+
+    if (sourceType === "purchase_order") {
+      const po = await postgres.readPurchaseOrderByKey(sourceId);
+      if (!po) return sendJson(res, 404, { error: "Purchase order not found." });
+      if (String(po.fulfillmentMode || "").toLowerCase() === "dropship_per_order" || po.directToCustomer === true) {
+        return sendJson(res, 409, { error: "A direct-to-customer PO cannot supply a warehouse live session." });
+      }
+      const purpose = purchaseOrderPurposeForRecord(po);
+      sourceItems = (po.items || []).map((line, index) => liveSessionItemFromPurchaseOrderLine(po, line, index, new Map()));
+      source = {
+        id: po.id,
+        number: po.poNumber || po.id,
+        label: `Purchase order ${po.poNumber || po.id}`,
+        href: `/purchase-orders/${encodeURIComponent(String(po.id || sourceId))}`,
+        warehouseId: po.warehouseId || "",
+        warehouseName: po.warehouseName || "",
+        channel: purpose.liveChannel || ""
+      };
+    } else if (sourceType === "warehouse_audit") {
+      const audit = await postgres.readWarehouseAudit(sourceId);
+      if (!audit) return sendJson(res, 404, { error: "Warehouse audit not found." });
+      availabilityAudit = audit;
+      sourceItems = (audit.lines || [])
+        .filter((line) => String(line.sku || "").trim())
+        .map((line, index) => liveSessionItemFromAuditLine(audit, line, index, new Map()));
+      source = {
+        id: audit.id,
+        number: audit.auditNumber || audit.id,
+        label: `Warehouse audit ${audit.auditNumber || audit.id}`,
+        href: liveSessionAuditUrl(audit),
+        warehouseId: audit.warehouseId || "",
+        warehouseName: audit.warehouseName || "",
+        channel: normalizeLiveInventoryChannel(audit.liveChannel)
+      };
+    } else {
+      const canonicalSource = canonicalLiveSessionReference(sourceId).toLowerCase();
+      const parentRecord = scopedSessions.find((session) => String(session.id || "").toLowerCase() === sourceId.toLowerCase()
+        || canonicalLiveSessionReference(session.sessionNumber, session.id).toLowerCase() === canonicalSource);
+      if (!parentRecord) return sendJson(res, 404, { error: "Previous live session not found." });
+      const parentAudit = parentRecord.linkedAuditId ? await postgres.readWarehouseAudit(parentRecord.linkedAuditId) : null;
+      availabilityAudit = parentAudit;
+      const parent = liveSessionWithAudit(parentRecord, parentAudit);
+      const measuredParent = liveSessionLedger.sessionTotals(parent);
+      sourceItems = measuredParent.items.filter((item) => Number(item.remainingQty || 0) > 0).map((item) => ({
+        ...item,
+        sourceAvailableQty: Number(item.remainingQty || 0),
+        sourceCommittedQty: 0,
+        allocatableQty: Number(item.remainingQty || 0),
+        requestedQty: Number(item.remainingQty || 0),
+        reservedQty: 0,
+        soldQty: 0,
+        shippedQty: 0,
+        releasedQty: 0,
+        shortageQty: 0,
+        remainingQty: 0
+      }));
+      source = {
+        id: parent.id,
+        number: parent.sessionNumber || parent.id,
+        label: `Previous session ${parent.sessionNumber || parent.id}`,
+        href: `/live-sessions/${encodeURIComponent(String(parent.sessionNumber || parent.id))}`,
+        warehouseId: parent.warehouseId || "",
+        warehouseName: parent.warehouseName || "",
+        channel: normalizeLiveInventoryChannel(parent.channel),
+        channelAccountId: parent.channelAccountId || ""
+      };
+    }
+
+    const availabilitySessions = availabilityAudit ? scopedSessions.map((session) => (
+      String(session.linkedAuditId || "") === String(availabilityAudit.id || "")
+        ? liveSessionWithAudit(session, availabilityAudit)
+        : session
+    )) : scopedSessions;
+    const previewItems = sourceType === "previous_session"
+      ? sourceItems
+      : liveSessionLedger.sourceAvailabilityItems(sourceItems, availabilitySessions);
+    const total = (field) => previewItems.reduce((sum, item) => sum + Math.max(0, Number(item[field] || 0)), 0);
+    return sendJson(res, 200, {
+      source,
+      items: previewItems,
+      summary: {
+        sourceUnits: total("sourceAvailableQty"),
+        committedUnits: total("sourceCommittedQty"),
+        availableUnits: total("allocatableQty"),
+        availableItems: previewItems.filter((item) => Number(item.allocatableQty || 0) > 0).length,
+        exhaustedItems: previewItems.filter((item) => Number(item.sourceAvailableQty || 0) > 0 && Number(item.allocatableQty || 0) <= 0).length
+      }
+    });
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "live-sessions" && postgres.isPostgresEnabled()) {
     const scope = liveSessionScope(req);
+    if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
     const [sessions, audits] = await Promise.all([
       postgres.readEntityDocumentCollectionFast("liveSessions"),
       postgres.readWarehouseAudits()
@@ -60523,6 +60660,7 @@ async function handleApi(req, res) {
     let sourceItems = [];
     let sourcePurchaseOrderId = "";
     let sourcePurchaseOrderNumber = "";
+    let linkedSourceAudit = null;
 
     if (sourceType === "purchase_order") {
       const po = await postgres.readPurchaseOrderByKey(sourceId);
@@ -60537,6 +60675,7 @@ async function handleApi(req, res) {
     } else if (sourceType === "warehouse_audit") {
       const audit = await postgres.readWarehouseAudit(sourceId);
       if (!audit) return sendJson(res, 404, { error: "Warehouse audit not found." });
+      linkedSourceAudit = audit;
       warehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(audit.warehouseId || "")) || warehouse;
       sourceItems = (audit.lines || []).filter((line) => String(line.sku || "").trim()).map((line, index) => liveSessionItemFromAuditLine(audit, line, index, requestedQuantities));
       sourceNumber = String(audit.auditNumber || audit.id || "");
@@ -60560,9 +60699,13 @@ async function handleApi(req, res) {
     if (!["previous_session"].includes(sourceType) && !sourceItems.length) return sendJson(res, 400, { error: "The selected source has no usable catalog quantities." });
     if (!warehouse && sourceType !== "previous_session") return sendJson(res, 400, { error: "The selected source is not assigned to a physical warehouse." });
 
-    const mutation = await postgres.mutateLiveSessionsAtomically((allSessions) => {
-      const scoped = liveSessionRowsForScope(allSessions, scope);
-      let allocationRows = allSessions;
+    const mutation = await postgres.mutateLiveSessionsAtomically(async (allSessions) => {
+      let allocationRows = linkedSourceAudit ? allSessions.map((session) => (
+        String(session.linkedAuditId || "") === String(linkedSourceAudit.id || "")
+          ? liveSessionWithAudit(session, linkedSourceAudit)
+          : session
+      )) : allSessions;
+      let scoped = liveSessionRowsForScope(allocationRows, scope);
       let resolvedItems = sourceItems;
       let parentSession = null;
       if (sourceType === "previous_session") {
@@ -60570,6 +60713,16 @@ async function handleApi(req, res) {
         parentSession = scoped.find((session) => String(session.id || "").toLowerCase() === sourceId.toLowerCase()
           || canonicalLiveSessionReference(session.sessionNumber, session.id).toLowerCase() === canonicalSource);
         if (!parentSession) throw Object.assign(new Error("Previous live session not found."), { statusCode: 404 });
+        if (parentSession.linkedAuditId) {
+          const parentAudit = await postgres.readWarehouseAudit(parentSession.linkedAuditId);
+          allocationRows = allocationRows.map((session) => (
+            String(session.linkedAuditId || "") === String(parentSession.linkedAuditId || "")
+              ? liveSessionWithAudit(session, parentAudit)
+              : session
+          ));
+          scoped = liveSessionRowsForScope(allocationRows, scope);
+          parentSession = scoped.find((session) => String(session.id || "") === String(parentSession.id || "")) || liveSessionWithAudit(parentSession, parentAudit);
+        }
         const measuredParent = liveSessionLedger.sessionTotals(parentSession);
         warehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(parentSession.warehouseId || "")) || warehouse;
         resolvedItems = measuredParent.items.map((item) => {
@@ -60600,6 +60753,8 @@ async function handleApi(req, res) {
         title: String(body.title || "").trim().slice(0, 160) || `${sessionNumber} ${sourceLabel}`,
         status: "draft", sourceType, sourceId: sourceType === "previous_session" ? String(parentSession?.id || "") : sourceId,
         sourceNumber, sourceLabel, sourcePurchaseOrderId, sourcePurchaseOrderNumber,
+        linkedAuditId: sourceType === "warehouse_audit" ? String(linkedSourceAudit?.id || "") : "",
+        linkedAuditNumber: sourceType === "warehouse_audit" ? String(linkedSourceAudit?.auditNumber || linkedSourceAudit?.id || "") : "",
         parentSessionId: sourceType === "previous_session" ? String(parentSession?.id || "") : "",
         parentSessionNumber: sourceType === "previous_session" ? String(parentSession?.sessionNumber || "") : "",
         channel, channelLabel: LIVE_INVENTORY_CHANNEL_LABELS[channel] || "Not assigned",
@@ -60608,7 +60763,18 @@ async function handleApi(req, res) {
         warehouseId: String(warehouse?.id || parentSession?.warehouseId || ""), warehouseName: String(warehouse?.name || parentSession?.warehouseName || "Warehouse"),
         items: allocatedItems, notes: String(body.notes || "").trim().slice(0, 2000), createdAt: now, createdBy: actor, updatedAt: now
       });
-      return { sessions: [...allocationRows, session], result: { session } };
+      const warehouseAudit = linkedSourceAudit ? {
+        ...linkedSourceAudit,
+        liveSessionIds: [...new Set([...(Array.isArray(linkedSourceAudit.liveSessionIds) ? linkedSourceAudit.liveSessionIds : []), session.id].filter(Boolean))],
+        liveSessionNumbers: [...new Set([...(Array.isArray(linkedSourceAudit.liveSessionNumbers) ? linkedSourceAudit.liveSessionNumbers : []), session.sessionNumber].filter(Boolean))],
+        liveSessionLinks: [
+          ...(Array.isArray(linkedSourceAudit.liveSessionLinks) ? linkedSourceAudit.liveSessionLinks : []).filter((link) => String(link?.id || "") !== String(session.id)),
+          { id: session.id, sessionNumber: session.sessionNumber, title: session.title, linkedAt: now }
+        ],
+        liveSessionLinkedAt: now,
+        updatedAt: now
+      } : null;
+      return { sessions: [...allocationRows, session], result: { session }, warehouseAudit };
     });
     const created = mutation?.result?.session;
     void recordUserActivity(req, authUser, { eventType: "warehouse", action: `Created live session from ${sourceType.replace(/_/g, " ")}`, entityType: "live_session", entityId: created?.id || "", path: `/live-sessions/${created?.sessionNumber || ""}` });
@@ -60622,6 +60788,7 @@ async function handleApi(req, res) {
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "live-sessions" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const scope = liveSessionScope(req);
+    if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
     const key = decodeURIComponent(parts[2]);
     const mutation = await postgres.mutateLiveSessionsAtomically((sessions) => {
       const canonicalKey = canonicalLiveSessionReference(key).toLowerCase();
@@ -60651,8 +60818,9 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "live-sessions" && parts[2] && parts[3] === "actions" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const action = String(body.action || "").trim().toLowerCase();
-    if (!["ready", "start", "reconcile", "complete", "cancel"].includes(action)) return sendJson(res, 400, { error: "Choose ready, start, reconcile, complete, or cancel." });
+    if (!["ready", "start", "reconcile", "accept_available", "complete", "cancel"].includes(action)) return sendJson(res, 400, { error: "Choose ready, start, reconcile, accept available quantities, complete, or cancel." });
     const scope = liveSessionScope(req);
+    if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
     const key = decodeURIComponent(parts[2]);
     const existingRows = await postgres.readEntityDocumentCollectionFast("liveSessions");
     const canonicalKey = canonicalLiveSessionReference(key).toLowerCase();
@@ -60684,6 +60852,17 @@ async function handleApi(req, res) {
         return { sessions: nextRows, result: { session: byId.get(String(target.id)), ordersChecked: (liveOrders || []).length } };
       }
       if (liveSessionLedger.sessionIsTerminal(target)) throw Object.assign(new Error("This live session is already closed."), { statusCode: 409 });
+      if (action === "accept_available") {
+        const next = liveSessionLedger.sessionTotals({
+          ...target,
+          items: (target.items || []).map((item) => {
+            const measured = liveSessionLedger.itemMetrics(item);
+            return { ...measured, requestedQty: Number(measured.reservedQty || 0), shortageQty: 0 };
+          }),
+          updatedAt: now
+        });
+        return { sessions: sessions.map((session) => String(session.id) === String(target.id) ? next : session), result: { session: next } };
+      }
       const currentStatus = String(target.status || "draft").toLowerCase();
       if (action === "ready" && !["draft", "counting", "review"].includes(currentStatus)) throw Object.assign(new Error("Only a draft or counted session can be marked ready."), { statusCode: 409 });
       if (action === "start" && !["draft", "ready"].includes(currentStatus)) throw Object.assign(new Error("Only a draft or ready session can be started."), { statusCode: 409 });
@@ -60725,6 +60904,7 @@ async function handleApi(req, res) {
       session: updated,
       ordersChecked: mutation?.result?.ordersChecked || 0,
       message: action === "reconcile" ? `${mutation?.result?.ordersChecked || 0} live order(s) checked; sold and shipped quantities were refreshed without changing stock.`
+        : action === "accept_available" ? "The session now uses only the quantities that were successfully reserved."
         : action === "complete" ? "Session completed and unused inventory released."
           : action === "cancel" ? "Session canceled and unused inventory released."
             : action === "start" ? "Live session started." : "Live session is ready."

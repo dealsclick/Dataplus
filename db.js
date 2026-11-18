@@ -3362,6 +3362,9 @@ async function mutateLiveSessionsAtomically(mutator) {
           updated_at = now()
       `, [entityId, storedPosition, JSON.stringify({ ...data, id: entityId })]);
     }
+    if (outcome?.warehouseAudit && nullableString(outcome.warehouseAudit.id)) {
+      await replaceWarehouseAudits([outcome.warehouseAudit], { client, preserveOthers: true });
+    }
     await client.query("delete from state_documents where doc_key = 'liveSessions'");
     await client.query("commit");
     return {

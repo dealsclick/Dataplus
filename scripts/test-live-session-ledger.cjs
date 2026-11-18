@@ -7,6 +7,7 @@ const {
   matchSessionItemToOrderLine,
   reconcileLiveSessions,
   sessionTotals,
+  sourceAvailabilityItems,
 } = require("../lib/live-sessions");
 
 test("active sessions cannot reserve the same physical source units twice", () => {
@@ -46,6 +47,30 @@ test("sold PO units stay consumed after a session completes while unused units r
 
   assert.equal(next.reservedQty, 6);
   assert.equal(next.shortageQty, 4);
+});
+
+test("source previews expose only PO units not already reserved or sold", () => {
+  const sessions = [
+    sessionTotals({
+      id: "active-session",
+      status: "live",
+      items: [{ sourceKey: "purchase_order:po-1:line-1", sourceAvailableQty: 12, reservedQty: 5, soldQty: 2 }],
+    }),
+    sessionTotals({
+      id: "completed-session",
+      status: "completed",
+      items: [{ sourceKey: "purchase_order:po-1:line-1", sourceAvailableQty: 12, reservedQty: 3, soldQty: 2, releasedQty: 1 }],
+    }),
+  ];
+  const [preview] = sourceAvailabilityItems([{
+    sourceKey: "purchase_order:po-1:line-1",
+    sourceAvailableQty: 12,
+  }], sessions);
+
+  assert.equal(preview.sourceCommittedQty, 7);
+  assert.equal(preview.allocatableQty, 5);
+  assert.equal(preview.requestedQty, 5);
+  assert.equal(preview.reservedQty, 0);
 });
 
 test("live order matching uses UPC, then manufacturer part number, then supplier SKU", () => {
