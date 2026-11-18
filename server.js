@@ -73767,7 +73767,9 @@ async function handleApi(req, res) {
     }
     const body = await parseBody(req);
     try {
-      const credentials = carrierCredentials.resolveEchoSyncPatch(body);
+      // Persist first so a failed upstream verification never discards what the
+      // operator entered, including requests from an already-open older UI.
+      const credentials = carrierCredentials.saveEchoSync(body);
       const result = await echoSync.verifyCredentials(credentials);
       const message = `EchoSync ${result.checks.join(" and ")} verified${result.expiresIn ? `; token valid for ${result.expiresIn} seconds` : ""}.`;
       const saved = carrierCredentials.recordEchoSyncTest({ ...result, message });
