@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { BarChart3, Boxes, CheckCircle2, ExternalLink, Loader2, MoreHorizontal, Play, Plus, Radio, RefreshCw, Save, ShieldCheck, Trash2, Webhook } from "lucide-react"
+import { BarChart3, Boxes, CheckCircle2, Circle, ExternalLink, History, ListChecks, Loader2, MoreHorizontal, Play, Plus, Radio, RefreshCw, Save, ShieldCheck, Trash2, Webhook } from "lucide-react"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
@@ -55,6 +55,14 @@ const features = [
 
 const defaultStart = () => new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10)
 const defaultEnd = () => new Date().toISOString().slice(0, 10)
+const setupHistoryStart = (mode: string, operationalStartDate: string, customStartDate: string) => {
+  if (mode === "none") return ""
+  if (mode === "custom") return customStartDate
+  const operational = new Date(`${operationalStartDate}T00:00:00Z`)
+  if (!Number.isFinite(operational.getTime())) return ""
+  if (mode === "year_to_date") return `${operational.getUTCFullYear()}-01-01`
+  return new Date(operational.getTime() - 30 * 86_400_000).toISOString().slice(0, 10)
+}
 
 export function TikTokChannel({
   channel,
@@ -81,6 +89,14 @@ export function TikTokChannel({
   const [credentials, setCredentials] = useState({ appKey: "", appSecret: "", serviceId: "" })
   const [skuText, setSkuText] = useState("")
   const [disconnectTarget, setDisconnectTarget] = useState<Json | null>(null)
+  const [initialSetup, setInitialSetup] = useState({
+    historyMode: "last_30_days",
+    customHistoryStartDate: defaultStart(),
+    operationalStartDate: defaultEnd(),
+    reconcileCatalog: true,
+    enableOperationalSync: true,
+    configureWebhooks: true,
+  })
   const rules = useMemo(() => ({ ...(channel.settings || {}), ...edits }), [channel.settings, edits])
 
   const refresh = async () => {
@@ -229,6 +245,33 @@ export function TikTokChannel({
     return result
   }
 
+  const startInitialSetup = async () => {
+    const importHistory = initialSetup.historyMode !== "none"
+    const historyStartDate = setupHistoryStart(initialSetup.historyMode, initialSetup.operationalStartDate, initialSetup.customHistoryStartDate)
+    const settingsPatch = {
+      ...edits,
+      channelEnabled: true,
+      tiktokOrdersEnabled: importHistory || initialSetup.enableOperationalSync,
+      tiktokOrderScheduleEnabled: initialSetup.enableOperationalSync,
+      tiktokCatalogEnabled: initialSetup.reconcileCatalog || rules.tiktokCatalogEnabled === true,
+      tiktokWebhooksEnabled: initialSetup.enableOperationalSync && initialSetup.configureWebhooks,
+    }
+    await onSave(channel.id, settingsPatch)
+    setEdits({})
+    const result = await request("setup/initial", {
+      accountId: status.activeAccountId || "",
+      importHistory,
+      historyStartDate,
+      operationalStartDate: initialSetup.operationalStartDate,
+      reconcileCatalog: initialSetup.reconcileCatalog,
+      enableOperationalSync: initialSetup.enableOperationalSync,
+      configureWebhooks: initialSetup.enableOperationalSync && initialSetup.configureWebhooks,
+    })
+    await Promise.all([refresh(), refreshWorkspace()])
+    onRefresh?.()
+    return result
+  }
+
   const queue = async (operation: string, extra: Json = {}) => request(`jobs/${operation}`, {
     accountId: status.activeAccountId || "",
     startDate: dateRange.startDate,
@@ -242,6 +285,18 @@ export function TikTokChannel({
   const appConfigured = status.appConfigured === true
   const verified = status.connection?.verified === true
   const accounts = Array.isArray(status.accounts) ? status.accounts : []
+  const activeAccount = accounts.find((account: Json) => String(account.id || "") === String(status.activeAccountId || "")) || null
+  const activeShopName = activeAccount?.shopName || status.connection?.accountName || "this TikTok shop"
+  const onboarding = status.onboarding || activeAccount?.onboarding || null
+  const activeJobs = (status.recentJobs || []).filter((row: Json) => String(row.accountId || "") === String(status.activeAccountId || ""))
+  const catalogSetupJob = activeJobs.find((row: Json) => row.task === "tiktok-products")
+  const historySetupJob = activeJobs.find((row: Json) => row.task === "tiktok-orders" && row.historicalBackfill === true)
+  const operationalSetupJob = activeJobs.find((row: Json) => row.task === "tiktok-orders" && row.historicalBackfill !== true)
+  const jobCompleted = (row: Json | undefined) => ["success", "warning"].includes(String(row?.status || "").toLowerCase())
+  const selectedHistoryStart = setupHistoryStart(initialSetup.historyMode, initialSetup.operationalStartDate, initialSetup.customHistoryStartDate)
+  const setupDatesValid = initialSetup.historyMode === "none" || Boolean(selectedHistoryStart && selectedHistoryStart < initialSetup.operationalStartDate)
+  const ongoingSyncReady = rules.tiktokOrdersEnabled === true && rules.tiktokOrderScheduleEnabled === true
+  const setupStatus = onboarding?.startedAt && ongoingSyncReady ? "Ongoing sync active" : onboarding?.startedAt ? "Setup started" : "Setup needed"
   const dirty = Object.keys(edits).length > 0
   const keysSaved = Boolean(status.appKey) && status.appSecretConfigured === true
   const canSaveCredentials = status.encryptedStorageReady === true
@@ -274,6 +329,41 @@ export function TikTokChannel({
 
           <TabsContent value="connection" className="space-y-4">
             <div className="flex flex-wrap items-center gap-2"><Badge variant={verified ? "default" : "outline"}>{verified ? "Verified" : configured ? "Authorized - verify connection" : appConfigured ? "App saved - authorization needed" : keysSaved ? "Keys saved - Service ID needed" : "Not configured"}</Badge><span className="text-sm text-muted-foreground">{status.environment || "production"} · {status.shopName || (status.activeAccountId ? "Seller authorized - shop selection pending" : "No seller account")}</span></div>
+            {verified && <section className="overflow-hidden rounded-md border" aria-labelledby="tiktok-initial-setup-heading">
+              <div className="flex flex-wrap items-start justify-between gap-3 border-b bg-muted/20 px-4 py-3">
+                <div className="min-w-0">
+                  <p id="tiktok-initial-setup-heading" className="flex items-center gap-2 text-sm font-medium"><ListChecks className="size-4" /> Finish setup for {activeShopName}</p>
+                  <p className="mt-1 max-w-3xl text-xs text-muted-foreground">Connecting a shop does not automatically download every order. Choose what DataPlus should reconcile, where reporting history begins, and the date operational fulfillment should start.</p>
+                </div>
+                <Badge variant={ongoingSyncReady ? "default" : onboarding?.startedAt ? "secondary" : "outline"}>{setupStatus}</Badge>
+              </div>
+              <div className="grid border-b sm:grid-cols-2 xl:grid-cols-4">
+                {[
+                  ["Connection", "Verified", true],
+                  ["Catalog matching", catalogSetupJob ? String(catalogSetupJob.status || "Queued") : "Not run", jobCompleted(catalogSetupJob)],
+                  ["Historical sales", historySetupJob ? String(historySetupJob.status || "Queued") : onboarding?.importHistory ? "Planned" : "Not run", jobCompleted(historySetupJob)],
+                  ["Operational orders", ongoingSyncReady ? "Hourly with checkpoint" : operationalSetupJob ? String(operationalSetupJob.status || "Queued") : "Not started", ongoingSyncReady],
+                ].map(([label, value, complete], index) => <div key={String(label)} className={`flex min-w-0 items-start gap-2 px-4 py-3 ${index > 0 ? "border-t sm:border-t-0 sm:border-l" : ""}`}>
+                  {complete ? <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-500" /> : <Circle className="mt-0.5 size-4 shrink-0 text-muted-foreground" />}
+                  <div className="min-w-0"><p className="text-xs text-muted-foreground">{label}</p><p className="truncate text-sm font-medium capitalize">{value}</p></div>
+                </div>)}
+              </div>
+              <div className="space-y-4 p-4">
+                <div className="grid gap-3 lg:grid-cols-3">
+                  <label className="flex min-w-0 items-center justify-between gap-4 rounded-md border p-3"><span className="min-w-0"><span className="block text-sm font-medium">Match existing listings</span><span className="block text-xs text-muted-foreground">Download TikTok products and link exact seller SKUs. Unmatched listings remain visible for review.</span></span><Switch checked={initialSetup.reconcileCatalog} onCheckedChange={value => setInitialSetup(current => ({ ...current, reconcileCatalog: value }))} /></label>
+                  <label className="grid gap-1.5 text-sm">Historical sales<Select value={initialSetup.historyMode} onValueChange={value => setInitialSetup(current => ({ ...current, historyMode: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="last_30_days">Last 30 days</SelectItem><SelectItem value="year_to_date">Year to date</SelectItem><SelectItem value="custom">Choose a date</SelectItem><SelectItem value="none">Do not import history</SelectItem></SelectContent></Select><span className="text-xs text-muted-foreground">History is reporting-only and never reserves stock or enters fulfillment.</span></label>
+                  <label className="grid gap-1.5 text-sm">Operational orders begin<Input type="date" value={initialSetup.operationalStartDate} max={defaultEnd()} onChange={event => setInitialSetup(current => ({ ...current, operationalStartDate: event.target.value }))} /><span className="text-xs text-muted-foreground">Orders updated from this date forward can enter normal fulfillment.</span></label>
+                  {initialSetup.historyMode === "custom" && <label className="grid gap-1.5 text-sm">Historical sales begin<Input type="date" value={initialSetup.customHistoryStartDate} max={initialSetup.operationalStartDate} onChange={event => setInitialSetup(current => ({ ...current, customHistoryStartDate: event.target.value }))} /><span className="text-xs text-muted-foreground">The historical range ends before operational orders begin.</span></label>}
+                  <label className="flex min-w-0 items-center justify-between gap-4 rounded-md border p-3"><span className="min-w-0"><span className="block text-sm font-medium">Start ongoing order sync</span><span className="block text-xs text-muted-foreground">Run hourly using the last completed per-shop checkpoint with a one-hour overlap.</span></span><Switch checked={initialSetup.enableOperationalSync} onCheckedChange={value => setInitialSetup(current => ({ ...current, enableOperationalSync: value }))} /></label>
+                  <label className="flex min-w-0 items-center justify-between gap-4 rounded-md border p-3"><span className="min-w-0"><span className="block text-sm font-medium">Configure webhooks</span><span className="block text-xs text-muted-foreground">Use signed TikTok events as the primary trigger while polling remains the recovery sweep.</span></span><Switch disabled={!initialSetup.enableOperationalSync} checked={initialSetup.enableOperationalSync && initialSetup.configureWebhooks} onCheckedChange={value => setInitialSetup(current => ({ ...current, configureWebhooks: value }))} /></label>
+                </div>
+                {initialSetup.historyMode !== "none" && <div className={`flex items-start gap-2 rounded-md border px-3 py-2 text-xs ${setupDatesValid ? "text-muted-foreground" : "border-destructive/50 text-destructive"}`}><History className="mt-0.5 size-4 shrink-0" /><span>{setupDatesValid ? `Reporting history: ${selectedHistoryStart} through the day before ${initialSetup.operationalStartDate}. Operational order handling starts ${initialSetup.operationalStartDate}.` : "Choose a historical start date before the operational order date."}</span></div>}
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-xs text-muted-foreground">Each connected TikTok shop keeps its own setup record, order checkpoint, jobs, and listing evidence.</p>
+                  <Button disabled={busy || !setupDatesValid || (!initialSetup.reconcileCatalog && initialSetup.historyMode === "none" && !initialSetup.enableOperationalSync)} onClick={() => void run(startInitialSetup)}>{busy ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />} {onboarding?.startedAt ? "Run setup again" : "Start shop setup"}</Button>
+                </div>
+              </div>
+            </section>}
             {!status.encryptedStorageReady && <Alert variant="destructive"><ShieldCheck className="size-4" /><AlertTitle>Credential encryption key required</AlertTitle><AlertDescription>Set <code>DATAPLUS_CREDENTIALS_ENCRYPTION_KEY</code> in the deployment secret store before saving credentials.</AlertDescription></Alert>}
             <section className="rounded-md border" aria-labelledby="tiktok-seller-accounts-heading">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b px-3 py-3">

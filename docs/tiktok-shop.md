@@ -58,6 +58,18 @@ Historical order imports set the DataPlus historical isolation fields. They do n
 8. Request Analytics access before enabling LIVE analytics. Request Seller Affiliate Collaboration access before enabling LIVE order attribution; Affiliate APIs are not enabled for every app by default.
 9. Run a small development-shop import and inspect Jobs and channel activity before enabling production schedules.
 
+## First shop setup
+
+Authorizing a seller account does not download orders by itself. After verification, Channels > TikTok Shop > Connection shows a per-shop setup workflow:
+
+1. Reconcile existing TikTok products against exact DataPlus seller SKUs. Listings without one exact catalog match remain in the job evidence as `needs_mapping`.
+2. Choose an optional historical-sales start date. Historical sales stop before the selected operational start date and remain reporting-only.
+3. Choose the operational start date. Orders updated from that point forward use the normal order, SKU-review, routing, inventory, and fulfillment rules.
+4. Enable ongoing order sync. Each shop stores its own completed-through checkpoint. Scheduled sweeps resume with a one-hour overlap instead of repeatedly downloading the full configured lookback.
+5. Configure signed webhooks. Webhooks are the primary event trigger and the scheduled checkpoint sweep remains the recovery path.
+
+Connected shops keep separate onboarding records, checkpoints, jobs, listing snapshots, and order account identity. Re-running setup never changes historical orders into operational orders.
+
 Official references:
 
 - <https://partner.tiktokshop.com/docv2/page/common-parameters>
