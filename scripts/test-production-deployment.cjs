@@ -15,5 +15,6 @@ assert.match(deploy, /git branch "\$BACKUP_REF" "\$CURRENT_REVISION"/);
 assert.match(deploy, /git bundle create .*"\$BACKUP_REF"/);
 assert.match(deploy, /git checkout --detach "\$TARGET_REVISION"/);
 assert.match(deploy, /\[\[ "\$\(git rev-parse HEAD\)" == "\$TARGET_REVISION" \]\]/);
+assert.match(deploy, /DEPLOY_SERVICES=\([^\n]*worker-orders-tiktok[^\n]*\)/, "Production deployment must restart the dedicated TikTok order worker.");
 
 console.log("Production deployment history safeguards are configured.");

@@ -182,7 +182,7 @@ run_with_timeout "${DATAPLUS_RELEASE_HISTORY_TIMEOUT_SECONDS:-120}" docker compo
 record_deployment_status deploying
 
 echo "Starting production services and waiting for health checks..."
-DEPLOY_SERVICES=(redis postgres dataplus worker worker-orders-shopify worker-routing worker-carrier worker-orders-ebay worker-orders-temu)
+DEPLOY_SERVICES=(redis postgres dataplus worker worker-orders-shopify worker-routing worker-carrier worker-orders-ebay worker-orders-temu worker-orders-tiktok)
 if [[ "$PRESERVE_BACKGROUND_WORKER" != "true" ]]; then
   DEPLOY_SERVICES+=(worker-background)
 fi
