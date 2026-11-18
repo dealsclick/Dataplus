@@ -116,6 +116,7 @@ function SettingsPage({
   const [temporaryPassword, setTemporaryPassword] = useState("")
   const [ownPasswordDraft, setOwnPasswordDraft] = useState({ currentPassword: "", password: "", confirm: "" })
   const [ownPasswordSaving, setOwnPasswordSaving] = useState(false)
+  const [settingsSearch, setSettingsSearch] = useState("")
   const requestedTab = new URLSearchParams(window.location.search).get("tab")
 
   const hasActivityAccess = authUser.isSuperuser === true || (authUser.featureAccess || []).includes("user_activity_audit")
@@ -124,6 +125,40 @@ function SettingsPage({
     : settingsTabItems
   const settingsTabs = new Set(visibleSettingsTabItems.map((item) => item.id))
   const [activeTab, setActiveTab] = useState(settingsTabs.has(requestedTab || "") ? String(requestedTab) : "operations")
+  const selectSettingsTab = (tab: string) => {
+    if (tab === "companies") {
+      window.location.assign("/settings?tab=companies")
+      return
+    }
+    setActiveTab(tab)
+    const nextUrl = new URL(window.location.href)
+    nextUrl.searchParams.set("tab", tab)
+    window.history.replaceState({}, "", nextUrl)
+    window.scrollTo({ top: 0, behavior: "smooth" })
+  }
+  const settingsSearchIndex = [
+    ...visibleSettingsTabItems.map((item) => ({ tab: item.id, label: item.label, description: `Open ${item.label} settings`, keywords: item.label })),
+    { tab: "shipping", label: "Shipping providers", description: "Carrier accounts, credentials, rates, and company access", keywords: "shipping carrier providers accounts credentials rates labels" },
+    { tab: "shipping", label: "EchoSync Freight", description: "EchoSync credentials, status, LTL rates, and company access", keywords: "echo echosync freight ltl shipper api" },
+    { tab: "shipping", label: "UPS account", description: "UPS negotiated rates, tracking, and credentials", keywords: "ups oauth rates tracking" },
+    { tab: "shipping", label: "USPS account", description: "USPS rates, tracking, and credentials", keywords: "usps postal rates tracking" },
+    { tab: "shipping", label: "Veeqo connection", description: "Veeqo OAuth, rates, labels, and preferences", keywords: "veeqo oauth rates labels" },
+    { tab: "shipping", label: "Carrier access by company", description: "Enable or disable shared carrier rates for each company", keywords: "share company buysupply linq carrier access permissions" },
+    { tab: "fulfillment", label: "Inventory supply priority", description: "Physical stock and supplier routing priority", keywords: "supplier sourcing priority physical stock routing" },
+    { tab: "fulfillment", label: "Fulfillment gates", description: "Warehouses, package requirements, and pick-list controls", keywords: "fulfillment gates package pick list warehouse" },
+    { tab: "inventory", label: "Inventory allocation", description: "Reservations, safety stock, and warehouse strategy", keywords: "inventory allocation reservations safety stock" },
+    { tab: "email", label: "Email provider", description: "Resend and SMTP credentials", keywords: "email resend smtp" },
+    { tab: "templates", label: "Document templates", description: "Operational email and document templates", keywords: "templates documents quote email" },
+    { tab: "users", label: "Users and permissions", description: "Accounts, roles, and access", keywords: "users permissions roles access" },
+    { tab: "releases", label: "Deployment history", description: "Production status, releases, and changes", keywords: "release deployment history production revision" },
+  ]
+  const normalizedSettingsSearch = settingsSearch.trim().toLowerCase()
+  const settingsSearchResults = normalizedSettingsSearch
+    ? settingsSearchIndex.filter((item, index, rows) => {
+      const matches = `${item.label} ${item.description} ${item.keywords}`.toLowerCase().includes(normalizedSettingsSearch)
+      return matches && rows.findIndex((candidate) => candidate.tab === item.tab && candidate.label === item.label) === index
+    }).slice(0, 8)
+    : []
   const value = (field: string) => draft[field] ?? settings[field]
   const boolValue = (field: string) => Boolean(value(field))
   const physicalSettingsWarehouses = settingsWarehouses.filter((warehouse) => warehouse.isPhysical === true)
@@ -982,7 +1017,7 @@ function SettingsPage({
         eyebrow="Admin"
         title="System Settings"
         description="Operations, workers, catalog controls, integrations, and deployment history in compact tabs."
-        action={["releases", "superuser", "performance", "sales"].includes(activeTab) ? undefined : editing ? (
+        action={["releases", "superuser", "performance", "sales", "shipping"].includes(activeTab) ? undefined : editing ? (
           <div className="flex gap-2">
             <Button variant="outline" onClick={() => { setEditing(false); setDraft({}) }}>Cancel</Button>
             <Button onClick={save}>Save changes</Button>
@@ -990,10 +1025,28 @@ function SettingsPage({
         ) : <Button onClick={() => setEditing(true)}>Edit</Button>}
       />
 
-      <Tabs value={activeTab} onValueChange={tab => { if (tab === "companies") window.location.assign("/settings?tab=companies"); else setActiveTab(tab) }}>
+      <div className="relative rounded-md border bg-card p-3 shadow-sm">
+        <Search className="pointer-events-none absolute left-6 top-6 size-4 text-muted-foreground" />
+        <Input
+          value={settingsSearch}
+          onChange={(event) => setSettingsSearch(event.target.value)}
+          className="h-10 pl-9"
+          placeholder="Search settings, providers, users, templates..."
+          aria-label="Search system settings"
+        />
+        {normalizedSettingsSearch ? <div className="mt-2 grid gap-1 sm:grid-cols-2 xl:grid-cols-4">
+          {settingsSearchResults.map((result) => <button type="button" key={`${result.tab}:${result.label}`} onClick={() => { selectSettingsTab(result.tab); setSettingsSearch("") }} className="min-w-0 rounded-md border bg-background px-3 py-2 text-left transition-colors hover:border-primary/50 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            <span className="block truncate text-sm font-medium">{result.label}</span>
+            <span className="block truncate text-xs text-muted-foreground">{result.description}</span>
+          </button>)}
+          {!settingsSearchResults.length ? <p className="px-1 py-3 text-sm text-muted-foreground sm:col-span-2 xl:col-span-4">No settings match "{settingsSearch.trim()}".</p> : null}
+        </div> : <p className="mt-2 text-xs text-muted-foreground">Search by setting, provider, workflow, or integration name.</p>}
+      </div>
+
+      <Tabs value={activeTab} onValueChange={selectSettingsTab}>
         {compactSettingsNav ? (
           <Field label="Settings section">
-            <Select value={activeTab} onValueChange={tab => { if (tab === "companies") window.location.assign("/settings?tab=companies"); else setActiveTab(tab) }}>
+            <Select value={activeTab} onValueChange={selectSettingsTab}>
               <SelectTrigger className="h-11 w-full">
                 <SelectValue />
               </SelectTrigger>
@@ -1003,9 +1056,11 @@ function SettingsPage({
             </Select>
           </Field>
         ) : (
-          <TabsList className="flex flex-wrap">
-            {visibleSettingsTabItems.map((item) => <TabsTrigger key={item.id} value={item.id}>{item.label}</TabsTrigger>)}
-          </TabsList>
+          <div className="max-w-full overflow-x-auto rounded-md border bg-card p-1">
+            <TabsList className="h-auto min-w-max justify-start gap-1 bg-transparent p-0">
+              {visibleSettingsTabItems.map((item) => <TabsTrigger key={item.id} value={item.id} className="h-8 px-3 text-xs">{item.label}</TabsTrigger>)}
+            </TabsList>
+          </div>
         )}
         {activeTab === "email" && <Card className="mt-4 border-primary/30">
           <CardHeader>
@@ -1152,6 +1207,9 @@ function SettingsPage({
             </CardContent>
           </Card>
         </TabsContent>
+        <TabsContent value="shipping" className="grid gap-4">
+          <CarrierProviderSettings canManage={canManageCarrierCredentials} />
+        </TabsContent>
         <TabsContent value="fulfillment" className="grid gap-4">
           <Card>
             <CardHeader className="gap-3 border-b sm:flex-row sm:items-start sm:justify-between">
@@ -1221,7 +1279,6 @@ function SettingsPage({
               <Field label="Default dimension unit"><Select disabled={!editing} value={String(value("fulfillmentDefaultDimensionUnit") || "in")} onValueChange={(next) => update("fulfillmentDefaultDimensionUnit", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="in">Inches</SelectItem><SelectItem value="cm">Centimeters</SelectItem></SelectContent></Select></Field>
             </CardContent>
           </Card>
-          <CarrierProviderSettings canManage={canManageCarrierCredentials} />
           <Card>
             <CardHeader><CardTitle className="text-base">Universal rate and label workflow</CardTitle><CardDescription>Use one label workflow while DataPlus loads channel-native labels, Veeqo rates, and configured direct carrier accounts.</CardDescription></CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
