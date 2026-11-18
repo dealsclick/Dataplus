@@ -304,7 +304,7 @@ let dbCache = { mtimeMs: 0, data: null };
 let shopifyRuntimeCredentialsCache = { mtimeMs: 0, value: {} };
 let ebayRuntimeCredentialsCache = { mtimeMs: 0, value: {} };
 let publicStateJsonCache = null;
-let operationalSummaryCache = { value: null, refreshedAt: 0, pending: null };
+let operationalSummaryCache = { value: null, refreshedAt: 0, retryAt: 0, pending: null };
 let shopifyAccessTokenCache = { token: "", expiresAt: 0, scope: "" };
 let shopifyStatusMapCache = { mtimeMs: 0, data: null };
 let connectorStateMemoryCache = {};
@@ -29992,15 +29992,26 @@ function sendVersionedProjection(req, res, payload, version) {
 async function withOperationalSummary(db, options = {}) {
   if (!postgres.isPostgresEnabled()) return db;
   const now = Date.now();
-  if (options.refresh !== false && !operationalSummaryCache.pending && now - operationalSummaryCache.refreshedAt > 60_000) {
+  if (
+    options.refresh !== false &&
+    !operationalSummaryCache.pending &&
+    now >= operationalSummaryCache.retryAt &&
+    now - operationalSummaryCache.refreshedAt > 60_000
+  ) {
     operationalSummaryCache.pending = postgres.readOperationalSummary()
       .then((summary) => {
         if (summary) {
           operationalSummaryCache.value = summary;
           operationalSummaryCache.refreshedAt = Date.now();
+          operationalSummaryCache.retryAt = 0;
+        } else {
+          operationalSummaryCache.retryAt = Date.now() + 5 * 60_000;
         }
       })
-      .catch((error) => console.warn("Unable to refresh Postgres operational summary:", error.message || error))
+      .catch((error) => {
+        operationalSummaryCache.retryAt = Date.now() + 5 * 60_000;
+        console.warn("Unable to refresh Postgres operational summary:", error.message || error);
+      })
       .finally(() => { operationalSummaryCache.pending = null; });
   }
   if (!operationalSummaryCache.value) return db;
