@@ -188,6 +188,7 @@ async function ensureOutboundAuditSchema(client) {
     alter table if exists outbound_audit_sessions add column if not exists evidence_required boolean not null default true;
     alter table if exists outbound_audit_sessions add column if not exists evidence_complete_count integer not null default 0;
     alter table if exists outbound_audit_sessions add column if not exists evidence_override_reason text;
+    alter table if exists outbound_audit_sessions add column if not exists close_override_reason text;
     alter table if exists outbound_audit_scans add column if not exists evidence_status text not null default 'missing';
     alter table if exists outbound_audit_scans add column if not exists evidence_count integer not null default 0;
     alter table if exists outbound_audit_scans add column if not exists live_item_required boolean not null default false;
@@ -1349,6 +1350,7 @@ async function initRelationalSchema() {
       evidence_required boolean not null default true,
       evidence_complete_count integer not null default 0,
       evidence_override_reason text,
+      close_override_reason text,
       started_by_id text,
       started_by_name text,
       closed_by_id text,
@@ -1387,10 +1389,13 @@ async function initRelationalSchema() {
       on outbound_audit_scans (audit_id, scanned_at desc);
     create index if not exists outbound_audit_scans_tracking_idx
       on outbound_audit_scans (tracking_normalized, scanned_at desc);
+    create index if not exists outbound_audit_scans_order_matches_gin_idx
+      on outbound_audit_scans using gin (order_matches jsonb_path_ops);
 
     alter table outbound_audit_sessions add column if not exists evidence_required boolean not null default true;
     alter table outbound_audit_sessions add column if not exists evidence_complete_count integer not null default 0;
     alter table outbound_audit_sessions add column if not exists evidence_override_reason text;
+    alter table outbound_audit_sessions add column if not exists close_override_reason text;
     alter table outbound_audit_scans add column if not exists evidence_status text not null default 'missing';
     alter table outbound_audit_scans add column if not exists evidence_count integer not null default 0;
     alter table outbound_audit_scans add column if not exists live_item_required boolean not null default false;

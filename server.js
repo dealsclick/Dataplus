@@ -55457,7 +55457,7 @@ function clearOrderApiCache(orderId = "") {
   redisCache.deleteByPrefix("dataplus:orders:").catch(() => {});
   // Detail pages are cached by canonical order ID. Invalidate only the order that
   // changed so activity elsewhere does not make every order-detail load cold.
-  if (orderId) redisCache.deleteByPrefix(`dataplus:order-detail:v9:${orderId}:`).catch(() => {});
+  if (orderId) redisCache.deleteByPrefix(`dataplus:order-detail:v10:${orderId}:`).catch(() => {});
 }
 
 async function invalidateOrderFinancialCaches(orderIds = []) {
@@ -55465,10 +55465,10 @@ async function invalidateOrderFinancialCaches(orderIds = []) {
   orderApiCacheGeneration += 1;
   await redisCache.deleteByPrefix("dataplus:orders:").catch(() => {});
   if (ids.length > 100) {
-    await redisCache.deleteByPrefix("dataplus:order-detail:v9:").catch(() => {});
+    await redisCache.deleteByPrefix("dataplus:order-detail:v10:").catch(() => {});
     return;
   }
-  await Promise.all(ids.map((orderId) => redisCache.deleteByPrefix(`dataplus:order-detail:v9:${orderId}:`).catch(() => {})));
+  await Promise.all(ids.map((orderId) => redisCache.deleteByPrefix(`dataplus:order-detail:v10:${orderId}:`).catch(() => {})));
 }
 
 function orderAddressLabel(address = {}) {
@@ -55653,10 +55653,11 @@ async function enrichOrderDetail(order = {}) {
   const lines = Array.isArray(order.items) ? order.items : [];
   const routePurchaseOrderIds = (order.fulfillmentRoutes || []).map((route) => String(route?.purchaseOrderId || "")).filter(Boolean);
   const purchaseOrderIds = [...new Set([...(order.purchaseOrderIds || []).map((id) => String(id || "")).filter(Boolean), ...routePurchaseOrderIds])];
-  const [products, linkedPurchaseOrders, financialSummary] = await Promise.all([
+  const [products, linkedPurchaseOrders, financialSummary, outboundEvidence] = await Promise.all([
     readOrderProductsForDetail(lines),
     postgres.isPostgresEnabled() ? Promise.all(purchaseOrderIds.map((id) => postgres.readPurchaseOrderByKey(id))) : [],
-    postgres.isPostgresEnabled() ? postgres.readOrderFinancialSummary(order.id) : { channelFees: [], settlements: [], shipping: { shipments: [], estimatedCost: 0, actualCost: null, effectiveCost: 0, reconciliationStatus: "not_recorded" } }
+    postgres.isPostgresEnabled() ? postgres.readOrderFinancialSummary(order.id) : { channelFees: [], settlements: [], shipping: { shipments: [], estimatedCost: 0, actualCost: null, effectiveCost: 0, reconciliationStatus: "not_recorded" } },
+    postgres.isPostgresEnabled() ? outboundAuditStore.readOrderEvidence({ tenantId: LEGACY_TENANT, companyId: LEGACY_COMPANY }, order) : []
   ]);
   const localByKey = orderProductLookup(products);
   let itemRevenue = 0;
@@ -55743,8 +55744,27 @@ async function enrichOrderDetail(order = {}) {
   const shippingLabelCost = hasNormalizedShipping ? Number(shippingFinancials.effectiveCost || 0) : estimatedShippingCost;
   const dropshipFees = Number(order.dropshipFees || 0);
   const grossProfit = total - estimatedCogs - shippingLabelCost - marketplaceFees - refunds - dropshipFees;
+  const outboundDocuments = (outboundEvidence || []).map((evidence) => ({
+    id: `outbound-${evidence.id}`,
+    name: `${evidence.auditNumber || "Outbound audit"} shipment photo`,
+    type: "shipment-photo",
+    note: [evidence.carrier, evidence.trackingNumber, evidence.scannedByName ? `scanned by ${evidence.scannedByName}` : ""].filter(Boolean).join(" | "),
+    mimeType: evidence.contentType || "image/jpeg",
+    size: Number(evidence.byteSize || 0),
+    storage: "outbound-audit",
+    url: evidence.contentUrl || "",
+    createdAt: evidence.capturedAt || evidence.scannedAt || "",
+    auditNumber: evidence.auditNumber || "",
+    trackingNumber: evidence.trackingNumber || "",
+    carrier: evidence.carrier || "",
+    scannedByName: evidence.scannedByName || ""
+  }));
+  const orderDocuments = Array.isArray(order.documents) ? order.documents : [];
+  const documentIds = new Set(orderDocuments.map((document) => String(document?.id || "")));
   return {
     ...order,
+    documents: [...orderDocuments, ...outboundDocuments.filter((document) => !documentIds.has(document.id))],
+    outboundAuditEvidence: outboundDocuments,
     timeline: normalizeOrderTimeline(order),
     items: enrichedLines,
     linkedPurchaseOrders: (linkedPurchaseOrders || []).filter(Boolean).map((po) => ({
@@ -65645,7 +65665,7 @@ async function handleApi(req, res) {
   }
 
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "orders" && parts[2] && parts[2] !== "tracking-lookup" && !parts[3] && postgres.isPostgresEnabled()) {
-    const requestedCacheKey = `dataplus:order-detail:v9:${parts[2]}:`;
+    const requestedCacheKey = `dataplus:order-detail:v10:${parts[2]}:`;
     const cached = await redisCache.getJson(requestedCacheKey);
     if (cached) return sendJson(res, 200, { ...cached, cached: true });
     const [order, warehouses, fulfillmentOperationsSettings] = await Promise.all([
@@ -65663,7 +65683,7 @@ async function handleApi(req, res) {
     const normalizedFulfillmentSettings = normalizeFulfillmentSettings(fulfillmentOperationsSettings || {});
     const defaultShipFromWarehouseId = fulfillmentDefaultShipFromWarehouseId({ warehouses: warehouses || [], fulfillmentOperationsSettings: normalizedFulfillmentSettings }, {});
     const payload = { order: enrichedOrder, warehouses: warehouses || [], settings, fulfillmentSettings: { ...normalizedFulfillmentSettings, defaultShipFromWarehouseId }, customerSummary, relatedReturns };
-    const cacheKey = `dataplus:order-detail:v9:${order.id}:`;
+    const cacheKey = `dataplus:order-detail:v10:${order.id}:`;
     await Promise.all([
       redisCache.setJson(cacheKey, payload, 300),
       requestedCacheKey === cacheKey ? Promise.resolve() : redisCache.setJson(requestedCacheKey, payload, 60)
@@ -70637,21 +70657,35 @@ async function handleApi(req, res) {
       try {
         const written = await writeOutboundEvidenceFile(req, filePath);
         const saved = await outboundAuditStore.completeEvidence(scope, auditId, scanId, evidenceId, written);
+        const audit = await outboundAuditStore.read(scope, auditId).catch(() => null);
+        const matchedScan = audit?.scans?.find((scan) => String(scan.id) === String(scanId));
+        for (const match of matchedScan?.matches || []) {
+          if (match.orderId) clearOrderApiCache(match.orderId);
+        }
         return sendJson(res, 200, { evidence: saved, message: "Package photo saved." });
       } catch (error) {
         await outboundAuditStore.failEvidence(scope, auditId, scanId, evidenceId, error.message).catch(() => {});
         throw error;
       }
     }
-    if (req.method === "GET") {
+    if (req.method === "GET" || req.method === "HEAD") {
       if (evidence.status !== "ready" || !fs.existsSync(filePath)) return notFound(res);
       const stat = await fs.promises.stat(filePath);
-      res.writeHead(200, {
+      const etag = `W/\"${stat.size}-${Math.floor(stat.mtimeMs)}\"`;
+      const headers = {
         "Content-Type": "image/jpeg",
         "Content-Length": stat.size,
-        "Cache-Control": "private, max-age=300",
+        "Cache-Control": "private, max-age=86400, stale-while-revalidate=604800",
+        "ETag": etag,
+        "Last-Modified": stat.mtime.toUTCString(),
         "Content-Disposition": `inline; filename="${path.basename(evidence.file_name || `${evidenceId}.jpg`)}"`
-      });
+      };
+      if (String(req.headers["if-none-match"] || "") === etag) {
+        res.writeHead(304, { "Cache-Control": headers["Cache-Control"], "ETag": etag, "Last-Modified": headers["Last-Modified"] });
+        return res.end();
+      }
+      res.writeHead(200, headers);
+      if (req.method === "HEAD") return res.end();
       return fs.createReadStream(filePath).pipe(res);
     }
   }

@@ -207,7 +207,7 @@ async function photoSource(video: HTMLVideoElement): Promise<ImageBitmap> {
 export async function captureCompressedEvidence(video: HTMLVideoElement) {
   const image = await photoSource(video)
   try {
-    const maxEdge = 2560
+    const maxEdge = 1920
     const scale = Math.min(1, maxEdge / Math.max(image.width, image.height))
     const canvas = document.createElement("canvas")
     canvas.width = Math.max(1, Math.round(image.width * scale))
@@ -215,13 +215,14 @@ export async function captureCompressedEvidence(video: HTMLVideoElement) {
     const context = canvas.getContext("2d", { alpha: false })
     if (!context) throw new Error("Unable to prepare the package photo.")
     context.drawImage(image, 0, 0, canvas.width, canvas.height)
-    let quality = 0.82
+    const maxBytes = 750_000
+    let quality = 0.78
     let blob = await canvasJpeg(canvas, quality)
-    while (blob.size > 1_500_000 && quality > 0.5) {
+    while (blob.size > maxBytes && quality > 0.46) {
       quality -= 0.08
       blob = await canvasJpeg(canvas, quality)
     }
-    if (blob.size > 1_500_000) throw new Error("The photo is still too large. Move closer to the package and try again.")
+    if (blob.size > maxBytes) throw new Error("The photo is still too large. Move closer to the package and try again.")
     return { blob, width: canvas.width, height: canvas.height }
   } finally {
     image.close()
