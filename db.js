@@ -185,7 +185,9 @@ async function ensureProductShadowSkuSchema(client) {
 
 async function ensureOutboundAuditSchema(client) {
   await client.query(`
-    alter table if exists outbound_audit_sessions add column if not exists evidence_required boolean not null default true;
+    alter table if exists outbound_audit_sessions add column if not exists evidence_required boolean not null default false;
+    alter table if exists outbound_audit_sessions alter column evidence_required set default false;
+    update outbound_audit_sessions set evidence_required = false where evidence_required = true;
     alter table if exists outbound_audit_sessions add column if not exists evidence_complete_count integer not null default 0;
     alter table if exists outbound_audit_sessions add column if not exists evidence_override_reason text;
     alter table if exists outbound_audit_sessions add column if not exists close_override_reason text;
@@ -1347,7 +1349,7 @@ async function initRelationalSchema() {
       matched_count integer not null default 0,
       unmatched_count integer not null default 0,
       multiple_match_count integer not null default 0,
-      evidence_required boolean not null default true,
+      evidence_required boolean not null default false,
       evidence_complete_count integer not null default 0,
       evidence_override_reason text,
       close_override_reason text,
@@ -1392,7 +1394,9 @@ async function initRelationalSchema() {
     create index if not exists outbound_audit_scans_order_matches_gin_idx
       on outbound_audit_scans using gin (order_matches jsonb_path_ops);
 
-    alter table outbound_audit_sessions add column if not exists evidence_required boolean not null default true;
+    alter table outbound_audit_sessions add column if not exists evidence_required boolean not null default false;
+    alter table outbound_audit_sessions alter column evidence_required set default false;
+    update outbound_audit_sessions set evidence_required = false where evidence_required = true;
     alter table outbound_audit_sessions add column if not exists evidence_complete_count integer not null default 0;
     alter table outbound_audit_sessions add column if not exists evidence_override_reason text;
     alter table outbound_audit_sessions add column if not exists close_override_reason text;
