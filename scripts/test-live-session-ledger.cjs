@@ -4,7 +4,9 @@ const test = require("node:test");
 const {
   allocateRequestedItems,
   applyLaunchJob,
+  datedLiveMerchantSku,
   itemMetrics,
+  launchCounts,
   launchReadiness,
   matchSessionItemToOrderLine,
   reconcileLiveSessions,
@@ -248,6 +250,35 @@ test("live launch uses manufacturer SKU and remaining reserved quantity", () => 
   assert.equal(review.groups[0].quantity, 4);
 });
 
+test("eBay Live appends a stable launch date to the manufacturer SKU", () => {
+  const review = launchReadiness({
+    id: "session-ebay",
+    status: "ready",
+    channel: "ebay_live",
+    channelAccountId: "ebay-primary",
+    scheduleTimeZone: "America/New_York",
+    items: [{ id: "item-1", productId: "product-1", manufacturerSku: "48-89-2801", reservedQty: 2 }],
+  }, [{ id: "product-1", sku: "BUS210787TRV", status: "active" }], { reviewedAt: "2026-11-18T15:00:00.000Z" });
+
+  assert.equal(review.session.items[0].launch.merchantSkuBase, "48-89-2801");
+  assert.equal(review.session.items[0].launch.merchantSku, "48-89-2801-LV-11-18-26");
+  assert.equal(review.session.launch.merchantSkuDate, "11-18-26");
+  assert.equal(review.groups[0].merchantSku, "48-89-2801-LV-11-18-26");
+  assert.equal(datedLiveMerchantSku("A".repeat(60), "11-18-26").length, 50);
+});
+
+test("launch counters are derived from the current SKU statuses", () => {
+  assert.deepEqual(launchCounts([
+    { launch: { status: "ready" } },
+    { launch: { status: "queued" } },
+    { launch: { status: "publishing" } },
+    { launch: { status: "scheduled" } },
+    { launch: { status: "live" } },
+    { launch: { status: "failed" } },
+    { launch: { status: "blocked" } },
+  ]), { readyItems: 1, blockedItems: 1, queuedItems: 2, submittedItems: 1, liveItems: 1, failedItems: 1 });
+});
+
 test("supplier SKU never substitutes for a missing manufacturer SKU during live launch", () => {
   const review = launchReadiness({
     id: "session-1",
@@ -276,16 +307,20 @@ test("channel job results persist listing identity and failed rows remain retrya
   }, [
     { id: "product-1", sku: "BUS210787TRV", status: "active" },
     { id: "product-2", sku: "BUS143823TRV", status: "active" },
-  ]).session;
+  ], { reviewedAt: "2026-11-18T15:00:00.000Z" }).session;
   reviewed.items = reviewed.items.map((item) => ({ ...item, launch: { ...item.launch, status: "queued", jobId: "job-1" } }));
   const applied = applyLaunchJob(reviewed, {
     id: "job-1",
     jobNumber: 42,
     status: "warning",
+    phase: "publish_offers",
+    processedRows: 2,
+    totalRows: 2,
+    progressPercent: 100,
     message: "One item needs review.",
     liveSessionLaunchResults: [
-      { merchantSku: "48-89-2801", status: "live", listingId: "listing-1", listingUrl: "https://example.test/listing-1" },
-      { merchantSku: "48-32-4013", status: "failed", error: "Category mapping is missing." },
+      { merchantSku: "48-89-2801-LV-11-18-26", status: "live", listingId: "listing-1", listingUrl: "https://example.test/listing-1" },
+      { merchantSku: "48-32-4013-LV-11-18-26", status: "failed", error: "Category mapping is missing." },
     ],
   });
 
@@ -295,6 +330,10 @@ test("channel job results persist listing identity and failed rows remain retrya
   assert.match(applied.items[1].launch.error, /Category mapping/);
   assert.equal(applied.launch.liveItems, 1);
   assert.equal(applied.launch.failedItems, 1);
+  assert.equal(applied.launch.jobPhase, "publish_offers");
+  assert.equal(applied.launch.processedItems, 2);
+  assert.equal(applied.launch.totalItems, 2);
+  assert.equal(applied.launch.progressPercent, 100);
 });
 
 test("readiness review does not queue an already submitted merchant SKU again", () => {
@@ -325,12 +364,12 @@ test("a future eBay offer remains scheduled instead of being reported live", () 
     channel: "ebay_live",
     channelAccountId: "ebay-primary",
     items: [{ id: "scheduled-item", productId: "product-1", manufacturerSku: "48-89-2801", reservedQty: 1 }],
-  }, [{ id: "product-1", sku: "BUS210787TRV", status: "active" }]).session;
+  }, [{ id: "product-1", sku: "BUS210787TRV", status: "active" }], { reviewedAt: "2026-11-18T15:00:00.000Z" }).session;
   reviewed.items[0].launch = { ...reviewed.items[0].launch, status: "queued", jobId: "job-scheduled" };
   const applied = applyLaunchJob(reviewed, {
     id: "job-scheduled",
     status: "success",
-    liveSessionLaunchResults: [{ merchantSku: "48-89-2801", status: "scheduled", listingId: "listing-future" }],
+    liveSessionLaunchResults: [{ merchantSku: "48-89-2801-LV-11-18-26", status: "scheduled", listingId: "listing-future" }],
   });
 
   assert.equal(applied.items[0].launch.status, "scheduled");

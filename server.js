@@ -61149,18 +61149,28 @@ async function handleApi(req, res) {
     }
     const selectedItemIds = new Set(groups.flatMap((group) => group.itemIds).map(String));
     const now = new Date().toISOString();
+    const nextItems = (plan.session.items || []).map((item) => selectedItemIds.has(String(item.id)) ? {
+      ...item,
+      launch: {
+        ...(item.launch || {}), status: "queued", error: "", jobId: String(queuedJob?.id || ""),
+        jobNumber: Number(queuedJob?.jobNumber || 0) || 0, queuedAt: now, updatedAt: now
+      }
+    } : item);
+    const nextLaunchCounts = liveSessionLedger.launchCounts(nextItems);
     const queuedSession = liveSessionLedger.sessionTotals({
       ...plan.session,
-      items: (plan.session.items || []).map((item) => selectedItemIds.has(String(item.id)) ? {
-        ...item,
-        launch: {
-          ...(item.launch || {}), status: "queued", error: "", jobId: String(queuedJob?.id || ""),
-          jobNumber: Number(queuedJob?.jobNumber || 0) || 0, queuedAt: now, updatedAt: now
-        }
-      } : item),
+      items: nextItems,
       launch: {
         ...(plan.session.launch || {}), status: "queued", jobId: String(queuedJob?.id || ""),
-        jobNumber: Number(queuedJob?.jobNumber || 0) || 0, queuedAt: now, updatedAt: now
+        jobNumber: Number(queuedJob?.jobNumber || 0) || 0,
+        jobStatus: String(queuedJob?.status || "queued"),
+        jobPhase: String(queuedJob?.phase || "queued"),
+        processedItems: Number(queuedJob?.processedRows || 0),
+        totalItems: Number(queuedJob?.totalRows || groups.length),
+        progressPercent: Number(queuedJob?.progressPercent || 0),
+        message: String(queuedJob?.message || "Channel launch queued."),
+        ...nextLaunchCounts,
+        queuedAt: now, updatedAt: now
       },
       updatedAt: now
     });
@@ -61175,7 +61185,7 @@ async function handleApi(req, res) {
       duplicate: queued?.duplicate === true,
       message: queued?.duplicate
         ? `Launch Job #${queuedJob?.jobNumber || queuedJob?.id} is already active for this session.`
-        : `${groups.length} manufacturer SKU${groups.length === 1 ? "" : "s"} queued for ${plan.session.channelLabel || "channel"} on ${plan.session.channelAccountName || "the selected shop"}.`
+        : `${groups.length} dated merchant SKU${groups.length === 1 ? "" : "s"} queued for ${plan.session.channelLabel || "channel"} on ${plan.session.channelAccountName || "the selected shop"}.`
     });
   }
 
