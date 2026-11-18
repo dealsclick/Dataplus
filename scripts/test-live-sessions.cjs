@@ -91,7 +91,13 @@ assert.match(serverSource, /\/api\/live-sessions\/source-preview/);
 assert.match(serverSource, /liveSessionLinks:/);
 assert.match(serverSource, /liveSessionId: sessionId/);
 assert.match(serverSource, /mutateLiveSessionsAtomically/);
+assert.match(serverSource, /parts\[3\] === "launch" && parts\[4\] === "readiness"/);
+assert.match(serverSource, /sourceLiveSessionId: plan\.session\.id/);
+assert.match(serverSource, /getTikTokMarketplace\(\)\.queue\("launch"/);
 assert.match(uiSource, /Session from remaining/);
 assert.match(uiSource, /Create and scan/);
+assert.match(uiSource, /Review readiness/);
+assert.match(uiSource, /Publish ready/);
+assert.match(uiSource, /Whatnot publishing is not connected/);
 
 console.log("Live session audit-link regression tests passed.");

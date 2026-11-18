@@ -3,7 +3,9 @@ const test = require("node:test");
 
 const {
   allocateRequestedItems,
+  applyLaunchJob,
   itemMetrics,
+  launchReadiness,
   matchSessionItemToOrderLine,
   reconcileLiveSessions,
   sessionTotals,
@@ -156,4 +158,100 @@ test("released units leave the active session without changing source inventory"
   const item = itemMetrics({ reservedQty: 10, soldQty: 3, shippedQty: 2, releasedQty: 4 });
   assert.equal(item.remainingQty, 3);
   assert.equal(item.sourceAvailableQty, 0);
+});
+
+test("live launch uses manufacturer SKU and remaining reserved quantity", () => {
+  const review = launchReadiness({
+    id: "session-1",
+    status: "ready",
+    channel: "tiktok_live",
+    channelAccountId: "shop-1",
+    channelAccountName: "Island Supply",
+    items: [{
+      id: "item-1",
+      productId: "product-1",
+      sku: "BUS210787TRV",
+      supplierSku: "210787",
+      manufacturerSku: "48-89-2801",
+      reservedQty: 8,
+      soldQty: 3,
+      releasedQty: 1,
+    }],
+  }, [{ id: "product-1", sku: "BUS210787TRV", status: "active" }]);
+
+  assert.equal(review.session.items[0].launch.status, "ready");
+  assert.equal(review.session.items[0].launch.merchantSku, "48-89-2801");
+  assert.equal(review.session.items[0].launch.quantity, 4);
+  assert.equal(review.groups[0].merchantSku, "48-89-2801");
+  assert.equal(review.groups[0].quantity, 4);
+});
+
+test("supplier SKU never substitutes for a missing manufacturer SKU during live launch", () => {
+  const review = launchReadiness({
+    id: "session-1",
+    status: "ready",
+    channel: "ebay_live",
+    channelAccountId: "ebay-primary",
+    items: [{ id: "item-1", productId: "product-1", sku: "BUS210787TRV", supplierSku: "210787", reservedQty: 2 }],
+  }, [{ id: "product-1", sku: "BUS210787TRV", status: "active" }]);
+
+  assert.equal(review.session.items[0].launch.status, "blocked");
+  assert.equal(review.session.items[0].launch.merchantSku, "");
+  assert.match(review.session.items[0].launch.blockers.join(" "), /Manufacturer SKU is required/);
+  assert.equal(review.groups.length, 0);
+});
+
+test("channel job results persist listing identity and failed rows remain retryable", () => {
+  const reviewed = launchReadiness({
+    id: "session-1",
+    status: "ready",
+    channel: "ebay_live",
+    channelAccountId: "ebay-primary",
+    items: [
+      { id: "item-live", productId: "product-1", manufacturerSku: "48-89-2801", reservedQty: 2 },
+      { id: "item-failed", productId: "product-2", manufacturerSku: "48-32-4013", reservedQty: 1 },
+    ],
+  }, [
+    { id: "product-1", sku: "BUS210787TRV", status: "active" },
+    { id: "product-2", sku: "BUS143823TRV", status: "active" },
+  ]).session;
+  reviewed.items = reviewed.items.map((item) => ({ ...item, launch: { ...item.launch, status: "queued", jobId: "job-1" } }));
+  const applied = applyLaunchJob(reviewed, {
+    id: "job-1",
+    jobNumber: 42,
+    status: "warning",
+    message: "One item needs review.",
+    liveSessionLaunchResults: [
+      { merchantSku: "48-89-2801", status: "live", listingId: "listing-1", listingUrl: "https://example.test/listing-1" },
+      { merchantSku: "48-32-4013", status: "failed", error: "Category mapping is missing." },
+    ],
+  });
+
+  assert.equal(applied.items[0].launch.status, "live");
+  assert.equal(applied.items[0].launch.listingId, "listing-1");
+  assert.equal(applied.items[1].launch.status, "failed");
+  assert.match(applied.items[1].launch.error, /Category mapping/);
+  assert.equal(applied.launch.liveItems, 1);
+  assert.equal(applied.launch.failedItems, 1);
+});
+
+test("readiness review does not queue an already submitted merchant SKU again", () => {
+  const review = launchReadiness({
+    id: "session-1",
+    status: "ready",
+    channel: "tiktok_live",
+    channelAccountId: "shop-1",
+    items: [{
+      id: "item-1",
+      productId: "product-1",
+      manufacturerSku: "48-89-2801",
+      reservedQty: 2,
+      launch: { status: "submitted", listingId: "listing-1" },
+    }],
+  }, [{ id: "product-1", sku: "BUS210787TRV", status: "active" }]);
+
+  assert.equal(review.session.items[0].launch.status, "submitted");
+  assert.equal(review.session.items[0].launch.listingId, "listing-1");
+  assert.equal(review.groups.length, 0);
+  assert.equal(review.summary.status, "complete");
 });

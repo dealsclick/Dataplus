@@ -13690,6 +13690,36 @@ function liveSessionChannelAccounts(db = {}) {
   return accounts;
 }
 
+function liveSessionRecordForKey(rows = [], scope = {}, key = "") {
+  const requested = decodeURIComponent(String(key || "")).trim();
+  const canonicalKey = canonicalLiveSessionReference(requested).toLowerCase();
+  return liveSessionRowsForScope(rows, scope).find((session) => String(session.id || "").toLowerCase() === requested.toLowerCase()
+    || canonicalLiveSessionReference(session.sessionNumber, session.id).toLowerCase() === canonicalKey) || null;
+}
+
+async function liveSessionLaunchContext(session = {}, db = {}) {
+  const linkedAudit = session.linkedAuditId ? await postgres.readWarehouseAudit(session.linkedAuditId) : null;
+  const hydrated = linkedAudit ? liveSessionWithAudit(session, linkedAudit) : liveSessionLedger.sessionTotals(session);
+  const productKeys = [...new Set((hydrated.items || []).flatMap((item) => [item.productId, item.sku, item.catalogSku]).map((value) => String(value || "").trim()).filter(Boolean))];
+  const products = productKeys.length
+    ? await postgres.readProductsByKeys(productKeys, { directProductIds: true, includeMarketplaceIds: true, includeInventoryLevels: true })
+    : [];
+  const accounts = liveSessionChannelAccounts(db);
+  const selectedAccount = accounts.find((account) => account.channel === normalizeLiveInventoryChannel(hydrated.channel)
+    && String(account.id || "") === String(hydrated.channelAccountId || "")) || null;
+  const plan = liveSessionLedger.launchReadiness(hydrated, products, {
+    accountConnected: Boolean(selectedAccount?.connected),
+    channelSupported: ["ebay_live", "tiktok_live"].includes(normalizeLiveInventoryChannel(hydrated.channel)),
+    reviewedAt: new Date().toISOString()
+  });
+  return { ...plan, products, selectedAccount, linkedAudit };
+}
+
+function liveSessionWithoutEmbeddedAudit(session = {}) {
+  const { audit: _audit, ...persisted } = session;
+  return persisted;
+}
+
 function liveInventoryChannelForOrder(order = {}) {
   const origin = String(order.salesOrigin || order.external?.salesOrigin || order.channelType || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
   if (order.isEbayLive === true || order.ebayLive?.isLive === true || order.external?.isEbayLive === true || origin === "ebay_live") return "ebay_live";
@@ -20528,6 +20558,11 @@ function normalizeImportJob(job = {}) {
       : job.raw?.ebayOrderCounts && typeof job.raw.ebayOrderCounts === "object"
         ? job.raw.ebayOrderCounts
         : {},
+    sourceLiveSessionId: job.sourceLiveSessionId || job.raw?.sourceLiveSessionId || job.workerPayload?.sourceLiveSessionId || '',
+    sourceLiveSessionNumber: job.sourceLiveSessionNumber || job.raw?.sourceLiveSessionNumber || job.workerPayload?.sourceLiveSessionNumber || '',
+    liveSessionLaunchResults: Array.isArray(job.liveSessionLaunchResults || job.raw?.liveSessionLaunchResults)
+      ? (job.liveSessionLaunchResults || job.raw?.liveSessionLaunchResults).slice(0, 500)
+      : [],
     scheduledFor: job.scheduledFor || job.raw?.scheduledFor || job.workerPayload?.scheduledFor || '',
     workerId: job.workerId || '',
     workerLastSeenAt: job.workerLastSeenAt || '',
@@ -24309,12 +24344,21 @@ function getTikTokMarketplace() {
     saveProductListing: async (product, listing) => {
       const productId = sourceTextValue(product?.id || product?.productId);
       const sku = sourceTextValue(product?.sku);
+      const accountId = sourceTextValue(listing?.accountId);
       const result = await postgres.getPool().query(`
         update products
-        set raw=jsonb_set(coalesce(raw,'{}'::jsonb),'{tiktokListing}',coalesce(raw->'tiktokListing','{}'::jsonb)||$3::jsonb),updated_at=now()
+        set raw=case when $4='' then
+          jsonb_set(coalesce(raw,'{}'::jsonb),'{tiktokListing}',coalesce(raw->'tiktokListing','{}'::jsonb)||$3::jsonb)
+        else
+          jsonb_set(
+            jsonb_set(coalesce(raw,'{}'::jsonb),'{tiktokListing}',coalesce(raw->'tiktokListing','{}'::jsonb)||$3::jsonb),
+            '{tiktokListings}',
+            coalesce(raw->'tiktokListings','{}'::jsonb)||jsonb_build_object($4,$3::jsonb)
+          )
+        end,updated_at=now()
         where ($1<>'' and product_id=$1) or ($2<>'' and upper(btrim(sku))=upper(btrim($2)))
         returning product_id
-      `, [productId, sku, JSON.stringify(listing)]);
+      `, [productId, sku, JSON.stringify(listing), accountId]);
       if (result.rowCount) await Promise.all([
         redisCache.deleteByPrefix('dataplus:products:'),
         redisCache.deleteByPrefix('dataplus:product-detail:')
@@ -24491,6 +24535,8 @@ async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
     fulfillmentPolicyId: String(body.fulfillmentPolicyId || settings.ebayFulfillmentPolicyId || ""),
     shadowLaunches: Array.isArray(body.shadowLaunches) ? body.shadowLaunches : [],
     sourceAuditId: String(body.sourceAuditId || ""),
+    sourceLiveSessionId: String(body.sourceLiveSessionId || ""),
+    sourceLiveSessionNumber: String(body.sourceLiveSessionNumber || ""),
     categoryId: String(body.categoryId || settings.ebayDefaultCategoryId || ""),
     storeCategoryId: String(body.storeCategoryId || settings.ebayDefaultStoreCategoryId || ""),
     storeCategoryName: String(body.storeCategoryName || settings.ebayDefaultStoreCategoryName || ""),
@@ -27718,6 +27764,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
     await persistWorkerImportJob(job, { totalRows: total, processedRows: 0, progressPercent: 0, estimatedSecondsRemaining: estimateRemainingSeconds(startedAt, 0, total) });
     await postgres.upsertOperationArtifact(job, "original").catch(() => {});
     const issuePreviews = [];
+    const liveSessionLaunchResults = [];
     let pendingTouched = [];
     const shadowContexts = new WeakMap();
     const markTouched = (item) => {
@@ -27790,10 +27837,24 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
       const parentItem = candidates[batchIndex];
       const shadowLaunch = shadowLaunchByProduct.get(String(parentItem.id || "").toLowerCase())
         || shadowLaunchByProduct.get(String(parentItem.sku || "").toLowerCase());
-      const shadow = shadowLaunch
+      const savedShadow = shadowLaunch
         ? (parentItem.shadowSkus || []).find((candidate) => String(candidate.id || "") === String(shadowLaunch.shadowId || "")
           || String(candidate.shadowSku || "").toLowerCase() === String(shadowLaunch.shadowSku || "").toLowerCase())
         : null;
+      const sessionShadow = !savedShadow && shadowLaunch?.liveSessionId && shadowLaunch?.merchantSku ? {
+        id: `live-session:${shadowLaunch.liveSessionId}:${shadowLaunch.merchantSku}`,
+        kind: "live_session",
+        shadowSku: String(shadowLaunch.merchantSku),
+        merchantSku: String(shadowLaunch.merchantSku),
+        warehouseId: String(shadowLaunch.warehouseId || payload.warehouseId || ""),
+        unitsPerPack: 1,
+        inventoryMultiplier: 1,
+        maxSellableQty: Math.max(0, Math.floor(Number(shadowLaunch.quantity || 0))),
+        inventoryEnabled: true,
+        channelListings: { ebay: { merchantSku: String(shadowLaunch.merchantSku), enabled: true, inventoryEnabled: true } },
+        channels: ["eBay"]
+      } : null;
+      const shadow = savedShadow || sessionShadow;
       const shadowUnitsPerPack = shadow ? Math.max(1, Number(shadow.unitsPerPack || shadow.inventoryMultiplier || 1)) : 1;
       const shadowWarehouseId = String(shadow?.warehouseId || shadowLaunch?.warehouseId || "");
       const warehouseRows = shadow ? (parentItem.warehouseStock || []).filter((row) => {
@@ -27810,8 +27871,9 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
         ? 0
         : Math.floor(Math.max(0, shadowAvailablePieces - shadowSafetyQty) / shadowUnitsPerPack);
       const shadowMaxSellableQty = Math.max(0, Number(shadow?.maxSellableQty || 0));
+      const sessionLaunchQuantity = sessionShadow ? Math.max(0, Math.floor(Number(shadowLaunch.quantity || 0))) : null;
       const shadowQuantity = shadow
-        ? (shadowMaxSellableQty > 0 ? Math.min(shadowUncappedQuantity, shadowMaxSellableQty) : shadowUncappedQuantity)
+        ? (sessionLaunchQuantity !== null ? sessionLaunchQuantity : shadowMaxSellableQty > 0 ? Math.min(shadowUncappedQuantity, shadowMaxSellableQty) : shadowUncappedQuantity)
         : null;
       const shadowPackCost = shadow ? Math.round(productEachUnitCost(parentItem, workDb) * shadowUnitsPerPack * 10000) / 10000 : 0;
       const shadowEbayListing = shadow?.channelListings?.ebay || {};
@@ -27837,7 +27899,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
         shadowSkus: [],
         ebayListing: { ...shadowEbayListing, merchantSku: shadowEbayListing.merchantSku || shadow.merchantSku || shadow.shadowSku }
       } : parentItem;
-      if (shadow) shadowContexts.set(item, { parent: parentItem, shadow });
+      if (savedShadow) shadowContexts.set(item, { parent: parentItem, shadow: savedShadow });
       const itemPayload = shadow ? {
         ...payload,
         shadowLaunch: true,
@@ -27984,6 +28046,20 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
         pendingTouched = [];
       }
       appendImportJobCsvRows(resultFilePath, results, EBAY_LISTING_LAUNCH_RESULT_COLUMNS);
+      if (payload.sourceLiveSessionId) {
+        liveSessionLaunchResults.push(...results.map((row) => ({
+          merchantSku: row.sku || "",
+          status: row.status || "",
+          reason: row.reason || "",
+          error: row.error || "",
+          missing: row.missing || "",
+          offerId: row.offer_id || "",
+          listingId: row.listing_id || "",
+          listingUrl: row.listing_url || "",
+          quantity: Number(row.quantity || 0),
+          price: Number(row.price || 0)
+        })).slice(0, Math.max(0, 500 - liveSessionLaunchResults.length)));
+      }
       const batchIssues = [...reviewIssues, ...warningIssues, ...errors];
       if (batchIssues.length) {
         if (!errorFilePath) errorFilePath = initializeImportJobCsvFile(job, "errors.csv", IMPORT_ERROR_COLUMNS, "errors");
@@ -28032,6 +28108,9 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
       changed,
       missingCount: skipped + failed,
       errors: issuePreviews,
+      sourceLiveSessionId: String(payload.sourceLiveSessionId || ""),
+      sourceLiveSessionNumber: String(payload.sourceLiveSessionNumber || ""),
+      liveSessionLaunchResults,
       progressPercent: 100,
       estimatedSecondsRemaining: 0,
       message,
@@ -28047,7 +28126,7 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
     return job;
   } catch (error) {
     const message = error.message || `${label} failed.`;
-    await persistWorkerImportJob(job, { status: "failed", phase: "failed", missingCount: 1, errors: [message], estimatedSecondsRemaining: 0, message, finishedAt: new Date().toISOString() });
+    await persistWorkerImportJob(job, { status: "failed", phase: "failed", missingCount: 1, errors: [message], estimatedSecondsRemaining: 0, message, sourceLiveSessionId: String(payload.sourceLiveSessionId || ""), sourceLiveSessionNumber: String(payload.sourceLiveSessionNumber || ""), finishedAt: new Date().toISOString() });
     appendChannelApiLog({ channel: "eBay", transport: "Job", method: "RUN", path: "ebay-listings", operation: `${label} failed`, statusCode: 502, ok: false, jobId: job.id, message });
     throw error;
   }
@@ -60782,6 +60861,155 @@ async function handleApi(req, res) {
       session: created,
       sessionUrl: `/live-sessions/${encodeURIComponent(String(created?.sessionNumber || created?.id || ""))}`,
       message: `${created?.sessionNumber || "Live session"} created with ${Number(created?.reservedUnits || 0)} reserved unit(s)${Number(created?.shortageUnits || 0) ? ` and ${Number(created.shortageUnits)} shortage unit(s)` : ""}.`
+    });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "live-sessions" && parts[2] && parts[3] === "launch" && parts[4] === "readiness" && postgres.isPostgresEnabled()) {
+    const scope = liveSessionScope(req);
+    if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
+    const rows = await postgres.readEntityDocumentCollectionFast("liveSessions");
+    const target = liveSessionRecordForKey(rows, scope, parts[2]);
+    if (!target) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const plan = await liveSessionLaunchContext(target, db);
+    const persisted = liveSessionWithoutEmbeddedAudit(plan.session);
+    const mutation = await postgres.mutateLiveSessionsAtomically((sessions) => ({
+      sessions: sessions.map((session) => String(session.id) === String(target.id) ? persisted : session),
+      result: { session: persisted }
+    }));
+    return sendJson(res, 200, {
+      session: mutation?.result?.session,
+      summary: plan.summary,
+      groups: plan.groups,
+      message: plan.summary.readyItems
+        ? `${plan.summary.readyItems} item(s) are ready to publish; ${plan.summary.blockedItems} need attention.`
+        : "No session items are ready to publish. Review the item blockers."
+    });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "live-sessions" && parts[2] && parts[3] === "launch" && parts[4] === "status" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const scope = liveSessionScope(req);
+    if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
+    const rows = await postgres.readEntityDocumentCollectionFast("liveSessions");
+    const target = liveSessionRecordForKey(rows, scope, parts[2]);
+    if (!target) return notFound(res);
+    const jobId = String(body.jobId || target.launch?.jobId || "").trim();
+    if (!jobId) return sendJson(res, 409, { error: "This session does not have a launch job to refresh." });
+    const job = await postgres.readOperationJob(jobId);
+    if (!job) return sendJson(res, 404, { error: "The channel launch job could not be found." });
+    const updated = liveSessionLedger.applyLaunchJob(target, job);
+    const mutation = await postgres.mutateLiveSessionsAtomically((sessions) => ({
+      sessions: sessions.map((session) => String(session.id) === String(target.id) ? updated : session),
+      result: { session: updated }
+    }));
+    return sendJson(res, 200, {
+      session: mutation?.result?.session,
+      job: clientImportJob(job),
+      message: ["queued", "running"].includes(String(job.status || "").toLowerCase())
+        ? `Launch Job #${job.jobNumber || job.id} is ${job.status}.`
+        : `Launch results refreshed from Job #${job.jobNumber || job.id}.`
+    });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "live-sessions" && parts[2] && parts[3] === "launch" && parts.length === 4 && postgres.isPostgresEnabled()) {
+    if (!userCan(authUser, "channels", "launch") && !userCan(authUser, "catalog.marketplace", "launch")) {
+      return sendJson(res, 403, { error: "Your account does not have marketplace launch access.", missingPermission: { area: "channels", action: "launch" } });
+    }
+    const body = await parseBody(req);
+    const scope = liveSessionScope(req);
+    if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
+    const rows = await postgres.readEntityDocumentCollectionFast("liveSessions");
+    const target = liveSessionRecordForKey(rows, scope, parts[2]);
+    if (!target) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
+    const plan = await liveSessionLaunchContext(target, db);
+    const requestedIds = new Set((Array.isArray(body.itemIds) ? body.itemIds : []).map((value) => String(value || "")).filter(Boolean));
+    if (body.retryFailed === true && !requestedIds.size) {
+      for (const item of target.items || []) if (String(item.launch?.status || "") === "failed") requestedIds.add(String(item.id || ""));
+    }
+    const groups = plan.groups.filter((group) => !requestedIds.size || group.itemIds.some((id) => requestedIds.has(String(id))));
+    if (!groups.length) {
+      return sendJson(res, 409, {
+        error: "No selected items are ready to publish. Run readiness review and resolve the blockers first.",
+        session: plan.session,
+        summary: plan.summary
+      });
+    }
+    const channel = normalizeLiveInventoryChannel(plan.session.channel);
+    let queued;
+    try {
+      if (channel === "ebay_live") {
+        if (!userCan(authUser, "channels.ebay", "launch")) return sendJson(res, 403, { error: "Your account does not have eBay launch access." });
+        const shadowLaunches = groups.map((group) => ({
+          productId: group.productId,
+          parentSku: group.parentSku,
+          shadowSku: group.merchantSku,
+          merchantSku: group.merchantSku,
+          warehouseId: plan.session.warehouseId || "",
+          quantity: group.quantity,
+          liveSessionId: plan.session.id,
+          liveSessionNumber: plan.session.sessionNumber,
+          liveSessionItemIds: group.itemIds
+        }));
+        queued = await queueEbayListingLaunchJob(db, {
+          skus: groups.map((group) => group.productKey),
+          shadowLaunches,
+          sourceLiveSessionId: plan.session.id,
+          sourceLiveSessionNumber: plan.session.sessionNumber,
+          lifecycleAction: "launch",
+          publish: true,
+          batchSize: Math.min(1000, Math.max(25, groups.length))
+        }, { operation: `eBay Live session ${plan.session.sessionNumber || plan.session.id}` });
+      } else if (channel === "tiktok_live") {
+        queued = await getTikTokMarketplace().queue("launch", {
+          accountId: plan.session.channelAccountId,
+          skus: groups.map((group) => group.productKey),
+          launchOverrides: groups,
+          sourceLiveSessionId: plan.session.id,
+          sourceLiveSessionNumber: plan.session.sessionNumber,
+          actor: String(authUser?.id || authUser?.username || "live-session")
+        });
+      } else {
+        return sendJson(res, 409, { error: "Publishing is not connected for this live channel yet." });
+      }
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue the live-session channel launch." });
+    }
+    const queuedJob = queued?.job;
+    const duplicateSourceId = String(queuedJob?.sourceLiveSessionId || queuedJob?.workerPayload?.sourceLiveSessionId || "");
+    if (queued?.duplicate && duplicateSourceId !== String(plan.session.id)) {
+      return sendJson(res, 409, { error: `Job #${queuedJob?.jobNumber || queuedJob?.id} is already publishing another live session. Retry after it finishes.`, activeJob: clientImportJob(queuedJob) });
+    }
+    const selectedItemIds = new Set(groups.flatMap((group) => group.itemIds).map(String));
+    const now = new Date().toISOString();
+    const queuedSession = liveSessionLedger.sessionTotals({
+      ...plan.session,
+      items: (plan.session.items || []).map((item) => selectedItemIds.has(String(item.id)) ? {
+        ...item,
+        launch: {
+          ...(item.launch || {}), status: "queued", error: "", jobId: String(queuedJob?.id || ""),
+          jobNumber: Number(queuedJob?.jobNumber || 0) || 0, queuedAt: now, updatedAt: now
+        }
+      } : item),
+      launch: {
+        ...(plan.session.launch || {}), status: "queued", jobId: String(queuedJob?.id || ""),
+        jobNumber: Number(queuedJob?.jobNumber || 0) || 0, queuedAt: now, updatedAt: now
+      },
+      updatedAt: now
+    });
+    const persisted = liveSessionWithoutEmbeddedAudit(queuedSession);
+    const mutation = await postgres.mutateLiveSessionsAtomically((sessions) => ({
+      sessions: sessions.map((session) => String(session.id) === String(target.id) ? persisted : session),
+      result: { session: persisted }
+    }));
+    return sendJson(res, queued?.duplicate ? 200 : 202, {
+      session: mutation?.result?.session,
+      job: clientImportJob(queuedJob),
+      duplicate: queued?.duplicate === true,
+      message: queued?.duplicate
+        ? `Launch Job #${queuedJob?.jobNumber || queuedJob?.id} is already active for this session.`
+        : `${groups.length} manufacturer SKU${groups.length === 1 ? "" : "s"} queued for ${plan.session.channelLabel || "channel"} on ${plan.session.channelAccountName || "the selected shop"}.`
     });
   }
 
