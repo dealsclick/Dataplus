@@ -41,14 +41,36 @@ const ready = liveSessionWithAudit({ id: "session-2", sessionNumber: "LS-102" },
 });
 assert.equal(ready.status, "ready");
 
+const live = liveSessionWithAudit({
+  id: "session-3",
+  sessionNumber: "LS-103",
+  status: "live",
+  sourceType: "extra_items",
+  items: [{ sourceLineId: "line-1", sku: "SKU-1", soldQty: 2, shippedQty: 1 }],
+}, {
+  id: "audit-3",
+  auditNumber: "A-224",
+  status: "completed",
+  lines: [{ id: "line-1", sku: "SKU-1", countedQty: 5 }],
+  unknownBarcodes: [],
+});
+assert.equal(live.status, "live");
+assert.equal(live.items[0].soldQty, 2);
+assert.equal(live.items[0].shippedQty, 1);
+assert.equal(live.items[0].remainingQty, 3);
+
 const dbSource = fs.readFileSync(path.join(__dirname, "..", "db.js"), "utf8");
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 const uiSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "components", "live-sessions-route.tsx"), "utf8");
 assert.match(dbSource, /async function createLiveSessionWithAudit[\s\S]*await client\.query\("begin"\)[\s\S]*replaceWarehouseAudits[\s\S]*insert into entity_documents[\s\S]*await client\.query\("commit"\)/);
 assert.match(dbSource, /const ENTITY_DOCUMENT_COLLECTIONS = new Set\(\[[\s\S]*"liveSessions"/);
-assert.match(serverSource, /sourceType !== "extra_items"/);
+assert.match(serverSource, /sourceType === "purchase_order"/);
+assert.match(serverSource, /sourceType === "warehouse_audit"/);
+assert.match(serverSource, /sourceType === "previous_session"/);
+assert.match(serverSource, /sourceType === "manual_skus"/);
 assert.match(serverSource, /liveSessionId: sessionId/);
-assert.match(uiSource, /Create session from extra items/);
+assert.match(serverSource, /mutateLiveSessionsAtomically/);
+assert.match(uiSource, /Session from remaining/);
 assert.match(uiSource, /Create and scan/);
 
 console.log("Live session audit-link regression tests passed.");

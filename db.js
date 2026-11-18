@@ -3293,6 +3293,14 @@ async function createLiveSessionWithAudit(session = {}, audit = {}) {
   const client = await pool.connect();
   try {
     await client.query("begin");
+    await client.query("select pg_advisory_xact_lock(hashtext('dataplus:live-sessions'))");
+    const currentSessionNumbers = await client.query("select data->>'sessionNumber' as session_number from entity_documents where collection = 'liveSessions'");
+    const requestedNumber = nullableString(session.sessionNumber);
+    if (!requestedNumber || currentSessionNumbers.rows.some((row) => String(row.session_number || "").toLowerCase() === requestedNumber.toLowerCase())) {
+      const highest = Math.max(100, ...currentSessionNumbers.rows.map((row) => Number(String(row.session_number || "").replace(/\D/g, "")) || 0));
+      session.sessionNumber = `LS-${highest + 1}`;
+    }
+    audit.liveSessionNumber = session.sessionNumber;
     await replaceWarehouseAudits([audit], { client, preserveOthers: true });
     await client.query(`
       insert into entity_documents (collection, entity_id, position, data, updated_at)
@@ -3307,6 +3315,59 @@ async function createLiveSessionWithAudit(session = {}, audit = {}) {
     await client.query("delete from state_documents where doc_key = 'liveSessions'");
     await client.query("commit");
     return true;
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function mutateLiveSessionsAtomically(mutator) {
+  const pool = getPool();
+  if (!pool || typeof mutator !== "function") return null;
+  await initRelationalSchema();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("select pg_advisory_xact_lock(hashtext('dataplus:live-sessions'))");
+    const current = await client.query(`
+      select entity_id, position, data
+      from entity_documents
+      where collection = 'liveSessions'
+      order by position, entity_id
+      for update
+    `);
+    const rows = current.rows.map((row) => ({
+      ...(row.data && typeof row.data === "object" ? row.data : {}),
+      id: row.data?.id || row.entity_id,
+      __position: Number(row.position || 0)
+    }));
+    const outcome = await mutator(rows);
+    const nextRows = Array.isArray(outcome?.sessions) ? outcome.sessions : rows;
+    const seen = new Set();
+    let nextPosition = current.rows.reduce((highest, row) => Math.max(highest, Number(row.position || 0)), -1) + 1;
+    for (const nextRow of nextRows) {
+      const entityId = nullableString(nextRow?.id);
+      if (!entityId || seen.has(entityId)) throw new Error("Every live session must have a unique ID.");
+      seen.add(entityId);
+      const storedPosition = Number.isFinite(Number(nextRow.__position)) ? Number(nextRow.__position) : nextPosition++;
+      const { __position: _position, ...data } = nextRow;
+      await client.query(`
+        insert into entity_documents (collection, entity_id, position, data, updated_at)
+        values ('liveSessions', $1, $2, $3::jsonb, now())
+        on conflict (collection, entity_id) do update set
+          position = excluded.position,
+          data = excluded.data,
+          updated_at = now()
+      `, [entityId, storedPosition, JSON.stringify({ ...data, id: entityId })]);
+    }
+    await client.query("delete from state_documents where doc_key = 'liveSessions'");
+    await client.query("commit");
+    return {
+      sessions: nextRows.map(({ __position: _position, ...row }) => row),
+      result: outcome?.result
+    };
   } catch (error) {
     await client.query("rollback").catch(() => {});
     throw error;
@@ -11805,7 +11866,7 @@ async function listOrders(options = {}) {
   const sources = filterOptionValues(options.source || options.channel);
   if (sources.length) {
     const sourcePredicates = [];
-    const ordinarySources = sources.filter((value) => !["ebay_live", "tiktok_live"].includes(value));
+    const ordinarySources = sources.filter((value) => !["ebay_live", "tiktok_live", "whatnot_live"].includes(value));
     if (ordinarySources.length) {
       params.push(ordinarySources);
       sourcePredicates.push(`lower(coalesce(nullif(source, ''), nullif(channel_source, ''), raw->>'salesChannel', '')) = any($${params.length}::text[])`);
@@ -11822,6 +11883,13 @@ async function listOrders(options = {}) {
         lower(coalesce(raw->>'salesOrigin', raw->'external'->>'salesOrigin', '')) = 'tiktok_live'
         or lower(coalesce(raw->>'isTikTokLive', 'false')) = 'true'
         or lower(coalesce(raw->'tiktokLive'->>'isLive', 'false')) = 'true'
+      )`);
+    }
+    if (sources.includes("whatnot_live")) {
+      sourcePredicates.push(`(
+        lower(coalesce(raw->>'salesOrigin', raw->'external'->>'salesOrigin', '')) = 'whatnot_live'
+        or lower(coalesce(raw->>'isWhatnotLive', 'false')) = 'true'
+        or lower(coalesce(raw->'whatnotLive'->>'isLive', 'false')) = 'true'
       )`);
     }
     where.push(`(${sourcePredicates.join(" or ")})`);
@@ -22481,6 +22549,7 @@ module.exports = {
   replaceWarehouseAudits,
   saveWarehouseAudit,
   createLiveSessionWithAudit,
+  mutateLiveSessionsAtomically,
   saveWarehouseAuditMetadata,
   touchWarehouseAuditReceivingParticipant,
   applyWarehouseAuditScan,

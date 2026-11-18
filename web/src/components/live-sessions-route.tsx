@@ -1,220 +1,281 @@
 import { useEffect, useMemo, useState } from "react"
-import { AlertCircle, ArrowLeft, Boxes, CalendarDays, Loader2, PackagePlus, RadioTower, ScanBarcode, Warehouse } from "lucide-react"
+import { AlertCircle, AlertTriangle, ArrowLeft, Boxes, CheckCircle2, ClipboardCheck, CopyPlus, Loader2, MoreHorizontal, PackagePlus, Play, RadioTower, RefreshCw, ScanBarcode, Search, ShoppingBag, Trash2, Warehouse, XCircle } from "lucide-react"
 import { toast } from "sonner"
 import { Field, MetricCard, PageHeader } from "./app-ui"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
-import { MobileTables, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { MobileTables, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Textarea } from "@/components/ui/textarea"
-import { api, dateLabel, numberLabel } from "../lib/client-api"
+import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
 
-type WarehouseReference = {
-  id?: string
-  name?: string
-  code?: string
-  isPhysical?: boolean
-  allowAudits?: boolean
-  inventorySourceType?: string
+type WarehouseReference = { id?: string; name?: string; code?: string; isPhysical?: boolean; allowAudits?: boolean; inventorySourceType?: string }
+type SourceReference = { id: string; number?: string; label: string; warehouseId?: string; warehouseName?: string; status?: string; liveChannel?: string; itemCount?: number; remainingUnits?: number; orderedUnits?: number; receivedUnits?: number }
+type ChannelAccount = { channel: string; id: string; name: string; shopId?: string; shopCode?: string; connected?: boolean; active?: boolean }
+type ReferenceData = { scope?: { tenantId?: string; companyId?: string; companyName?: string }; warehouses?: WarehouseReference[]; purchaseOrders?: SourceReference[]; audits?: SourceReference[]; previousSessions?: SourceReference[]; channelAccounts?: ChannelAccount[] }
+type LiveSessionAudit = { id?: string; auditNumber?: string; status?: string; url?: string; mobileUrl?: string; lines?: Array<Record<string, unknown>>; unknownBarcodes?: Array<Record<string, unknown>> }
+type LiveSessionItem = {
+  id?: string; sourceLineId?: string; productId?: string; sku?: string; catalogSku?: string; merchantSku?: string; title?: string; image?: string
+  upc?: string; manufacturerSku?: string; supplierSku?: string; unitCost?: number; orderedQty?: number; receivedQty?: number; incomingQty?: number
+  sourceAvailableQty?: number; requestedQty?: number; reservedQty?: number; soldQty?: number; shippedQty?: number; releasedQty?: number; remainingQty?: number
+  shortageQty?: number; linkedOrderIds?: string[]; lastMatchMode?: string
 }
-
-type LiveSessionAudit = {
-  id?: string
-  auditNumber?: string
-  status?: string
-  url?: string
-  mobileUrl?: string
-  lines?: Array<Record<string, unknown>>
-  unknownBarcodes?: Array<Record<string, unknown>>
-}
-
 type LiveSession = {
-  id: string
-  sessionNumber?: string
-  title?: string
-  status?: string
-  sourceLabel?: string
-  channelLabel?: string
-  warehouseName?: string
-  scannedSkus?: number
-  scannedUnits?: number
-  unknownBarcodes?: number
-  notes?: string
-  createdAt?: string
-  createdBy?: string
-  updatedAt?: string
-  audit?: LiveSessionAudit | null
+  id: string; sessionNumber?: string; title?: string; status?: string; sourceType?: string; sourceId?: string; sourceNumber?: string; sourceLabel?: string
+  sourcePurchaseOrderId?: string; sourcePurchaseOrderNumber?: string; parentSessionId?: string; parentSessionNumber?: string; channel?: string; channelLabel?: string
+  channelAccountId?: string; channelAccountName?: string; channelShopId?: string; companyName?: string; warehouseId?: string; warehouseName?: string; itemCount?: number
+  receivedUnits?: number; incomingUnits?: number; availableUnits?: number; reservedUnits?: number; soldUnits?: number; shippedUnits?: number; releasedUnits?: number
+  remainingUnits?: number; shortageUnits?: number; scannedSkus?: number; scannedUnits?: number; unknownBarcodes?: number; items?: LiveSessionItem[]; notes?: string
+  createdAt?: string; createdBy?: string; updatedAt?: string; reconciledAt?: string; audit?: LiveSessionAudit | null
 }
+type QuickProduct = { id?: string; sku: string; title?: string; image?: string; qty?: number; cost?: number; barcode?: string; mfrPartNumber?: string; vendorSku?: string }
+type DraftItem = LiveSessionItem & { requestedQty: number; sourceAvailableQty: number }
 
-const liveDestinations = [
+const destinations = [
   { value: "unassigned", label: "Not assigned yet" },
   { value: "ebay_live", label: "eBay Live" },
   { value: "tiktok_live", label: "TikTok Live" },
   { value: "whatnot_live", label: "Whatnot" },
 ]
+const sources = [
+  { value: "purchase_order", label: "Purchase order" },
+  { value: "warehouse_audit", label: "Warehouse audit" },
+  { value: "previous_session", label: "Previous session remainder" },
+  { value: "manual_skus", label: "Manual SKUs" },
+  { value: "extra_items", label: "Scan extra items" },
+]
 
 function statusLabel(status = "") {
-  if (status === "counting") return "Counting"
-  if (status === "review") return "Review"
-  if (status === "ready") return "Ready"
-  if (status === "live") return "Live"
-  if (status === "completed") return "Completed"
-  return "Draft"
+  return ({ counting: "Counting", review: "Review", ready: "Ready", live: "Live", completed: "Completed", canceled: "Canceled", draft: "Draft" } as Record<string, string>)[status] || "Draft"
 }
 
 function statusClass(status = "") {
-  if (status === "ready" || status === "live" || status === "completed") return "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+  if (["ready", "live", "completed"].includes(status)) return "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
   if (status === "review") return "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
   if (status === "counting") return "border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-300"
+  if (status === "canceled") return "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300"
   return ""
 }
 
-function liveSessionKeyFromPath() {
+function detailKeyFromPath() {
   const match = window.location.pathname.match(/^\/live-sessions\/([^/]+)\/?$/)
   return match ? decodeURIComponent(match[1]) : ""
 }
 
-function auditScanUrl(session: LiveSession) {
-  const audit = session.audit
-  if (!audit) return ""
-  return window.matchMedia("(max-width: 767px)").matches
-    ? String(audit.mobileUrl || audit.url || "")
-    : String(audit.url || audit.mobileUrl || "")
+function defaultsFromUrl() {
+  const params = new URLSearchParams(window.location.search)
+  const sourceType = String(params.get("sourceType") || "extra_items")
+  return { sourceType: sources.some((option) => option.value === sourceType) ? sourceType : "extra_items", sourceId: String(params.get("sourceId") || "") }
 }
 
-function SessionDetail({ session, loading, error }: { session: LiveSession | null; loading: boolean; error: string }) {
+function auditScanUrl(session: LiveSession) {
+  if (!session.audit) return ""
+  return window.matchMedia("(max-width: 767px)").matches ? String(session.audit.mobileUrl || session.audit.url || "") : String(session.audit.url || session.audit.mobileUrl || "")
+}
+
+function sourceHref(session: LiveSession) {
+  if (session.sourcePurchaseOrderId || session.sourceType === "purchase_order") return `/purchase-orders/${encodeURIComponent(String(session.sourcePurchaseOrderId || session.sourceId || ""))}`
+  if (session.audit?.url) return session.audit.url
+  if (session.sourceType === "warehouse_audit") return `/warehouse/audits/${encodeURIComponent(String(session.sourceNumber || session.sourceId || ""))}`
+  if (session.parentSessionId || session.sourceType === "previous_session") return `/live-sessions/${encodeURIComponent(String(session.parentSessionNumber || session.parentSessionId || session.sourceId || ""))}`
+  return ""
+}
+
+function metric(item: LiveSessionItem, key: keyof LiveSessionItem) { return Number(item[key] || 0) }
+
+function ItemIdentity({ item }: { item: LiveSessionItem }) {
+  return <div className="flex min-w-64 items-center gap-3">
+    {item.image ? <img src={item.image} alt="" className="size-10 rounded border object-contain" /> : <span className="grid size-10 shrink-0 place-items-center rounded border bg-muted"><Boxes className="size-4 text-muted-foreground" /></span>}
+    <div className="min-w-0"><a className="font-mono text-xs font-medium text-primary hover:underline" href={`/products/${encodeURIComponent(String(item.sku || ""))}`}>{item.sku || "Unknown SKU"}</a><p className="max-w-80 truncate font-medium" title={item.title}>{item.title || "Untitled item"}</p><p className="text-xs text-muted-foreground">UPC {item.upc || "-"} · MPN {item.manufacturerSku || "-"}</p></div>
+  </div>
+}
+
+function SessionDetail({ session, loading, error, references, onReload }: { session: LiveSession | null; loading: boolean; error: string; references: ReferenceData; onReload: () => Promise<void> }) {
+  const [working, setWorking] = useState("")
+  const [confirmAction, setConfirmAction] = useState<"complete" | "cancel" | "">("")
+  const [editOpen, setEditOpen] = useState(false)
+  const [edit, setEdit] = useState({ title: "", channel: "unassigned", channelAccountId: "", notes: "" })
+
+  useEffect(() => {
+    if (session) setEdit({ title: session.title || "", channel: session.channel || "unassigned", channelAccountId: session.channelAccountId || "", notes: session.notes || "" })
+  }, [session])
+
   if (loading) return <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading live session...</div>
   if (!session || error) return <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Live session not found</AlertTitle><AlertDescription>{error || "This session could not be loaded."}</AlertDescription></Alert>
+
+  const runAction = async (action: "ready" | "start" | "reconcile" | "complete" | "cancel") => {
+    if (working) return
+    setWorking(action)
+    try {
+      const result = await api<{ message?: string }>(`/api/live-sessions/${encodeURIComponent(session.id)}/actions`, { method: "POST", body: JSON.stringify({ action }) })
+      toast.success(result.message || "Live session updated.")
+      await onReload()
+    } catch (actionError) { toast.error(actionError instanceof Error ? actionError.message : "Unable to update the live session.") }
+    finally { setWorking(""); setConfirmAction("") }
+  }
+
+  const saveEdit = async () => {
+    if (working) return
+    setWorking("save")
+    try {
+      const result = await api<{ message?: string }>(`/api/live-sessions/${encodeURIComponent(session.id)}`, { method: "PATCH", body: JSON.stringify({ ...edit, channel: edit.channel === "unassigned" ? "" : edit.channel }) })
+      toast.success(result.message || "Live session updated.")
+      setEditOpen(false)
+      await onReload()
+    } catch (editError) { toast.error(editError instanceof Error ? editError.message : "Unable to update the live session.") }
+    finally { setWorking("") }
+  }
+
+  const items = session.items || []
+  const active = !["completed", "canceled"].includes(String(session.status || ""))
+  const accounts = (references.channelAccounts || []).filter((account) => account.channel === edit.channel)
   const scanUrl = auditScanUrl(session)
-  const knownLines = session.audit?.lines || []
-  const unknownLines = session.audit?.unknownBarcodes || []
-  const itemRows: Array<Record<string, unknown> & { itemType: string }> = [
-    ...knownLines.map((line) => ({ ...line, itemType: "known" })),
-    ...unknownLines.map((line) => ({ ...line, itemType: "unknown" })),
-  ]
+  const sourceLink = sourceHref(session)
   return <div className="grid gap-5">
-    <PageHeader
-      eyebrow="Live sessions"
-      title={`${session.sessionNumber || "Session"} · ${session.title || "Extra items"}`}
-      description="Scanned warehouse evidence for inventory being prepared for a live selling session."
-      action={<div className="flex flex-wrap gap-2"><Button variant="outline" onClick={() => window.location.assign("/live-sessions")}><ArrowLeft className="size-4" /> Sessions</Button>{scanUrl && <Button onClick={() => window.location.assign(scanUrl)}><ScanBarcode className="size-4" /> Scan items</Button>}</div>}
-    />
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-      <MetricCard label="Status" value={statusLabel(session.status)} icon={RadioTower} />
-      <MetricCard label="Scanned units" value={numberLabel(session.scannedUnits)} icon={ScanBarcode} />
-      <MetricCard label="Catalog SKUs" value={numberLabel(session.scannedSkus)} icon={Boxes} />
-      <MetricCard label="Destination" value={session.channelLabel || "Not assigned"} icon={CalendarDays} />
-    </div>
-    <Card>
-      <CardHeader className="border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">Session inventory</CardTitle><CardDescription>{session.sourceLabel || "Scanned extra items"} · {session.warehouseName || "Warehouse"}</CardDescription></div><div className="flex flex-wrap gap-2"><Badge variant="outline" className={statusClass(session.status)}>{statusLabel(session.status)}</Badge>{session.audit?.url && <Button asChild size="sm" variant="outline"><a href={session.audit.url}>Audit {session.audit.auditNumber || "record"}</a></Button>}</div></div></CardHeader>
-      <CardContent className="p-0">
-        {itemRows.length ? <MobileTables><Table><TableHeader><TableRow><TableHead>Item</TableHead><TableHead>Identifier</TableHead><TableHead>Bin</TableHead><TableHead className="text-right">Scanned</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{itemRows.map((line, index) => {
-          const identifier = String(line.sku || line.barcode || "Unknown barcode")
-          return <TableRow key={String(line.id || `${identifier}-${index}`)}><TableCell><div className="min-w-0"><p className="font-medium whitespace-normal">{String(line.title || line.description || (line.itemType === "unknown" ? "Unrecognized item" : identifier))}</p>{line.itemType === "unknown" && <p className="text-xs text-amber-600 dark:text-amber-300">Catalog match needed</p>}</div></TableCell><TableCell className="font-mono text-xs">{identifier}</TableCell><TableCell>{String(line.locationBin || "Not assigned")}</TableCell><TableCell className="text-right font-medium">{numberLabel(line.countedQty ?? line.count ?? 0)}</TableCell><TableCell><Badge variant="outline">{line.itemType === "unknown" ? "Unknown" : "Recorded"}</Badge></TableCell></TableRow>
-        })}</TableBody></Table></MobileTables> : <div className="flex min-h-48 flex-col items-center justify-center gap-3 px-5 py-10 text-center"><div className="grid size-12 place-items-center rounded-md bg-muted"><ScanBarcode className="size-6 text-muted-foreground" /></div><div><p className="font-medium">No items scanned yet</p><p className="mt-1 text-sm text-muted-foreground">Open the linked inventory audit and scan each extra item.</p></div>{scanUrl && <Button onClick={() => window.location.assign(scanUrl)}><ScanBarcode className="size-4" /> Start scanning</Button>}</div>}
-      </CardContent>
-    </Card>
+    <PageHeader eyebrow="Live sessions" title={`${session.sessionNumber || "Session"} · ${session.title || "Live inventory"}`} description={`${session.companyName || references.scope?.companyName || "Company"} · ${session.sourceLabel || "Live inventory"} · ${session.warehouseName || "Warehouse"}`} action={<div className="flex flex-wrap gap-2"><Button variant="outline" onClick={() => window.location.assign("/live-sessions")}><ArrowLeft className="size-4" /> Sessions</Button>{scanUrl && <Button onClick={() => window.location.assign(scanUrl)}><ScanBarcode className="size-4" /> Scan items</Button>}<DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline"><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => setEditOpen(true)} disabled={!active}>Edit session</DropdownMenuItem>{session.status === "draft" && <DropdownMenuItem onClick={() => void runAction("ready")}><CheckCircle2 className="size-4" /> Mark ready</DropdownMenuItem>}{["draft", "ready"].includes(String(session.status)) && <DropdownMenuItem onClick={() => void runAction("start")}><Play className="size-4" /> Start session</DropdownMenuItem>}<DropdownMenuItem onClick={() => void runAction("reconcile")} disabled={!session.channel}><RefreshCw className="size-4" /> Reconcile sales</DropdownMenuItem>{Number(session.remainingUnits || 0) > 0 && <DropdownMenuItem onClick={() => window.location.assign(`/live-sessions?sourceType=previous_session&sourceId=${encodeURIComponent(session.id)}`)}><CopyPlus className="size-4" /> Session from remaining</DropdownMenuItem>}{active && <><DropdownMenuSeparator /><DropdownMenuItem onClick={() => setConfirmAction("complete")}><ClipboardCheck className="size-4" /> Complete and release</DropdownMenuItem><DropdownMenuItem className="text-destructive" onClick={() => setConfirmAction("cancel")}><XCircle className="size-4" /> Cancel and release</DropdownMenuItem></>}</DropdownMenuContent></DropdownMenu></div>} />
+    {Number(session.shortageUnits || 0) > 0 && <Alert className="border-amber-500/40 bg-amber-500/5"><AlertTriangle className="size-4" /><AlertTitle>{numberLabel(session.shortageUnits)} shortage unit(s)</AlertTitle><AlertDescription>The original source is fully reused before another PO is suggested. Reduce requested quantities or replenish the source.</AlertDescription></Alert>}
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6"><MetricCard label="Reserved" value={numberLabel(session.reservedUnits)} icon={Boxes} /><MetricCard label="Received" value={numberLabel(session.receivedUnits)} icon={Warehouse} /><MetricCard label="Sold" value={numberLabel(session.soldUnits)} icon={ShoppingBag} /><MetricCard label="Shipped" value={numberLabel(session.shippedUnits)} icon={ScanBarcode} /><MetricCard label="Remaining" value={numberLabel(session.remainingUnits)} icon={RadioTower} /><MetricCard label="Status" value={statusLabel(session.status)} icon={CheckCircle2} /></div>
+    <Card><CardHeader className="border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">Session inventory</CardTitle><CardDescription>{session.channelLabel || "Destination not assigned"}{session.channelAccountName ? ` · ${session.channelAccountName}${session.channelShopId ? ` (${session.channelShopId})` : ""}` : ""}</CardDescription></div><div className="flex flex-wrap gap-2"><Badge variant="outline" className={statusClass(session.status)}>{statusLabel(session.status)}</Badge>{sourceLink && <Button asChild size="sm" variant="outline"><a href={sourceLink}>Open source</a></Button>}</div></div></CardHeader><CardContent className="p-0">{items.length ? <MobileTables><Table><TableHeader><TableRow><TableHead>Item</TableHead><TableHead>Merchant SKU</TableHead><TableHead className="text-right">Received</TableHead><TableHead className="text-right">Available</TableHead><TableHead className="text-right">Reserved</TableHead><TableHead className="text-right">Sold</TableHead><TableHead className="text-right">Shipped</TableHead><TableHead className="text-right">Released</TableHead><TableHead className="text-right">Remaining</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{items.map((item, index) => <TableRow key={String(item.id || `${item.sku}-${index}`)} className={metric(item, "shortageQty") > 0 ? "bg-amber-500/5" : ""}><TableCell><ItemIdentity item={item} /></TableCell><TableCell className="font-mono text-xs">{item.merchantSku || item.manufacturerSku || item.sku || "-"}</TableCell><TableCell className="text-right">{numberLabel(item.receivedQty)}</TableCell><TableCell className="text-right">{numberLabel(item.sourceAvailableQty)}</TableCell><TableCell className="text-right font-medium">{numberLabel(item.reservedQty)}</TableCell><TableCell className="text-right">{numberLabel(item.soldQty)}</TableCell><TableCell className="text-right">{numberLabel(item.shippedQty)}</TableCell><TableCell className="text-right">{numberLabel(item.releasedQty)}</TableCell><TableCell className="text-right font-medium">{numberLabel(item.remainingQty)}</TableCell><TableCell>{metric(item, "shortageQty") > 0 ? <Badge variant="warning">Short {numberLabel(item.shortageQty)}</Badge> : metric(item, "remainingQty") > 0 ? <Badge variant="success">Available</Badge> : <Badge variant="outline">Allocated</Badge>}</TableCell></TableRow>)}</TableBody></Table></MobileTables> : <div className="flex min-h-48 flex-col items-center justify-center gap-3 px-5 py-10 text-center"><ScanBarcode className="size-8 text-muted-foreground" /><div><p className="font-medium">No session items yet</p><p className="mt-1 text-sm text-muted-foreground">Scan the linked audit or add inventory from a source.</p></div>{scanUrl && <Button onClick={() => window.location.assign(scanUrl)}>Start scanning</Button>}</div>}</CardContent></Card>
+    {session.notes && <Card><CardHeader><CardTitle className="text-sm">Session notes</CardTitle><CardDescription className="whitespace-pre-wrap">{session.notes}</CardDescription></CardHeader></Card>}
+    <Dialog open={editOpen} onOpenChange={setEditOpen}><DialogContent className="sm:max-w-2xl"><DialogHeader><DialogTitle>Edit live session</DialogTitle><DialogDescription>Change the launch destination without changing reserved quantities.</DialogDescription></DialogHeader><div className="grid gap-4 sm:grid-cols-2"><Field label="Session name"><Input value={edit.title} onChange={(event) => setEdit((current) => ({ ...current, title: event.target.value }))} /></Field><Field label="Live channel"><Select value={edit.channel} onValueChange={(channel) => setEdit((current) => ({ ...current, channel, channelAccountId: "" }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{destinations.map((destination) => <SelectItem key={destination.value} value={destination.value}>{destination.label}</SelectItem>)}</SelectContent></Select></Field><Field label="Seller account / shop"><Select value={edit.channelAccountId || "unassigned"} onValueChange={(channelAccountId) => setEdit((current) => ({ ...current, channelAccountId: channelAccountId === "unassigned" ? "" : channelAccountId }))}><SelectTrigger><SelectValue placeholder="Choose a connected shop" /></SelectTrigger><SelectContent><SelectItem value="unassigned">No shop selected</SelectItem>{accounts.map((account) => <SelectItem key={account.id} value={account.id}>{account.name}{account.shopId ? ` (${account.shopId})` : ""}</SelectItem>)}</SelectContent></Select></Field><div className="sm:col-span-2"><Field label="Notes"><Textarea value={edit.notes} onChange={(event) => setEdit((current) => ({ ...current, notes: event.target.value }))} /></Field></div></div><DialogFooter><Button variant="outline" onClick={() => setEditOpen(false)}>Cancel</Button><Button onClick={() => void saveEdit()} disabled={working === "save"}>{working === "save" && <Loader2 className="size-4 animate-spin" />} Save session</Button></DialogFooter></DialogContent></Dialog>
+    <AlertDialog open={Boolean(confirmAction)} onOpenChange={(open) => !open && setConfirmAction("")}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{confirmAction === "cancel" ? "Cancel this live session?" : "Complete this live session?"}</AlertDialogTitle><AlertDialogDescription>Unused reserved quantities will be released for another session. Sold and shipped evidence remains attached for reporting.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Keep open</AlertDialogCancel><AlertDialogAction onClick={() => void runAction(confirmAction || "complete")} className={confirmAction === "cancel" ? "bg-destructive text-destructive-foreground hover:bg-destructive/90" : ""}>{confirmAction === "cancel" ? "Cancel session" : "Complete session"}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </div>
 }
 
 export function LiveSessionsRoute({ warehouses = [], operatorName = "Warehouse user" }: { warehouses?: WarehouseReference[]; operatorName?: string }) {
-  const detailKey = liveSessionKeyFromPath()
+  const detailKey = detailKeyFromPath()
+  const urlDefaults = useMemo(defaultsFromUrl, [])
   const [sessions, setSessions] = useState<LiveSession[]>([])
   const [selectedSession, setSelectedSession] = useState<LiveSession | null>(null)
+  const [references, setReferences] = useState<ReferenceData>({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
-  const [createOpen, setCreateOpen] = useState(false)
+  const [createOpen, setCreateOpen] = useState(Boolean(urlDefaults.sourceId))
   const [creating, setCreating] = useState(false)
-  const physicalWarehouses = useMemo(() => warehouses.filter((warehouse) => warehouse.isPhysical !== false && warehouse.inventorySourceType !== "supplier_feed" && warehouse.allowAudits !== false), [warehouses])
-  const [draft, setDraft] = useState({ title: "", warehouseId: "", channel: "unassigned", notes: "" })
-
-  useEffect(() => {
-    if (!draft.warehouseId && physicalWarehouses[0]?.id) setDraft((current) => ({ ...current, warehouseId: String(physicalWarehouses[0]?.id || "") }))
-  }, [physicalWarehouses, draft.warehouseId])
+  const [loadingSource, setLoadingSource] = useState(false)
+  const [draftItems, setDraftItems] = useState<DraftItem[]>([])
+  const [manualQuery, setManualQuery] = useState("")
+  const [manualResults, setManualResults] = useState<QuickProduct[]>([])
+  const [manualSearching, setManualSearching] = useState(false)
+  const [draft, setDraft] = useState({ title: "", sourceType: urlDefaults.sourceType, sourceId: urlDefaults.sourceId, warehouseId: "", channel: "unassigned", channelAccountId: "", notes: "" })
+  const referenceWarehouses = references.warehouses || warehouses
+  const physicalWarehouses = useMemo(() => referenceWarehouses.filter((warehouse) => warehouse.isPhysical !== false && warehouse.inventorySourceType !== "supplier_feed" && warehouse.allowAudits !== false), [referenceWarehouses])
 
   const load = async () => {
-    setLoading(true)
-    setError("")
+    setLoading(true); setError("")
     try {
+      const refsPromise = api<ReferenceData>(`/api/live-sessions/references${urlDefaults.sourceId ? `?sourceId=${encodeURIComponent(urlDefaults.sourceId)}` : ""}`)
       if (detailKey) {
-        const result = await api<{ session?: LiveSession }>(`/api/live-sessions/${encodeURIComponent(detailKey)}`)
-        setSelectedSession(result.session || null)
+        const [result, refs] = await Promise.all([api<{ session?: LiveSession }>(`/api/live-sessions/${encodeURIComponent(detailKey)}`), refsPromise])
+        setSelectedSession(result.session || null); setReferences(refs)
       } else {
-        const result = await api<{ sessions?: LiveSession[] }>("/api/live-sessions")
-        setSessions(result.sessions || [])
+        const [result, refs] = await Promise.all([api<{ sessions?: LiveSession[] }>("/api/live-sessions"), refsPromise])
+        setSessions(result.sessions || []); setReferences(refs)
       }
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Unable to load live sessions.")
-    } finally {
-      setLoading(false)
-    }
+    } catch (loadError) { setError(loadError instanceof Error ? loadError.message : "Unable to load live sessions.") }
+    finally { setLoading(false) }
   }
 
   useEffect(() => { void load() }, [detailKey])
+  useEffect(() => { if (!draft.warehouseId && physicalWarehouses[0]?.id) setDraft((current) => ({ ...current, warehouseId: String(physicalWarehouses[0]?.id || "") })) }, [physicalWarehouses, draft.warehouseId])
 
-  const create = async () => {
-    if (!draft.warehouseId || creating) return
-    setCreating(true)
+  const sourceReferences = draft.sourceType === "purchase_order" ? references.purchaseOrders || [] : draft.sourceType === "warehouse_audit" ? references.audits || [] : draft.sourceType === "previous_session" ? references.previousSessions || [] : []
+  const selectedAccounts = (references.channelAccounts || []).filter((account) => account.channel === draft.channel)
+
+  const selectSource = async (sourceId: string, sourceType = draft.sourceType) => {
+    setDraft((current) => ({ ...current, sourceId })); setDraftItems([])
+    if (!sourceId || !["purchase_order", "warehouse_audit", "previous_session"].includes(sourceType)) return
+    setLoadingSource(true)
     try {
-      const result = await api<{ message?: string; auditUrl?: string; mobileAuditUrl?: string }>("/api/live-sessions", {
-        method: "POST",
-        body: JSON.stringify({
-          sourceType: "extra_items",
-          title: draft.title,
-          warehouseId: draft.warehouseId,
-          channel: draft.channel === "unassigned" ? "" : draft.channel,
-          notes: draft.notes,
-          user: operatorName,
-        }),
-      })
-      toast.success(result.message || "Live session created.")
-      const scannerUrl = window.matchMedia("(max-width: 767px)").matches ? result.mobileAuditUrl : result.auditUrl
-      window.location.assign(scannerUrl || "/live-sessions")
-    } catch (createError) {
-      toast.error(createError instanceof Error ? createError.message : "Unable to create the live session.")
-    } finally {
-      setCreating(false)
-    }
+      if (sourceType === "purchase_order") {
+        const result = await api<{ purchaseOrder?: Record<string, unknown> }>(`/api/purchase-orders/${encodeURIComponent(sourceId)}`)
+        const po = result.purchaseOrder || {}; const lines = Array.isArray(po.items) ? po.items as Array<Record<string, unknown>> : []
+        setDraftItems(lines.map((line, index) => { const ordered = Math.max(0, Number(line.qty ?? line.quantity ?? 0) - Number(line.canceledQty || 0) - Number(line.reSourcedQty || 0)); const received = Math.max(0, Number(line.receivedQty || 0)); const available = Math.max(ordered, received); return { id: String(line.id || `${sourceId}:line:${index}`), sourceLineId: String(line.id || `${sourceId}:line:${index}`), productId: String(line.productId || ""), sku: String(line.sku || ""), title: String(line.title || line.description || line.sku || "PO item"), image: String(line.image || line.defaultImage || ""), orderedQty: ordered, receivedQty: received, sourceAvailableQty: available, requestedQty: available, unitCost: Number(line.unitCost ?? line.cost ?? 0) } }).filter((item) => item.sku && item.sourceAvailableQty > 0))
+        setDraft((current) => ({ ...current, warehouseId: String(po.warehouseId || current.warehouseId), channel: String(po.liveChannel || current.channel || "unassigned") || "unassigned" }))
+      } else if (sourceType === "warehouse_audit") {
+        const result = await api<{ audit?: Record<string, unknown> }>(`/api/warehouse-audits/${encodeURIComponent(sourceId)}`)
+        const audit = result.audit || {}; const lines = Array.isArray(audit.lines) ? audit.lines as Array<Record<string, unknown>> : []
+        setDraftItems(lines.map((line, index) => { const counted = Number(line.countedQty ?? line.count ?? 0); return { id: String(line.id || `${sourceId}:line:${index}`), sourceLineId: String(line.id || `${sourceId}:line:${index}`), productId: String(line.productId || ""), sku: String(line.sku || ""), title: String(line.title || line.description || line.sku || "Audit item"), image: String(line.image || ""), receivedQty: String(audit.status) === "completed" ? counted : 0, sourceAvailableQty: counted, requestedQty: counted, unitCost: Number(line.unitCost ?? line.cost ?? 0) } }).filter((item) => item.sku && item.sourceAvailableQty > 0))
+        setDraft((current) => ({ ...current, warehouseId: String(audit.warehouseId || current.warehouseId), channel: String(audit.liveChannel || current.channel || "unassigned") || "unassigned" }))
+      } else {
+        const result = await api<{ session?: LiveSession }>(`/api/live-sessions/${encodeURIComponent(sourceId)}`); const parent = result.session
+        setDraftItems((parent?.items || []).filter((item) => Number(item.remainingQty || 0) > 0).map((item) => ({ ...item, sourceAvailableQty: Number(item.remainingQty || 0), requestedQty: Number(item.remainingQty || 0) })))
+        setDraft((current) => ({ ...current, warehouseId: String(parent?.warehouseId || current.warehouseId), channel: String(parent?.channel || current.channel || "unassigned") || "unassigned", channelAccountId: String(parent?.channelAccountId || "") }))
+      }
+    } catch (sourceError) { toast.error(sourceError instanceof Error ? sourceError.message : "Unable to load the inventory source.") }
+    finally { setLoadingSource(false) }
   }
 
-  if (detailKey) return <SessionDetail session={selectedSession} loading={loading} error={error} />
+  useEffect(() => { if (urlDefaults.sourceId && draft.sourceId === urlDefaults.sourceId && !draftItems.length) void selectSource(urlDefaults.sourceId, draft.sourceType) }, [references.purchaseOrders?.length, references.audits?.length, references.previousSessions?.length])
+  useEffect(() => {
+    if (draft.sourceType !== "manual_skus" || manualQuery.trim().length < 2) { setManualResults([]); return }
+    const controller = new AbortController(); const timer = window.setTimeout(async () => {
+      setManualSearching(true)
+      try { const result = await api<{ products?: QuickProduct[] }>(`/api/quick-search/products?q=${encodeURIComponent(manualQuery.trim())}&limit=10`, { signal: controller.signal }); setManualResults(result.products || []) }
+      catch (searchError) { if (!controller.signal.aborted) toast.error(searchError instanceof Error ? searchError.message : "Unable to search products.") }
+      finally { if (!controller.signal.aborted) setManualSearching(false) }
+    }, 250)
+    return () => { controller.abort(); window.clearTimeout(timer) }
+  }, [manualQuery, draft.sourceType])
 
-  const counting = sessions.filter((session) => session.status === "counting").length
-  const ready = sessions.filter((session) => session.status === "ready").length
-  const totalUnits = sessions.reduce((sum, session) => sum + Number(session.scannedUnits || 0), 0)
+  const addManualProduct = (product: QuickProduct) => {
+    if (draftItems.some((item) => item.sku === product.sku)) return
+    const available = Math.max(0, Number(product.qty || 0))
+    setDraftItems((current) => [...current, { id: product.id || product.sku, productId: product.id, sku: product.sku, title: product.title || product.sku, image: product.image, upc: product.barcode, manufacturerSku: product.mfrPartNumber, supplierSku: product.vendorSku, unitCost: product.cost, sourceAvailableQty: available, requestedQty: Math.min(1, available) }])
+    setManualQuery(""); setManualResults([])
+  }
+
+  const create = async (): Promise<void> => {
+    if (creating) return
+    if (["purchase_order", "warehouse_audit", "previous_session"].includes(draft.sourceType) && !draft.sourceId) { toast.error("Choose an inventory source."); return }
+    if (draft.sourceType === "manual_skus" && !draftItems.length) { toast.error("Add at least one SKU."); return }
+    if (["extra_items", "manual_skus"].includes(draft.sourceType) && !draft.warehouseId) { toast.error("Choose a warehouse."); return }
+    setCreating(true)
+    try {
+      const result = await api<{ message?: string; auditUrl?: string; mobileAuditUrl?: string; sessionUrl?: string }>("/api/live-sessions", { method: "POST", body: JSON.stringify({ ...draft, channel: draft.channel === "unassigned" ? "" : draft.channel, user: operatorName, items: draftItems.filter((item) => item.requestedQty > 0).map((item) => ({ id: item.id, sourceLineId: item.sourceLineId, productId: item.productId, sku: item.sku, requestedQty: item.requestedQty })) }) })
+      toast.success(result.message || "Live session created.")
+      const scannerUrl = window.matchMedia("(max-width: 767px)").matches ? result.mobileAuditUrl : result.auditUrl
+      window.location.assign(scannerUrl || result.sessionUrl || "/live-sessions")
+    } catch (createError) { toast.error(createError instanceof Error ? createError.message : "Unable to create the live session.") }
+    finally { setCreating(false) }
+  }
+
+  if (detailKey) return <SessionDetail session={selectedSession} loading={loading} error={error} references={references} onReload={load} />
+  const active = sessions.filter((session) => !["completed", "canceled"].includes(String(session.status))).length
+  const reserved = sessions.reduce((sum, session) => sum + Number(session.reservedUnits || session.scannedUnits || 0), 0)
+  const sold = sessions.reduce((sum, session) => sum + Number(session.soldUnits || 0), 0)
+  const shortages = sessions.reduce((sum, session) => sum + Number(session.shortageUnits || 0), 0)
+
   return <div className="grid gap-5">
-    <PageHeader eyebrow="Warehouse / Live sessions" title="Live Sessions" description="Build reusable live inventory pools from purchase orders, warehouse counts, or scanned extra items, then assign a selling destination when the team is ready." action={<Button onClick={() => setCreateOpen(true)}><PackagePlus className="size-4" /> Create session</Button>} />
-    <div className="grid gap-3 sm:grid-cols-3">
-      <MetricCard label="Counting" value={counting} icon={ScanBarcode} />
-      <MetricCard label="Ready" value={ready} icon={RadioTower} />
-      <MetricCard label="Scanned units" value={totalUnits} icon={Boxes} />
-    </div>
+    <PageHeader eyebrow="Warehouse / Live sessions" title="Live Sessions" description="Reserve inventory once, split a PO across multiple launches, and reconcile sold and shipped quantities without deducting physical stock twice." action={<Button onClick={() => setCreateOpen(true)}><PackagePlus className="size-4" /> Create session</Button>} />
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><MetricCard label="Active sessions" value={active} icon={RadioTower} /><MetricCard label="Reserved units" value={reserved} icon={Boxes} /><MetricCard label="Sold units" value={sold} icon={ShoppingBag} /><MetricCard label="Shortage units" value={shortages} icon={AlertTriangle} /></div>
     {error && <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Live sessions could not load</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
-    <Card>
-      <CardHeader className="border-b"><CardTitle className="text-base">Sessions</CardTitle><CardDescription>Each extra-items session is backed by a linked warehouse audit, so scanning remains reviewable and inventory is not added until the count is posted.</CardDescription></CardHeader>
-      <CardContent className="p-0">
-        {loading ? <div className="flex min-h-52 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading live sessions...</div> : sessions.length ? <MobileTables><Table><TableHeader><TableRow><TableHead>Session</TableHead><TableHead>Source</TableHead><TableHead>Warehouse</TableHead><TableHead>Destination</TableHead><TableHead className="text-right">Units</TableHead><TableHead>Status</TableHead><TableHead>Updated</TableHead></TableRow></TableHeader><TableBody>{sessions.map((session) => <TableRow key={session.id}><TableCell><a className="font-medium text-primary hover:underline" href={`/live-sessions/${encodeURIComponent(String(session.sessionNumber || session.id))}`}>{session.sessionNumber || "Session"}</a><p className="max-w-72 truncate text-xs text-muted-foreground">{session.title || "Extra items"}</p></TableCell><TableCell>{session.sourceLabel || "Scanned extra items"}</TableCell><TableCell>{session.warehouseName || "-"}</TableCell><TableCell>{session.channelLabel || "Not assigned"}</TableCell><TableCell className="text-right font-medium">{numberLabel(session.scannedUnits)}</TableCell><TableCell><Badge variant="outline" className={statusClass(session.status)}>{statusLabel(session.status)}</Badge></TableCell><TableCell>{dateLabel(session.updatedAt || session.createdAt)}</TableCell></TableRow>)}</TableBody></Table></MobileTables> : <div className="flex min-h-52 flex-col items-center justify-center gap-3 px-5 py-10 text-center"><div className="grid size-12 place-items-center rounded-md bg-muted"><RadioTower className="size-6 text-muted-foreground" /></div><div><p className="font-medium">No live sessions yet</p><p className="mt-1 max-w-md text-sm text-muted-foreground">Create a session from extra items to open a linked inventory audit and start scanning.</p></div><Button onClick={() => setCreateOpen(true)}><PackagePlus className="size-4" /> Create session</Button></div>}
-      </CardContent>
-    </Card>
-
-    <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-      <DialogContent className="sm:max-w-2xl">
-        <DialogHeader><DialogTitle>Create session from extra items</DialogTitle><DialogDescription>Start a linked inventory audit, scan the available items, and keep the resulting quantities attached to this live session.</DialogDescription></DialogHeader>
-        <Alert className="border-blue-500/30 bg-blue-500/10"><ScanBarcode className="size-4" /><AlertTitle>Scanning is the source of truth</AlertTitle><AlertDescription>Creating the session does not add inventory. Counts become physical stock only when the linked audit is reviewed and posted.</AlertDescription></Alert>
-        <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="Session name"><Input value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} placeholder="Friday tool launch" /></Field>
-          <Field label="Warehouse"><Select value={draft.warehouseId} onValueChange={(warehouseId) => setDraft((current) => ({ ...current, warehouseId }))}><SelectTrigger><SelectValue placeholder="Select a physical warehouse" /></SelectTrigger><SelectContent>{physicalWarehouses.map((warehouse) => <SelectItem key={String(warehouse.id || warehouse.name)} value={String(warehouse.id || "")}>{String(warehouse.name || "Warehouse")}{warehouse.code ? ` (${warehouse.code})` : ""}</SelectItem>)}</SelectContent></Select></Field>
-          <Field label="Live destination"><Select value={draft.channel} onValueChange={(channel) => setDraft((current) => ({ ...current, channel }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{liveDestinations.map((destination) => <SelectItem key={destination.value} value={destination.value}>{destination.label}</SelectItem>)}</SelectContent></Select></Field>
-          <div className="rounded-md border bg-muted/30 p-3 text-sm"><p className="font-medium">Source: Extra items audit</p><p className="mt-1 text-xs text-muted-foreground">You will be taken directly to the warehouse scanner after creation.</p></div>
-          <div className="sm:col-span-2"><Field label="Notes"><Textarea value={draft.notes} onChange={(event) => setDraft((current) => ({ ...current, notes: event.target.value }))} placeholder="Optional handling or launch notes" /></Field></div>
-        </div>
-        {!physicalWarehouses.length && <Alert variant="destructive"><Warehouse className="size-4" /><AlertTitle>No audit-ready warehouse</AlertTitle><AlertDescription>Configure a physical warehouse that allows audits before creating this session.</AlertDescription></Alert>}
-        <DialogFooter><Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button><Button disabled={creating || !draft.warehouseId} onClick={() => void create()}>{creating ? <Loader2 className="size-4 animate-spin" /> : <ScanBarcode className="size-4" />} Create and scan</Button></DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <Card><CardHeader className="border-b"><CardTitle className="text-base">Sessions</CardTitle><CardDescription>Every quantity stays traceable to the PO, audit, previous session, or warehouse stock that supplied it.</CardDescription></CardHeader><CardContent className="p-0">{loading ? <div className="flex min-h-52 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading live sessions...</div> : sessions.length ? <MobileTables><Table><TableHeader><TableRow><TableHead>Session</TableHead><TableHead>Source</TableHead><TableHead>Destination</TableHead><TableHead className="text-right">Reserved</TableHead><TableHead className="text-right">Sold</TableHead><TableHead className="text-right">Shipped</TableHead><TableHead className="text-right">Remaining</TableHead><TableHead>Status</TableHead><TableHead>Updated</TableHead></TableRow></TableHeader><TableBody>{sessions.map((session) => <TableRow key={session.id}><TableCell><a className="font-medium text-primary hover:underline" href={`/live-sessions/${encodeURIComponent(String(session.sessionNumber || session.id))}`}>{session.sessionNumber || "Session"}</a><p className="max-w-72 truncate text-xs text-muted-foreground">{session.title || "Live inventory"}</p></TableCell><TableCell><p>{session.sourceLabel || "Live inventory"}</p><p className="text-xs text-muted-foreground">{session.warehouseName || "-"}</p></TableCell><TableCell><p>{session.channelLabel || "Not assigned"}</p><p className="text-xs text-muted-foreground">{session.channelAccountName || "No shop selected"}</p></TableCell><TableCell className="text-right font-medium">{numberLabel(session.reservedUnits || session.scannedUnits)}</TableCell><TableCell className="text-right">{numberLabel(session.soldUnits)}</TableCell><TableCell className="text-right">{numberLabel(session.shippedUnits)}</TableCell><TableCell className="text-right">{numberLabel(session.remainingUnits)}</TableCell><TableCell><Badge variant="outline" className={statusClass(session.status)}>{statusLabel(session.status)}</Badge>{Number(session.shortageUnits || 0) > 0 && <Badge variant="warning" className="ml-1">Short {numberLabel(session.shortageUnits)}</Badge>}</TableCell><TableCell>{dateLabel(session.updatedAt || session.createdAt)}</TableCell></TableRow>)}</TableBody></Table></MobileTables> : <div className="flex min-h-52 flex-col items-center justify-center gap-3 px-5 py-10 text-center"><RadioTower className="size-8 text-muted-foreground" /><div><p className="font-medium">No live sessions yet</p><p className="mt-1 max-w-md text-sm text-muted-foreground">Create one from a live-purpose PO, inventory audit, previous unsold inventory, manual SKUs, or a new scan.</p></div><Button onClick={() => setCreateOpen(true)}><PackagePlus className="size-4" /> Create session</Button></div>}</CardContent></Card>
+    <CreateDialog open={createOpen} onOpenChange={setCreateOpen} draft={draft} setDraft={setDraft} sourceReferences={sourceReferences} selectSource={selectSource} physicalWarehouses={physicalWarehouses} selectedAccounts={selectedAccounts} loadingSource={loadingSource} draftItems={draftItems} setDraftItems={setDraftItems} manualQuery={manualQuery} setManualQuery={setManualQuery} manualResults={manualResults} manualSearching={manualSearching} addManualProduct={addManualProduct} references={references} creating={creating} create={create} />
   </div>
+}
+
+type DraftState = { title: string; sourceType: string; sourceId: string; warehouseId: string; channel: string; channelAccountId: string; notes: string }
+function CreateDialog(props: {
+  open: boolean; onOpenChange: (open: boolean) => void; draft: DraftState; setDraft: React.Dispatch<React.SetStateAction<DraftState>>; sourceReferences: SourceReference[]
+  selectSource: (sourceId: string) => Promise<void>; physicalWarehouses: WarehouseReference[]; selectedAccounts: ChannelAccount[]; loadingSource: boolean
+  draftItems: DraftItem[]; setDraftItems: React.Dispatch<React.SetStateAction<DraftItem[]>>; manualQuery: string; setManualQuery: (value: string) => void
+  manualResults: QuickProduct[]; manualSearching: boolean; addManualProduct: (product: QuickProduct) => void; references: ReferenceData; creating: boolean; create: () => Promise<void>
+}) {
+  const { draft, setDraft } = props
+  return <Dialog open={props.open} onOpenChange={props.onOpenChange}><DialogContent className="flex h-[min(92vh,900px)] max-w-[calc(100vw-1rem)] flex-col overflow-hidden p-0 sm:max-w-6xl"><DialogHeader className="border-b px-6 py-5"><DialogTitle>Create live session</DialogTitle><DialogDescription>{props.references.scope?.companyName || "Selected company"} · Choose the physical source first, then reserve only the units planned for this launch.</DialogDescription></DialogHeader><div className="min-h-0 flex-1 overflow-y-auto px-6 py-5"><div className="grid gap-5">
+    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4"><Field label="Inventory source"><Select value={draft.sourceType} onValueChange={(sourceType) => { setDraft((current) => ({ ...current, sourceType, sourceId: "" })); props.setDraftItems([]) }}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{sources.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></Field>{["purchase_order", "warehouse_audit", "previous_session"].includes(draft.sourceType) && <Field label={sources.find((option) => option.value === draft.sourceType)?.label || "Source"}><Select value={draft.sourceId} onValueChange={(sourceId) => void props.selectSource(sourceId)}><SelectTrigger><SelectValue placeholder="Choose source" /></SelectTrigger><SelectContent>{props.sourceReferences.map((source) => <SelectItem key={source.id} value={source.id}>{source.label}{source.remainingUnits ? ` · ${numberLabel(source.remainingUnits)} left` : ""}</SelectItem>)}</SelectContent></Select></Field>}{["extra_items", "manual_skus"].includes(draft.sourceType) && <Field label="Warehouse"><Select value={draft.warehouseId} onValueChange={(warehouseId) => setDraft((current) => ({ ...current, warehouseId }))}><SelectTrigger><SelectValue placeholder="Select warehouse" /></SelectTrigger><SelectContent>{props.physicalWarehouses.map((warehouse) => <SelectItem key={String(warehouse.id || warehouse.name)} value={String(warehouse.id || "")}>{String(warehouse.name || "Warehouse")}{warehouse.code ? ` (${warehouse.code})` : ""}</SelectItem>)}</SelectContent></Select></Field>}<Field label="Session name"><Input value={draft.title} onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))} placeholder="Friday tool launch" /></Field><Field label="Live channel"><Select value={draft.channel} onValueChange={(channel) => setDraft((current) => ({ ...current, channel, channelAccountId: "" }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{destinations.map((destination) => <SelectItem key={destination.value} value={destination.value}>{destination.label}</SelectItem>)}</SelectContent></Select></Field><Field label="Seller account / shop"><Select value={draft.channelAccountId || "unassigned"} onValueChange={(channelAccountId) => setDraft((current) => ({ ...current, channelAccountId: channelAccountId === "unassigned" ? "" : channelAccountId }))}><SelectTrigger><SelectValue placeholder="Choose shop" /></SelectTrigger><SelectContent><SelectItem value="unassigned">Select later</SelectItem>{props.selectedAccounts.map((account) => <SelectItem key={account.id} value={account.id}>{account.name}{account.shopId ? ` (${account.shopId})` : ""}</SelectItem>)}</SelectContent></Select></Field></div>
+    {draft.sourceType === "extra_items" && <Alert className="border-blue-500/30 bg-blue-500/5"><ScanBarcode className="size-4" /><AlertTitle>A linked audit will open</AlertTitle><AlertDescription>Creating the session does not add physical inventory; posting the audit remains the stock event.</AlertDescription></Alert>}
+    {draft.sourceType === "manual_skus" && <div className="grid gap-2"><Label htmlFor="live-manual-search">Add catalog SKUs</Label><div className="relative"><Search className="absolute left-3 top-2.5 size-4 text-muted-foreground" /><Input id="live-manual-search" className="pl-9" value={props.manualQuery} onChange={(event) => props.setManualQuery(event.target.value)} placeholder="Search SKU, UPC, MPN, or title" />{props.manualSearching && <Loader2 className="absolute right-3 top-2.5 size-4 animate-spin text-muted-foreground" />}</div>{props.manualResults.length > 0 && <div className="divide-y rounded-md border">{props.manualResults.map((product) => <button type="button" key={product.id || product.sku} className="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-muted" onClick={() => props.addManualProduct(product)}>{product.image ? <img src={product.image} alt="" className="size-9 rounded border object-contain" /> : <span className="grid size-9 place-items-center rounded border bg-muted"><Boxes className="size-4" /></span>}<span className="min-w-0 flex-1"><span className="block font-mono text-xs text-primary">{product.sku}</span><span className="block truncate text-sm font-medium">{product.title || product.sku}</span></span><Badge variant="outline">{numberLabel(product.qty)} available</Badge></button>)}</div>}</div>}
+    {props.loadingSource && <div className="flex min-h-32 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading source inventory...</div>}
+    {!props.loadingSource && props.draftItems.length > 0 && <Card><CardHeader className="border-b"><div className="flex flex-wrap items-center justify-between gap-3"><div><CardTitle className="text-sm">Inventory allocation</CardTitle><CardDescription>Requested quantities are rechecked against every active session when saved.</CardDescription></div><Badge variant="outline">{numberLabel(props.draftItems.reduce((sum, item) => sum + Number(item.requestedQty || 0), 0))} requested</Badge></div></CardHeader><CardContent className="p-0"><MobileTables><Table><TableHeader><TableRow><TableHead>Item</TableHead><TableHead className="text-right">Source qty</TableHead><TableHead className="w-36">Reserve</TableHead><TableHead className="text-right">Cost</TableHead>{draft.sourceType === "manual_skus" && <TableHead className="w-14" />}</TableRow></TableHeader><TableBody>{props.draftItems.map((item, index) => <TableRow key={String(item.id || `${item.sku}-${index}`)}><TableCell><ItemIdentity item={item} /></TableCell><TableCell className="text-right font-medium">{numberLabel(item.sourceAvailableQty)}</TableCell><TableCell><Input type="number" min={0} step={1} value={item.requestedQty} onChange={(event) => props.setDraftItems((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, requestedQty: Math.max(0, Number(event.target.value || 0)) } : row))} /></TableCell><TableCell className="text-right">{moneyLabel(Number(item.unitCost || 0))}</TableCell>{draft.sourceType === "manual_skus" && <TableCell><Button size="icon" variant="ghost" onClick={() => props.setDraftItems((current) => current.filter((_, rowIndex) => rowIndex !== index))} aria-label={`Remove ${item.sku}`}><Trash2 className="size-4" /></Button></TableCell>}</TableRow>)}</TableBody></Table></MobileTables></CardContent></Card>}
+    <Field label="Notes"><Textarea value={draft.notes} onChange={(event) => setDraft((current) => ({ ...current, notes: event.target.value }))} placeholder="Optional launch, handling, or sourcing notes" /></Field>
+  </div></div><DialogFooter className="border-t px-6 py-4"><Button variant="outline" onClick={() => props.onOpenChange(false)}>Cancel</Button><Button disabled={props.creating || props.loadingSource} onClick={() => void props.create()}>{props.creating ? <Loader2 className="size-4 animate-spin" /> : draft.sourceType === "extra_items" ? <ScanBarcode className="size-4" /> : <PackagePlus className="size-4" />} {draft.sourceType === "extra_items" ? "Create and scan" : "Create session"}</Button></DialogFooter></DialogContent></Dialog>
 }

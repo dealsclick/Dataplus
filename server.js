@@ -21,6 +21,7 @@ const { XMLParser, XMLBuilder } = require("fast-xml-parser");
 const postgres = require("./db");
 const { createCompanyStore, LEGACY_TENANT, LEGACY_COMPANY } = require("./lib/company-workspaces");
 const { buildOrderIdentity } = require("./lib/order-identity");
+const liveSessionLedger = require("./lib/live-sessions");
 const { SUPERUSER_FEATURES, isSuperuser: isSuperuserAccount, normalizedFeatureSettings, featureAccessForUser } = require("./lib/superuser-access");
 const { channelIsEnabled } = require("./lib/channel-enabled");
 const { applyWalmartSettings, walmartIsSettlementOnly } = require("./lib/walmart-settings");
@@ -13432,14 +13433,54 @@ function liveSessionWithAudit(session = {}, audit = null) {
     sum + Math.max(0, Number(line?.countedQty ?? line?.count ?? 0))
   ), 0);
   const auditStatus = String(audit?.status || "").toLowerCase();
-  const status = auditStatus === "completed"
+  const savedStatus = String(session.status || "draft").toLowerCase();
+  const status = ["live", "completed", "canceled"].includes(savedStatus)
+    ? savedStatus
+    : auditStatus === "completed"
     ? "ready"
     : auditStatus === "pending_review"
       ? "review"
       : auditStatus === "in_progress"
         ? "counting"
-        : String(session.status || "draft");
-  return {
+        : savedStatus;
+  const storedItems = Array.isArray(session.items) ? session.items : [];
+  const auditItems = knownLines.filter((line) => String(line.sku || "").trim()).map((line, index) => {
+    const countedQty = Math.max(0, Number(line.countedQty ?? line.count ?? 0));
+    const sourceLineId = String(line.id || `${audit?.id || "audit"}:line:${index}`);
+    const storedItem = storedItems.find((item) => String(item.sourceLineId || item.id || "") === sourceLineId)
+      || storedItems.find((item) => String(item.sku || "").toLowerCase() === String(line.sku || "").toLowerCase())
+      || {};
+    return liveSessionLedger.itemMetrics({
+      ...storedItem,
+      id: String(line.liveSessionItemId || sourceLineId),
+      sourceType: String(session.sourceType || "warehouse_audit"),
+      sourceId: String(audit?.id || session.sourceId || ""),
+      sourceLineId,
+      sourceKey: `warehouse_audit:${audit?.id || session.sourceId || "unknown"}:${sourceLineId}`,
+      productId: String(line.productId || ""),
+      sku: String(line.sku || ""),
+      catalogSku: String(line.sku || ""),
+      title: String(line.title || line.description || line.sku || "Live inventory item"),
+      image: String(line.image || ""),
+      upc: String(line.upc || line.barcode || ""),
+      barcode: String(line.barcode || line.upc || ""),
+      manufacturerSku: String(line.manufacturerSku || line.manufacturerPartNumber || line.mfrPartNumber || line.mpn || ""),
+      supplierSku: String(line.supplierSku || line.vendorSku || line.sourceSku || ""),
+      unitCost: Number(line.unitCost ?? line.cost ?? 0),
+      receivedQty: auditStatus === "completed" ? countedQty : 0,
+      incomingQty: auditStatus === "completed" ? 0 : countedQty,
+      sourceAvailableQty: countedQty,
+      requestedQty: countedQty,
+      reservedQty: countedQty,
+      soldQty: Number(storedItem.soldQty || 0),
+      shippedQty: Number(storedItem.shippedQty || 0),
+      releasedQty: Number(storedItem.releasedQty || 0),
+      linkedOrderIds: storedItem.linkedOrderIds || [],
+      linkedOutboundScanIds: storedItem.linkedOutboundScanIds || []
+    });
+  });
+  const shouldUseAuditItems = ["extra_items", "warehouse_audit"].includes(String(session.sourceType || "").toLowerCase()) && knownLines.length > 0;
+  const measured = liveSessionLedger.sessionTotals({
     ...session,
     sessionNumber: canonicalLiveSessionReference(session.sessionNumber, session.id),
     status,
@@ -13449,6 +13490,7 @@ function liveSessionWithAudit(session = {}, audit = null) {
     scannedSkus: knownLines.length,
     unknownBarcodes: unknownLines.length,
     scannedUnits,
+    items: shouldUseAuditItems ? auditItems : (Array.isArray(session.items) ? session.items : []),
     audit: audit ? {
       id: audit.id,
       auditNumber: audit.auditNumber,
@@ -13458,7 +13500,162 @@ function liveSessionWithAudit(session = {}, audit = null) {
       lines: knownLines,
       unknownBarcodes: unknownLines
     } : null
+  });
+  return measured;
+}
+
+function liveSessionScope(req) {
+  const selected = companySelection(req);
+  const scope = notificationScope(req);
+  return {
+    ...scope,
+    companyName: String(selected?.companyName || selected?.name || (scope.companyId === LEGACY_COMPANY ? "LINQ USA dba Dealsclick" : "Selected company")),
+    legacy: scope.tenantId === LEGACY_TENANT && scope.companyId === LEGACY_COMPANY
   };
+}
+
+function liveSessionRowsForScope(rows = [], scope = {}) {
+  return (rows || []).filter((session) => liveSessionLedger.sessionBelongsToScope(session, scope));
+}
+
+function liveSessionRequestQuantities(body = {}) {
+  const values = new Map();
+  for (const item of Array.isArray(body.items) ? body.items : []) {
+    const keys = [item.sourceLineId, item.id, item.productId, item.sku].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+    for (const key of keys) values.set(key, Math.max(0, Number(item.requestedQty ?? item.quantity ?? item.qty ?? item.reservedQty ?? 0)));
+  }
+  return values;
+}
+
+function requestedLiveSessionQuantity(requested = new Map(), values = [], fallback = 0) {
+  for (const value of values) {
+    const key = String(value || "").trim().toLowerCase();
+    if (key && requested.has(key)) return Math.max(0, Number(requested.get(key) || 0));
+  }
+  return Math.max(0, Number(fallback || 0));
+}
+
+function liveSessionItemFromPurchaseOrderLine(po = {}, line = {}, index = 0, requested = new Map()) {
+  const sourceLineId = String(line.id || line.lineId || `${po.id}:line:${index}`);
+  const orderedQty = Math.max(0, Number(line.qty ?? line.quantity ?? 0) - Number(line.canceledQty || 0) - Number(line.reSourcedQty || 0));
+  const receivedQty = Math.max(0, Number(line.receivedQty || 0));
+  const availableQty = Math.max(orderedQty, receivedQty);
+  return {
+    id: `${po.id}:${sourceLineId}`,
+    sourceType: "purchase_order",
+    sourceId: String(po.id || ""),
+    sourceNumber: String(po.poNumber || po.id || ""),
+    sourceLineId,
+    sourceKey: `purchase_order:${po.id}:${sourceLineId}`,
+    productId: String(line.productId || ""),
+    sku: String(line.sku || ""),
+    catalogSku: String(line.sku || ""),
+    title: String(line.title || line.description || line.sku || "PO item"),
+    image: String(line.image || line.defaultImage || ""),
+    upc: String(line.upc || line.barcode || ""),
+    barcode: String(line.barcode || line.upc || ""),
+    manufacturerSku: String(line.manufacturerSku || line.manufacturerPartNumber || line.mfrPartNumber || line.mpn || ""),
+    supplierSku: String(line.supplierSku || line.vendorSku || line.sourceSku || ""),
+    supplier: String(line.supplier || po.supplier || ""),
+    orderedQty,
+    receivedQty,
+    incomingQty: Math.max(0, orderedQty - receivedQty),
+    sourceAvailableQty: availableQty,
+    requestedQty: requestedLiveSessionQuantity(requested, [sourceLineId, line.id, line.productId, line.sku], availableQty),
+    unitCost: Number(line.unitCost ?? line.cost ?? 0)
+  };
+}
+
+function liveSessionItemFromAuditLine(audit = {}, line = {}, index = 0, requested = new Map()) {
+  const sourceLineId = String(line.id || `${audit.id}:line:${index}`);
+  const countedQty = Math.max(0, Number(line.countedQty ?? line.count ?? 0));
+  const completed = String(audit.status || "").toLowerCase() === "completed";
+  return {
+    id: `${audit.id}:${sourceLineId}`,
+    sourceType: "warehouse_audit",
+    sourceId: String(audit.id || ""),
+    sourceNumber: String(audit.auditNumber || audit.id || ""),
+    sourceLineId,
+    sourceKey: `warehouse_audit:${audit.id}:${sourceLineId}`,
+    productId: String(line.productId || ""),
+    sku: String(line.sku || ""),
+    catalogSku: String(line.sku || ""),
+    title: String(line.title || line.description || line.sku || "Audit item"),
+    image: String(line.image || ""),
+    upc: String(line.upc || line.barcode || ""),
+    barcode: String(line.barcode || line.upc || ""),
+    manufacturerSku: String(line.manufacturerSku || line.manufacturerPartNumber || line.mfrPartNumber || line.mpn || ""),
+    supplierSku: String(line.supplierSku || line.vendorSku || line.sourceSku || ""),
+    receivedQty: completed ? countedQty : 0,
+    incomingQty: completed ? 0 : countedQty,
+    sourceAvailableQty: countedQty,
+    requestedQty: requestedLiveSessionQuantity(requested, [sourceLineId, line.productId, line.sku], countedQty),
+    unitCost: Number(line.unitCost ?? line.cost ?? 0)
+  };
+}
+
+function liveSessionProductWarehouseAvailability(product = {}, warehouse = {}) {
+  const warehouseId = String(warehouse.id || "");
+  const warehouseName = String(warehouse.name || "").toLowerCase();
+  const row = (Array.isArray(product.warehouseStock) ? product.warehouseStock : []).find((stock) => (
+    (warehouseId && String(stock.warehouseId || "") === warehouseId)
+    || (warehouseName && String(stock.warehouseName || "").toLowerCase() === warehouseName)
+  ));
+  if (row) return Math.max(0, Number(row.qty || 0) - Number(row.reserved || 0));
+  return Math.max(0, Number(product.qty ?? product.stockQty ?? 0) - Number(product.reserved || 0));
+}
+
+function liveSessionItemFromProduct(product = {}, warehouse = {}, requestedQty = 0) {
+  const availableQty = liveSessionProductWarehouseAvailability(product, warehouse);
+  const sku = String(product.sku || product.id || "");
+  return {
+    id: `${warehouse.id}:${product.id || sku}`,
+    sourceType: "manual_skus",
+    sourceId: String(warehouse.id || ""),
+    sourceNumber: String(warehouse.name || ""),
+    sourceLineId: String(product.id || sku),
+    sourceKey: `warehouse:${warehouse.id}:${product.id || sku}`,
+    productId: String(product.id || ""),
+    sku,
+    catalogSku: sku,
+    title: String(product.title || product.marketplaceTitle || sku),
+    image: String(product.defaultImage || product.image || ""),
+    upc: String(product.upc || product.barcode || product.gtin || ""),
+    barcode: String(product.barcode || product.upc || ""),
+    manufacturerSku: String(product.mfrPartNumber || product.manufacturerPartNumber || product.mpn || ""),
+    supplierSku: String(product.vendorSku || product.sourceSku || ""),
+    supplier: String(product.supplier || product.vendor || ""),
+    receivedQty: availableQty,
+    incomingQty: 0,
+    sourceAvailableQty: availableQty,
+    requestedQty: requestedQty > 0 ? requestedQty : availableQty,
+    unitCost: Number(product.sellUnitCost ?? product.unitCost ?? product.cost ?? 0)
+  };
+}
+
+function liveSessionChannelAccounts(db = {}) {
+  const accounts = [];
+  const tiktokStatus = getTikTokCredentials().status("production");
+  for (const account of tiktokStatus.accounts || []) {
+    accounts.push({
+      channel: "tiktok_live",
+      id: String(account.id || ""),
+      name: String(account.shopName || account.label || account.id || "TikTok Shop"),
+      shopId: String(account.shopId || ""),
+      shopCode: String(account.shopCode || ""),
+      connected: account.configured === true,
+      active: String(tiktokStatus.activeAccountId || "") === String(account.id || "")
+    });
+  }
+  const ebayStatus = publicEbayConfigStatus(db);
+  if (ebayStatus.hasSellerAuthorization) {
+    accounts.push({ channel: "ebay_live", id: "ebay-primary", name: "Connected eBay seller account", shopId: "", connected: true, active: true });
+  }
+  const whatnot = findChannelByName(db, "Whatnot");
+  if (whatnot && channelIsEnabled(whatnot)) {
+    accounts.push({ channel: "whatnot_live", id: String(whatnot.accountId || whatnot.id || "whatnot-primary"), name: String(whatnot.accountName || whatnot.name || "Whatnot account"), shopId: String(whatnot.shopId || ""), connected: true, active: true });
+  }
+  return accounts;
 }
 
 function liveInventoryChannelForOrder(order = {}) {
@@ -38572,9 +38769,11 @@ function orderIdentityPriority(value = {}) {
 
 function importedOrderLineLookupValues(importedSku = "", line = {}) {
   const clean = (values) => [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
+  const literalSku = String(importedSku || "").trim();
+  const numericSku = literalSku.replace(/[\s-]+/g, "");
   return {
-    upcs: clean([line.upc, line.upcCode, line.barcode, line.gtin, line.ean, line.productBarcode, line.variantBarcode]),
-    manufacturerSkus: clean([line.mfrPartNumber, line.manufacturerPartNumber, line.mpn, line.manufacturerSku, line.manufacturerSKU]),
+    upcs: clean([line.upc, line.upcCode, line.barcode, line.gtin, line.ean, line.productBarcode, line.variantBarcode, /^\d{8,14}$/.test(numericSku) ? literalSku : ""]),
+    manufacturerSkus: clean([line.mfrPartNumber, line.manufacturerPartNumber, line.mpn, line.manufacturerSku, line.manufacturerSKU, literalSku]),
     supplierSkus: clean([importedSku, line.originalSku, line.channelSku, line.channelVariantSku, line.vendorSku, line.supplierSku, line.sourceSku])
   };
 }
@@ -38626,10 +38825,10 @@ function importedOrderProductMatch(product = {}, importedSku = "", line = {}) {
   ];
   let result = null;
   if (matchesAny(productUpcs, lineValues.upcs)) result = { mode: "upc", score: 300 };
-  else if (directValues.includes(literal)) result = { mode: "catalog-sku", score: 250 };
-  else if (aliasValues.includes(literal)) result = { mode: "catalog-alias", score: 240 };
-  else if (matchesAny(productSupplierSkus, lineValues.supplierSkus)) result = { mode: "supplier-sku", score: 230 };
-  else if (matchesAny(productManufacturerSkus, lineValues.manufacturerSkus)) result = { mode: "manufacturer-part-number", score: 200 };
+  else if (matchesAny(productManufacturerSkus, lineValues.manufacturerSkus)) result = { mode: "manufacturer-part-number", score: 260 };
+  else if (directValues.includes(literal)) result = { mode: "catalog-sku", score: 240 };
+  else if (aliasValues.includes(literal)) result = { mode: "catalog-alias", score: 230 };
+  else if (matchesAny(productSupplierSkus, lineValues.supplierSkus)) result = { mode: "supplier-sku", score: 220 };
   if (!result) return null;
   if (product.systemCreatedFromOrderImport === true && product.catalogAttentionRequired === true) {
     result.score -= 80;
@@ -60177,13 +60376,65 @@ async function handleApi(req, res) {
     }
   }
 
+  if (req.method === "GET" && url.pathname === "/api/live-sessions/references" && postgres.isPostgresEnabled()) {
+    const scope = liveSessionScope(req);
+    const [allSessions, audits, purchaseOrders, db] = await Promise.all([
+      postgres.readEntityDocumentCollectionFast("liveSessions"),
+      postgres.readWarehouseAudits(),
+      postgres.listPurchaseOrders({ limit: 500, excludeStatuses: ["canceled", "cancelled", "rejected", "superseded", "deleted"] }),
+      readDbFast({ skipInventory: true })
+    ]);
+    const auditsById = new Map((audits || []).map((audit) => [String(audit.id || ""), audit]));
+    const scopedSessions = liveSessionRowsForScope(allSessions, scope).map((session) => liveSessionWithAudit(session, auditsById.get(String(session.linkedAuditId || "")) || null));
+    const requestedSourceId = String(url.searchParams.get("sourceId") || "").trim().toLowerCase();
+    const poReferences = (purchaseOrders || []).filter((po) => {
+      if (String(po.fulfillmentMode || "").toLowerCase() === "dropship_per_order" || po.directToCustomer === true) return false;
+      const purpose = purchaseOrderPurposeForRecord(po);
+      return purpose.inventoryPurpose === "live_selling"
+        || (requestedSourceId && [po.id, po.poNumber].some((value) => String(value || "").toLowerCase() === requestedSourceId));
+    }).map((po) => {
+      const purpose = purchaseOrderPurposeForRecord(po);
+      return {
+        id: po.id,
+        number: po.poNumber || po.id,
+        label: `${po.poNumber || po.id} · ${po.supplier || "Supplier"}`,
+        supplier: po.supplier || "",
+        warehouseId: po.warehouseId || "",
+        warehouseName: po.warehouseName || "",
+        status: po.status || "",
+        purpose: purpose.inventoryPurpose,
+        liveChannel: purpose.liveChannel,
+        itemCount: Array.isArray(po.items) ? po.items.length : 0,
+        receivedUnits: (po.items || []).reduce((sum, line) => sum + Number(line.receivedQty || 0), 0),
+        orderedUnits: (po.items || []).reduce((sum, line) => sum + Number(line.qty ?? line.quantity ?? 0), 0)
+      };
+    });
+    return sendJson(res, 200, {
+      scope: { tenantId: scope.tenantId, companyId: scope.companyId, companyName: scope.companyName },
+      warehouses: (db.warehouses || []).filter(isPhysicalWarehouse).filter((warehouse) => warehouse.status !== "inactive").map((warehouse) => ({
+        id: warehouse.id, name: warehouse.name, code: warehouse.code || "", allowAudits: warehouse.allowAudits !== false
+      })),
+      purchaseOrders: poReferences,
+      audits: (audits || []).filter((audit) => !["outbound", "returns"].includes(String(audit.reason || "").toLowerCase())).slice(0, 100).map((audit) => ({
+        id: audit.id, number: audit.auditNumber || audit.id, label: `${audit.auditNumber || audit.id} · ${audit.warehouseName || "Warehouse"}`,
+        warehouseId: audit.warehouseId || "", warehouseName: audit.warehouseName || "", status: audit.status || "", reason: audit.reason || "", lineCount: audit.lineCount || 0
+      })),
+      previousSessions: scopedSessions.filter((session) => Number(session.remainingUnits || 0) > 0).map((session) => ({
+        id: session.id, number: session.sessionNumber || session.id, label: `${session.sessionNumber || session.id} · ${session.title || "Live session"}`,
+        channel: session.channel || "", warehouseId: session.warehouseId || "", warehouseName: session.warehouseName || "", remainingUnits: session.remainingUnits || 0, itemCount: session.itemCount || 0
+      })),
+      channelAccounts: liveSessionChannelAccounts(db)
+    });
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "live-sessions" && postgres.isPostgresEnabled()) {
+    const scope = liveSessionScope(req);
     const [sessions, audits] = await Promise.all([
       postgres.readEntityDocumentCollectionFast("liveSessions"),
       postgres.readWarehouseAudits()
     ]);
     const auditsById = new Map((audits || []).map((audit) => [String(audit.id || ""), audit]));
-    const rows = (sessions || []).map((session) => {
+    const rows = liveSessionRowsForScope(sessions, scope).map((session) => {
       const audit = auditsById.get(String(session.linkedAuditId || "")) || null;
       return liveSessionWithAudit(session, audit);
     }).sort((left, right) => new Date(String(right.updatedAt || right.createdAt || 0)).getTime() - new Date(String(left.updatedAt || left.createdAt || 0)).getTime());
@@ -60195,86 +60446,288 @@ async function handleApi(req, res) {
       if (!session) return notFound(res);
       return sendJson(res, 200, { session });
     }
-    return sendJson(res, 200, { sessions: rows });
+    const sourceId = String(url.searchParams.get("sourceId") || "").trim().toLowerCase();
+    const filtered = sourceId ? rows.filter((session) => String(session.sourceId || session.sourcePurchaseOrderId || "").toLowerCase() === sourceId
+      || (session.items || []).some((item) => String(item.sourceId || "").toLowerCase() === sourceId)) : rows;
+    return sendJson(res, 200, { sessions: filtered });
   }
 
   if (req.method === "POST" && url.pathname === "/api/live-sessions" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const sourceType = String(body.sourceType || "extra_items").trim().toLowerCase();
-    if (sourceType !== "extra_items") return sendJson(res, 400, { error: "This release supports session creation from scanned extra items." });
+    if (!["extra_items", "purchase_order", "warehouse_audit", "previous_session", "manual_skus"].includes(sourceType)) {
+      return sendJson(res, 400, { error: "Choose a purchase order, warehouse audit, previous session, manual SKUs, or an extra-items scan." });
+    }
+    const scope = liveSessionScope(req);
+    if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
     const db = await readDbFast({ skipInventory: true });
     const requestedWarehouse = String(body.warehouseId || body.warehouseName || "").trim().toLowerCase();
-    const warehouse = (db.warehouses || []).find((row) => String(row.id || "").toLowerCase() === requestedWarehouse || String(row.name || "").toLowerCase() === requestedWarehouse) || null;
-    if (!warehouse || !isPhysicalWarehouse(warehouse) || warehouse.allowAudits === false) {
-      return sendJson(res, 400, { error: "Choose a physical warehouse that allows inventory audits." });
-    }
-    const [sessions, audits] = await Promise.all([
-      postgres.readEntityDocumentCollectionFast("liveSessions"),
-      postgres.readWarehouseAudits()
-    ]);
-    const highestSession = Math.max(100, ...(sessions || []).map((session) => Number(String(session.sessionNumber || "").replace(/\D/g, "")) || 0));
-    const highestAudit = Math.max(122, ...(audits || []).map((audit) => Number(String(audit.auditNumber || "").replace(/\D/g, "")) || 0));
-    const now = new Date().toISOString();
+    let warehouse = (db.warehouses || []).find((row) => String(row.id || "").toLowerCase() === requestedWarehouse || String(row.name || "").toLowerCase() === requestedWarehouse) || null;
     const actor = String(body.user || authUser?.name || authUser?.username || "Warehouse user").trim() || "Warehouse user";
-    const sessionId = crypto.randomUUID();
-    const sessionNumber = `LS-${highestSession + 1}`;
-    const auditId = crypto.randomUUID();
-    const auditNumber = `AUDIT-${highestAudit + 1}`;
+    const now = new Date().toISOString();
     const channel = normalizeLiveInventoryChannel(body.channel || body.liveChannel);
-    const title = String(body.title || "").trim().slice(0, 160) || `${sessionNumber} extra items`;
-    const session = {
-      id: sessionId,
-      sessionNumber,
-      title,
-      status: "counting",
-      sourceType,
-      sourceLabel: "Scanned extra items",
-      channel,
-      channelLabel: LIVE_INVENTORY_CHANNEL_LABELS[channel] || "Not assigned",
-      warehouseId: String(warehouse.id || ""),
-      warehouseName: String(warehouse.name || "Warehouse"),
-      linkedAuditId: auditId,
-      linkedAuditNumber: auditNumber,
-      notes: String(body.notes || "").trim().slice(0, 2000),
-      createdAt: now,
-      createdBy: actor,
-      updatedAt: now
-    };
-    const audit = {
-      id: auditId,
-      auditNumber,
-      status: "in_progress",
-      reason: "live_selling_inventory",
-      reasonLabel: "Live selling inventory",
-      inventoryPurpose: "live_selling",
-      inventoryPurposeLabel: INVENTORY_PURPOSE_LABELS.live_selling,
-      liveChannel: channel,
-      liveChannelLabel: LIVE_INVENTORY_CHANNEL_LABELS[channel] || "",
-      liveSessionId: sessionId,
-      liveSessionNumber: sessionNumber,
-      liveSessionTitle: title,
-      liveSessionLinkedAt: now,
-      extraItemsOnly: true,
-      warehouseId: String(warehouse.id || ""),
-      warehouseName: String(warehouse.name || "Warehouse"),
-      lines: [],
-      unknownBarcodes: [],
-      receivingDocuments: [],
-      packingSlipReview: null,
-      createdAt: now,
-      createdBy: actor,
-      reviewer: ""
-    };
-    await postgres.createLiveSessionWithAudit(session, audit);
-    void recordUserActivity(req, authUser, { eventType: "warehouse", action: "Created live session from extra items", entityType: "live_session", entityId: sessionId, path: `/live-sessions/${sessionNumber}` });
-    const hydrated = liveSessionWithAudit(session, audit);
+    const channelAccounts = liveSessionChannelAccounts(db);
+    const requestedAccountId = String(body.channelAccountId || "").trim();
+    const selectedAccount = requestedAccountId ? channelAccounts.find((account) => account.channel === channel && account.id === requestedAccountId) : null;
+    if (requestedAccountId && !selectedAccount) return sendJson(res, 400, { error: "Choose a connected seller account for the selected live channel." });
+
+    if (sourceType === "extra_items") {
+      if (!warehouse || !isPhysicalWarehouse(warehouse) || warehouse.allowAudits === false) {
+        return sendJson(res, 400, { error: "Choose a physical warehouse that allows inventory audits." });
+      }
+      const [sessions, audits] = await Promise.all([
+        postgres.readEntityDocumentCollectionFast("liveSessions"),
+        postgres.readWarehouseAudits()
+      ]);
+      const highestSession = Math.max(100, ...(sessions || []).map((session) => Number(String(session.sessionNumber || "").replace(/\D/g, "")) || 0));
+      const highestAudit = Math.max(122, ...(audits || []).map((audit) => Number(String(audit.auditNumber || "").replace(/\D/g, "")) || 0));
+      const sessionId = crypto.randomUUID();
+      const sessionNumber = `LS-${highestSession + 1}`;
+      const auditId = crypto.randomUUID();
+      const auditNumber = `AUDIT-${highestAudit + 1}`;
+      const title = String(body.title || "").trim().slice(0, 160) || `${sessionNumber} extra items`;
+      const session = {
+        id: sessionId, sessionNumber, title, status: "counting", sourceType, sourceId: auditId,
+        sourceLabel: liveSessionLedger.sourceLabel(sourceType), channel,
+        channelLabel: LIVE_INVENTORY_CHANNEL_LABELS[channel] || "Not assigned",
+        channelAccountId: requestedAccountId, channelAccountName: selectedAccount?.name || "", channelShopId: selectedAccount?.shopId || "",
+        tenantId: scope.tenantId, companyId: scope.companyId, companyName: scope.companyName,
+        warehouseId: String(warehouse.id || ""), warehouseName: String(warehouse.name || "Warehouse"),
+        linkedAuditId: auditId, linkedAuditNumber: auditNumber, items: [],
+        notes: String(body.notes || "").trim().slice(0, 2000), createdAt: now, createdBy: actor, updatedAt: now
+      };
+      const audit = {
+        id: auditId, auditNumber, status: "in_progress", reason: "live_selling_inventory", reasonLabel: "Live selling inventory",
+        inventoryPurpose: "live_selling", inventoryPurposeLabel: INVENTORY_PURPOSE_LABELS.live_selling,
+        liveChannel: channel, liveChannelLabel: LIVE_INVENTORY_CHANNEL_LABELS[channel] || "", liveSessionId: sessionId,
+        liveSessionNumber: sessionNumber, liveSessionTitle: title, liveSessionLinkedAt: now, extraItemsOnly: true,
+        warehouseId: String(warehouse.id || ""), warehouseName: String(warehouse.name || "Warehouse"), lines: [], unknownBarcodes: [],
+        receivingDocuments: [], packingSlipReview: null, createdAt: now, createdBy: actor, reviewer: ""
+      };
+      await postgres.createLiveSessionWithAudit(session, audit);
+      audit.liveSessionNumber = session.sessionNumber;
+      session.linkedAuditNumber = audit.auditNumber;
+      void recordUserActivity(req, authUser, { eventType: "warehouse", action: "Created live session from extra items", entityType: "live_session", entityId: sessionId, path: `/live-sessions/${session.sessionNumber}` });
+      return sendJson(res, 201, {
+        session: liveSessionWithAudit(session, audit), audit,
+        sessionUrl: `/live-sessions/${encodeURIComponent(session.sessionNumber)}`, auditUrl: liveSessionAuditUrl(audit), mobileAuditUrl: liveSessionAuditUrl(audit, true),
+        message: `${session.sessionNumber} created. Scan the extra items into ${auditNumber}.`
+      });
+    }
+
+    const requestedQuantities = liveSessionRequestQuantities(body);
+    const explicitSelection = Array.isArray(body.items) && body.items.length > 0;
+    const sourceId = String(body.sourceId || body.purchaseOrderId || body.auditId || body.previousSessionId || "").trim();
+    let sourceLabel = liveSessionLedger.sourceLabel(sourceType);
+    let sourceNumber = sourceId;
+    let sourceItems = [];
+    let sourcePurchaseOrderId = "";
+    let sourcePurchaseOrderNumber = "";
+
+    if (sourceType === "purchase_order") {
+      const po = await postgres.readPurchaseOrderByKey(sourceId);
+      if (!po) return sendJson(res, 404, { error: "Purchase order not found." });
+      if (String(po.fulfillmentMode || "").toLowerCase() === "dropship_per_order" || po.directToCustomer === true) return sendJson(res, 409, { error: "A direct-to-customer PO cannot supply a warehouse live session." });
+      warehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(po.warehouseId || "")) || warehouse;
+      sourceItems = (po.items || []).map((line, index) => liveSessionItemFromPurchaseOrderLine(po, line, index, requestedQuantities));
+      sourcePurchaseOrderId = String(po.id || "");
+      sourcePurchaseOrderNumber = String(po.poNumber || po.id || "");
+      sourceNumber = sourcePurchaseOrderNumber;
+      sourceLabel = `Purchase order ${sourcePurchaseOrderNumber}`;
+    } else if (sourceType === "warehouse_audit") {
+      const audit = await postgres.readWarehouseAudit(sourceId);
+      if (!audit) return sendJson(res, 404, { error: "Warehouse audit not found." });
+      warehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(audit.warehouseId || "")) || warehouse;
+      sourceItems = (audit.lines || []).filter((line) => String(line.sku || "").trim()).map((line, index) => liveSessionItemFromAuditLine(audit, line, index, requestedQuantities));
+      sourceNumber = String(audit.auditNumber || audit.id || "");
+      sourceLabel = `Warehouse audit ${sourceNumber}`;
+    } else if (sourceType === "manual_skus") {
+      if (!warehouse || !isPhysicalWarehouse(warehouse)) return sendJson(res, 400, { error: "Choose the physical warehouse holding these SKUs." });
+      const selectedRows = Array.isArray(body.items) ? body.items : [];
+      const keys = [...new Set(selectedRows.flatMap((item) => [item.productId, item.sku]).map((value) => String(value || "").trim()).filter(Boolean))];
+      if (!keys.length) return sendJson(res, 400, { error: "Add at least one catalog SKU." });
+      const products = await postgres.readProductsByKeys(keys, { directProductIds: true, includeMarketplaceIds: true, includeInventoryLevels: true });
+      sourceItems = products.map((product) => liveSessionItemFromProduct(product, warehouse, requestedLiveSessionQuantity(requestedQuantities, [product.id, product.sku], 0)));
+      sourceNumber = String(warehouse.name || warehouse.id || "Warehouse");
+      sourceLabel = `Manual selection · ${sourceNumber}`;
+    }
+    if (explicitSelection && sourceType !== "manual_skus") {
+      sourceItems = sourceItems.map((item) => ({
+        ...item,
+        requestedQty: requestedLiveSessionQuantity(requestedQuantities, [item.sourceLineId, item.id, item.productId, item.sku], 0)
+      })).filter((item) => Number(item.requestedQty || 0) > 0);
+    }
+    if (!["previous_session"].includes(sourceType) && !sourceItems.length) return sendJson(res, 400, { error: "The selected source has no usable catalog quantities." });
+    if (!warehouse && sourceType !== "previous_session") return sendJson(res, 400, { error: "The selected source is not assigned to a physical warehouse." });
+
+    const mutation = await postgres.mutateLiveSessionsAtomically((allSessions) => {
+      const scoped = liveSessionRowsForScope(allSessions, scope);
+      let allocationRows = allSessions;
+      let resolvedItems = sourceItems;
+      let parentSession = null;
+      if (sourceType === "previous_session") {
+        const canonicalSource = canonicalLiveSessionReference(sourceId).toLowerCase();
+        parentSession = scoped.find((session) => String(session.id || "").toLowerCase() === sourceId.toLowerCase()
+          || canonicalLiveSessionReference(session.sessionNumber, session.id).toLowerCase() === canonicalSource);
+        if (!parentSession) throw Object.assign(new Error("Previous live session not found."), { statusCode: 404 });
+        const measuredParent = liveSessionLedger.sessionTotals(parentSession);
+        warehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(parentSession.warehouseId || "")) || warehouse;
+        resolvedItems = measuredParent.items.map((item) => {
+          const requestedQty = explicitSelection
+            ? requestedLiveSessionQuantity(requestedQuantities, [item.id, item.sourceLineId, item.productId, item.sku], 0)
+            : Number(item.remainingQty || 0);
+          return { ...item, sourceType: "previous_session", sourceSessionId: parentSession.id, sourceSessionNumber: parentSession.sessionNumber, requestedQty };
+        }).filter((item) => Number(item.requestedQty || 0) > 0 && Number(item.remainingQty || 0) > 0);
+        if (!resolvedItems.length) throw Object.assign(new Error("The previous session has no unreserved inventory to transfer."), { statusCode: 409 });
+        const transferredByItem = new Map(resolvedItems.map((item) => [String(item.id), Math.min(Number(item.requestedQty || 0), Number(item.remainingQty || 0))]));
+        const updatedParent = liveSessionLedger.sessionTotals({
+          ...parentSession,
+          items: measuredParent.items.map((item) => ({ ...item, releasedQty: Number(item.releasedQty || 0) + Number(transferredByItem.get(String(item.id)) || 0) })),
+          updatedAt: now
+        });
+        allocationRows = allSessions.map((session) => String(session.id) === String(updatedParent.id) ? updatedParent : session);
+        sourceNumber = String(parentSession.sessionNumber || parentSession.id || "");
+        sourceLabel = `Previous session ${sourceNumber}`;
+      }
+      const allocatedItems = liveSessionLedger.allocateRequestedItems(resolvedItems, allocationRows);
+      if (!allocatedItems.some((item) => Number(item.reservedQty || 0) > 0) && !allocatedItems.some((item) => Number(item.shortageQty || 0) > 0)) {
+        throw Object.assign(new Error("No source inventory is available for this session."), { statusCode: 409 });
+      }
+      const highestSession = Math.max(100, ...allSessions.map((session) => Number(String(session.sessionNumber || "").replace(/\D/g, "")) || 0));
+      const sessionNumber = `LS-${highestSession + 1}`;
+      const session = liveSessionLedger.sessionTotals({
+        id: crypto.randomUUID(), sessionNumber,
+        title: String(body.title || "").trim().slice(0, 160) || `${sessionNumber} ${sourceLabel}`,
+        status: "draft", sourceType, sourceId: sourceType === "previous_session" ? String(parentSession?.id || "") : sourceId,
+        sourceNumber, sourceLabel, sourcePurchaseOrderId, sourcePurchaseOrderNumber,
+        parentSessionId: sourceType === "previous_session" ? String(parentSession?.id || "") : "",
+        parentSessionNumber: sourceType === "previous_session" ? String(parentSession?.sessionNumber || "") : "",
+        channel, channelLabel: LIVE_INVENTORY_CHANNEL_LABELS[channel] || "Not assigned",
+        channelAccountId: requestedAccountId, channelAccountName: selectedAccount?.name || "", channelShopId: selectedAccount?.shopId || "",
+        tenantId: scope.tenantId, companyId: scope.companyId, companyName: scope.companyName,
+        warehouseId: String(warehouse?.id || parentSession?.warehouseId || ""), warehouseName: String(warehouse?.name || parentSession?.warehouseName || "Warehouse"),
+        items: allocatedItems, notes: String(body.notes || "").trim().slice(0, 2000), createdAt: now, createdBy: actor, updatedAt: now
+      });
+      return { sessions: [...allocationRows, session], result: { session } };
+    });
+    const created = mutation?.result?.session;
+    void recordUserActivity(req, authUser, { eventType: "warehouse", action: `Created live session from ${sourceType.replace(/_/g, " ")}`, entityType: "live_session", entityId: created?.id || "", path: `/live-sessions/${created?.sessionNumber || ""}` });
     return sendJson(res, 201, {
-      session: hydrated,
-      audit,
-      sessionUrl: `/live-sessions/${encodeURIComponent(sessionNumber)}`,
-      auditUrl: liveSessionAuditUrl(audit),
-      mobileAuditUrl: liveSessionAuditUrl(audit, true),
-      message: `${sessionNumber} created. Scan the extra items into ${auditNumber}.`
+      session: created,
+      sessionUrl: `/live-sessions/${encodeURIComponent(String(created?.sessionNumber || created?.id || ""))}`,
+      message: `${created?.sessionNumber || "Live session"} created with ${Number(created?.reservedUnits || 0)} reserved unit(s)${Number(created?.shortageUnits || 0) ? ` and ${Number(created.shortageUnits)} shortage unit(s)` : ""}.`
+    });
+  }
+
+  if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "live-sessions" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const scope = liveSessionScope(req);
+    const key = decodeURIComponent(parts[2]);
+    const mutation = await postgres.mutateLiveSessionsAtomically((sessions) => {
+      const canonicalKey = canonicalLiveSessionReference(key).toLowerCase();
+      const target = liveSessionRowsForScope(sessions, scope).find((session) => String(session.id || "").toLowerCase() === key.toLowerCase()
+        || canonicalLiveSessionReference(session.sessionNumber, session.id).toLowerCase() === canonicalKey);
+      if (!target) throw Object.assign(new Error("Live session not found."), { statusCode: 404 });
+      if (liveSessionLedger.sessionIsTerminal(target)) throw Object.assign(new Error("Completed or canceled sessions cannot be edited."), { statusCode: 409 });
+      const channel = body.channel === undefined ? normalizeLiveInventoryChannel(target.channel) : normalizeLiveInventoryChannel(body.channel);
+      const db = dbCache.data || {};
+      const accounts = liveSessionChannelAccounts(db);
+      const accountId = body.channelAccountId === undefined ? String(target.channelAccountId || "") : String(body.channelAccountId || "");
+      const account = accountId ? accounts.find((entry) => entry.channel === channel && entry.id === accountId) : null;
+      if (accountId && !account) throw Object.assign(new Error("Choose a connected seller account for the selected live channel."), { statusCode: 400 });
+      const next = liveSessionLedger.sessionTotals({
+        ...target,
+        title: body.title === undefined ? target.title : String(body.title || "").trim().slice(0, 160),
+        notes: body.notes === undefined ? target.notes : String(body.notes || "").trim().slice(0, 2000),
+        channel, channelLabel: LIVE_INVENTORY_CHANNEL_LABELS[channel] || "Not assigned",
+        channelAccountId: accountId, channelAccountName: account?.name || "", channelShopId: account?.shopId || "",
+        updatedAt: new Date().toISOString()
+      });
+      return { sessions: sessions.map((session) => String(session.id) === String(target.id) ? next : session), result: { session: next } };
+    });
+    return sendJson(res, 200, { session: mutation?.result?.session, message: "Live session updated." });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "live-sessions" && parts[2] && parts[3] === "actions" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const action = String(body.action || "").trim().toLowerCase();
+    if (!["ready", "start", "reconcile", "complete", "cancel"].includes(action)) return sendJson(res, 400, { error: "Choose ready, start, reconcile, complete, or cancel." });
+    const scope = liveSessionScope(req);
+    const key = decodeURIComponent(parts[2]);
+    const existingRows = await postgres.readEntityDocumentCollectionFast("liveSessions");
+    const canonicalKey = canonicalLiveSessionReference(key).toLowerCase();
+    const existing = liveSessionRowsForScope(existingRows, scope).find((session) => String(session.id || "").toLowerCase() === key.toLowerCase()
+      || canonicalLiveSessionReference(session.sessionNumber, session.id).toLowerCase() === canonicalKey);
+    if (!existing) return notFound(res);
+    const linkedAudit = existing.linkedAuditId ? await postgres.readWarehouseAudit(existing.linkedAuditId) : null;
+    let liveOrders = [];
+    if (["reconcile", "complete"].includes(action)) {
+      const channel = normalizeLiveInventoryChannel(existing.channel);
+      if (action === "reconcile" && !channel) return sendJson(res, 409, { error: "Select the live channel before reconciling sales." });
+      if (channel) {
+        const createdAt = new Date(existing.startedAt || existing.createdAt || Date.now());
+        const dateFrom = new Date(createdAt.getTime() - 86400000).toISOString().slice(0, 10);
+        liveOrders = await postgres.listOrders({ channel, dateFrom, includeOpenWork: true, limit: 50000 });
+      }
+    }
+    const now = new Date().toISOString();
+    const mutation = await postgres.mutateLiveSessionsAtomically((sessions) => {
+      let scoped = liveSessionRowsForScope(sessions, scope);
+      if (linkedAudit) scoped = scoped.map((session) => String(session.id) === String(existing.id) ? liveSessionWithAudit(session, linkedAudit) : session);
+      let target = scoped.find((session) => String(session.id || "").toLowerCase() === key.toLowerCase()
+        || canonicalLiveSessionReference(session.sessionNumber, session.id).toLowerCase() === canonicalKey);
+      if (!target) throw Object.assign(new Error("Live session not found."), { statusCode: 404 });
+      if (action === "reconcile") {
+        const reconciled = liveSessionLedger.reconcileLiveSessions(scoped, liveOrders || []);
+        const byId = new Map(reconciled.map((session) => [String(session.id), { ...session, updatedAt: now }]));
+        const nextRows = sessions.map((session) => byId.get(String(session.id)) || session);
+        return { sessions: nextRows, result: { session: byId.get(String(target.id)), ordersChecked: (liveOrders || []).length } };
+      }
+      if (liveSessionLedger.sessionIsTerminal(target)) throw Object.assign(new Error("This live session is already closed."), { statusCode: 409 });
+      const currentStatus = String(target.status || "draft").toLowerCase();
+      if (action === "ready" && !["draft", "counting", "review"].includes(currentStatus)) throw Object.assign(new Error("Only a draft or counted session can be marked ready."), { statusCode: 409 });
+      if (action === "start" && !["draft", "ready"].includes(currentStatus)) throw Object.assign(new Error("Only a draft or ready session can be started."), { statusCode: 409 });
+      if (["complete", "cancel"].includes(action) && !liveSessionLedger.sessionIsActive(target)) throw Object.assign(new Error("Only an active live session can be closed."), { statusCode: 409 });
+      if (["ready", "start"].includes(action) && Number(liveSessionLedger.sessionTotals(target).reservedUnits || 0) <= 0) {
+        throw Object.assign(new Error("Reserve at least one unit before starting this session."), { statusCode: 409 });
+      }
+      if (action === "start" && !normalizeLiveInventoryChannel(target.channel)) throw Object.assign(new Error("Select the live channel before starting this session."), { statusCode: 409 });
+      if (action === "start") {
+        const connectedAccounts = liveSessionChannelAccounts(dbCache.data || {}).filter((account) => account.channel === normalizeLiveInventoryChannel(target.channel));
+        if (connectedAccounts.length && !String(target.channelAccountId || "").trim()) throw Object.assign(new Error("Select the seller account or shop before starting this session."), { statusCode: 409 });
+      }
+      let workingSessions = sessions;
+      if (action === "complete" && normalizeLiveInventoryChannel(target.channel)) {
+        const reconciled = liveSessionLedger.reconcileLiveSessions(scoped, liveOrders || []);
+        const reconciledById = new Map(reconciled.map((session) => [String(session.id), { ...session, updatedAt: now }]));
+        workingSessions = sessions.map((session) => reconciledById.get(String(session.id)) || session);
+        target = reconciledById.get(String(target.id)) || target;
+      }
+      const terminal = ["complete", "cancel"].includes(action);
+      const next = liveSessionLedger.sessionTotals({
+        ...target,
+        status: action === "start" ? "live" : action === "complete" ? "completed" : action === "cancel" ? "canceled" : "ready",
+        startedAt: action === "start" ? (target.startedAt || now) : target.startedAt,
+        completedAt: action === "complete" ? now : target.completedAt,
+        canceledAt: action === "cancel" ? now : target.canceledAt,
+        closedBy: terminal ? String(authUser?.name || authUser?.username || body.user || "DataPlus user") : target.closedBy,
+        closeReason: terminal ? String(body.reason || "").trim().slice(0, 500) : target.closeReason,
+        items: terminal ? (target.items || []).map((item) => {
+          const measured = liveSessionLedger.itemMetrics(item);
+          return { ...measured, releasedQty: Number(measured.releasedQty || 0) + Number(measured.remainingQty || 0) };
+        }) : target.items,
+        updatedAt: now
+      });
+      return { sessions: workingSessions.map((session) => String(session.id) === String(target.id) ? next : session), result: { session: next, ordersChecked: action === "complete" ? (liveOrders || []).length : 0 } };
+    });
+    const updated = mutation?.result?.session;
+    return sendJson(res, 200, {
+      session: updated,
+      ordersChecked: mutation?.result?.ordersChecked || 0,
+      message: action === "reconcile" ? `${mutation?.result?.ordersChecked || 0} live order(s) checked; sold and shipped quantities were refreshed without changing stock.`
+        : action === "complete" ? "Session completed and unused inventory released."
+          : action === "cancel" ? "Session canceled and unused inventory released."
+            : action === "start" ? "Live session started." : "Live session is ready."
     });
   }
 
@@ -66036,9 +66489,10 @@ async function handleApi(req, res) {
       }
     }
     const linkedOrderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
-    const [linkedOrders, db] = await Promise.all([
+    const [linkedOrders, db, storedLiveSessions] = await Promise.all([
       postgres.readOrdersByIds(linkedOrderIds),
-      postgres.readStateFields(["vendors", "warehouses", "systemSettings", "fulfillmentOperationsSettings"], { fallbackToLegacy: false })
+      postgres.readStateFields(["vendors", "warehouses", "systemSettings", "fulfillmentOperationsSettings"], { fallbackToLegacy: false }),
+      postgres.readEntityDocumentCollectionFast("liveSessions")
     ]);
     const fulfillmentOperationsSettings = normalizeFulfillmentSettings(db.fulfillmentOperationsSettings || {});
     const defaultShipFromId = fulfillmentDefaultShipFromWarehouseId({ ...db, fulfillmentOperationsSettings }, readSystemSettingsStore(db.systemSettings || {}));
@@ -66061,9 +66515,16 @@ async function handleApi(req, res) {
       channelOrderUrl: order.channelOrderUrl || order.marketplaceOrderUrl || order.shopifyAdminUrl || order.adminUrl || "",
       channel: orderSourceChannelName(order, "")
     }));
+    const sessionScope = liveSessionScope(req);
+    const relatedLiveSessions = liveSessionRowsForScope(storedLiveSessions, sessionScope)
+      .filter((session) => String(session.sourcePurchaseOrderId || session.sourceId || "") === String(po.id || "")
+        || (session.items || []).some((item) => String(item.sourceId || "") === String(po.id || "")))
+      .map((session) => liveSessionLedger.sessionTotals(session))
+      .sort((left, right) => new Date(String(right.updatedAt || right.createdAt || 0)).getTime() - new Date(String(left.updatedAt || left.createdAt || 0)).getTime());
     return sendJson(res, 200, {
       purchaseOrder,
       linkedOrders: linkedOrders.filter(Boolean),
+      liveSessions: relatedLiveSessions,
       dropshipShipFromWarehouse,
       shipFromWarehouses: (db.warehouses || []).filter(isPhysicalWarehouse).filter((warehouse) => warehouse.status !== "inactive"),
       fulfillmentSettings: { ...fulfillmentOperationsSettings, defaultShipFromWarehouseId: defaultShipFromId },
