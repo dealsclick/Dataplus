@@ -354,12 +354,19 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
 
   const verifyAndSaveEcho = async () => {
     setEchoTesting(true)
+    const saved = await saveEchoCredentials({ close: false, notify: false })
+    if (!saved) {
+      setEchoTesting(false)
+      return
+    }
     try {
-      const result = await api<{ message?: string }>("/api/shipping-providers/echosync/test", { method: "POST", body: JSON.stringify(echoDraft) })
-      const saved = await saveEchoCredentials({ close: true, notify: false })
-      if (saved) toast.success(result.message || "EchoSync connection verified and saved.")
+      const result = await api<{ provider?: CarrierProviderStatus; message?: string }>("/api/shipping-providers/echosync/test", { method: "POST", body: "{}" })
+      if (result.provider) setProviders((current) => ({ ...current, echosync: result.provider as CarrierProviderStatus }))
+      setEchoDialogOpen(false)
+      toast.success(result.message || "EchoSync connection verified and saved.")
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "EchoSync connection test failed.")
+      const message = error instanceof Error ? error.message : "EchoSync connection test failed."
+      toast.error(`Credentials were saved, but verification failed: ${message}`)
       await load()
     } finally {
       setEchoTesting(false)
