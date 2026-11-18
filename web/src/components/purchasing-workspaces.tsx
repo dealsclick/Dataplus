@@ -88,6 +88,8 @@ import {
 } from "lucide-react"
 import { useEffect,useRef,useState } from "react"
 import { toast } from "sonner"
+
+const ECHO_FREIGHT_CLASSES = ["50", "55", "60", "65", "70", "77.5", "85", "92.5", "100", "110", "125", "150", "175", "200", "250", "300", "400", "500"]
 import type {
   ProductItem,
   QuickProductResult
@@ -407,6 +409,7 @@ export function DraftQuoteFieldDetailPage() {
   const [selectedShippingRateId, setSelectedShippingRateId] = useState("")
   const [shippingWarehouseId, setShippingWarehouseId] = useState("")
   const [shippingPackage, setShippingPackage] = useState({ weight: "", length: "", width: "", height: "" })
+  const [shippingFreight, setShippingFreight] = useState({ freightClass: "100", palletQuantity: "1", pickupDate: "", residentialDelivery: false })
   const [supplierOptionsBySku, setSupplierOptionsBySku] = useState<Record<string, QuoteSupplierOption[]>>({})
   const [supplierOptionsLoading, setSupplierOptionsLoading] = useState<Set<string>>(new Set())
   const autoEditOpenedRef = useRef(false)
@@ -779,6 +782,12 @@ export function DraftQuoteFieldDetailPage() {
       width: packageInfo?.width ? String(packageInfo.width) : "",
       height: packageInfo?.height ? String(packageInfo.height) : "",
     })
+    setShippingFreight({
+      freightClass: String(packageInfo?.freightClass || "100"),
+      palletQuantity: String(packageInfo?.palletQuantity || "1"),
+      pickupDate: String(packageInfo?.pickupDate || ""),
+      residentialDelivery: packageInfo?.residentialDelivery === true,
+    })
     setShippingWarehouseId(String(estimate?.warehouseId || warehouses.find((row) => row.isDefaultReceiving)?.id || warehouses[0]?.id || ""))
     setShippingRates([])
     setShippingProviderErrors([])
@@ -791,7 +800,7 @@ export function DraftQuoteFieldDetailPage() {
     if (Object.values(parcel).some((value) => !Number.isFinite(value) || value <= 0)) { toast.error("Enter weight and all package dimensions."); return }
     setShippingBusy(true)
     try {
-      const result = await api<{ rates?: QuoteCarrierRate[]; providerErrors?: Array<{ provider?: string; message?: string }>; addressValidation?: QuoteAddressValidation }>(`/api/order-drafts/${encodeURIComponent(draftId)}/shipping-rates`, { method: "POST", body: JSON.stringify({ warehouseId: shippingWarehouseId, package: parcel }) })
+      const result = await api<{ rates?: QuoteCarrierRate[]; providerErrors?: Array<{ provider?: string; message?: string }>; addressValidation?: QuoteAddressValidation }>(`/api/order-drafts/${encodeURIComponent(draftId)}/shipping-rates`, { method: "POST", body: JSON.stringify({ warehouseId: shippingWarehouseId, package: parcel, ...shippingFreight, palletQuantity: Number(shippingFreight.palletQuantity || 0) }) })
       const rates = result.rates || []
       setShippingRates(rates)
       setShippingProviderErrors(result.providerErrors || [])
@@ -809,7 +818,7 @@ export function DraftQuoteFieldDetailPage() {
       await api(`/api/order-drafts/${encodeURIComponent(draftId)}`, { method: "PATCH", body: JSON.stringify({ shippingEstimate: {
         providerId: rate.providerId, carrier: rate.carrier, service: rate.service, serviceCode: rate.serviceCode || "", amount: rate.amount, currency: rate.currency || "USD",
         deliveryDays: rate.deliveryDays || null, deliveryEstimate: rate.deliveryEstimate || "", quotedAt: rate.quotedAt || new Date().toISOString(),
-        expiresAt: rate.expiresAt, warehouseId: shippingWarehouseId, package: Object.fromEntries(Object.entries(shippingPackage).map(([key, value]) => [key, Number(value)])),
+        expiresAt: rate.expiresAt, warehouseId: shippingWarehouseId, package: { ...Object.fromEntries(Object.entries(shippingPackage).map(([key, value]) => [key, Number(value)])), ...shippingFreight, palletQuantity: Number(shippingFreight.palletQuantity || 0) },
       } }) })
       setShippingOpen(false)
       await load()
@@ -839,6 +848,7 @@ export function DraftQuoteFieldDetailPage() {
   const savedShippingManual = savedShippingEstimate?.manual === true || String(savedShippingEstimate?.providerId || "") === "manual"
   const savedRateExpired = Boolean(savedShippingEstimate && !savedShippingManual && (!Number.isFinite(savedRateExpiresAt) || savedRateExpiresAt <= Date.now()))
   const enabledQuoteCarriers = quoteCarriers.filter((provider) => provider.enabled && provider.companyRates)
+  const echoRatesEnabled = enabledQuoteCarriers.some((provider) => provider.id === "echosync")
   const shippingAmount = Number(savedShippingEstimate?.amount || 0)
   const taxExempt = draft?.taxExempt === true
   const taxRate = Math.max(0, Number(draft?.taxRate || 0))
@@ -1003,6 +1013,7 @@ export function DraftQuoteFieldDetailPage() {
     <Dialog open={shippingOpen} onOpenChange={(open) => { if (!shippingBusy) setShippingOpen(open) }}><DialogContent className="flex max-h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-3xl flex-col overflow-hidden p-0 sm:max-h-[90vh]"><DialogHeader className="border-b px-4 py-5 sm:px-6"><DialogTitle>Get shipping quote rates</DialogTitle><DialogDescription>DataPlus validates the destination, then compares every enabled shared carrier. Label purchasing remains disabled for company quotes.</DialogDescription></DialogHeader><div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-6">
       {warehouses.length ? <Field label="Ship from warehouse"><Select value={shippingWarehouseId} onValueChange={setShippingWarehouseId}><SelectTrigger><SelectValue placeholder="Use company address" /></SelectTrigger><SelectContent>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || "Warehouse")}</SelectItem>)}</SelectContent></Select></Field> : <Alert><Info className="size-4" /><AlertTitle>Using company address</AlertTitle><AlertDescription>No company warehouse is configured, so carriers will use the saved company profile address.</AlertDescription></Alert>}
       <div className="grid gap-3 sm:grid-cols-4"><Field label="Weight (lb)"><Input type="number" min="0.01" step="0.01" inputMode="decimal" value={shippingPackage.weight} onChange={(event) => setShippingPackage((current) => ({ ...current, weight: event.target.value }))} /></Field><Field label="Length (in)"><Input type="number" min="0.01" step="0.01" inputMode="decimal" value={shippingPackage.length} onChange={(event) => setShippingPackage((current) => ({ ...current, length: event.target.value }))} /></Field><Field label="Width (in)"><Input type="number" min="0.01" step="0.01" inputMode="decimal" value={shippingPackage.width} onChange={(event) => setShippingPackage((current) => ({ ...current, width: event.target.value }))} /></Field><Field label="Height (in)"><Input type="number" min="0.01" step="0.01" inputMode="decimal" value={shippingPackage.height} onChange={(event) => setShippingPackage((current) => ({ ...current, height: event.target.value }))} /></Field></div>
+      {echoRatesEnabled ? <div className="grid gap-3 rounded-md border border-blue-500/30 bg-blue-500/5 p-4"><div><p className="text-sm font-semibold">EchoSync freight details</p><p className="text-xs text-muted-foreground">These saved values are sent only to EchoSync when requesting LTL rates.</p></div><div className="grid gap-3 sm:grid-cols-3"><Field label="NMFC class"><Select value={shippingFreight.freightClass} onValueChange={(value) => setShippingFreight((current) => ({ ...current, freightClass: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{ECHO_FREIGHT_CLASSES.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></Field><Field label="Pallets"><Input type="number" min="0" max="12" step="1" inputMode="numeric" value={shippingFreight.palletQuantity} onChange={(event) => setShippingFreight((current) => ({ ...current, palletQuantity: event.target.value }))} /></Field><Field label="Pickup date"><Input type="date" value={shippingFreight.pickupDate} onChange={(event) => setShippingFreight((current) => ({ ...current, pickupDate: event.target.value }))} /></Field></div><label className="flex items-center gap-2 text-sm"><Checkbox checked={shippingFreight.residentialDelivery} onCheckedChange={(checked) => setShippingFreight((current) => ({ ...current, residentialDelivery: checked === true }))} /> Residential delivery</label></div> : null}
       <Button type="button" variant="outline" disabled={shippingBusy} onClick={() => void requestShippingRates()}>{shippingBusy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Request carrier rates</Button>
       {shippingAddressValidation ? <Alert variant={shippingAddressValidation.status === "warning" ? "destructive" : "default"}>{shippingAddressValidation.status === "warning" ? <AlertTriangle className="size-4" /> : <CheckCircle2 className="size-4" />}<AlertTitle>{shippingAddressValidation.status === "corrected" ? "Address standardized" : shippingAddressValidation.status === "verified" ? "Address verified" : "Address validation notice"}</AlertTitle><AlertDescription>{shippingAddressValidation.message}</AlertDescription></Alert> : null}
       {shippingProviderErrors.length ? <div className="grid gap-2">{shippingProviderErrors.map((error, index) => <Alert key={`${error.provider}-${index}`}><AlertTriangle className="size-4" /><AlertTitle>{error.provider || "Carrier"} unavailable</AlertTitle><AlertDescription>{error.message}</AlertDescription></Alert>)}</div> : null}

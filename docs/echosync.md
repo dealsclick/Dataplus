@@ -21,6 +21,10 @@ Configure EchoSync under System Settings > Shipping providers. Secrets remain se
 
 Environment-variable fallbacks are documented in `.env.example`.
 
+The EchoSync connection is owned by the LINQ organization and can be shared with selected companies from System Settings > Shipping providers > Share across companies. LINQ access is enabled by default for compatibility; BuySupply and future companies are opt-in. Rate, capacity, and tracking requests enforce the selected company's saved access on the server.
+
+The provider card displays saved non-secret account identifiers, verification status, and the companies currently enabled for rates. API keys, OAuth secrets, and webhook secrets remain masked and are shown only as saved or not saved.
+
 ## Webhook security and processing
 
 DataPlus verifies `X-Echo-Hmac-SHA256` against the exact raw request body using HMAC-SHA256. It deduplicates retries by `X-Echo-Webhook-Id`, stores accepted events in a bounded NDJSON inbox, acknowledges immediately, and processes linked order shipment updates asynchronously. An order shipment is linked when its `echoShipmentId` equals the Echo load or shipment ID.

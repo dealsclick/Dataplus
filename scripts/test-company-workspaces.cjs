@@ -140,6 +140,7 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
       {id:'ups',name:'UPS',enabled:true,companyRates:true,companyLabels:true},
       {id:'usps',name:'USPS',enabled:true,companyRates:true,companyLabels:false},
       {id:'veeqo',name:'Veeqo',enabled:true,companyRates:true,companyLabels:false},
+      {id:'echosync',name:'EchoSync Freight',enabled:true,companyRates:true,companyLabels:false},
     ],
     companyCarrierPreference:async()=>({selectionMode:'preferred_carrier',preferredProviderId:'usps',rateTtlMinutes:30}),
     selectProduct:async(_user,_scope,input)=>{selectedCompanyProduct=input;return {saved:true,product:input};},
@@ -492,8 +493,11 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal(initialCarrierAccess.providers.find(provider=>provider.id==='ups').companies.find(company=>company.id==='buysupply').enabled,true);
     assert.equal(initialCarrierAccess.providers.find(provider=>provider.id==='veeqo').companies.find(company=>company.id==='buysupply').enabled,false);
     assert.equal(initialCarrierAccess.providers.find(provider=>provider.id==='usps').companyRates,true);
+    assert.equal(initialCarrierAccess.providers.find(provider=>provider.id==='echosync').companies.find(company=>company.id===LEGACY_COMPANY).enabled,true);
+    assert.equal(initialCarrierAccess.providers.find(provider=>provider.id==='echosync').companies.find(company=>company.id==='buysupply').enabled,false);
     assert.equal(initialCarrierAccess.preferences.find(preference=>preference.companyId==='buysupply').selectionMode,'lowest_cost');
     assert.equal((await store.companyCarrierAccess(owner,buy)).find(provider=>provider.id==='ups').enabled,true);
+    assert.equal((await store.companyCarrierAccess(owner,buy)).find(provider=>provider.id==='echosync').enabled,false);
     assert.equal((await store.companyCarrierPreference(owner,buy)).rateTtlMinutes,30);
     assert.equal((await store.saveCompanyCarrierPreference(owner,buy,{selectionMode:'preferred_carrier',preferredProviderId:'ups',rateTtlMinutes:60})).preferredProviderId,'ups');
     await assert.rejects(store.saveCompanyCarrierPreference(staff,buy,{selectionMode:'lowest_cost',rateTtlMinutes:30}),/access/);
@@ -514,6 +518,10 @@ test('company isolation, catalog projection, access changes, persistence and HTT
     assert.equal((await store.companyCarrierPreference(owner,buy)).selectionMode,'lowest_cost','Disabling the preferred carrier resets the company to lowest cost');
     await store.saveCarrierAccess(owner,tenantId,'ups',{companyIds:[LEGACY_COMPANY,'buysupply',newCompany.id]});
     assert.equal((await store.companyCarrierAccess(owner,buy)).find(provider=>provider.id==='ups').enabled,true);
+    await store.saveCarrierAccess(owner,tenantId,'echosync',{companyIds:[LEGACY_COMPANY,'buysupply']});
+    assert.equal((await store.companyCarrierAccess(owner,buy)).find(provider=>provider.id==='echosync').enabled,true);
+    await store.saveCarrierAccess(owner,tenantId,'echosync',{companyIds:['buysupply']});
+    assert.equal((await store.companyCarrierAccess(owner,{tenantId,companyId:LEGACY_COMPANY})).find(provider=>provider.id==='echosync').enabled,false);
     await assert.rejects(store.saveCarrierAccess(staff,tenantId,'ups',{companyIds:['buysupply']}),/access/);
     assert.deepEqual(await store.operationalState(owner,newScope),{});
     assert.equal((await store.vendorAccounts(owner,newScope)).length,0);

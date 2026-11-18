@@ -188,6 +188,8 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
   const ups = providers.ups
   const usps = providers.usps
   const echo = providers.echosync
+  const echoAccess = carrierAccess?.providers.find((provider) => provider.id === "echosync")
+  const echoEnabledCompanies = echoAccess?.companies.filter((company) => company.enabled).map((company) => company.name) || []
   const environmentStatus = (environment = draft.environment) => ups?.environments?.[environment]
   const selectedStatus = environmentStatus()
   const canSubmit = Boolean(draft.clientId.trim() && (draft.clientSecret.trim() || selectedStatus?.secretConfigured) && (draft.accountNumber.trim() || selectedStatus?.accountConfigured))
@@ -382,7 +384,7 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base"><Truck className="size-4" /> Direct carrier accounts</CardTitle>
-        <CardDescription>Credentials stay on the server and are never returned to the browser. UPS and USPS direct APIs are available; additional carriers remain reserved for later support.</CardDescription>
+        <CardDescription>Credentials stay on the server and are never returned to the browser. UPS, USPS, and EchoSync Freight accounts can be shared with selected companies below.</CardDescription>
       </CardHeader>
       <CardContent className="p-0">
         {loading ? <div className="flex items-center gap-2 border-t p-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading carrier connections...</div> : <div className="divide-y border-t">
@@ -428,6 +430,12 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
               <div className="flex flex-wrap items-center gap-2"><p className="font-semibold">EchoSync Freight</p><Badge variant={echo?.configured ? "default" : "outline"}>{echo?.configured ? "Configured" : "Not configured"}</Badge><Badge variant="secondary">Production</Badge>{echo?.lastTestStatus === "verified" ? <Badge variant="outline" className="border-emerald-500/50 text-emerald-700 dark:text-emerald-300"><CheckCircle2 className="size-3" /> Verified</Badge> : null}</div>
               <p className="mt-1 text-sm text-muted-foreground">Freight quoting, Echo shipment tracking, signed status webhooks, and optional carrier-side available-load matching. Shipper, Pricing, and Carrier credentials remain separate because Echo grants them independently.</p>
               <p className="mt-1 text-xs text-muted-foreground">{echo?.lastTestedAt ? `Last tested ${dateLabel(echo.lastTestedAt)}${echo.lastTestMessage ? `: ${echo.lastTestMessage}` : ""}` : "Connection has not been tested."}</p>
+              {echo?.configured ? <div className="mt-3 grid gap-2 rounded-md border bg-muted/20 p-3 text-sm sm:grid-cols-2 lg:grid-cols-4">
+                <div><p className="text-xs font-medium uppercase text-muted-foreground">Shipper account</p><p className="mt-1 break-all font-medium">{echo.shipperUsername || "Not saved"}</p><p className="text-xs text-muted-foreground">API key {echo.shipperConfigured ? "saved" : "not saved"}</p></div>
+                <div><p className="text-xs font-medium uppercase text-muted-foreground">Pricing OAuth</p><p className="mt-1 break-all font-medium">{echo.pricingClientId || "Not saved"}</p><p className="text-xs text-muted-foreground">Secret {echo.pricingConfigured ? "saved" : "not saved"}</p></div>
+                <div><p className="text-xs font-medium uppercase text-muted-foreground">Carrier OAuth</p><p className="mt-1 break-all font-medium">{echo.carrierClientId || "Not saved"}</p><p className="text-xs text-muted-foreground">Secret {echo.carrierConfigured ? "saved" : "not saved"}</p></div>
+                <div><p className="text-xs font-medium uppercase text-muted-foreground">Companies with rates</p><p className="mt-1 font-medium">{echoEnabledCompanies.length ? echoEnabledCompanies.join(", ") : "None enabled"}</p><p className="text-xs text-muted-foreground">Webhook secret {echo.webhookConfigured ? "saved" : "not saved"}</p></div>
+              </div> : null}
               {echo?.configured ? <div className="mt-3 grid gap-2 rounded-md border bg-muted/20 p-3 text-sm sm:grid-cols-2 lg:grid-cols-3">{(echo.capabilities || []).map((capability) => <div key={capability.id} className="rounded border bg-background p-2"><div className="flex items-center justify-between gap-2"><p className="font-medium">{capability.label}</p><Badge variant={capability.status === "ready" ? "outline" : "secondary"}>{capability.status.replaceAll("_", " ")}</Badge></div><p className="mt-1 text-xs text-muted-foreground">{capability.detail}</p></div>)}</div> : null}
             </div>
             <div className="flex flex-wrap gap-2 lg:justify-end">

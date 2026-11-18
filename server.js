@@ -98,6 +98,7 @@ const companyOperationsHandler = createCompanyOperationsHandler({
   quoteUps: (input) => upsRating.shopRates(input, process.env, carrierCredentials.getUps()),
   quoteUsps: (input) => uspsApi.shopRates(input, process.env, carrierCredentials.getUsps()),
   quoteVeeqo: quoteCompanyVeeqo,
+  quoteEcho: quoteCompanyEcho,
   purchaseUps: (input) => upsRating.createShipment(input, process.env, carrierCredentials.getUps()),
   validateAddress: validateCompanyQuoteAddress,
   competitorProducts,
@@ -33165,6 +33166,62 @@ async function quoteCompanyVeeqo(input = {}) {
     deliveryDays:rate.deliveryDays,deliveryEstimate:rate.deliveryEstimate,warning:rate.warning,quotedAt:rate.quotedAt,expiresAt:rate.expiresAt
   })).filter((rate) => rate.amount > 0 && !/media mail|bound printed matter/i.test(`${rate.carrier} ${rate.service}`));
   return { rates, status:{ ok:rates.length>0,rateCount:rates.length } };
+}
+
+const ECHO_FREIGHT_CLASSES = new Set(["50", "55", "60", "65", "70", "77.5", "85", "92.5", "100", "110", "125", "150", "175", "200", "250", "300", "400", "500"]);
+
+function echoPickupDate(value) {
+  const requested = String(value || "").trim();
+  const date = requested ? new Date(`${requested}T12:00:00`) : new Date(Date.now() + 24 * 60 * 60 * 1000);
+  if (Number.isNaN(date.getTime())) throw Object.assign(new Error("Choose a valid EchoSync pickup date."), { statusCode: 400 });
+  return `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}/${date.getFullYear()}`;
+}
+
+async function quoteCompanyEcho(input = {}) {
+  const freightClass = String(input.freightClass || "").trim();
+  if (!ECHO_FREIGHT_CLASSES.has(freightClass)) throw Object.assign(new Error("Choose an NMFC freight class before requesting EchoSync rates."), { statusCode: 400 });
+  const weight = Math.ceil(Number(input.package?.weight || 0));
+  if (!Number.isFinite(weight) || weight <= 0 || weight >= 20000) throw Object.assign(new Error("EchoSync LTL weight must be between 1 and 19,999 lb."), { statusCode: 400 });
+  const country = (value) => String(value || "US").trim().toUpperCase() === "CA" ? "CA" : "US";
+  const payload = {
+    OriginPostalCode: String(input.from?.postalCode || "").trim(),
+    OriginCountryCode: country(input.from?.country),
+    OriginType: "BUSINESS",
+    DestinationPostalCode: String(input.to?.postalCode || "").trim(),
+    DestinationCountryCode: country(input.to?.country),
+    DestinationType: input.residentialDelivery === true ? "RESIDENTIAL" : "BUSINESS",
+    ...(input.residentialDelivery === true ? { DestinationAccessorials: "RESIDENTIALDELIVERY" } : {}),
+    PickUpDate: echoPickupDate(input.pickupDate),
+    PalletQuantity: Math.min(12, Math.max(0, Math.round(Number(input.palletQuantity || 0) || 0))),
+    UnitOfWeight: "LB",
+    Items: [{ NmfcClass: freightClass, Weight: weight }],
+  };
+  const response = await echoSync.quoteLtl(payload, carrierCredentials.getEchoSync());
+  const rows = Array.isArray(response?.Rates) ? response.Rates : Array.isArray(response?.rates) ? response.rates : [];
+  return {
+    rates: rows.map((rate) => ({
+      id: String(rate.CarrierSCAC || rate.carrierSCAC || rate.CarrierName || crypto.randomUUID()),
+      carrier: String(rate.CarrierName || rate.carrierName || "Echo carrier"),
+      service: `LTL${rate.CarrierGuarantee ? ` ${rate.CarrierGuarantee}` : ""}`,
+      serviceCode: String(rate.CarrierSCAC || rate.carrierSCAC || ""),
+      amount: Number(rate.TotalCharge ?? rate.totalCharge ?? 0),
+      currency: "USD",
+      deliveryDays: Number(rate.CarrierTransitDays ?? rate.carrierTransitDays ?? 0) || null,
+      expiresAt: String(rate.ExpirationDate || rate.expirationDate || ""),
+      warning: Number(rate.AccessorialCharge || 0) > 0 ? `Includes $${Number(rate.AccessorialCharge).toFixed(2)} in accessorial charges.` : "",
+      raw: rate,
+    })),
+    request: payload,
+  };
+}
+
+async function requireEchoSyncCompanyAccess(req, user) {
+  const scope = notificationScope(req);
+  const providers = await companyStore.companyCarrierAccess(user, scope);
+  if (!providers.some((provider) => provider.id === "echosync" && provider.enabled === true)) {
+    throw Object.assign(new Error("EchoSync rates are not enabled for the selected company. Enable this company under Settings > Carrier accounts."), { statusCode: 403 });
+  }
+  return scope;
 }
 
 function normalizeUnavailableVeeqoRate(rate = {}, index = 0) {
@@ -73704,6 +73761,7 @@ async function handleApi(req, res) {
 
   if (url.pathname === "/api/shipping-providers/echosync/quotes" && req.method === "POST") {
     try {
+      await requireEchoSyncCompanyAccess(req, authUser);
       const body = await parseBody(req);
       const mode = String(body.mode || "ltl").trim().toLowerCase();
       if (!["ltl", "tl", "pl", "partial"].includes(mode)) return sendJson(res, 400, { error: "EchoSync quote mode must be LTL, TL, or PL." });
@@ -73718,6 +73776,7 @@ async function handleApi(req, res) {
 
   if (url.pathname === "/api/shipping-providers/echosync/capacity" && req.method === "POST") {
     try {
+      await requireEchoSyncCompanyAccess(req, authUser);
       const body = await parseBody(req);
       const result = await echoSync.searchCapacity(body.payload || body.search || {}, { offset: body.offset, limit: body.limit }, carrierCredentials.getEchoSync());
       appendChannelApiLog({ channel: "EchoSync", transport: "HTTP", method: "POST", path: "/v2/availableloads", operation: "EchoSync carrier capacity search", statusCode: 200, ok: true, message: "EchoSync available-load search returned." });
@@ -73729,6 +73788,7 @@ async function handleApi(req, res) {
 
   if (parts[0] === "api" && parts[1] === "shipping-providers" && parts[2] === "echosync" && parts[3] === "tracking" && parts[4] && parts.length === 5 && req.method === "GET") {
     try {
+      await requireEchoSyncCompanyAccess(req, authUser);
       const tracking = await echoSync.shipmentTracking(decodeURIComponent(parts[4]), carrierCredentials.getEchoSync());
       appendChannelApiLog({ channel: "EchoSync", transport: "HTTP", method: "GET", path: "/v2/shipments/{id}/tracking", operation: "EchoSync shipment tracking", statusCode: 200, ok: true, message: `Echo Shipment ${tracking.shipmentId} tracking returned.` });
       return sendJson(res, 200, tracking);
