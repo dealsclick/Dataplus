@@ -279,14 +279,30 @@ test("launch counters are derived from the current SKU statuses", () => {
   ]), { readyItems: 1, blockedItems: 1, queuedItems: 2, submittedItems: 1, liveItems: 1, failedItems: 1 });
 });
 
-test("supplier SKU never substitutes for a missing manufacturer SKU during live launch", () => {
+test("eBay Live falls back to the DataPlus SKU when the manufacturer SKU is missing", () => {
   const review = launchReadiness({
     id: "session-1",
     status: "ready",
     channel: "ebay_live",
     channelAccountId: "ebay-primary",
-    items: [{ id: "item-1", productId: "product-1", sku: "BUS210787TRV", supplierSku: "210787", reservedQty: 2 }],
-  }, [{ id: "product-1", sku: "BUS210787TRV", status: "active" }]);
+    items: [{ id: "item-1", productId: "product-1", sku: "DPS10221", supplierSku: "210787", reservedQty: 2 }],
+  }, [{ id: "product-1", sku: "DPS10221", status: "active" }]);
+
+  assert.equal(review.session.items[0].launch.status, "ready");
+  assert.equal(review.session.items[0].launch.merchantSkuBase, "DPS10221");
+  assert.equal(review.session.items[0].launch.merchantSkuSource, "dataplus_sku");
+  assert.match(review.session.items[0].launch.merchantSku, /^DPS10221-LV-/);
+  assert.equal(review.groups.length, 1);
+});
+
+test("TikTok Live still requires a manufacturer SKU", () => {
+  const review = launchReadiness({
+    id: "session-1",
+    status: "ready",
+    channel: "tiktok_live",
+    channelAccountId: "tiktok-primary",
+    items: [{ id: "item-1", productId: "product-1", sku: "DPS10221", reservedQty: 2 }],
+  }, [{ id: "product-1", sku: "DPS10221", status: "active" }]);
 
   assert.equal(review.session.items[0].launch.status, "blocked");
   assert.equal(review.session.items[0].launch.merchantSku, "");
