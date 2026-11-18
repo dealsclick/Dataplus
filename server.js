@@ -57239,11 +57239,21 @@ async function handleApi(req, res) {
 
   const isNotificationRequest = url.pathname === "/api/notifications" || url.pathname.startsWith("/api/notifications/");
   const isCollaborationRequest = isNotificationRequest || url.pathname === "/api/mentions" || url.pathname.startsWith("/api/mentions/") || (req.method === "POST" && url.pathname === "/api/activity");
+  const isSharedCarrierCredentialRequest = (
+    req.method === "PUT"
+    && /^\/api\/shipping-providers\/(?:ups|usps|echosync)\/credentials$/.test(url.pathname)
+  ) || (
+    req.method === "POST"
+    && /^\/api\/shipping-providers\/(?:ups|usps|echosync)\/test$/.test(url.pathname)
+  );
   const isSharedSystemRequest = url.pathname === "/api/system/releases"
     || url.pathname.startsWith("/api/system/extensions")
     || (req.method === "GET" && url.pathname === "/api/shipping-providers");
-  if (!changingOwnPassword && !isCollaborationRequest && !isSharedSystemRequest && await companyOperationsHandler(req,res,url,authUser)) return;
-  if (!changingOwnPassword && !isSharedSystemRequest && (postgres.isPostgresEnabled() || companySelection(req))) {
+  if (!changingOwnPassword && !isCollaborationRequest && !isSharedSystemRequest && !isSharedCarrierCredentialRequest && await companyOperationsHandler(req,res,url,authUser)) return;
+  if (!changingOwnPassword && isSharedCarrierCredentialRequest && (postgres.isPostgresEnabled() || companySelection(req))) {
+    try { await companyStore.authorize(authUser, notificationScope(req)); }
+    catch (error) { return sendJson(res, error.statusCode || 503, { error: error.statusCode ? error.message : "Company access could not be verified.", companyWorkspace: "/organization" }); }
+  } else if (!changingOwnPassword && !isSharedSystemRequest && (postgres.isPostgresEnabled() || companySelection(req))) {
     try {
       if (isCollaborationRequest) await companyStore.authorize(authUser, notificationScope(req));
       else await companyStore.legacyAccess(authUser, companySelection(req));
@@ -73735,8 +73745,8 @@ async function handleApi(req, res) {
 
   if (url.pathname === "/api/shipping-providers/echosync/credentials" && req.method === "PUT") {
     const scope = notificationScope(req);
-    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
-      return sendJson(res, 409, { error: "EchoSync credentials are available only for LINQ while company isolation is completed." });
+    if (scope.tenantId !== LEGACY_TENANT) {
+      return sendJson(res, 409, { error: "EchoSync credentials are not configured for this organization." });
     }
     try {
       const body = await parseBody(req);
@@ -73752,8 +73762,8 @@ async function handleApi(req, res) {
 
   if (url.pathname === "/api/shipping-providers/echosync/test" && req.method === "POST") {
     const scope = notificationScope(req);
-    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
-      return sendJson(res, 409, { error: "EchoSync credentials are available only for LINQ while company isolation is completed." });
+    if (scope.tenantId !== LEGACY_TENANT) {
+      return sendJson(res, 409, { error: "EchoSync credentials are not configured for this organization." });
     }
     const body = await parseBody(req);
     try {
@@ -73813,8 +73823,8 @@ async function handleApi(req, res) {
 
   if (url.pathname === "/api/shipping-providers/ups/credentials" && req.method === "PUT") {
     const scope = notificationScope(req);
-    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
-      return sendJson(res, 409, { error: "Direct carrier credentials are available only for LINQ while company isolation is completed." });
+    if (scope.tenantId !== LEGACY_TENANT) {
+      return sendJson(res, 409, { error: "Direct carrier credentials are not configured for this organization." });
     }
     try {
       const body = await parseBody(req);
@@ -73829,8 +73839,8 @@ async function handleApi(req, res) {
 
   if (url.pathname === "/api/shipping-providers/ups/test" && req.method === "POST") {
     const scope = notificationScope(req);
-    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
-      return sendJson(res, 409, { error: "Direct carrier credentials are available only for LINQ while company isolation is completed." });
+    if (scope.tenantId !== LEGACY_TENANT) {
+      return sendJson(res, 409, { error: "Direct carrier credentials are not configured for this organization." });
     }
     const body = await parseBody(req);
     const environment = String(body.environment || carrierCredentials.activeEnvironment());
@@ -73859,8 +73869,8 @@ async function handleApi(req, res) {
 
   if (url.pathname === "/api/shipping-providers/usps/credentials" && req.method === "PUT") {
     const scope = notificationScope(req);
-    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
-      return sendJson(res, 409, { error: "Direct carrier credentials are available only for LINQ while company isolation is completed." });
+    if (scope.tenantId !== LEGACY_TENANT) {
+      return sendJson(res, 409, { error: "Direct carrier credentials are not configured for this organization." });
     }
     try {
       const body = await parseBody(req);
@@ -73875,8 +73885,8 @@ async function handleApi(req, res) {
 
   if (url.pathname === "/api/shipping-providers/usps/test" && req.method === "POST") {
     const scope = notificationScope(req);
-    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
-      return sendJson(res, 409, { error: "Direct carrier credentials are available only for LINQ while company isolation is completed." });
+    if (scope.tenantId !== LEGACY_TENANT) {
+      return sendJson(res, 409, { error: "Direct carrier credentials are not configured for this organization." });
     }
     const body = await parseBody(req);
     const environment = String(body.environment || carrierCredentials.activeUspsEnvironment());

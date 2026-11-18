@@ -94,6 +94,10 @@ async function run() {
   assert.match(server, /\/api\/shipping-providers\/ups\/credentials/);
   assert.match(server, /\/api\/shipping-providers\/ups\/test/);
   assert.match(server, /req\.method === "GET" && url\.pathname === "\/api\/shipping-providers"/);
+  assert.match(server, /isSharedCarrierCredentialRequest/);
+  assert.match(server, /companyStore\.authorize\(authUser, notificationScope\(req\)\)/);
+  assert.match(server, /\^\\\/api\\\/shipping-providers\\\/\(\?:ups\|usps\|echosync\)\\\/test\$/);
+  assert.doesNotMatch(server, /EchoSync credentials are available only for LINQ/);
   assert.match(server, /method === "GET" \? "settings" : "settings\.security"/);
   assert.match(ui, /Verify and save/);
   assert.match(ui, /UPS-reported scopes/);
