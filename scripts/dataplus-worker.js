@@ -2861,6 +2861,12 @@ async function main() {
     console.warn(`[${WORKER_ID}] terminated ${recovery.terminated} stale supplier-index session(s): ${recovery.pids.join(", ")}`);
   }
   await postgres.initDatabase();
+  if (["all", "orders-tiktok"].includes(WORKER_LANE)) {
+    const recovered = await postgres.recoverInterruptedTikTokOrderJobs({ workerId: WORKER_ID });
+    for (const job of recovered) {
+      console.warn(`[${WORKER_ID}] requeued interrupted TikTok order job ${job.jobId} from ${job.previousWorkerId || "the previous worker"} (recovery ${job.recoveryCount}).`);
+    }
+  }
   await writeHeartbeat("starting", null, true);
   console.log(`[${WORKER_ID}] started. Supported tasks: ${SUPPORTED_TASKS.join(", ")}`);
   await checkScheduledFulfillmentRateRefresh();

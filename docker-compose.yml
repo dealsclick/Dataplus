@@ -98,6 +98,7 @@ services:
       context: .
     container_name: dataplus-worker
     restart: unless-stopped
+    stop_grace_period: 65s
     mem_limit: 1536m
     cpus: 2.5
     env_file:

@@ -161,6 +161,16 @@ async function main() {
   assert.equal(tiktokMarketplaceSource.includes('fulfillmentOrder, fulfillmentServices, previewPackage, createPackage, shippingDocument'), true, 'TikTok fulfillment must expose the complete order-to-label workflow.');
   assert.equal(tiktokMarketplaceSource.includes("status: Number(match?.matched || 0) > 0 ? 'linked' : 'needs_mapping'"), true, 'TikTok catalog reconciliation must expose unmatched seller SKUs for review.');
   assert.equal(tiktokMarketplaceSource.includes("action === 'setup/initial'"), true, 'TikTok must expose the initial setup endpoint.');
+  const workerSource = fs.readFileSync(path.join(__dirname, 'dataplus-worker.js'), 'utf8');
+  assert.equal(workerSource.includes('recoverInterruptedTikTokOrderJobs({ workerId: WORKER_ID })'), true, 'The replacement TikTok worker must requeue an orphaned order import after deployment.');
+  const supervisorSource = fs.readFileSync(path.join(__dirname, 'dataplus-worker-supervisor.js'), 'utf8');
+  assert.equal(supervisorSource.includes('"product-dump-import", "ebay-order-import", "tiktok-orders"'), true, 'The worker supervisor must automatically retry interrupted TikTok order intake.');
+  assert.equal(supervisorSource.includes('reason: stopping ? "deployment_shutdown"'), true, 'A normal deployment shutdown must be recorded as a resumable TikTok interruption.');
+  const databaseSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
+  assert.equal(databaseSource.includes('async function recoverInterruptedTikTokOrderJobs'), true, 'PostgreSQL must provide durable TikTok restart recovery.');
+  assert.equal(databaseSource.includes("coalesce(raw ->> 'workerTask', '') = 'tiktok-orders'"), true, 'Restart recovery must be limited to TikTok order intake jobs.');
+  const composeSource = fs.readFileSync(path.join(__dirname, '..', 'docker-compose.yml'), 'utf8');
+  assert.match(composeSource, /worker:\s*[\s\S]*?restart: unless-stopped\s*stop_grace_period: 65s/, 'Worker containers need enough deployment grace to persist retry state.');
   const tiktokLabelDialogSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'tiktok-shipping-label-dialog.tsx'), 'utf8');
   assert.equal(tiktokLabelDialogSource.includes('TikTok Shipping label'), true, 'Order detail must expose TikTok label generation.');
   assert.equal(tiktokLabelDialogSource.includes('/api/tiktok/fulfillment/services'), true, 'TikTok label generation must quote eligible services dynamically.');

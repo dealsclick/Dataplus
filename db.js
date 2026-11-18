@@ -16781,6 +16781,75 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all"
   };
 }
 
+async function recoverInterruptedTikTokOrderJobs({ workerId = "" } = {}) {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const replacementWorkerId = nullableString(workerId) || "";
+  const message = "TikTok order intake was interrupted by a server update and will continue automatically.";
+  const result = await client.query(`
+    with interrupted as (
+      select
+        job_id,
+        coalesce(raw ->> 'workerId', '') as previous_worker_id,
+        coalesce(nullif(raw -> 'workerPayload' ->> 'restartRecoveryCount', '')::int, 0) + 1 as recovery_count
+      from operations_jobs
+      where lower(status) = 'running'
+        and coalesce(raw ->> 'workerTask', '') = 'tiktok-orders'
+        and ($1::text = '' or coalesce(raw ->> 'workerId', '') <> $1::text)
+      for update skip locked
+    )
+    update operations_jobs job
+    set
+      status = 'queued',
+      message = $2,
+      total_rows = 0,
+      processed_rows = 0,
+      changed_rows = 0,
+      missing_rows = 0,
+      progress = 0,
+      started_at = null,
+      ended_at = null,
+      updated_at = now(),
+      raw = coalesce(job.raw, '{}'::jsonb) || jsonb_build_object(
+        'status', 'queued',
+        'phase', 'retry_scheduled',
+        'message', $2::text,
+        'details', 'Orders saved before the update were retained. The replacement worker will recheck the same range and update or skip existing TikTok order IDs.',
+        'processedRows', 0,
+        'totalRows', 0,
+        'changed', 0,
+        'missingCount', 0,
+        'progressPercent', 0,
+        'startedAt', '',
+        'finishedAt', '',
+        'workerId', '',
+        'workerLane', '',
+        'workerClaimedAt', '',
+        'workerLastSeenAt', '',
+        'workerHealth', 'restart_recovered',
+        'scheduledFor', to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+        'restartRecovery', jsonb_build_object(
+          'previousWorkerId', interrupted.previous_worker_id,
+          'replacementWorkerId', $1::text,
+          'recoveredAt', now(),
+          'count', interrupted.recovery_count
+        ),
+        'workerPayload', coalesce(job.raw -> 'workerPayload', '{}'::jsonb) || jsonb_build_object(
+          'restartRecoveryCount', interrupted.recovery_count
+        )
+      )
+    from interrupted
+    where job.job_id = interrupted.job_id
+    returning job.job_id, interrupted.previous_worker_id, interrupted.recovery_count
+  `, [replacementWorkerId, message]);
+  return result.rows.map((row) => ({
+    jobId: row.job_id,
+    previousWorkerId: row.previous_worker_id || "",
+    recoveryCount: Number(row.recovery_count || 0)
+  }));
+}
+
 const BACKUP_CORE_TABLES = [
   "vendors",
   "products",
@@ -22457,6 +22526,7 @@ module.exports = {
   claimFulfillmentPrintJob,
   replaceStateArrayItem,
   claimQueuedOperationJob,
+  recoverInterruptedTikTokOrderJobs,
   createPostgresBackup,
   readChannelApiLogs,
   pruneChannelApiLogs,

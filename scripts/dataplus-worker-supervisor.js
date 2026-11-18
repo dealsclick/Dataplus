@@ -124,8 +124,11 @@ async function markInterruptedJob(claim, incident = {}) {
   const observedMb = Math.max(0, Math.ceil(Number(incident.observedBytes || 0) / MIB));
   const budgetMb = Math.max(0, Number(incident.budgetMb || 0));
   const memoryStopped = incident.reason === "memory_limit";
+  const deploymentStopped = incident.reason === "deployment_shutdown";
   const message = memoryStopped
     ? `Worker memory guard stopped ${claim.task || "the job"} at ${observedMb} MB before the ${budgetMb} MB job budget could endanger the worker lane.`
+    : deploymentStopped
+      ? `A server update interrupted ${claim.task || "the job"}.`
     : `The isolated worker process exited before ${claim.task || "the job"} completion could be confirmed.`;
   let details = memoryStopped
     ? "No automatic retry was attempted because the job may contain marketplace or carrier side effects. Review the provider status, then retry or use the existing recovery action only when needed."
@@ -150,19 +153,27 @@ async function markInterruptedJob(claim, incident = {}) {
   };
   try {
     await client.connect();
-    if (["product-dump-import", "ebay-order-import"].includes(String(claim.task || ""))) {
+    if (["product-dump-import", "ebay-order-import", "tiktok-orders"].includes(String(claim.task || ""))) {
       const current = await client.query("select raw from operations_jobs where job_id = $1 limit 1", [String(claim.jobId)]);
       const raw = current.rows[0]?.raw && typeof current.rows[0].raw === "object" ? current.rows[0].raw : {};
       const workerPayload = raw.workerPayload && typeof raw.workerPayload === "object" ? raw.workerPayload : {};
-      const retryCount = Math.max(0, Number(workerPayload.automaticRetryCount || 0)) + 1;
+      const retryCount = deploymentStopped
+        ? Math.max(0, Number(workerPayload.automaticRetryCount || 0))
+        : Math.max(0, Number(workerPayload.automaticRetryCount || 0)) + 1;
+      const deploymentRestartCount = Math.max(0, Number(workerPayload.deploymentRestartCount || 0)) + (deploymentStopped ? 1 : 0);
       const isProductDump = String(claim.task || "") === "product-dump-import";
-      if (isProductDump || retryCount <= 3) {
+      const isTikTokOrders = String(claim.task || "") === "tiktok-orders";
+      if (deploymentStopped || isProductDump || retryCount <= 3) {
         const delays = isProductDump ? [5, 15, 30, 60, 120] : [1, 5, 15];
-        const delayMinutes = delays[Math.min(retryCount - 1, delays.length - 1)];
+        const delayMinutes = deploymentStopped ? 0 : delays[Math.min(Math.max(0, retryCount - 1), delays.length - 1)];
         const scheduledFor = new Date(Date.now() + delayMinutes * 60_000).toISOString();
         const retryMessage = isProductDump
           ? `Datadump ${workerPayload.importType === "sku-creation" ? "SKU creation" : "price and inventory refresh"} was interrupted and will retry automatically at ${scheduledFor}.`
-          : `eBay order intake was interrupted and will retry automatically at ${scheduledFor}; standard and Live orders remain separate.`;
+          : isTikTokOrders
+            ? deploymentStopped
+              ? "TikTok order intake paused for a server update and will continue automatically."
+              : `TikTok order intake was interrupted and will retry automatically at ${scheduledFor}.`
+            : `eBay order intake was interrupted and will retry automatically at ${scheduledFor}; standard and Live orders remain separate.`;
         const retryPatch = {
           ...patch,
           status: "queued",
@@ -172,8 +183,8 @@ async function markInterruptedJob(claim, incident = {}) {
           workerId: "",
           workerLastSeenAt: "",
           message: retryMessage,
-          details: `Automatic retry ${retryCount}. Completed work is retained and the next idempotent pass will refresh existing orders without duplicating them. ${message}`,
-          workerPayload: { ...workerPayload, automaticRetryCount: retryCount }
+          details: `${deploymentStopped ? `Deployment restart ${deploymentRestartCount}` : `Automatic retry ${retryCount}`}. Completed work is retained and the next idempotent pass will refresh existing orders without duplicating them. ${message}`,
+          workerPayload: { ...workerPayload, automaticRetryCount: retryCount, deploymentRestartCount }
         };
         if (isProductDump) {
           await client.query(`
@@ -196,7 +207,9 @@ async function markInterruptedJob(claim, incident = {}) {
         `, [String(claim.jobId), String(claim.workerId), retryMessage, JSON.stringify(retryPatch)]);
         return retried.rowCount > 0;
       }
-      details = `Three automatic eBay order retries were interrupted. Standard and Live orders remain eligible for the next scheduled reconciliation; review worker memory before retrying this job.`;
+      details = isTikTokOrders
+        ? "Three automatic TikTok order retries were interrupted. Saved orders remain intact; review worker health before retrying this job."
+        : "Three automatic eBay order retries were interrupted. Standard and Live orders remain eligible for the next scheduled reconciliation; review worker memory before retrying this job.";
       patch.details = details;
       patch.workerPayload = { ...workerPayload, automaticRetryCount: retryCount };
     }
@@ -313,9 +326,9 @@ async function supervise() {
     if (postJobTimer) clearTimeout(postJobTimer);
     child = null;
 
-    if (!stopping && claim && !completed) {
+    if (claim && !completed && (!stopping || claim.task === "tiktok-orders")) {
       await markInterruptedJob(claim, memoryIncident || {
-        reason: jobFinished ? "post_job_timeout" : "process_exit",
+        reason: stopping ? "deployment_shutdown" : jobFinished ? "post_job_timeout" : "process_exit",
         code: result.code,
         signal: result.signal || result.error?.message || ""
       });
