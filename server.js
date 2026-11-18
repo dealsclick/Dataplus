@@ -122,6 +122,7 @@ const { createOutboundAuditStore, publicEvidence } = require("./lib/outbound-aud
 const ebayOperations = require("./lib/ebay-operations");
 const upsRating = require("./lib/ups-rating");
 const uspsApi = require("./lib/usps-api");
+const echoSync = require("./lib/echo-sync");
 const { dailyScheduleKey } = require("./lib/carrier-tracking-schedule");
 const { createCarrierCredentials } = require("./lib/carrier-credentials");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
@@ -214,6 +215,19 @@ const PUBLIC_DIR = path.join(ROOT, "public");
 const WEB_DIST_DIR = path.join(ROOT, "web", "dist");
 const DATA_DIR = path.join(ROOT, "data");
 const carrierCredentials = createCarrierCredentials({ directory: DATA_DIR });
+const ECHOSYNC_WEBHOOK_FILE = path.join(DATA_DIR, "echosync-webhook-events.ndjson");
+const echoSyncWebhookIds = new Set();
+try {
+  const recent = fs.existsSync(ECHOSYNC_WEBHOOK_FILE) ? fs.readFileSync(ECHOSYNC_WEBHOOK_FILE, "utf8").slice(-10_000_000) : "";
+  for (const line of recent.split(/\r?\n/)) {
+    try {
+      const id = String(JSON.parse(line).webhookId || "").trim();
+      if (id) echoSyncWebhookIds.add(id);
+    } catch {}
+  }
+} catch (error) {
+  console.warn("Unable to load EchoSync webhook IDs:", error.message);
+}
 const DB_FILE = path.join(DATA_DIR, "db.json");
 const EXPORT_MAPPINGS_FILE = path.join(DATA_DIR, "export-mappings.json");
 const SYSTEM_SETTINGS_FILE = path.join(DATA_DIR, "system-settings.json");
@@ -20147,6 +20161,39 @@ function readRawBody(req) {
     req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
+}
+
+async function processEchoSyncWebhook(event) {
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  const shipmentId = String(payload.loadId || payload.shipmentId || payload.ShipmentId || payload.LoadId || "").trim();
+  if (!shipmentId || !postgres.isPostgresEnabled()) return { matchedOrders: 0 };
+  const orders = await postgres.readOrdersByEchoShipmentId(shipmentId);
+  for (const order of orders) {
+    let updated = false;
+    for (const shipment of Array.isArray(order.shipments) ? order.shipments : []) {
+      if (String(shipment.echoShipmentId || "") !== shipmentId) continue;
+      shipment.echoTracking = {
+        status: String(payload.status || payload.loadStatus || payload.Status || payload.LoadStatus || "").trim(),
+        location: payload.location || payload.currentLocation || payload.geoLocation || null,
+        occurredAt: String(payload.eventDateTime || payload.statusDateTime || payload.timestamp || event.timestamp || "").trim(),
+        webhookId: event.webhookId,
+        updatedAt: new Date().toISOString(),
+        raw: payload,
+      };
+      updated = true;
+    }
+    if (!updated && String(order.echoShipmentId || "") === shipmentId) {
+      order.echoTracking = { webhookId: event.webhookId, updatedAt: new Date().toISOString(), raw: payload };
+      updated = true;
+    }
+    if (!updated) continue;
+    order.updatedAt = new Date().toISOString();
+    addOrderTimeline(order, { type: "tracking", title: "EchoSync freight status updated", message: `Echo Shipment ${shipmentId} reported ${String(payload.status || payload.loadStatus || "a new tracking event")}.`, user: "EchoSync webhook" });
+    await postgres.saveOrder(order);
+    clearOrderApiCache(order.id);
+    invalidateFulfillmentConsoleSnapshot([order.id]);
+  }
+  return { matchedOrders: orders.length };
 }
 
 function escapeCsv(value) {
@@ -56664,6 +56711,41 @@ async function handleApi(req, res) {
   const parts = url.pathname.split("/").filter(Boolean);
   await hydrateAuthSessionsStore();
 
+  if (req.method === "POST" && url.pathname === "/api/webhooks/echosync") {
+    const rawBody = await readRawBody(req);
+    if (rawBody.length > 2 * 1024 * 1024) return sendJson(res, 413, { error: "EchoSync webhook payload is too large." });
+    const credentials = carrierCredentials.getEchoSync();
+    const signature = String(req.headers["x-echo-hmac-sha256"] || "");
+    if (!credentials.webhookSigningSecret || !echoSync.verifyWebhook(rawBody, signature, credentials.webhookSigningSecret)) {
+      appendChannelApiLog({ channel: "EchoSync", transport: "Webhook", method: "POST", path: url.pathname, operation: "Verify EchoSync webhook", statusCode: 401, ok: false, message: "EchoSync HMAC signature did not match." });
+      return sendJson(res, 401, { error: "EchoSync webhook signature did not match." });
+    }
+    let payload;
+    try { payload = rawBody.length ? JSON.parse(rawBody.toString("utf8")) : {}; }
+    catch { return sendJson(res, 400, { error: "EchoSync webhook payload is not valid JSON." }); }
+    const webhookId = echoSync.webhookId(req.headers, rawBody);
+    if (echoSyncWebhookIds.has(webhookId)) return sendJson(res, 200, { accepted: true, duplicate: true, webhookId });
+    const event = {
+      webhookId,
+      eventType: String(payload.ediType || payload.eventType || payload.type || "EchoSync event"),
+      timestamp: String(req.headers["x-echo-timestamp"] || ""),
+      originalTimestamp: String(req.headers["x-echo-timestamp-original"] || ""),
+      retryAttempt: Math.max(0, Number(req.headers["x-echo-retry-attempt"] || 0) || 0),
+      receivedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      payload,
+    };
+    echoSyncWebhookIds.add(webhookId);
+    appendNdjsonRowSync(ECHOSYNC_WEBHOOK_FILE, event);
+    if (echoSyncWebhookIds.size % 100 === 0) void pruneNdjsonFile(ECHOSYNC_WEBHOOK_FILE, { cutoffMs: Date.now() - 365 * 24 * 60 * 60 * 1000, maxScanBytes: 64 * 1024 * 1024 }).catch(() => {});
+    void processEchoSyncWebhook(event).then((result) => {
+      appendChannelApiLog({ channel: "EchoSync", transport: "Webhook", method: "POST", path: url.pathname, operation: "Process EchoSync webhook", statusCode: 202, ok: true, message: `${webhookId}: matched ${result.matchedOrders} order${result.matchedOrders === 1 ? "" : "s"}.` });
+    }).catch((error) => {
+      appendChannelApiLog({ channel: "EchoSync", transport: "Webhook", method: "POST", path: url.pathname, operation: "Process EchoSync webhook failed", statusCode: 502, ok: false, message: `${webhookId}: ${error.message || "processing failed"}` });
+    });
+    return sendJson(res, 202, { accepted: true, webhookId });
+  }
+
   if (req.method === "POST" && url.pathname === "/api/webhooks/usps/tracking") {
     if (!postgres.isPostgresEnabled()) return sendJson(res, 503, { error: "USPS tracking webhooks require PostgreSQL." });
     const rawBody = await readRawBody(req);
@@ -73538,11 +73620,87 @@ async function handleApi(req, res) {
         ups: carrierCredentials.status(),
         fedex: { id: "fedex", name: "FedEx", available: false, status: "planned", message: "Direct FedEx API support is planned." },
         usps: { ...carrierCredentials.uspsStatus(), ...uspsApi.publicStatus(process.env, carrierCredentials.getUsps()) },
+        echosync: echoSync.publicStatus(carrierCredentials.getEchoSync()),
         dhl: { id: "dhl", name: "DHL Express", available: false, status: "planned", message: "Direct DHL Express API support is planned." },
         ontrac: { id: "ontrac", name: "OnTrac", available: false, status: "planned", message: "Direct OnTrac API support is planned." },
         amazon_shipping: { id: "amazon_shipping", name: "Amazon Shipping", available: false, status: "planned", message: "Direct Amazon Shipping API support is planned." },
       },
     });
+  }
+
+  if (url.pathname === "/api/shipping-providers/echosync/credentials" && req.method === "PUT") {
+    const scope = notificationScope(req);
+    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
+      return sendJson(res, 409, { error: "EchoSync credentials are available only for LINQ while company isolation is completed." });
+    }
+    try {
+      const body = await parseBody(req);
+      const credentials = carrierCredentials.saveEchoSync(body);
+      const provider = echoSync.publicStatus(credentials);
+      appendChannelApiLog({ channel: "EchoSync", transport: "configuration", method: "PUT", path: url.pathname, operation: "Update EchoSync credentials", statusCode: 200, ok: true, message: "EchoSync credentials updated; secrets remain masked." });
+      void recordUserActivity(req, authUser, { eventType: "security", action: "Updated EchoSync credentials", entityType: "shipping_provider", entityId: "echosync:production", metadata: { shipperConfigured: provider.shipperConfigured, pricingConfigured: provider.pricingConfigured, carrierConfigured: provider.carrierConfigured, webhookConfigured: provider.webhookConfigured } });
+      return sendJson(res, 200, { provider, message: "EchoSync credentials saved. API keys, client secrets, and the webhook signing secret remain masked." });
+    } catch (error) {
+      return sendJson(res, Number(error.statusCode || 400), { error: error.message || "Unable to save EchoSync credentials." });
+    }
+  }
+
+  if (url.pathname === "/api/shipping-providers/echosync/test" && req.method === "POST") {
+    const scope = notificationScope(req);
+    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
+      return sendJson(res, 409, { error: "EchoSync credentials are available only for LINQ while company isolation is completed." });
+    }
+    const body = await parseBody(req);
+    try {
+      const credentials = carrierCredentials.resolveEchoSyncPatch(body);
+      const result = await echoSync.verifyCredentials(credentials);
+      const message = `EchoSync ${result.checks.join(" and ")} verified${result.expiresIn ? `; token valid for ${result.expiresIn} seconds` : ""}.`;
+      const saved = carrierCredentials.recordEchoSyncTest({ ...result, message });
+      const provider = echoSync.publicStatus({ ...credentials, ...saved });
+      appendChannelApiLog({ channel: "EchoSync", transport: "OAuth", method: "POST", path: "/token", operation: "EchoSync connection test", statusCode: 200, ok: true, message });
+      void recordUserActivity(req, authUser, { eventType: "security", action: "Tested EchoSync credentials", entityType: "shipping_provider", entityId: "echosync:production", metadata: { ok: true, checks: result.checks } });
+      return sendJson(res, 200, { provider, message });
+    } catch (error) {
+      const message = error.message || "Unable to verify the EchoSync connection.";
+      const provider = echoSync.publicStatus(carrierCredentials.recordEchoSyncTest({ ok: false, message }));
+      appendChannelApiLog({ channel: "EchoSync", transport: "OAuth", method: "POST", path: "/token", operation: "EchoSync connection test failed", statusCode: 502, ok: false, message });
+      return sendJson(res, 502, { error: message, provider });
+    }
+  }
+
+  if (url.pathname === "/api/shipping-providers/echosync/quotes" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      const mode = String(body.mode || "ltl").trim().toLowerCase();
+      if (!["ltl", "tl", "pl", "partial"].includes(mode)) return sendJson(res, 400, { error: "EchoSync quote mode must be LTL, TL, or PL." });
+      const credentials = carrierCredentials.getEchoSync();
+      const quote = mode === "ltl" ? await echoSync.quoteLtl(body.payload || body.quote || {}, credentials) : await echoSync.quoteFreight(body.payload || body.quote || {}, credentials);
+      appendChannelApiLog({ channel: "EchoSync", transport: "HTTP", method: "POST", path: mode === "ltl" ? "/v2/rates" : "/v2/quotes", operation: `EchoSync ${mode.toUpperCase()} freight quote`, statusCode: 200, ok: true, message: "EchoSync freight quote returned." });
+      return sendJson(res, 200, { provider: "EchoSync", mode, quote, quotedAt: new Date().toISOString() });
+    } catch (error) {
+      return sendJson(res, Number(error.statusCode >= 400 && error.statusCode < 500 ? error.statusCode : 502), { error: error.message || "EchoSync freight quote failed." });
+    }
+  }
+
+  if (url.pathname === "/api/shipping-providers/echosync/capacity" && req.method === "POST") {
+    try {
+      const body = await parseBody(req);
+      const result = await echoSync.searchCapacity(body.payload || body.search || {}, { offset: body.offset, limit: body.limit }, carrierCredentials.getEchoSync());
+      appendChannelApiLog({ channel: "EchoSync", transport: "HTTP", method: "POST", path: "/v2/availableloads", operation: "EchoSync carrier capacity search", statusCode: 200, ok: true, message: "EchoSync available-load search returned." });
+      return sendJson(res, 200, { provider: "EchoSync", result, searchedAt: new Date().toISOString() });
+    } catch (error) {
+      return sendJson(res, Number(error.statusCode >= 400 && error.statusCode < 500 ? error.statusCode : 502), { error: error.message || "EchoSync capacity search failed." });
+    }
+  }
+
+  if (parts[0] === "api" && parts[1] === "shipping-providers" && parts[2] === "echosync" && parts[3] === "tracking" && parts[4] && parts.length === 5 && req.method === "GET") {
+    try {
+      const tracking = await echoSync.shipmentTracking(decodeURIComponent(parts[4]), carrierCredentials.getEchoSync());
+      appendChannelApiLog({ channel: "EchoSync", transport: "HTTP", method: "GET", path: "/v2/shipments/{id}/tracking", operation: "EchoSync shipment tracking", statusCode: 200, ok: true, message: `Echo Shipment ${tracking.shipmentId} tracking returned.` });
+      return sendJson(res, 200, tracking);
+    } catch (error) {
+      return sendJson(res, Number(error.statusCode >= 400 && error.statusCode < 500 ? error.statusCode : 502), { error: error.message || "EchoSync shipment tracking failed." });
+    }
   }
 
   if (url.pathname === "/api/shipping-providers/ups/credentials" && req.method === "PUT") {

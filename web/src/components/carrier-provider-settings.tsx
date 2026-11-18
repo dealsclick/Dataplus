@@ -59,6 +59,13 @@ type CarrierProviderStatus = {
   accountConfigured?: boolean
   accountType?: string
   webhookAdminEmail?: string
+  shipperConfigured?: boolean
+  pricingConfigured?: boolean
+  carrierConfigured?: boolean
+  webhookConfigured?: boolean
+  shipperUsername?: string
+  pricingClientId?: string
+  carrierClientId?: string
   capabilities?: CarrierCapability[]
   environments?: Record<"production" | "test", CarrierEnvironmentStatus>
 }
@@ -93,14 +100,19 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
   const [loading, setLoading] = useState(true)
   const [dialogOpen, setDialogOpen] = useState(false)
   const [uspsDialogOpen, setUspsDialogOpen] = useState(false)
+  const [echoDialogOpen, setEchoDialogOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [rowTesting, setRowTesting] = useState(false)
   const [uspsSaving, setUspsSaving] = useState(false)
   const [uspsTesting, setUspsTesting] = useState(false)
   const [uspsRowTesting, setUspsRowTesting] = useState(false)
+  const [echoSaving, setEchoSaving] = useState(false)
+  const [echoTesting, setEchoTesting] = useState(false)
+  const [echoRowTesting, setEchoRowTesting] = useState(false)
   const [draft, setDraft] = useState({ environment: "production" as "production" | "test", clientId: "", clientSecret: "", accountNumber: "" })
   const [uspsDraft, setUspsDraft] = useState({ environment: "production" as "production" | "test", clientId: "", clientSecret: "", crid: "", mid: "", accountType: "EPS", accountNumber: "", webhookAdminEmail: "" })
+  const [echoDraft, setEchoDraft] = useState({ shipperUsername: "", shipperApiKey: "", pricingClientId: "", pricingClientSecret: "", carrierClientId: "", carrierClientSecret: "", webhookSigningSecret: "" })
 
   const load = async () => {
     setLoading(true)
@@ -175,12 +187,18 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
 
   const ups = providers.ups
   const usps = providers.usps
+  const echo = providers.echosync
   const environmentStatus = (environment = draft.environment) => ups?.environments?.[environment]
   const selectedStatus = environmentStatus()
   const canSubmit = Boolean(draft.clientId.trim() && (draft.clientSecret.trim() || selectedStatus?.secretConfigured) && (draft.accountNumber.trim() || selectedStatus?.accountConfigured))
   const uspsEnvironmentStatus = (environment = uspsDraft.environment) => usps?.environments?.[environment]
   const selectedUspsStatus = uspsEnvironmentStatus()
   const canSubmitUsps = Boolean(uspsDraft.clientId.trim() && (uspsDraft.clientSecret.trim() || selectedUspsStatus?.secretConfigured))
+  const canSubmitEcho = Boolean(
+    (echoDraft.shipperUsername.trim() && (echoDraft.shipperApiKey.trim() || echo?.shipperConfigured))
+    || (echoDraft.pricingClientId.trim() && (echoDraft.pricingClientSecret.trim() || echo?.pricingConfigured))
+    || (echoDraft.carrierClientId.trim() && (echoDraft.carrierClientSecret.trim() || echo?.carrierConfigured)),
+  )
 
   const openUpsDialog = (environment = ups?.environment || "production") => {
     const normalized = environment === "test" ? "test" : "production"
@@ -305,6 +323,61 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
     }
   }
 
+  const openEchoDialog = () => {
+    setEchoDraft({
+      shipperUsername: String(echo?.shipperUsername || ""), shipperApiKey: "",
+      pricingClientId: String(echo?.pricingClientId || ""), pricingClientSecret: "",
+      carrierClientId: String(echo?.carrierClientId || ""), carrierClientSecret: "",
+      webhookSigningSecret: "",
+    })
+    setEchoDialogOpen(true)
+  }
+
+  const saveEchoCredentials = async ({ close = true, notify = true }: { close?: boolean; notify?: boolean } = {}) => {
+    setEchoSaving(true)
+    try {
+      const result = await api<{ provider?: CarrierProviderStatus; message?: string }>("/api/shipping-providers/echosync/credentials", { method: "PUT", body: JSON.stringify(echoDraft) })
+      if (result.provider) setProviders((current) => ({ ...current, echosync: result.provider as CarrierProviderStatus }))
+      setEchoDraft((current) => ({ ...current, shipperApiKey: "", pricingClientSecret: "", carrierClientSecret: "", webhookSigningSecret: "" }))
+      if (close) setEchoDialogOpen(false)
+      if (notify) toast.success(result.message || "EchoSync credentials saved.")
+      return true
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to save EchoSync credentials.")
+      return false
+    } finally {
+      setEchoSaving(false)
+    }
+  }
+
+  const verifyAndSaveEcho = async () => {
+    setEchoTesting(true)
+    try {
+      const result = await api<{ message?: string }>("/api/shipping-providers/echosync/test", { method: "POST", body: JSON.stringify(echoDraft) })
+      const saved = await saveEchoCredentials({ close: true, notify: false })
+      if (saved) toast.success(result.message || "EchoSync connection verified and saved.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "EchoSync connection test failed.")
+      await load()
+    } finally {
+      setEchoTesting(false)
+    }
+  }
+
+  const testSavedEchoConnection = async () => {
+    setEchoRowTesting(true)
+    try {
+      const result = await api<{ provider?: CarrierProviderStatus; message?: string }>("/api/shipping-providers/echosync/test", { method: "POST", body: "{}" })
+      if (result.provider) setProviders((current) => ({ ...current, echosync: result.provider as CarrierProviderStatus }))
+      toast.success(result.message || "EchoSync connection verified.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "EchoSync connection test failed.")
+      await load()
+    } finally {
+      setEchoRowTesting(false)
+    }
+  }
+
   return <>
     <Card>
       <CardHeader>
@@ -348,6 +421,19 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
               <Button type="button" size="sm" variant="outline" disabled={!canManage || !usps?.configured || uspsRowTesting} onClick={() => void testSavedUspsConnection()}>{uspsRowTesting ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Test</Button>
               <Button type="button" size="sm" disabled={!canManage} onClick={() => openUspsDialog()}><Settings2 className="size-4" /> Configure</Button>
               <Button type="button" size="sm" variant="outline" asChild><a href="https://developers.usps.com/" target="_blank" rel="noreferrer">USPS portal <ExternalLink className="size-4" /></a></Button>
+            </div>
+          </div>
+          <div className="grid gap-3 p-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2"><p className="font-semibold">EchoSync Freight</p><Badge variant={echo?.configured ? "default" : "outline"}>{echo?.configured ? "Configured" : "Not configured"}</Badge><Badge variant="secondary">Production</Badge>{echo?.lastTestStatus === "verified" ? <Badge variant="outline" className="border-emerald-500/50 text-emerald-700 dark:text-emerald-300"><CheckCircle2 className="size-3" /> Verified</Badge> : null}</div>
+              <p className="mt-1 text-sm text-muted-foreground">Freight quoting, Echo shipment tracking, signed status webhooks, and optional carrier-side available-load matching. Shipper, Pricing, and Carrier credentials remain separate because Echo grants them independently.</p>
+              <p className="mt-1 text-xs text-muted-foreground">{echo?.lastTestedAt ? `Last tested ${dateLabel(echo.lastTestedAt)}${echo.lastTestMessage ? `: ${echo.lastTestMessage}` : ""}` : "Connection has not been tested."}</p>
+              {echo?.configured ? <div className="mt-3 grid gap-2 rounded-md border bg-muted/20 p-3 text-sm sm:grid-cols-2 lg:grid-cols-3">{(echo.capabilities || []).map((capability) => <div key={capability.id} className="rounded border bg-background p-2"><div className="flex items-center justify-between gap-2"><p className="font-medium">{capability.label}</p><Badge variant={capability.status === "ready" ? "outline" : "secondary"}>{capability.status.replaceAll("_", " ")}</Badge></div><p className="mt-1 text-xs text-muted-foreground">{capability.detail}</p></div>)}</div> : null}
+            </div>
+            <div className="flex flex-wrap gap-2 lg:justify-end">
+              <Button type="button" size="sm" variant="outline" disabled={!canManage || !echo?.configured || echoRowTesting} onClick={() => void testSavedEchoConnection()}>{echoRowTesting ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Test</Button>
+              <Button type="button" size="sm" disabled={!canManage} onClick={openEchoDialog}><Settings2 className="size-4" /> Configure</Button>
+              <Button type="button" size="sm" variant="outline" asChild><a href="https://www.echo.com/technology/integrations/echosync/documentation/" target="_blank" rel="noreferrer">EchoSync docs <ExternalLink className="size-4" /></a></Button>
             </div>
           </div>
           {plannedProviderOrder.map((id) => {
@@ -430,6 +516,35 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
           <div className="flex gap-2 rounded-md border bg-muted/25 p-3 text-xs text-muted-foreground sm:col-span-2"><LockKeyhole className="mt-0.5 size-4 shrink-0" /><p>The Consumer Secret and generated webhook signing secret stay in restricted server storage. USPS label purchase remains unavailable until USPS separately approves USPS Ship, Payments, and the Enterprise Payment Account.</p></div>
         </div>
         <DialogFooter className="gap-2 sm:gap-0"><Button type="button" variant="outline" disabled={uspsSaving || uspsTesting} onClick={() => setUspsDialogOpen(false)}>Cancel</Button><Button type="button" variant="outline" disabled={!canSubmitUsps || uspsSaving || uspsTesting} onClick={() => void saveUspsCredentials()}>{uspsSaving && !uspsTesting ? <Loader2 className="size-4 animate-spin" /> : null} Save</Button><Button type="button" disabled={!canSubmitUsps || uspsSaving || uspsTesting} onClick={() => void verifyAndSaveUsps()}>{uspsTesting ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Verify and save</Button></DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <Dialog open={echoDialogOpen} onOpenChange={(open) => { if (!echoSaving && !echoTesting) setEchoDialogOpen(open) }}>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-3xl">
+        <DialogHeader><DialogTitle>Configure EchoSync Freight</DialogTitle><DialogDescription>Connect only the EchoSync services assigned to your account. Shipper credentials handle LTL rates and tracking, Pricing OAuth handles truckload quotes, and Carrier OAuth is optional for capacity matching.</DialogDescription></DialogHeader>
+        <div className="grid gap-5 py-1">
+          <div className="grid gap-3 rounded-md border p-4 sm:grid-cols-2">
+            <div className="sm:col-span-2"><p className="text-sm font-semibold">Shipper API</p><p className="text-xs text-muted-foreground">Required for negotiated LTL rates and shipment status or tracking by Echo Shipment ID.</p></div>
+            <CredentialField label="Shipper UserName (ENumber)"><Input value={echoDraft.shipperUsername} onChange={(event) => setEchoDraft((current) => ({ ...current, shipperUsername: event.target.value }))} autoComplete="off" placeholder="Echo ENumber" /></CredentialField>
+            <CredentialField label="Shipper API Key" hint={echo?.shipperConfigured ? "An API key is saved. Leave blank to keep it." : "Provided by your Echo account team."}><Input type="password" value={echoDraft.shipperApiKey} onChange={(event) => setEchoDraft((current) => ({ ...current, shipperApiKey: event.target.value }))} autoComplete="new-password" placeholder={echo?.shipperConfigured ? "Saved, enter only to replace" : "Echo Shipper API Key"} /></CredentialField>
+          </div>
+          <div className="grid gap-3 rounded-md border p-4 sm:grid-cols-2">
+            <div className="sm:col-span-2"><p className="text-sm font-semibold">Pricing API OAuth</p><p className="text-xs text-muted-foreground">Uses the quotes:create scope for truckload and partial-load quote generation.</p></div>
+            <CredentialField label="Pricing Client ID"><Input value={echoDraft.pricingClientId} onChange={(event) => setEchoDraft((current) => ({ ...current, pricingClientId: event.target.value }))} autoComplete="off" placeholder="Pricing Client ID" /></CredentialField>
+            <CredentialField label="Pricing Client Secret" hint={echo?.pricingConfigured ? "A secret is saved. Leave blank to keep it." : undefined}><Input type="password" value={echoDraft.pricingClientSecret} onChange={(event) => setEchoDraft((current) => ({ ...current, pricingClientSecret: event.target.value }))} autoComplete="new-password" placeholder={echo?.pricingConfigured ? "Saved, enter only to replace" : "Pricing Client Secret"} /></CredentialField>
+          </div>
+          <div className="grid gap-3 rounded-md border p-4 sm:grid-cols-2">
+            <div className="sm:col-span-2"><p className="text-sm font-semibold">Carrier API OAuth, optional</p><p className="text-xs text-muted-foreground">For carrier organizations matching their capacity against Echo available loads. This uses loads:read and is not required for shipper quoting.</p></div>
+            <CredentialField label="Carrier Client ID"><Input value={echoDraft.carrierClientId} onChange={(event) => setEchoDraft((current) => ({ ...current, carrierClientId: event.target.value }))} autoComplete="off" placeholder="Carrier Client ID" /></CredentialField>
+            <CredentialField label="Carrier Client Secret" hint={echo?.carrierConfigured ? "A secret is saved. Leave blank to keep it." : undefined}><Input type="password" value={echoDraft.carrierClientSecret} onChange={(event) => setEchoDraft((current) => ({ ...current, carrierClientSecret: event.target.value }))} autoComplete="new-password" placeholder={echo?.carrierConfigured ? "Saved, enter only to replace" : "Carrier Client Secret"} /></CredentialField>
+          </div>
+          <div className="grid gap-3 rounded-md border p-4">
+            <div><p className="text-sm font-semibold">Webhook signing secret</p><p className="text-xs text-muted-foreground">Create a strong secret and give the same value to Echo during webhook registration. Echo sends events to <span className="font-mono">/api/webhooks/echosync</span> with an X-Echo-Hmac-SHA256 signature.</p></div>
+            <CredentialField label="Signing secret" hint={echo?.webhookConfigured ? "A signing secret is saved. Leave blank to keep it." : "Optional until Echo registers the endpoint, but required before events are accepted."}><Input type="password" value={echoDraft.webhookSigningSecret} onChange={(event) => setEchoDraft((current) => ({ ...current, webhookSigningSecret: event.target.value }))} autoComplete="new-password" placeholder={echo?.webhookConfigured ? "Saved, enter only to replace" : "Echo webhook signing secret"} /></CredentialField>
+          </div>
+          <div className="flex gap-2 rounded-md border bg-muted/25 p-3 text-xs text-muted-foreground"><LockKeyhole className="mt-0.5 size-4 shrink-0" /><p>API keys, client secrets, access tokens, and webhook secrets stay in restricted server storage. The browser receives only configuration status and non-secret IDs.</p></div>
+        </div>
+        <DialogFooter className="gap-2 sm:gap-0"><Button type="button" variant="outline" disabled={echoSaving || echoTesting} onClick={() => setEchoDialogOpen(false)}>Cancel</Button><Button type="button" variant="outline" disabled={!canSubmitEcho || echoSaving || echoTesting} onClick={() => void saveEchoCredentials()}>{echoSaving && !echoTesting ? <Loader2 className="size-4 animate-spin" /> : null} Save</Button><Button type="button" disabled={!canSubmitEcho || echoSaving || echoTesting} onClick={() => void verifyAndSaveEcho()}>{echoTesting ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Verify and save</Button></DialogFooter>
       </DialogContent>
     </Dialog>
   </>

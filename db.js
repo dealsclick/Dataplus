@@ -12885,6 +12885,22 @@ async function readOrdersByShipmentGroupId(shipmentGroupId) {
   return readOrdersByIds(result.rows.map((row) => row.order_id));
 }
 
+async function readOrdersByEchoShipmentId(shipmentId) {
+  const client = getPool();
+  const value = nullableString(shipmentId);
+  if (!client || !value) return [];
+  await initRelationalSchema();
+  const result = await client.query(`
+    select order_id
+    from order_records
+    where raw->'shipments' @> jsonb_build_array(jsonb_build_object('echoShipmentId', $1::text))
+       or raw->>'echoShipmentId' = $1
+    order by coalesce(order_date, created_at, updated_at) desc, order_id
+    limit 50
+  `, [value]);
+  return readOrdersByIds(result.rows.map((row) => row.order_id));
+}
+
 async function readOrdersByTrackingCandidates(values = [], options = {}) {
   const client = getPool();
   const candidates = [...new Set((Array.isArray(values) ? values : [])
@@ -22445,6 +22461,7 @@ module.exports = {
   readOrdersByIds,
   readOrdersByFulfillmentRouteIds,
   readOrdersByShipmentGroupId,
+  readOrdersByEchoShipmentId,
   readOrdersByTrackingCandidates,
   listFulfillmentPickRows,
   listManifestShipments,
