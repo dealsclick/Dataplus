@@ -63,6 +63,12 @@ const liveMarkSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", 
 assert.match(serverSource, /salesOrigin: isEbayLive \? "ebay_live" : "ebay"/);
 assert.match(serverSource, /inventoryOrigin: "ebay_live_committed_stock"/);
 assert.match(serverSource, /type: "ebay_live_committed_stock", source: "ebay_live_order"/);
+assert.match(serverSource, /allocation\?\.receivedInventory === true/);
+assert.match(serverSource, /recoverableCommittedQty > 0/);
+assert.match(serverSource, /listingStartDate: optionalIsoDate\(body\.listingStartDate/);
+assert.match(serverSource, /payload\.listingStartDate = new Date\(listingStartAt\)\.toISOString\(\)/);
+assert.match(serverSource, /reconcileImportedEbayLiveOrdersAtomically\(liveOrders\)/);
+assert.match(serverSource, /const importedLiveOrders = new Map\(\)/);
 assert.match(serverSource, /purchaseOrder\?\.vendorName \|\| route\.inventorySourceLabel \|\|/);
 assert.match(serverSource, /resolveOrderRoutingExceptions\(order, lineIndex, \["no_fulfillment_source", "supplier_unavailable", "supplier_assignment_required", "ebay_live_warehouse_required"\]\)/);
 const committedRouteSource = serverSource.match(/inventoryOrigin: "ebay_live_committed_stock"[\s\S]*?\}\)\);/)?.[0] || "";

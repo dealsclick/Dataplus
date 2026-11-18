@@ -135,6 +135,68 @@ test("repeat reconciliation is deterministic and does not count a shipment twice
   assert.equal(second[0].remainingUnits, 5);
 });
 
+test("eBay event ID selects the correct session and persists the order allocation", () => {
+  const sessions = [{
+    id: "session-older",
+    sessionNumber: "LS-201",
+    status: "live",
+    channel: "ebay_live",
+    channelAccountId: "ebay-primary",
+    createdAt: "2026-11-10T12:00:00.000Z",
+    items: [{ id: "older-item", sourceType: "purchase_order", upc: "0045242167234", receivedQty: 4, reservedQty: 4 }],
+  }, {
+    id: "session-event",
+    sessionNumber: "LS-202",
+    status: "live",
+    channel: "ebay_live",
+    channelAccountId: "ebay-primary",
+    channelEventId: "event-202",
+    createdAt: "2026-11-10T13:00:00.000Z",
+    items: [{ id: "event-item", sourceType: "purchase_order", sourceId: "po-202", upc: "0045242167234", receivedQty: 2, incomingQty: 1, reservedQty: 3 }],
+  }];
+  const order = {
+    id: "order-event",
+    orderNumber: "90001",
+    isEbayLive: true,
+    channelAccountId: "ebay-primary",
+    ebayLive: { eventIds: ["event-202"] },
+    items: [{ upc: "0045242167234", qty: 3, ebayLiveEventId: "event-202" }],
+  };
+
+  const result = reconcileLiveSessions(sessions, [order]);
+  assert.equal(result[0].soldUnits, 0);
+  assert.equal(result[1].soldUnits, 3);
+  assert.deepEqual(order.liveSessionIds, ["session-event"]);
+  assert.equal(order.liveSessionId, "session-event");
+  assert.equal(order.items[0].liveSessionId, "session-event");
+  assert.equal(order.items[0].liveSessionItemId, "event-item");
+  assert.equal(order.items[0].liveSessionMatchMode, "upc");
+  assert.equal(order.items[0].liveSessionAllocations[0].receivedInventoryQty, 2);
+  assert.equal(order.items[0].liveSessionAllocations[0].receivedInventory, true);
+});
+
+test("scheduled sessions do not claim earlier orders without an exact event ID", () => {
+  const order = {
+    id: "order-before",
+    isEbayLive: true,
+    channelAccountId: "ebay-primary",
+    createdAt: "2026-11-10T12:00:00.000Z",
+    items: [{ upc: "0045242167234", qty: 1 }],
+  };
+  const result = reconcileLiveSessions([{
+    id: "scheduled-session",
+    status: "ready",
+    channel: "ebay_live",
+    channelAccountId: "ebay-primary",
+    scheduledStartAt: "2026-11-10T13:00:00.000Z",
+    items: [{ sourceType: "purchase_order", upc: "0045242167234", receivedQty: 1, reservedQty: 1 }],
+  }], [order]);
+
+  assert.equal(result[0].soldUnits, 0);
+  assert.deepEqual(order.liveSessionIds, []);
+  assert.deepEqual(order.items[0].liveSessionAllocations, []);
+});
+
 test("a completed session does not absorb orders placed after it ended", () => {
   const result = reconcileLiveSessions([{
     id: "session-1",
@@ -254,4 +316,24 @@ test("readiness review does not queue an already submitted merchant SKU again", 
   assert.equal(review.session.items[0].launch.listingId, "listing-1");
   assert.equal(review.groups.length, 0);
   assert.equal(review.summary.status, "complete");
+});
+
+test("a future eBay offer remains scheduled instead of being reported live", () => {
+  const reviewed = launchReadiness({
+    id: "scheduled-session",
+    status: "ready",
+    channel: "ebay_live",
+    channelAccountId: "ebay-primary",
+    items: [{ id: "scheduled-item", productId: "product-1", manufacturerSku: "48-89-2801", reservedQty: 1 }],
+  }, [{ id: "product-1", sku: "BUS210787TRV", status: "active" }]).session;
+  reviewed.items[0].launch = { ...reviewed.items[0].launch, status: "queued", jobId: "job-scheduled" };
+  const applied = applyLaunchJob(reviewed, {
+    id: "job-scheduled",
+    status: "success",
+    liveSessionLaunchResults: [{ merchantSku: "48-89-2801", status: "scheduled", listingId: "listing-future" }],
+  });
+
+  assert.equal(applied.items[0].launch.status, "scheduled");
+  assert.equal(applied.launch.submittedItems, 1);
+  assert.equal(applied.launch.liveItems, 0);
 });

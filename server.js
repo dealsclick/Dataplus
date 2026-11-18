@@ -13080,6 +13080,16 @@ function addInventoryLedger(db, item, event = {}) {
     source: event.source || "manual",
     referenceId: event.referenceId || "",
     referenceNumber: event.referenceNumber || "",
+    sourcePurchaseOrderId: event.sourcePurchaseOrderId || "",
+    sourcePurchaseOrderNumber: event.sourcePurchaseOrderNumber || "",
+    sourceAuditId: event.sourceAuditId || "",
+    sourceAuditNumber: event.sourceAuditNumber || "",
+    liveSessionId: event.liveSessionId || "",
+    liveSessionNumber: event.liveSessionNumber || "",
+    receiptId: event.receiptId || "",
+    receiptNumber: event.receiptNumber || "",
+    inventoryPurpose: event.inventoryPurpose || "",
+    liveChannel: event.liveChannel || "",
     warehouseId: event.warehouseId || "",
     warehouseName: event.warehouseName || "",
     locationBin: event.locationBin || "",
@@ -13548,6 +13558,103 @@ function liveSessionScope(req) {
 
 function liveSessionRowsForScope(rows = [], scope = {}) {
   return (rows || []).filter((session) => liveSessionLedger.sessionBelongsToScope(session, scope));
+}
+
+function optionalIsoDate(value, label) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const timestamp = new Date(raw).getTime();
+  if (!Number.isFinite(timestamp)) throw Object.assign(new Error(`${label} must be a valid date and time.`), { statusCode: 400 });
+  return new Date(timestamp).toISOString();
+}
+
+function liveSessionScheduleInput(body = {}, current = {}) {
+  const scheduledStartAt = body.scheduledStartAt === undefined
+    ? String(current.scheduledStartAt || "")
+    : optionalIsoDate(body.scheduledStartAt, "Scheduled start");
+  const scheduledEndAt = body.scheduledEndAt === undefined
+    ? String(current.scheduledEndAt || "")
+    : optionalIsoDate(body.scheduledEndAt, "Scheduled end");
+  if (scheduledStartAt && scheduledEndAt && new Date(scheduledEndAt).getTime() <= new Date(scheduledStartAt).getTime()) {
+    throw Object.assign(new Error("Scheduled end must be after the scheduled start."), { statusCode: 400 });
+  }
+  const scheduleTimeZone = String(body.scheduleTimeZone === undefined ? current.scheduleTimeZone || "" : body.scheduleTimeZone || "").trim().slice(0, 100);
+  const channelEventId = String(body.channelEventId === undefined
+    ? current.channelEventId || current.ebayLiveEventId || current.eventId || ""
+    : body.channelEventId || "").trim().slice(0, 200);
+  return { scheduledStartAt, scheduledEndAt, scheduleTimeZone, channelEventId };
+}
+
+function stableLiveOrderKey(order = {}) {
+  return String(order.marketplaceOrderId || order.marketplaceOrderNumber || order.orderNumber || order.id || "").trim().toLowerCase();
+}
+
+function liveSessionOrderLinkSignature(order = {}) {
+  return JSON.stringify({
+    liveSessionIds: order.liveSessionIds || [],
+    lines: (Array.isArray(order.items) ? order.items : []).map((line) => ({
+      liveSessionId: line.liveSessionId || "",
+      liveSessionItemId: line.liveSessionItemId || "",
+      allocations: line.liveSessionAllocations || []
+    }))
+  });
+}
+
+async function reconcileImportedEbayLiveOrdersAtomically(incomingOrders = []) {
+  const imported = (Array.isArray(incomingOrders) ? incomingOrders : []).filter((order) => ebayLiveOrderContext(order).isLive);
+  if (!imported.length) return { orders: [], sessions: [] };
+  const allSessions = await postgres.readEntityDocumentCollectionFast("liveSessions");
+  const importedEventIds = new Set(imported.flatMap((order) => (order.ebayLive?.eventIds || []).map((value) => String(value || "").trim().toLowerCase())).filter(Boolean));
+  const importedTimestamps = imported.map((order) => new Date(order.orderDate || order.orderedAt || order.createdAt || 0).getTime()).filter((value) => Number.isFinite(value) && value > 0);
+  const earliestImportedAt = importedTimestamps.length ? Math.min(...importedTimestamps) : Date.now() - 31 * 86400000;
+  const scopedSessions = liveSessionRowsForScope(allSessions, { legacy: true }).filter((session) => {
+    const status = String(session.status || "draft").toLowerCase();
+    if (["ready", "live"].includes(status)) return true;
+    const sessionEvents = liveSessionLedger.eventIdsForSession(session);
+    if (sessionEvents.some((eventId) => importedEventIds.has(eventId))) return true;
+    const endedAt = new Date(session.completedAt || session.canceledAt || session.endedAt || 0).getTime();
+    return status === "completed" && Number.isFinite(endedAt) && endedAt >= earliestImportedAt - 86400000;
+  });
+  if (!scopedSessions.length) {
+    await postgres.upsertOrdersFromState(imported, { replace: false, batchSize: 250 });
+    return { orders: imported, sessions: [] };
+  }
+  const sessionStarts = scopedSessions
+    .map((session) => new Date(session.scheduledStartAt || session.startedAt || session.createdAt || 0).getTime())
+    .filter((timestamp) => Number.isFinite(timestamp) && timestamp > 0);
+  const earliest = sessionStarts.length ? Math.min(...sessionStarts) : Date.now() - 31 * 86400000;
+  const dateFrom = new Date(earliest - 86400000).toISOString().slice(0, 10);
+  const existing = await postgres.listOrders({ channel: "ebay_live", dateFrom, includeOpenWork: true, limit: 50000 });
+  const ordersByKey = new Map();
+  for (const order of existing || []) ordersByKey.set(stableLiveOrderKey(order), order);
+  const priorLinkSignatures = new Map([...ordersByKey.entries()].map(([key, order]) => [key, liveSessionOrderLinkSignature(order)]));
+  const importedKeys = new Set(imported.map(stableLiveOrderKey));
+  for (const incoming of imported) {
+    const key = stableLiveOrderKey(incoming);
+    const previous = ordersByKey.get(key);
+    const merged = previous
+      ? preserveEbayLiveOrderIdentity({ ...previous, ...incoming, id: previous.id || incoming.id, items: incoming.items }, previous)
+      : incoming;
+    Object.assign(incoming, merged);
+    ordersByKey.set(key, incoming);
+  }
+  const reconciledOrders = [...ordersByKey.values()];
+  const mutation = await postgres.mutateLiveSessionsAtomically((sessions) => {
+    const scopedIds = new Set(scopedSessions.map((session) => String(session.id || "")));
+    const scoped = sessions.filter((session) => scopedIds.has(String(session.id || "")));
+    const reconciled = liveSessionLedger.reconcileLiveSessions(scoped, reconciledOrders);
+    const byId = new Map(reconciled.map((session) => [String(session.id || ""), session]));
+    const changedOrders = reconciledOrders.filter((order) => {
+      const key = stableLiveOrderKey(order);
+      return importedKeys.has(key) || priorLinkSignatures.get(key) !== liveSessionOrderLinkSignature(order);
+    });
+    return {
+      sessions: sessions.map((session) => byId.get(String(session.id || "")) || session),
+      orders: changedOrders,
+      result: { sessions: reconciled, orders: reconciledOrders }
+    };
+  });
+  return mutation?.result || { orders: reconciledOrders, sessions: [] };
 }
 
 function liveSessionRequestQuantities(body = {}) {
@@ -24537,6 +24644,8 @@ async function queueEbayListingLaunchJob(db, body = {}, options = {}) {
     sourceAuditId: String(body.sourceAuditId || ""),
     sourceLiveSessionId: String(body.sourceLiveSessionId || ""),
     sourceLiveSessionNumber: String(body.sourceLiveSessionNumber || ""),
+    sourceLiveEventId: String(body.sourceLiveEventId || ""),
+    listingStartDate: optionalIsoDate(body.listingStartDate, "eBay listing start"),
     categoryId: String(body.categoryId || settings.ebayDefaultCategoryId || ""),
     storeCategoryId: String(body.storeCategoryId || settings.ebayDefaultStoreCategoryId || ""),
     storeCategoryName: String(body.storeCategoryName || settings.ebayDefaultStoreCategoryName || ""),
@@ -27046,6 +27155,7 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
     } : { skipInventory: true }));
     let lastOrderFlushCount = 0;
     const systemCreatedSkus = new Set();
+    const importedLiveOrders = new Map();
     const ebayCountSummary = (counts = {}) => {
       const standard = counts.standard || {};
       const live = counts.live || {};
@@ -27069,7 +27179,11 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
           await hydrateOrdersLocalCosts(group.orders);
           await postgres.upsertOrdersFromState(group.orders, { replace: false, batchSize: 250 });
           if (!payload.historicalBackfill) await reconcilePersistedTerminalOrders(group.orders, { user: group.actor });
-          if (!payload.historicalBackfill) await queuePaidOrderRoutingCandidates(group.orders.map((order) => order.id), { immediate: true, source: group.source, sourceJobId: job.id });
+          if (!payload.historicalBackfill && group.source === "ebay-live-order-import") {
+            for (const order of group.orders) importedLiveOrders.set(stableLiveOrderKey(order), order);
+          } else if (!payload.historicalBackfill) {
+            await queuePaidOrderRoutingCandidates(group.orders.map((order) => order.id), { immediate: true, source: group.source, sourceJobId: job.id });
+          }
         }
         clearOrderApiCache();
         invalidateFulfillmentConsoleSnapshot(importableOrders.map((order) => order.id));
@@ -27125,6 +27239,11 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
         });
       }
     });
+    if (!payload.historicalBackfill && importedLiveOrders.size) {
+      const liveOrders = [...importedLiveOrders.values()];
+      await reconcileImportedEbayLiveOrdersAtomically(liveOrders);
+      await queuePaidOrderRoutingCandidates(liveOrders.map((order) => order.id), { immediate: true, source: "ebay-live-order-import", sourceJobId: job.id });
+    }
     const statusSweep = payload.historicalBackfill ? { checked: 0, updated: 0, fulfilled: 0, errors: [] }
       : await reconcileEbayOrderStatusCandidates(workDb, payload.statusCandidateOrderIds, { jobId: job.id });
     if (!payload.historicalBackfill) await drainFulfillmentConsoleProjectionPatches();
@@ -28019,7 +28138,9 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
             launched += 1;
             const promotionWarning = result.config?.promotionStatus === "failed" ? `Promoted Listings: ${result.config?.promotionError || "enrollment failed"}` : "";
             if (promotionWarning) warningIssues.push(standardImportError({ sku, supplier, field: "promoted_listing", issue: "eBay listing published without promotion", details: promotionWarning }));
-            results.push({ ...resultBase, status: result.config?.listingId ? "live" : "offer", offer_id: result.config?.offerId || "", listing_id: result.config?.listingId || "", listing_url: result.config?.listingUrl || "", price: result.config?.price || readiness.price, quantity: result.config?.quantity || readiness.quantity, catalog_match: result.config?.catalogMatch?.status || "", ebay_product_id: result.config?.ePid || "", catalog_match_method: result.config?.catalogMatch?.matchedBy || "", promotion_status: result.config?.promotionStatus || resultBase.promotion_status, promotion_campaign_id: result.config?.promotionCampaignId || "", promotion_error: result.config?.promotionError || "", warning: [resultBase.warning, promotionWarning].filter(Boolean).join("; ") });
+            const scheduledListing = Number.isFinite(new Date(result.config?.listingStartDate || 0).getTime())
+              && new Date(result.config.listingStartDate).getTime() > Date.now() + 60000;
+            results.push({ ...resultBase, status: result.config?.listingId ? (scheduledListing ? "scheduled" : "live") : "offer", offer_id: result.config?.offerId || "", listing_id: result.config?.listingId || "", listing_url: result.config?.listingUrl || "", price: result.config?.price || readiness.price, quantity: result.config?.quantity || readiness.quantity, listing_start_date: result.config?.listingStartDate || "", catalog_match: result.config?.catalogMatch?.status || "", ebay_product_id: result.config?.ePid || "", catalog_match_method: result.config?.catalogMatch?.matchedBy || "", promotion_status: result.config?.promotionStatus || resultBase.promotion_status, promotion_campaign_id: result.config?.promotionCampaignId || "", promotion_error: result.config?.promotionError || "", warning: [resultBase.warning, promotionWarning].filter(Boolean).join("; ") });
           }
         }
       } catch (error) {
@@ -41723,6 +41844,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
     let remaining = openLineQuantity(line, (order.fulfillmentRoutes || []).filter((route) => route.lineIndex === lineIndex));
     if (order.shipmentCorrection?.active) remaining = Math.min(remaining, Math.max(0, Number(line.qty || 0) - Number((order.fulfillmentLines || []).find((entry) => Number(entry.lineIndex) === lineIndex)?.qtyFulfilled || 0)));
     if (!remaining) continue;
+    const lineRoutingQty = remaining;
     const importedSku = String(line.sku || "").trim();
     const purchasingDismissal = activePurchaseDemandDismissal(order, lineIndex, importedSku);
     if (purchasingDismissal) {
@@ -41853,6 +41975,9 @@ async function routeOrderForFulfillment(db, order, body = {}) {
           listingSku: line.marketplaceSku || line.originalSku || importedSku,
           supplierPriority: candidate.priority,
           catalogIdentityMatch: candidate.identityMatch,
+          liveSessionId: line.liveSessionId || "",
+          liveSessionNumber: line.liveSessionNumber || "",
+          liveSessionItemId: line.liveSessionItemId || "",
           ...(body.sourceReceiptId ? { sourceReceiptId: body.sourceReceiptId, sourceReceiptNumber: body.sourceReceiptNumber || "" } : {}),
           reservationExpiresAt: warehouseReservationExpiryAt(systemSettings)
         }));
@@ -41863,13 +41988,18 @@ async function routeOrderForFulfillment(db, order, body = {}) {
             ? (plan.matchedRule ? `Matched routing rule ${plan.matchedRule.name}.` : "Selected by channel warehouse priority and available stock.")
             : `Used related managed SKU ${candidate.product.sku} because it has physical stock for the same product identity.`
         });
-        addInventoryLedger(db, candidate.product, { type: "workflow_reservation", source: "order_workflow", referenceId: order.id, referenceNumber: order.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name, quantityChange: 0, reservedChange: inventoryQty, reason: `Workflow allocation for ${order.orderNumber}: ${qty} sell unit${qty === 1 ? "" : "s"} (${inventoryQty} piece${inventoryQty === 1 ? "" : "s"}) from related SKU ${candidate.product.sku}`, user: body.user || "System" });
+        addInventoryLedger(db, candidate.product, { type: "workflow_reservation", source: "order_workflow", referenceId: order.id, referenceNumber: order.orderNumber, liveSessionId: line.liveSessionId || "", liveSessionNumber: line.liveSessionNumber || "", warehouseId: warehouse.id, warehouseName: warehouse.name, quantityChange: 0, reservedChange: inventoryQty, reason: `Workflow allocation for ${order.orderNumber}: ${qty} sell unit${qty === 1 ? "" : "s"} (${inventoryQty} piece${inventoryQty === 1 ? "" : "s"}) from related SKU ${candidate.product.sku}`, user: body.user || "System" });
         remaining -= qty;
         warehouseAllocated += qty;
       }
       if (!warehouseAllocated) explanation.decisions.push({ warehouseId: warehouse.id, warehouseName: warehouse.name, status: "skipped", reason: `No unreserved physical quantity across ${familyProducts.length} related managed SKU${familyProducts.length === 1 ? "" : "s"}.` });
     }
-    if (remaining > 0 && product && ebayLiveOrderUsesCommittedStock(order, line)) {
+    const receivedSessionAllocations = (Array.isArray(line.liveSessionAllocations) ? line.liveSessionAllocations : [])
+      .filter((allocation) => allocation?.receivedInventory === true && Number(allocation.receivedInventoryQty || 0) > 0);
+    const receivedSessionQty = receivedSessionAllocations.reduce((sum, allocation) => sum + Number(allocation.receivedInventoryQty || 0), 0);
+    const alreadyAllocatedQty = Math.max(0, lineRoutingQty - remaining);
+    const recoverableCommittedQty = Math.max(0, receivedSessionQty - alreadyAllocatedQty);
+    if (remaining > 0 && product && ebayLiveOrderUsesCommittedStock(order, line) && recoverableCommittedQty > 0) {
       const warehouse = warehouses[0] || null;
       if (!warehouse) {
         const message = "Choose an active physical warehouse for this eBay Live sold item.";
@@ -41880,7 +42010,9 @@ async function routeOrderForFulfillment(db, order, body = {}) {
         });
         continue;
       }
-      const inventoryQty = remaining * inventoryMultiplier;
+      const committedQty = Math.min(remaining, recoverableCommittedQty);
+      const inventoryQty = committedQty * inventoryMultiplier;
+      const primaryAllocation = receivedSessionAllocations[0] || {};
       const stock = ensureInventoryWarehouseStock(product, warehouse);
       const qtyBefore = Number(stock.qty || 0);
       const reservedBefore = Number(stock.reserved || 0);
@@ -41892,9 +42024,15 @@ async function routeOrderForFulfillment(db, order, body = {}) {
       touchedProducts.push(product);
       created.push(createWorkflowRoute(order, {
         type: "warehouse", status: "allocated", lineIndex, sku: line.sku, title: line.title || line.sku,
-        qty: remaining, inventoryQty, inventoryMultiplier,
+        qty: committedQty, inventoryQty, inventoryMultiplier,
         warehouseId: warehouse.id, warehouseName: warehouse.name, productId: product.id,
         inventoryOrigin: "ebay_live_committed_stock", inventorySourceLabel: "eBay Live committed stock",
+        liveSessionId: primaryAllocation.liveSessionId || line.liveSessionId || "",
+        liveSessionNumber: primaryAllocation.liveSessionNumber || line.liveSessionNumber || "",
+        sourcePurchaseOrderId: primaryAllocation.sourcePurchaseOrderId || "",
+        sourcePurchaseOrderNumber: primaryAllocation.sourcePurchaseOrderNumber || "",
+        sourceAuditId: primaryAllocation.sourceAuditId || "",
+        sourceAuditNumber: primaryAllocation.sourceAuditNumber || "",
         ebayLiveEventId: line.ebayLiveEventId || line.ebayLiveContext?.eventId || order.ebayLive?.eventIds?.[0] || ""
       }));
       order.fulfillmentWarehouseId = order.fulfillmentWarehouseId || warehouse.id;
@@ -41902,17 +42040,24 @@ async function routeOrderForFulfillment(db, order, body = {}) {
       addInventoryLedger(db, product, {
         type: "ebay_live_committed_stock", source: "ebay_live_order", referenceId: order.id,
         referenceNumber: order.orderNumber, warehouseId: warehouse.id, warehouseName: warehouse.name,
+        liveSessionId: primaryAllocation.liveSessionId || line.liveSessionId || "",
+        liveSessionNumber: primaryAllocation.liveSessionNumber || line.liveSessionNumber || "",
+        sourcePurchaseOrderId: primaryAllocation.sourcePurchaseOrderId || "",
+        sourcePurchaseOrderNumber: primaryAllocation.sourcePurchaseOrderNumber || "",
+        sourceAuditId: primaryAllocation.sourceAuditId || "",
+        sourceAuditNumber: primaryAllocation.sourceAuditNumber || "",
+        inventoryPurpose: "live_selling", liveChannel: "ebay_live",
         qtyBefore, qtyAfter: stock.qty, reservedBefore, reservedAfter: stock.reserved,
         quantityChange: inventoryQty, reservedChange: inventoryQty,
-        reason: `Recognized and reserved ${inventoryQty} physical piece${inventoryQty === 1 ? "" : "s"} sold through eBay Live. Original supplier provenance is not required for fulfillment.`,
+        reason: `Recovered and reserved ${inventoryQty} received physical piece${inventoryQty === 1 ? "" : "s"} from ${primaryAllocation.liveSessionNumber || "the matched live session"} for this eBay Live order.`,
         user: body.user || "System"
       });
       explanation.decisions.push({
         warehouseId: warehouse.id, warehouseName: warehouse.name, status: "routed", routeType: "warehouse",
-        qty: remaining, reason: "The eBay Live sale confirms this physical item exists; recognized as event-committed warehouse stock."
+        qty: committedQty, reason: `Matched received inventory reserved by ${primaryAllocation.liveSessionNumber || "the live session"}; recovered it into warehouse stock and assigned it to this order.`
       });
       resolveOrderRoutingExceptions(order, lineIndex, ["no_fulfillment_source", "supplier_unavailable", "supplier_assignment_required", "ebay_live_warehouse_required"]);
-      remaining = 0;
+      remaining -= committedQty;
     }
     if (remaining > 0 && plan.shadowWarehouseId) {
       const shadowWarehouse = (db.warehouses || []).find((warehouse) => String(warehouse.id || "") === plan.shadowWarehouseId);
@@ -45471,6 +45616,7 @@ function ebayListingConfig(db, item, body = {}) {
     quantity,
     quantityOverride,
     merchantSku: String((body.merchantSku ?? productSettings.ebayMerchantSku ?? saved.merchantSku ?? item.sku ?? "")).trim(),
+    listingStartDate: optionalIsoDate(body.listingStartDate ?? saved.listingStartDate, "eBay listing start"),
     identifierType,
     identifierValue,
     identifierUnavailable,
@@ -47875,6 +48021,8 @@ function ebayOfferPayload(item, config) {
     },
     listingDuration: "GTC"
   };
+  const listingStartAt = new Date(config.listingStartDate || 0).getTime();
+  if (Number.isFinite(listingStartAt) && listingStartAt > Date.now() + 60000) payload.listingStartDate = new Date(listingStartAt).toISOString();
   if (config.matchEbayCatalog !== false && config.ePid) payload.includeCatalogProductDetails = true;
   return payload;
 }
@@ -48392,6 +48540,9 @@ function mapEbayOrder(order, db = {}, fulfillments = []) {
     source: "eBay",
     salesOrigin: isEbayLive ? "ebay_live" : "ebay",
     isEbayLive,
+    channelAccountId: "ebay-primary",
+    channelAccountName: String(order.sellerId || "Connected eBay seller account"),
+    channelEventId: liveEventIds[0] || "",
     ebayLive: {
       isLive: isEbayLive,
       eventIds: liveEventIds,
@@ -48447,6 +48598,9 @@ function mapEbayOrder(order, db = {}, fulfillments = []) {
       source: "eBay",
       salesOrigin: isEbayLive ? "ebay_live" : "ebay",
       isEbayLive,
+      accountId: "ebay-primary",
+      accountName: String(order.sellerId || "Connected eBay seller account"),
+      channelEventId: liveEventIds[0] || "",
       ebayLive: {
         eventIds: liveEventIds,
         combineShippingWindows: liveShippingWindows,
@@ -60686,6 +60840,12 @@ async function handleApi(req, res) {
     const requestedAccountId = String(body.channelAccountId || "").trim();
     const selectedAccount = requestedAccountId ? channelAccounts.find((account) => account.channel === channel && account.id === requestedAccountId) : null;
     if (requestedAccountId && !selectedAccount) return sendJson(res, 400, { error: "Choose a connected seller account for the selected live channel." });
+    let schedule;
+    try {
+      schedule = liveSessionScheduleInput(body);
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Review the live-session schedule." });
+    }
 
     if (sourceType === "extra_items") {
       if (!warehouse || !isPhysicalWarehouse(warehouse) || warehouse.allowAudits === false) {
@@ -60707,6 +60867,7 @@ async function handleApi(req, res) {
         sourceLabel: liveSessionLedger.sourceLabel(sourceType), channel,
         channelLabel: LIVE_INVENTORY_CHANNEL_LABELS[channel] || "Not assigned",
         channelAccountId: requestedAccountId, channelAccountName: selectedAccount?.name || "", channelShopId: selectedAccount?.shopId || "",
+        ...schedule,
         tenantId: scope.tenantId, companyId: scope.companyId, companyName: scope.companyName,
         warehouseId: String(warehouse.id || ""), warehouseName: String(warehouse.name || "Warehouse"),
         linkedAuditId: auditId, linkedAuditNumber: auditNumber, items: [],
@@ -60838,6 +60999,7 @@ async function handleApi(req, res) {
         parentSessionNumber: sourceType === "previous_session" ? String(parentSession?.sessionNumber || "") : "",
         channel, channelLabel: LIVE_INVENTORY_CHANNEL_LABELS[channel] || "Not assigned",
         channelAccountId: requestedAccountId, channelAccountName: selectedAccount?.name || "", channelShopId: selectedAccount?.shopId || "",
+        ...schedule,
         tenantId: scope.tenantId, companyId: scope.companyId, companyName: scope.companyName,
         warehouseId: String(warehouse?.id || parentSession?.warehouseId || ""), warehouseName: String(warehouse?.name || parentSession?.warehouseName || "Warehouse"),
         items: allocatedItems, notes: String(body.notes || "").trim().slice(0, 2000), createdAt: now, createdBy: actor, updatedAt: now
@@ -60950,6 +61112,8 @@ async function handleApi(req, res) {
           quantity: group.quantity,
           liveSessionId: plan.session.id,
           liveSessionNumber: plan.session.sessionNumber,
+          channelEventId: plan.session.channelEventId || "",
+          listingStartDate: plan.session.scheduledStartAt || "",
           liveSessionItemIds: group.itemIds
         }));
         queued = await queueEbayListingLaunchJob(db, {
@@ -60957,6 +61121,8 @@ async function handleApi(req, res) {
           shadowLaunches,
           sourceLiveSessionId: plan.session.id,
           sourceLiveSessionNumber: plan.session.sessionNumber,
+          sourceLiveEventId: plan.session.channelEventId || "",
+          listingStartDate: plan.session.scheduledStartAt || "",
           lifecycleAction: "launch",
           publish: true,
           batchSize: Math.min(1000, Math.max(25, groups.length))
@@ -61030,12 +61196,14 @@ async function handleApi(req, res) {
       const accountId = body.channelAccountId === undefined ? String(target.channelAccountId || "") : String(body.channelAccountId || "");
       const account = accountId ? accounts.find((entry) => entry.channel === channel && entry.id === accountId) : null;
       if (accountId && !account) throw Object.assign(new Error("Choose a connected seller account for the selected live channel."), { statusCode: 400 });
+      const schedule = liveSessionScheduleInput(body, target);
       const next = liveSessionLedger.sessionTotals({
         ...target,
         title: body.title === undefined ? target.title : String(body.title || "").trim().slice(0, 160),
         notes: body.notes === undefined ? target.notes : String(body.notes || "").trim().slice(0, 2000),
         channel, channelLabel: LIVE_INVENTORY_CHANNEL_LABELS[channel] || "Not assigned",
         channelAccountId: accountId, channelAccountName: account?.name || "", channelShopId: account?.shopId || "",
+        ...schedule,
         updatedAt: new Date().toISOString()
       });
       return { sessions: sessions.map((session) => String(session.id) === String(target.id) ? next : session), result: { session: next } };
@@ -61077,7 +61245,7 @@ async function handleApi(req, res) {
         const reconciled = liveSessionLedger.reconcileLiveSessions(scoped, liveOrders || []);
         const byId = new Map(reconciled.map((session) => [String(session.id), { ...session, updatedAt: now }]));
         const nextRows = sessions.map((session) => byId.get(String(session.id)) || session);
-        return { sessions: nextRows, result: { session: byId.get(String(target.id)), ordersChecked: (liveOrders || []).length } };
+        return { sessions: nextRows, orders: liveOrders || [], result: { session: byId.get(String(target.id)), ordersChecked: (liveOrders || []).length } };
       }
       if (liveSessionLedger.sessionIsTerminal(target)) throw Object.assign(new Error("This live session is already closed."), { statusCode: 409 });
       if (action === "accept_available") {
@@ -61125,7 +61293,11 @@ async function handleApi(req, res) {
         }) : target.items,
         updatedAt: now
       });
-      return { sessions: workingSessions.map((session) => String(session.id) === String(target.id) ? next : session), result: { session: next, ordersChecked: action === "complete" ? (liveOrders || []).length : 0 } };
+      return {
+        sessions: workingSessions.map((session) => String(session.id) === String(target.id) ? next : session),
+        orders: action === "complete" ? liveOrders || [] : [],
+        result: { session: next, ordersChecked: action === "complete" ? (liveOrders || []).length : 0 }
+      };
     });
     const updated = mutation?.result?.session;
     return sendJson(res, 200, {

@@ -3365,6 +3365,9 @@ async function mutateLiveSessionsAtomically(mutator) {
     if (outcome?.warehouseAudit && nullableString(outcome.warehouseAudit.id)) {
       await replaceWarehouseAudits([outcome.warehouseAudit], { client, preserveOthers: true });
     }
+    if (Array.isArray(outcome?.orders) && outcome.orders.length) {
+      await upsertOrdersFromState(outcome.orders, { client, replace: false, batchSize: 250 });
+    }
     await client.query("delete from state_documents where doc_key = 'liveSessions'");
     await client.query("commit");
     return {
