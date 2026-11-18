@@ -33196,7 +33196,19 @@ async function quoteCompanyEcho(input = {}) {
     UnitOfWeight: "LB",
     Items: [{ NmfcClass: freightClass, Weight: weight }],
   };
-  const response = await echoSync.quoteLtl(payload, carrierCredentials.getEchoSync());
+  let response;
+  try {
+    response = await echoSync.quoteLtl(payload, carrierCredentials.getEchoSync());
+    const current = carrierCredentials.getEchoSync();
+    if (current.lastTestStatus !== "verified") {
+      carrierCredentials.recordEchoSyncTest({ ok: true, message: "EchoSync Shipper API accepted the saved credentials during an LTL quote." });
+    }
+  } catch (error) {
+    if (error.statusCode === 401 || error.statusCode === 403) {
+      carrierCredentials.recordEchoSyncTest({ ok: false, message: error.message || "EchoSync Shipper API rejected the saved credentials." });
+    }
+    throw error;
+  }
   const rows = Array.isArray(response?.Rates) ? response.Rates : Array.isArray(response?.rates) ? response.rates : [];
   return {
     rates: rows.map((rate) => ({
@@ -57227,7 +57239,9 @@ async function handleApi(req, res) {
 
   const isNotificationRequest = url.pathname === "/api/notifications" || url.pathname.startsWith("/api/notifications/");
   const isCollaborationRequest = isNotificationRequest || url.pathname === "/api/mentions" || url.pathname.startsWith("/api/mentions/") || (req.method === "POST" && url.pathname === "/api/activity");
-  const isSharedSystemRequest = url.pathname === "/api/system/releases" || url.pathname.startsWith("/api/system/extensions");
+  const isSharedSystemRequest = url.pathname === "/api/system/releases"
+    || url.pathname.startsWith("/api/system/extensions")
+    || (req.method === "GET" && url.pathname === "/api/shipping-providers");
   if (!changingOwnPassword && !isCollaborationRequest && !isSharedSystemRequest && await companyOperationsHandler(req,res,url,authUser)) return;
   if (!changingOwnPassword && !isSharedSystemRequest && (postgres.isPostgresEnabled() || companySelection(req))) {
     try {
@@ -73703,8 +73717,8 @@ async function handleApi(req, res) {
 
   if (url.pathname === "/api/shipping-providers" && req.method === "GET") {
     const scope = notificationScope(req);
-    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
-      return sendJson(res, 409, { error: "Direct carrier credentials are available only for LINQ while company isolation is completed." });
+    if (scope.tenantId !== LEGACY_TENANT) {
+      return sendJson(res, 409, { error: "Direct carrier credentials are not configured for this organization." });
     }
     return sendJson(res, 200, {
       providers: {

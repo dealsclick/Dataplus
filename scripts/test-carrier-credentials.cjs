@@ -80,10 +80,20 @@ async function run() {
   assert.equal(upsRating.config({}, credentials.getUps()).baseUrl, "https://wwwcie.ups.com");
   assert.equal(upsRating.config({ UPS_TEST_MODE: "true", UPS_CLIENT_ID: "legacy", UPS_CLIENT_SECRET: "secret", UPS_ACCOUNT_NUMBER: "ABC123" }).configured, true);
 
+  credentials.saveEchoSync({ shipperUsername: "E123", shipperApiKey: "echo-key" });
+  credentials.recordEchoSyncTest({ ok: true, message: "Verified." });
+  assert.equal(credentials.getEchoSync().lastTestStatus, "verified");
+  credentials.saveEchoSync({ shipperUsername: "E123", shipperApiKey: "echo-key" });
+  assert.equal(credentials.getEchoSync().lastTestStatus, "verified");
+  credentials.saveEchoSync({ shipperUsername: "E456", shipperApiKey: "new-key" });
+  assert.equal(credentials.getEchoSync().lastTestStatus, "");
+  assert.equal(credentials.getEchoSync().lastVerifiedAt, "");
+
   const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
   const ui = fs.readFileSync(path.join(__dirname, "..", "web", "src", "components", "carrier-provider-settings.tsx"), "utf8");
   assert.match(server, /\/api\/shipping-providers\/ups\/credentials/);
   assert.match(server, /\/api\/shipping-providers\/ups\/test/);
+  assert.match(server, /req\.method === "GET" && url\.pathname === "\/api\/shipping-providers"/);
   assert.match(server, /method === "GET" \? "settings" : "settings\.security"/);
   assert.match(ui, /Verify and save/);
   assert.match(ui, /UPS-reported scopes/);

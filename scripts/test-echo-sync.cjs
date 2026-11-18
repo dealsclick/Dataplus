@@ -10,6 +10,7 @@ async function run() {
   const fetchImpl = async (url, options = {}) => {
     calls.push({ url: String(url), options });
     if (String(url).endsWith("/token")) return response({ access_token: "token-1", token_type: "Bearer", expires_in: 86400, scope: new URLSearchParams(options.body).get("scope") });
+    if (String(url).endsWith("/v2/shipments/statuses")) return response({ message: "Shipment IDs are required." }, 400);
     if (String(url).includes("/v2/availableloads")) return response({ resultSet: { total: 1 }, loads: [{ loadId: 123 }] });
     if (String(url).endsWith("/v2/rates")) return response({ rates: [{ carrier: "Test Freight", total: 100 }] });
     if (String(url).endsWith("/tracking")) return response({ events: [{ status: "In transit" }] });
@@ -27,6 +28,15 @@ async function run() {
   await echoSync.quoteLtl({ originZip: "10314" }, { shipperUsername: "E123", shipperApiKey: "shipper-key" }, runtime);
   assert.match(calls.at(-1).options.headers.Authorization, /^Basic /);
   assert.match(calls.at(-1).url, /\/v2\/rates$/);
+
+  const verified = await echoSync.verifyCredentials({ shipperUsername: "E123", shipperApiKey: "shipper-key" }, runtime);
+  assert.deepEqual(verified.checks, ["Shipper API authentication"]);
+  assert.match(calls.at(-1).url, /\/v2\/shipments\/statuses$/);
+
+  await assert.rejects(
+    () => echoSync.verifyShipperCredentials({ shipperUsername: "wrong", shipperApiKey: "wrong" }, { ...runtime, fetchImpl: async () => response({}, 401) }),
+    /Echo ENumber/,
+  );
 
   await echoSync.quoteFreight({ mode: "TL" }, { pricingClientId: "pricing-client-test", pricingClientSecret: "pricing-secret" }, runtime);
   assert.equal(new URLSearchParams(calls.find((call) => call.url.endsWith("/token")).options.body).get("scope"), "quotes:create");
