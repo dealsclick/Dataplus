@@ -380,15 +380,15 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
     }
   }
 
-  return <>
-    <Card>
+  return <div className="grid min-w-0 max-w-full gap-4 overflow-x-clip">
+    <Card className="min-w-0 overflow-hidden">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base"><Truck className="size-4" /> Direct carrier accounts</CardTitle>
         <CardDescription>Credentials stay on the server and are never returned to the browser. UPS, USPS, and EchoSync Freight accounts can be shared with selected companies below.</CardDescription>
       </CardHeader>
       <CardContent className="p-0">
         {loading ? <div className="flex items-center gap-2 border-t p-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading carrier connections...</div> : <div className="divide-y border-t">
-          <div className="grid gap-3 p-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+          <div className="grid min-w-0 gap-3 p-4 2xl:grid-cols-[minmax(0,1fr)_auto] 2xl:items-center">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2"><p className="font-semibold">UPS</p><Badge variant={ups?.configured ? "default" : "outline"}>{ups?.configured ? "Configured" : "Not configured"}</Badge><Badge variant="secondary">{ups?.environment === "test" ? "Test" : "Production"}</Badge>{ups?.lastTestStatus === "verified" ? <Badge variant="outline" className="border-emerald-500/50 text-emerald-700 dark:text-emerald-300"><CheckCircle2 className="size-3" /> Verified</Badge> : null}</div>
               <p className="mt-1 text-sm text-muted-foreground">Direct negotiated rates use the UPS Rating API. UPS tracking numbers use the UPS Tracking API for carrier scans and available delivery evidence. {ups?.accountEnding ? `Billing account ending ${ups.accountEnding}.` : "Add the billing account linked to the UPS app."}</p>
@@ -401,13 +401,13 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
                 <div className="sm:col-span-3"><p className="text-xs font-medium uppercase text-muted-foreground">UPS-reported scopes</p>{ups.lastTokenScopes?.length ? <div className="mt-1 flex flex-wrap gap-1">{ups.lastTokenScopes.map((scope) => <Badge key={scope} variant="outline" className="max-w-full break-all">{scope}</Badge>)}</div> : <p className="mt-1 text-xs text-muted-foreground">UPS did not return named scopes. A valid OAuth token confirms authentication, but UPS does not include the Developer Portal subscription list in this response.</p>}</div>
               </div> : null}
             </div>
-            <div className="flex flex-wrap gap-2 lg:justify-end">
+            <div className="flex min-w-0 flex-wrap gap-2 2xl:justify-end">
               <Button type="button" size="sm" variant="outline" disabled={!canManage || !ups?.configured || rowTesting} onClick={() => void testSavedConnection()}>{rowTesting ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Test</Button>
               <Button type="button" size="sm" disabled={!canManage} onClick={() => openUpsDialog()}><Settings2 className="size-4" /> Configure</Button>
               <Button type="button" size="sm" variant="outline" asChild><a href="https://developer.ups.com/" target="_blank" rel="noreferrer">UPS portal <ExternalLink className="size-4" /></a></Button>
             </div>
           </div>
-          <div className="grid gap-3 p-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+          <div className="grid min-w-0 gap-3 p-4 2xl:grid-cols-[minmax(0,1fr)_auto] 2xl:items-center">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2"><p className="font-semibold">USPS</p><Badge variant={usps?.configured ? "default" : "outline"}>{usps?.configured ? "Configured" : "Not configured"}</Badge><Badge variant="secondary">{usps?.environment === "test" ? "Test" : "Production"}</Badge>{usps?.lastTestStatus === "verified" ? <Badge variant="outline" className="border-emerald-500/50 text-emerald-700 dark:text-emerald-300"><CheckCircle2 className="size-3" /> Verified</Badge> : null}</div>
               <p className="mt-1 text-sm text-muted-foreground">Direct USPS uses Addresses 3.0, Domestic Prices 3.0, and modern Tracking 3.2. The Consumer Key and Consumer Secret are enough for default-product APIs; postage labels require separate USPS Ship and payment approval.</p>
@@ -419,13 +419,13 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
                 <div className="sm:col-span-3"><p className="text-xs font-medium uppercase text-muted-foreground">Capabilities</p><div className="mt-2 grid gap-2 sm:grid-cols-2">{(usps.capabilities || []).map((capability) => <div key={capability.id} className="rounded border bg-background p-2"><div className="flex items-center justify-between gap-2"><p className="font-medium">{capability.label}</p><Badge variant={capability.status === "ready" || capability.status === "setup_available" || capability.status === "email_request_available" ? "outline" : "secondary"}>{capability.status.replaceAll("_", " ")}</Badge></div><p className="mt-1 text-xs text-muted-foreground">{capability.detail}</p></div>)}</div></div>
               </div> : null}
             </div>
-            <div className="flex flex-wrap gap-2 lg:justify-end">
+            <div className="flex min-w-0 flex-wrap gap-2 2xl:justify-end">
               <Button type="button" size="sm" variant="outline" disabled={!canManage || !usps?.configured || uspsRowTesting} onClick={() => void testSavedUspsConnection()}>{uspsRowTesting ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Test</Button>
               <Button type="button" size="sm" disabled={!canManage} onClick={() => openUspsDialog()}><Settings2 className="size-4" /> Configure</Button>
               <Button type="button" size="sm" variant="outline" asChild><a href="https://developers.usps.com/" target="_blank" rel="noreferrer">USPS portal <ExternalLink className="size-4" /></a></Button>
             </div>
           </div>
-          <div className="grid gap-3 p-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+          <div className="grid min-w-0 gap-3 p-4 2xl:grid-cols-[minmax(0,1fr)_auto] 2xl:items-center">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2"><p className="font-semibold">EchoSync Freight</p><Badge variant={echo?.configured ? "default" : "outline"}>{echo?.configured ? "Configured" : "Not configured"}</Badge><Badge variant="secondary">Production</Badge>{echo?.lastTestStatus === "verified" ? <Badge variant="outline" className="border-emerald-500/50 text-emerald-700 dark:text-emerald-300"><CheckCircle2 className="size-3" /> Verified</Badge> : null}</div>
               <p className="mt-1 text-sm text-muted-foreground">Freight quoting, Echo shipment tracking, signed status webhooks, and optional carrier-side available-load matching. Shipper, Pricing, and Carrier credentials remain separate because Echo grants them independently.</p>
@@ -438,7 +438,7 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
               </div> : null}
               {echo?.configured ? <div className="mt-3 grid gap-2 rounded-md border bg-muted/20 p-3 text-sm sm:grid-cols-2 lg:grid-cols-3">{(echo.capabilities || []).map((capability) => <div key={capability.id} className="rounded border bg-background p-2"><div className="flex items-center justify-between gap-2"><p className="font-medium">{capability.label}</p><Badge variant={capability.status === "ready" ? "outline" : "secondary"}>{capability.status.replaceAll("_", " ")}</Badge></div><p className="mt-1 text-xs text-muted-foreground">{capability.detail}</p></div>)}</div> : null}
             </div>
-            <div className="flex flex-wrap gap-2 lg:justify-end">
+            <div className="flex min-w-0 flex-wrap gap-2 2xl:justify-end">
               <Button type="button" size="sm" variant="outline" disabled={!canManage || !echo?.configured || echoRowTesting} onClick={() => void testSavedEchoConnection()}>{echoRowTesting ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Test</Button>
               <Button type="button" size="sm" disabled={!canManage} onClick={openEchoDialog}><Settings2 className="size-4" /> Configure</Button>
               <Button type="button" size="sm" variant="outline" asChild><a href="https://www.echo.com/technology/integrations/echosync/documentation/" target="_blank" rel="noreferrer">EchoSync docs <ExternalLink className="size-4" /></a></Button>
@@ -447,25 +447,25 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
           {plannedProviderOrder.map((id) => {
             const provider = providers[id]
             if (!provider) return null
-            return <div key={id} className="grid gap-2 p-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><div><div className="flex flex-wrap items-center gap-2"><p className="font-medium">{provider.name}</p><Badge variant="secondary">Planned</Badge></div><p className="mt-1 text-sm text-muted-foreground">{provider.message}</p></div><Button type="button" size="sm" variant="outline" disabled><LockKeyhole className="size-4" /> Coming later</Button></div>
+            return <div key={id} className="grid min-w-0 gap-2 p-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="font-medium">{provider.name}</p><Badge variant="secondary">Planned</Badge></div><p className="mt-1 break-words text-sm text-muted-foreground">{provider.message}</p></div><Button type="button" size="sm" variant="outline" disabled><LockKeyhole className="size-4" /> Coming later</Button></div>
           })}
         </div>}
       </CardContent>
     </Card>
 
-    {carrierAccess ? <Card>
+    {carrierAccess ? <Card className="min-w-0 overflow-hidden">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base"><LockKeyhole className="size-4" /> Share across companies</CardTitle>
         <CardDescription>Grant a company permission to use an organization carrier account. Credentials remain in restricted server storage and are never copied into company records.</CardDescription>
       </CardHeader>
       <CardContent className="p-0">
         <div className="divide-y border-t">
-          {carrierAccess.providers.map((provider) => <div key={provider.id} className="grid gap-3 p-4 lg:grid-cols-[minmax(160px,0.35fr)_minmax(0,1fr)] lg:items-start">
-            <div>
+          {carrierAccess.providers.map((provider) => <div key={provider.id} className="grid min-w-0 gap-3 p-4 xl:grid-cols-[minmax(160px,0.35fr)_minmax(0,1fr)] xl:items-start">
+            <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2"><p className="font-semibold">{provider.name}</p>{provider.companyRates ? <Badge variant="outline" className="border-emerald-500/50 text-emerald-700 dark:text-emerald-300">Quote rates ready</Badge> : <Badge variant="secondary">Shared access</Badge>}{provider.companyLabels ? <Badge variant="outline" className="border-blue-500/50 text-blue-700 dark:text-blue-300">Shipping labels ready</Badge> : null}</div>
               <p className="mt-1 text-xs text-muted-foreground">{provider.companyLabels ? "Enabled companies can request negotiated rates and buy labels on the shared account without accessing another company's orders." : provider.companyRates ? "Enabled companies can request negotiated rates from their company-owned quotes." : "The access grant is managed here; company quote rating is not enabled for this provider yet."}</p>
             </div>
-            <div className="grid gap-2 sm:grid-cols-2">
+            <div className="grid min-w-0 gap-2 sm:grid-cols-2">
               {provider.companies.map((company) => { const saving = sharingSaving === `${provider.id}:${company.id}`; return <label key={company.id} className="flex min-w-0 cursor-pointer items-center gap-3 rounded-md border p-3">
                 <Checkbox checked={company.enabled} disabled={Boolean(sharingSaving)} onCheckedChange={(value) => void setCompanyAccess(provider.id, company.id, value === true)} />
                 <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{company.name}</span><span className="block text-xs text-muted-foreground">{company.enabled ? "Account enabled" : "Account disabled"}</span></span>
@@ -476,12 +476,12 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
         </div>
         <div className="border-t bg-muted/15 p-4">
           <div className="mb-3"><p className="text-sm font-semibold">Company rate policy</p><p className="text-xs text-muted-foreground">Choose whether quote rate lists lead with the lowest price or an enabled preferred carrier. Saved rates expire and must be refreshed before quote acceptance.</p></div>
-          <div className="grid gap-3 lg:grid-cols-2">
+          <div className="grid min-w-0 gap-3 lg:grid-cols-2">
             {carrierAccess.companies.map((company) => {
               const preference = carrierAccess.preferences.find((row) => row.companyId === company.id) || { companyId: company.id, selectionMode: "lowest_cost" as const, preferredProviderId: "", rateTtlMinutes: 30 }
               const enabledProviders = carrierAccess.providers.filter((provider) => provider.companyRates && provider.companies.some((entry) => entry.id === company.id && entry.enabled))
               const saving = preferenceSaving === company.id
-              return <div key={company.id} className="grid gap-3 rounded-md border bg-background p-3">
+              return <div key={company.id} className="grid min-w-0 gap-3 rounded-md border bg-background p-3">
                 <div className="flex items-center justify-between gap-2"><p className="truncate text-sm font-medium">{company.name}</p>{saving ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : null}</div>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <CredentialField label="Rate selection"><Select value={preference.selectionMode} disabled={saving} onValueChange={(value) => void saveCompanyPreference(company.id, { selectionMode: value as CompanyCarrierPreference["selectionMode"] })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="lowest_cost">Lowest cost first</SelectItem><SelectItem value="preferred_carrier">Preferred carrier first</SelectItem></SelectContent></Select></CredentialField>
@@ -555,5 +555,5 @@ export function CarrierProviderSettings({ canManage }: { canManage: boolean }) {
         <DialogFooter className="gap-2 sm:gap-0"><Button type="button" variant="outline" disabled={echoSaving || echoTesting} onClick={() => setEchoDialogOpen(false)}>Cancel</Button><Button type="button" variant="outline" disabled={!canSubmitEcho || echoSaving || echoTesting} onClick={() => void saveEchoCredentials()}>{echoSaving && !echoTesting ? <Loader2 className="size-4 animate-spin" /> : null} Save</Button><Button type="button" disabled={!canSubmitEcho || echoSaving || echoTesting} onClick={() => void verifyAndSaveEcho()}>{echoTesting ? <Loader2 className="size-4 animate-spin" /> : <CheckCircle2 className="size-4" />} Verify and save</Button></DialogFooter>
       </DialogContent>
     </Dialog>
-  </>
+  </div>
 }

@@ -1012,7 +1012,7 @@ function SettingsPage({
     })
 
   return (
-    <div className="grid gap-5">
+    <div className="grid min-w-0 max-w-full gap-5 overflow-x-clip">
       <PageHeader
         eyebrow="Admin"
         title="System Settings"
@@ -1043,7 +1043,7 @@ function SettingsPage({
         </div> : <p className="mt-2 text-xs text-muted-foreground">Search by setting, provider, workflow, or integration name.</p>}
       </div>
 
-      <Tabs value={activeTab} onValueChange={selectSettingsTab}>
+      <Tabs value={activeTab} onValueChange={selectSettingsTab} className="min-w-0 max-w-full">
         {compactSettingsNav ? (
           <Field label="Settings section">
             <Select value={activeTab} onValueChange={selectSettingsTab}>
@@ -1207,7 +1207,7 @@ function SettingsPage({
             </CardContent>
           </Card>
         </TabsContent>
-        <TabsContent value="shipping" className="grid gap-4">
+        <TabsContent value="shipping" className="grid min-w-0 max-w-full gap-4 overflow-x-clip">
           <CarrierProviderSettings canManage={canManageCarrierCredentials} />
         </TabsContent>
         <TabsContent value="fulfillment" className="grid gap-4">
