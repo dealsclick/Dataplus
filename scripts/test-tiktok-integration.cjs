@@ -154,8 +154,27 @@ async function main() {
   assert.equal(tiktokMarketplaceSource.includes("orderCheckpointKey"), true, 'TikTok scheduled order sync must keep a per-shop checkpoint.');
   assert.equal(tiktokMarketplaceSource.includes("checkpointTime - 3_600_000"), true, 'TikTok scheduled order sync must retain a safety overlap.');
   assert.equal(tiktokMarketplaceSource.includes("const canAdvance = failed === 0"), true, 'TikTok order checkpoints must not advance past failed order rows.');
+  assert.equal(tiktokMarketplaceSource.includes("'/order/202507/orders'"), true, 'TikTok order imports must hydrate current full order details.');
+  assert.equal(tiktokMarketplaceSource.includes('index += 50'), true, 'TikTok order detail hydration must respect the 50-order API limit.');
+  assert.equal(tiktokMarketplaceSource.includes("document_type: 'SHIPPING_LABEL'"), true, 'TikTok label retrieval must request the required shipping document type.');
+  assert.equal(tiktokMarketplaceSource.includes("document_size: 'A6'"), true, 'TikTok shipping labels must request the warehouse A6 format.');
+  assert.equal(tiktokMarketplaceSource.includes('fulfillmentOrder, fulfillmentServices, previewPackage, createPackage, shippingDocument'), true, 'TikTok fulfillment must expose the complete order-to-label workflow.');
   assert.equal(tiktokMarketplaceSource.includes("status: Number(match?.matched || 0) > 0 ? 'linked' : 'needs_mapping'"), true, 'TikTok catalog reconciliation must expose unmatched seller SKUs for review.');
   assert.equal(tiktokMarketplaceSource.includes("action === 'setup/initial'"), true, 'TikTok must expose the initial setup endpoint.');
+  const tiktokLabelDialogSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'tiktok-shipping-label-dialog.tsx'), 'utf8');
+  assert.equal(tiktokLabelDialogSource.includes('TikTok Shipping label'), true, 'Order detail must expose TikTok label generation.');
+  assert.equal(tiktokLabelDialogSource.includes('/api/tiktok/fulfillment/services'), true, 'TikTok label generation must quote eligible services dynamically.');
+  assert.equal(tiktokLabelDialogSource.includes('/api/tiktok/fulfillment/packages/preview'), true, 'TikTok label generation must require a preview before purchase.');
+  assert.equal(tiktokLabelDialogSource.includes('/api/tiktok/fulfillment/packages/apply'), true, 'TikTok label generation must use the reviewed package purchase endpoint.');
+  assert.equal(tiktokLabelDialogSource.includes('Open and print label'), true, 'TikTok labels must be printable from the order workflow.');
+  const orderDetailSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'order-detail-route.tsx'), 'utf8');
+  assert.equal(orderDetailSource.includes('TikTokShippingLabelDialog'), true, 'TikTok orders must open the TikTok shipping label workflow.');
+  assert.equal(orderDetailSource.includes('TikTok order'), true, 'TikTok order detail must label the marketplace order number clearly.');
+  const ordersRouteSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'orders-route.tsx'), 'utf8');
+  assert.equal(ordersRouteSource.includes('TikTok {tiktokOrderNumber}'), true, 'The main order list must display the TikTok order number.');
+  const fulfillmentSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'fulfillment-route.tsx'), 'utf8');
+  assert.equal(fulfillmentSource.includes('TikTok LIVE'), true, 'Fulfillment must visibly distinguish TikTok LIVE orders.');
+  assert.equal(fulfillmentSource.includes('channelOrderNumber'), true, 'Fulfillment must display marketplace order numbers.');
   const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.equal(serverSource.includes('setTikTokOAuthRecoveryCookie(req, res, authorization.state)'), true, 'TikTok authorization must preserve its signed one-time state in the browser before redirecting to TikTok.');
   assert.equal(serverSource.includes('Restarted ${environment} seller authorization with DataPlus security state.'), false, 'A missing TikTok state must be recovered from the original signed attempt instead of starting a loop.');
@@ -176,18 +195,25 @@ async function main() {
   }), /non-seller token/);
 
   const rawOrder = {
-    id: '576000001', status: 'AWAITING_SHIPMENT', create_time: 1700000000, update_time: 1700000100,
+    id: '576000001', status: 'AWAITING_SHIPMENT', shipping_type: 'TIKTOK', fulfillment_type: 'FULFILLMENT_BY_SELLER', buyer_nickname: 'Live buyer', create_time: 1700000000, update_time: 1700000100,
     recipient_address: { name: 'Customer', address_line1: '1 Main St', post_town: 'Seattle', postal_code: '98101', region_code: 'US', district_info: [{ address_level_name: 'State', address_name: 'WA' }] },
     payment: { total_amount: '30.00', sub_total: '28.00', shipping_fee: '2.00', currency: 'USD' },
     line_items: [
-      { id: 'line-1', seller_sku: 'SKU-1', product_name: 'First', quantity: 2, sale_price: '5.00', combined_listing_skus: [{ seller_sku: 'COMPONENT-1', sku_count: 4 }] },
+      { id: 'line-1', seller_sku: 'SKU-1', product_name: 'First', quantity: 2, sale_price: '5.00', room_id: 'live-room-1', combined_listing_skus: [{ seller_sku: 'COMPONENT-1', sku_count: 4 }] },
       { id: 'line-2', seller_sku: 'SKU-2', product_name: 'Second', sale_price: '18.00' }
     ]
   };
   const order = mapTikTokOrder(rawOrder);
   assert.equal(order.items.length, 2);
   assert.equal(order.marketplaceOrderId, '576000001');
+  assert.equal(order.marketplaceOrderNumber, '576000001');
   assert.equal(order.source, 'TikTok Shop');
+  assert.equal(order.buyerNickname, 'Live buyer');
+  assert.equal(order.isTikTokLive, true);
+  assert.equal(order.salesOrigin, 'tiktok_live');
+  assert.deepEqual(order.tiktokLive.contentIds, ['live-room-1']);
+  assert.equal(order.items[0].tiktokLiveContentId, 'live-room-1');
+  assert.equal(order.external.shippingType, 'TIKTOK');
   assert.equal(order.address.postalCode, '98101');
   assert.equal(order.items[0].qty, 2);
   assert.equal(order.items[0].price, 5);
