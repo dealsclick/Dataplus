@@ -283,7 +283,9 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   assert.equal(rateResult.rates[1].amount,8.5);
   assert.equal(rateResult.addressValidation.status,'verified');
   assert.match(rateResult.providerErrors[0].message,/Veeqo test account/);
-  const withShipping=(await op(`/api/order-drafts/${created.id}`,'PATCH',{shippingEstimate:{...rateResult.rates[0],warehouseId:'',package:rateResult.package}})).response.data.draft;
+  const shippingResponse=(await op(`/api/order-drafts/${created.id}`,'PATCH',{shippingEstimate:{...rateResult.rates[0],warehouseId:'',package:rateResult.package}})).response;
+  assert.equal(shippingResponse.status,200,shippingResponse.data.error || 'Shipping estimate should save.');
+  const withShipping=shippingResponse.data.draft;
   assert.equal(withShipping.total,29);
   assert.equal(withShipping.shippingEstimate.carrier,'USPS');
   assert.ok(Date.parse(withShipping.shippingEstimate.expiresAt)>Date.now());
