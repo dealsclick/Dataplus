@@ -25,6 +25,9 @@ const {
 } = require('../lib/tiktok-live');
 
 async function main() {
+  const marketplaceSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'tiktok-marketplace.js'), 'utf8');
+  assert.match(marketplaceSource, /sort_field: 'update_time', sort_order: 'DESC'/, 'TikTok order intake should prioritize current updates');
+
   const signature = tiktokSignature('/order/202309/orders/search', {
     timestamp: '1700000000',
     app_key: 'app-key',
