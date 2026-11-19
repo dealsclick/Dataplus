@@ -157,12 +157,12 @@ export function TikTokChannel({
       }
       if (event.data?.type === "dataplus:tiktok-creator-authorized") {
         setError("")
-        setMessage(event.data.message || "TikTok creator connected.")
-        void refresh().catch(reason => setError(reason instanceof Error ? reason.message : "TikTok creator status could not refresh."))
+        setMessage(event.data.message || "Official TikTok LIVE account authorized.")
+        void refresh().catch(reason => setError(reason instanceof Error ? reason.message : "TikTok LIVE account status could not refresh."))
       }
       if (event.data?.type === "dataplus:tiktok-creator-authorization-error") {
         setMessage("")
-        setError(event.data.message || "TikTok creator authorization failed.")
+        setError(event.data.message || "Official TikTok LIVE account authorization failed.")
         void refresh().catch(() => {})
       }
     }
@@ -248,10 +248,10 @@ export function TikTokChannel({
       const authPath = `/auth/tiktok/creator/start?environment=${encodeURIComponent(environment)}&returnTo=${encodeURIComponent(returnTo)}${creatorQuery}`
       if (popup) popup.location.href = authPath
       else window.location.assign(authPath)
-      setMessage("Sign in with the TikTok creator account that hosts LIVE sessions and approve the creator permissions.")
+      setMessage("Sign in with this shop's official TikTok account and approve creator-side access for automated LIVE product controls.")
     } catch (reason) {
       popup?.close()
-      setError(reason instanceof Error ? reason.message : "TikTok creator connection could not start.")
+      setError(reason instanceof Error ? reason.message : "TikTok LIVE account authorization could not start.")
     } finally {
       setBusy(false)
     }
@@ -311,6 +311,8 @@ export function TikTokChannel({
   const accounts = Array.isArray(status.accounts) ? status.accounts : []
   const creatorAccounts = Array.isArray(status.creatorAccounts) ? status.creatorAccounts : []
   const activeAccount = accounts.find((account: Json) => String(account.id || "") === String(status.activeAccountId || "")) || null
+  const shopLiveAccounts = Array.isArray(activeAccount?.shopCreators) ? activeAccount.shopCreators : []
+  const officialLiveAccount = shopLiveAccounts.find((account: Json) => String(account.type || "").toUpperCase() === "OFFICIAL") || null
   const activeShopName = activeAccount?.shopName || status.connection?.accountName || "this TikTok shop"
   const onboarding = status.onboarding || activeAccount?.onboarding || null
   const activeJobs = (status.recentJobs || []).filter((row: Json) => String(row.accountId || "") === String(status.activeAccountId || ""))
@@ -467,17 +469,22 @@ export function TikTokChannel({
             <section className="rounded-md border" aria-labelledby="tiktok-creator-accounts-heading">
               <div className="flex flex-wrap items-center justify-between gap-3 border-b px-3 py-3">
                 <div className="min-w-0">
-                  <p id="tiktok-creator-accounts-heading" className="text-sm font-medium">Creator accounts for LIVE</p>
-                  <p className="text-xs text-muted-foreground">{creatorAccounts.length ? `${creatorAccounts.length} connected · used to place session products in the creator's LIVE preparation list.` : "Connect the TikTok account that hosts your LIVE sessions."}</p>
+                  <p id="tiktok-creator-accounts-heading" className="text-sm font-medium">Official TikTok LIVE account</p>
+                  <p className="text-xs text-muted-foreground">This is the TikTok profile linked to {activeShopName} that your team uses to go LIVE. TikTok calls it the official creator at the API level; it is not a separate influencer account.</p>
                 </div>
                 <Button variant="outline" disabled={busy || !canSaveCredentials} onClick={() => void connectCreator()}>
                   {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
-                  {creatorAccounts.length ? "Add creator" : "Connect creator"}
+                  {creatorAccounts.length ? "Reauthorize LIVE account" : "Authorize LIVE account"}
                 </Button>
               </div>
-              {!canSaveCredentials && <p className="px-3 py-3 text-xs text-muted-foreground">Save the shared app key and app secret before connecting a creator.</p>}
+              <div className="grid gap-2 border-b bg-muted/20 px-3 py-3 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                <div><p className="font-medium">Shop-linked official account</p><p className="text-xs text-muted-foreground">Detected with the existing seller connection. The authorization below is optional unless DataPlus should automatically add, order, or pin products in LIVE.</p></div>
+                <Badge variant={officialLiveAccount?.bindingStatus === "ACTIVE" ? "default" : officialLiveAccount ? "outline" : "secondary"}>{officialLiveAccount ? `Official · ${String(officialLiveAccount.bindingStatus || "Unknown").replaceAll("_", " ")}` : verified ? "Not detected · verify connection" : "Verify shop first"}</Badge>
+              </div>
+              {activeAccount?.shopCreatorsWarning && <Alert className="m-3 w-auto"><Circle className="size-4" /><AlertTitle>Official account status unavailable</AlertTitle><AlertDescription>{activeAccount.shopCreatorsWarning}</AlertDescription></Alert>}
+              {!canSaveCredentials && <p className="px-3 py-3 text-xs text-muted-foreground">Save the shared app key and app secret before authorizing the LIVE account.</p>}
               {creatorAccounts.length > 0 && <div className="overflow-x-auto"><Table>
-                <TableHeader><TableRow><TableHead>Creator</TableHead><TableHead>Type</TableHead><TableHead>LIVE permission</TableHead><TableHead>Token</TableHead><TableHead className="w-14 text-right">Actions</TableHead></TableRow></TableHeader>
+                <TableHeader><TableRow><TableHead>Authorized TikTok profile</TableHead><TableHead>Account type</TableHead><TableHead>LIVE automation</TableHead><TableHead>Token</TableHead><TableHead className="w-14 text-right">Actions</TableHead></TableRow></TableHeader>
                 <TableBody>{creatorAccounts.map((creator: Json) => {
                   const hasLivePermission = (creator.permissions || []).includes("LIVE_STREAM_PERMISSION")
                   const scopes = new Set(creator.grantedScopes || [])
@@ -485,7 +492,7 @@ export function TikTokChannel({
                   const displayName = creator.username ? `@${creator.username}` : creator.label || creator.id
                   return <TableRow key={creator.id}>
                     <TableCell className="min-w-72"><div className="flex items-center gap-3">{creator.avatarUrl ? <img src={creator.avatarUrl} alt="" className="size-9 rounded-full border object-cover" /> : <span className="grid size-9 place-items-center rounded-full border bg-muted"><Radio className="size-4" /></span>}<div><p className="font-medium">{displayName}</p><p className="font-mono text-xs text-muted-foreground">{creator.creatorUserOpenId || creator.id}</p></div></div></TableCell>
-                    <TableCell>{String(creator.userType || "Creator").replaceAll("_", " ")}</TableCell>
+                    <TableCell>{String(creator.userType || "Official TikTok account").replaceAll("_", " ")}</TableCell>
                     <TableCell><div className="flex flex-wrap gap-1"><Badge variant={scopeReady ? "default" : "destructive"}>{scopeReady ? "Scopes ready" : "Reconnect scopes"}</Badge><Badge variant={hasLivePermission ? "outline" : "destructive"}>{hasLivePermission ? "LIVE eligible" : "LIVE permission missing"}</Badge></div></TableCell>
                     <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{creator.accessTokenExpiresAt ? new Date(creator.accessTokenExpiresAt).toLocaleDateString() : "Not available"}</TableCell>
                     <TableCell className="text-right"><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" disabled={busy} aria-label={`Actions for ${displayName}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => void run(async () => { const result = await request("creators/verify", { creatorId: creator.id }); await refresh(); return result })}><ShieldCheck className="size-4" /> Verify</DropdownMenuItem><DropdownMenuItem onSelect={() => void connectCreator(String(creator.id))}><RefreshCw className="size-4" /> Reconnect</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onSelect={() => setDisconnectTarget({ ...creator, kind: "creator", displayName })}><Trash2 className="size-4" /> Disconnect</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell>

@@ -151,7 +151,8 @@ async function main() {
   assert.equal(tiktokChannelSource.includes('Use account'), true, 'TikTok settings must expose explicit seller-account selection.');
   assert.equal(tiktokChannelSource.includes('accounts/remove'), true, 'TikTok settings must allow a seller account to be disconnected.');
   assert.equal(tiktokChannelSource.includes('Shop ID'), true, 'TikTok settings must display the selected shop ID.');
-  assert.equal(tiktokChannelSource.includes('Creator accounts for LIVE'), true, 'TikTok settings must expose separate creator authorization.');
+  assert.equal(tiktokChannelSource.includes('Official TikTok LIVE account'), true, 'TikTok settings must explain that the creator API identity is the shop official LIVE account.');
+  assert.equal(tiktokChannelSource.includes('not a separate influencer account'), true, 'TikTok settings must not imply that a separate influencer account is required.');
   assert.equal(tiktokChannelSource.includes('/auth/tiktok/creator/start'), true, 'TikTok settings must start the creator authorization flow.');
   const liveSessionsSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'live-sessions-route.tsx'), 'utf8');
   assert.equal(liveSessionsSource.includes('Sync products to TikTok LIVE'), true, 'TikTok Live Sessions must expose creator product sync.');
@@ -170,6 +171,7 @@ async function main() {
   assert.equal(tiktokMarketplaceSource.includes('launchOverrides:'), true, 'TikTok launch jobs must retain live-session merchant SKU and quantity overrides.');
   assert.equal(tiktokMarketplaceSource.includes('seller_sku: merchantSku'), true, 'TikTok live-session launches must use the reviewed manufacturer SKU as seller SKU.');
   assert.equal(tiktokMarketplaceSource.includes('sourceLiveSessionId'), true, 'TikTok launch evidence must remain linked to the source live session.');
+  assert.equal(tiktokMarketplaceSource.includes("'/seller/202407/shop_creators'"), true, 'TikTok verification must detect the official account bound to the selected shop.');
   assert.equal(tiktokMarketplaceSource.includes("orderCheckpointKey"), true, 'TikTok scheduled order sync must keep a per-shop checkpoint.');
   assert.equal(tiktokMarketplaceSource.includes("checkpointTime - 3_600_000"), true, 'TikTok scheduled order sync must retain a safety overlap.');
   assert.equal(tiktokMarketplaceSource.includes("const canAdvance = failed === 0"), true, 'TikTok order checkpoints must not advance past failed order rows.');

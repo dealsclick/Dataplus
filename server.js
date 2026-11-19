@@ -61747,7 +61747,7 @@ async function handleApi(req, res) {
     const requestedCreatorId = channel === "tiktok_live" ? String(body.tiktokCreatorId || "").trim() : "";
     const tiktokEnvironment = findChannelByName(db, "TikTok Shop")?.settings?.tiktokEnvironment === "development" ? "development" : "production";
     const selectedCreator = requestedCreatorId ? getTikTokCredentials().creators(tiktokEnvironment).find((creator) => String(creator.id) === requestedCreatorId) : null;
-    if (requestedCreatorId && !selectedCreator) return sendJson(res, 400, { error: "Choose a connected TikTok creator account." });
+    if (requestedCreatorId && !selectedCreator) return sendJson(res, 400, { error: "Choose an authorized official TikTok LIVE account." });
     let schedule;
     try {
       schedule = liveSessionScheduleInput(body);
@@ -62111,7 +62111,7 @@ async function handleApi(req, res) {
     if (!target) return notFound(res);
     if (normalizeLiveInventoryChannel(target.channel) !== "tiktok_live") return sendJson(res, 409, { error: "Select TikTok Live as this session's destination first." });
     const creatorId = String(body.creatorId || target.tiktokCreatorId || "").trim();
-    if (!creatorId) return sendJson(res, 409, { error: "Connect and select the TikTok creator account that will host this LIVE session." });
+    if (!creatorId) return sendJson(res, 409, { error: "Authorize and select the official TikTok account that hosts this shop's LIVE sessions." });
     const productIds = [...new Set((target.items || []).map((item) => String(item.launch?.listingId || "").trim()).filter(Boolean))];
     if (!productIds.length) return sendJson(res, 409, { error: "Publish the session products to TikTok Shop and refresh the launch results before syncing to LIVE." });
     let synced;
@@ -62179,7 +62179,7 @@ async function handleApi(req, res) {
       const tiktokCreatorId = body.tiktokCreatorId === undefined ? String(target.tiktokCreatorId || "") : String(body.tiktokCreatorId || "");
       const tiktokStatus = getTikTokCredentials().status((findChannelByName(db, "TikTok Shop")?.settings?.tiktokEnvironment === "development") ? "development" : "production");
       const creator = tiktokCreatorId ? (tiktokStatus.creatorAccounts || getTikTokCredentials().creators(tiktokStatus.environment)).find((entry) => String(entry.id) === tiktokCreatorId) : null;
-      if (tiktokCreatorId && !creator) throw Object.assign(new Error("Choose a connected TikTok creator account."), { statusCode: 400 });
+      if (tiktokCreatorId && !creator) throw Object.assign(new Error("Choose an authorized official TikTok LIVE account."), { statusCode: 400 });
       const next = liveSessionLedger.sessionTotals({
         ...target,
         title: body.title === undefined ? target.title : String(body.title || "").trim().slice(0, 160),
@@ -83606,8 +83606,8 @@ async function handleTikTokCreatorStart(req, res) {
   await hydrateAuthSessionsStore();
   const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
   const actor = currentAuthUser(req, settings);
-  if (!actor) return sendHtml(res, 401, tiktokAuthorizationResultHtml({ creator: true, success: false, message: 'Sign in to DataPlus before connecting a TikTok creator.' }));
-  if (!userCan(actor, 'channels.settings', 'credentials')) return sendHtml(res, 403, tiktokAuthorizationResultHtml({ creator: true, success: false, message: 'Channel credential permission is required to connect a TikTok creator.' }));
+  if (!actor) return sendHtml(res, 401, tiktokAuthorizationResultHtml({ creator: true, success: false, message: 'Sign in to DataPlus before authorizing the official TikTok LIVE account.' }));
+  if (!userCan(actor, 'channels.settings', 'credentials')) return sendHtml(res, 403, tiktokAuthorizationResultHtml({ creator: true, success: false, message: 'Channel credential permission is required to authorize the official TikTok LIVE account.' }));
   const scope = notificationScope(req);
   if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
     return sendHtml(res, 409, tiktokAuthorizationResultHtml({ creator: true, success: false, message: 'TikTok Shop operations are available only for LINQ while company isolation is completed.' }));
@@ -83626,8 +83626,8 @@ async function handleTikTokCreatorStart(req, res) {
   const location = creatorAuthorizationUrl({ appKey: credentials.get(environment).appKey, state: authorization.state });
   appendChannelApiLog({
     channel: 'TikTok Shop', transport: 'OAuth', method: 'GET', path: '/auth/tiktok/creator/start',
-    operation: 'Start TikTok creator authorization', statusCode: 302, ok: true,
-    message: `Started ${environment} creator authorization.`
+    operation: 'Start official TikTok LIVE account authorization', statusCode: 302, ok: true,
+    message: `Started ${environment} official TikTok LIVE account authorization.`
   });
   setTikTokOAuthRecoveryCookie(req, res, authorization.state);
   res.writeHead(302, { Location: location, 'Cache-Control': 'no-store' });
@@ -83718,12 +83718,12 @@ async function handleTikTokCallback(req, res) {
       return sendHtml(res, 400, tiktokAuthorizationResultHtml({ creator: true, success: false, message: error.message }));
     }
     const denied = url.searchParams.get('error_description') || url.searchParams.get('error');
-    if (denied) return sendHtml(res, 400, tiktokAuthorizationResultHtml({ creator: true, success: false, message: `TikTok creator authorization was not completed: ${denied}`, returnTo: authorization.returnTo }));
+    if (denied) return sendHtml(res, 400, tiktokAuthorizationResultHtml({ creator: true, success: false, message: `Official TikTok LIVE account authorization was not completed: ${denied}`, returnTo: authorization.returnTo }));
     if (returnedAppKey && returnedAppKey !== authorization.credentials.appKey) {
-      return sendHtml(res, 400, tiktokAuthorizationResultHtml({ creator: true, success: false, message: 'TikTok returned creator authorization for a different app key.', returnTo: authorization.returnTo }));
+      return sendHtml(res, 400, tiktokAuthorizationResultHtml({ creator: true, success: false, message: 'TikTok returned LIVE account authorization for a different app key.', returnTo: authorization.returnTo }));
     }
     const code = url.searchParams.get('code') || url.searchParams.get('auth_code');
-    if (!code) return sendHtml(res, 400, tiktokAuthorizationResultHtml({ creator: true, success: false, message: 'TikTok did not return a creator authorization code.', returnTo: authorization.returnTo }));
+    if (!code) return sendHtml(res, 400, tiktokAuthorizationResultHtml({ creator: true, success: false, message: 'TikTok did not return a LIVE account authorization code.', returnTo: authorization.returnTo }));
     try {
       const { exchangeCreatorAuthorizationCode } = require('./lib/tiktok-oauth');
       const tokens = await exchangeCreatorAuthorizationCode({
@@ -83735,12 +83735,12 @@ async function handleTikTokCallback(req, res) {
       const connectedCreator = credentials.updateCreatorTokens(authorization.environment, tokens, authorization.creatorId);
       const verified = await getTikTokMarketplace().verifyCreator(connectedCreator.accountId);
       void recordUserActivity(req, { id: authorization.actorId, name: authorization.actorName || 'DataPlus user' }, {
-        eventType: 'channel', action: 'Connected TikTok creator account', entityType: 'channel', entityId: 'tiktok-shop',
+        eventType: 'channel', action: 'Authorized official TikTok LIVE account', entityType: 'channel', entityId: 'tiktok-shop',
         metadata: { environment: authorization.environment, creatorId: connectedCreator.accountId, username: verified.username || '' }
       });
-      return sendHtml(res, 200, tiktokAuthorizationResultHtml({ creator: true, success: true, message: `${verified.label || 'TikTok creator'} connected for LIVE product sync.`, returnTo: authorization.returnTo }));
+      return sendHtml(res, 200, tiktokAuthorizationResultHtml({ creator: true, success: true, message: `${verified.label || 'Official TikTok LIVE account'} authorized for automated LIVE product controls.`, returnTo: authorization.returnTo }));
     } catch (error) {
-      appendChannelApiLog({ channel: 'TikTok Shop', transport: 'OAuth', method: 'GET', path: '/auth/tiktok/callback', operation: 'Complete TikTok creator authorization', statusCode: apiErrorStatus(error), ok: false, message: error.message });
+      appendChannelApiLog({ channel: 'TikTok Shop', transport: 'OAuth', method: 'GET', path: '/auth/tiktok/callback', operation: 'Complete official TikTok LIVE account authorization', statusCode: apiErrorStatus(error), ok: false, message: error.message });
       return sendHtml(res, apiErrorStatus(error), tiktokAuthorizationResultHtml({ creator: true, success: false, message: error.message, returnTo: authorization.returnTo }));
     }
   }
