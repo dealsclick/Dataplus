@@ -99,5 +99,9 @@ assert.match(uiSource, /Create and scan/);
 assert.match(uiSource, /Review readiness/);
 assert.match(uiSource, /Publish ready/);
 assert.match(uiSource, /Whatnot publishing is not connected/);
+assert.match(uiSource, /Select only the items for this session/);
+assert.match(uiSource, /20%\+ markup/);
+assert.match(serverSource, /requestedLiveSessionSalePrice/);
+assert.match(serverSource, /price: group\.salePrice/);
 
 console.log("Live session audit-link regression tests passed.");

@@ -13702,6 +13702,24 @@ function liveSessionRequestQuantities(body = {}) {
   return values;
 }
 
+function liveSessionRequestSalePrices(body = {}) {
+  const values = new Map();
+  for (const item of Array.isArray(body.items) ? body.items : []) {
+    const salePrice = Math.max(0.01, Number(item.salePrice ?? item.price ?? 1) || 1);
+    const keys = [item.sourceLineId, item.id, item.productId, item.sku].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+    for (const key of keys) values.set(key, salePrice);
+  }
+  return values;
+}
+
+function requestedLiveSessionSalePrice(prices = new Map(), values = [], fallback = 1) {
+  for (const value of values) {
+    const key = String(value || "").trim().toLowerCase();
+    if (key && prices.has(key)) return Math.max(0.01, Number(prices.get(key) || fallback));
+  }
+  return Math.max(0.01, Number(fallback || 1));
+}
+
 function requestedLiveSessionQuantity(requested = new Map(), values = [], fallback = 0) {
   for (const value of values) {
     const key = String(value || "").trim().toLowerCase();
@@ -28274,7 +28292,8 @@ async function runEbayListingLaunchWorkerJob(job = {}, attrs = {}) {
         inventoryMultiplier: 1,
         maxSellableQty: Math.max(0, Math.floor(Number(shadowLaunch.quantity || 0))),
         inventoryEnabled: true,
-        channelListings: { ebay: { merchantSku: String(shadowLaunch.merchantSku), enabled: true, inventoryEnabled: true } },
+        price: Math.max(0.01, Number(shadowLaunch.price || 1)),
+        channelListings: { ebay: { merchantSku: String(shadowLaunch.merchantSku), price: Math.max(0.01, Number(shadowLaunch.price || 1)), enabled: true, inventoryEnabled: true } },
         channels: ["eBay"]
       } : null;
       const shadow = savedShadow || sessionShadow;
@@ -61802,6 +61821,7 @@ async function handleApi(req, res) {
     }
 
     const requestedQuantities = liveSessionRequestQuantities(body);
+    const requestedSalePrices = liveSessionRequestSalePrices(body);
     const explicitSelection = Array.isArray(body.items) && body.items.length > 0;
     const sourceId = String(body.sourceId || body.purchaseOrderId || body.auditId || body.previousSessionId || "").trim();
     let sourceLabel = liveSessionLedger.sourceLabel(sourceType);
@@ -61842,8 +61862,15 @@ async function handleApi(req, res) {
     if (explicitSelection && sourceType !== "manual_skus") {
       sourceItems = sourceItems.map((item) => ({
         ...item,
-        requestedQty: requestedLiveSessionQuantity(requestedQuantities, [item.sourceLineId, item.id, item.productId, item.sku], 0)
+        requestedQty: requestedLiveSessionQuantity(requestedQuantities, [item.sourceLineId, item.id, item.productId, item.sku], 0),
+        salePrice: requestedLiveSessionSalePrice(requestedSalePrices, [item.sourceLineId, item.id, item.productId, item.sku], 1)
       })).filter((item) => Number(item.requestedQty || 0) > 0);
+    }
+    if (sourceType === "manual_skus") {
+      sourceItems = sourceItems.map((item) => ({
+        ...item,
+        salePrice: requestedLiveSessionSalePrice(requestedSalePrices, [item.sourceLineId, item.id, item.productId, item.sku], 1)
+      }));
     }
     if (!["previous_session"].includes(sourceType) && !sourceItems.length) return sendJson(res, 400, { error: "The selected source has no usable catalog quantities." });
     if (!warehouse && sourceType !== "previous_session") return sendJson(res, 400, { error: "The selected source is not assigned to a physical warehouse." });
@@ -61878,7 +61905,8 @@ async function handleApi(req, res) {
           const requestedQty = explicitSelection
             ? requestedLiveSessionQuantity(requestedQuantities, [item.id, item.sourceLineId, item.productId, item.sku], 0)
             : Number(item.remainingQty || 0);
-          return { ...item, sourceType: "previous_session", sourceSessionId: parentSession.id, sourceSessionNumber: parentSession.sessionNumber, requestedQty };
+          const salePrice = requestedLiveSessionSalePrice(requestedSalePrices, [item.id, item.sourceLineId, item.productId, item.sku], item.salePrice || 1);
+          return { ...item, sourceType: "previous_session", sourceSessionId: parentSession.id, sourceSessionNumber: parentSession.sessionNumber, requestedQty, salePrice };
         }).filter((item) => Number(item.requestedQty || 0) > 0 && Number(item.remainingQty || 0) > 0);
         if (!resolvedItems.length) throw Object.assign(new Error("The previous session has no unreserved inventory to transfer."), { statusCode: 409 });
         const transferredByItem = new Map(resolvedItems.map((item) => [String(item.id), Math.min(Number(item.requestedQty || 0), Number(item.remainingQty || 0))]));
@@ -62020,6 +62048,7 @@ async function handleApi(req, res) {
           merchantSku: group.merchantSku,
           warehouseId: plan.session.warehouseId || "",
           quantity: group.quantity,
+          price: group.salePrice,
           liveSessionId: plan.session.id,
           liveSessionNumber: plan.session.sessionNumber,
           channelEventId: plan.session.channelEventId || "",

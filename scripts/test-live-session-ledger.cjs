@@ -237,6 +237,7 @@ test("live launch uses manufacturer SKU and remaining reserved quantity", () => 
       sku: "BUS210787TRV",
       supplierSku: "210787",
       manufacturerSku: "48-89-2801",
+      salePrice: 24.99,
       reservedQty: 8,
       soldQty: 3,
       releasedQty: 1,
@@ -248,6 +249,7 @@ test("live launch uses manufacturer SKU and remaining reserved quantity", () => 
   assert.equal(review.session.items[0].launch.quantity, 4);
   assert.equal(review.groups[0].merchantSku, "48-89-2801");
   assert.equal(review.groups[0].quantity, 4);
+  assert.equal(review.groups[0].salePrice, 24.99);
 });
 
 test("eBay Live appends a stable launch date to the manufacturer SKU", () => {
