@@ -108,5 +108,7 @@ assert.match(serverSource, /const audit = session\.linkedAuditId \? await postgr
 assert.match(serverSource, /const \{ items, audit, \.\.\.summary \} = liveSessionLedger\.sessionTotals\(session\)/);
 assert.doesNotMatch(uiSource, /const refsPromise =/);
 assert.match(uiSource, /if \(detailKey \|\| createOpen\) void loadReferences\(\)/);
+assert.match(uiSource, /warehouseAuditUrl\(selectedSource\.number, selectedSource\.id\)/);
+assert.match(uiSource, /aria-label="Open selected warehouse audit"/);
 
 console.log("Live session audit-link regression tests passed.");
