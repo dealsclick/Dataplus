@@ -61566,14 +61566,14 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/live-sessions/references" && postgres.isPostgresEnabled()) {
     const scope = liveSessionScope(req);
     if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
-    const [allSessions, audits, purchaseOrders, db] = await Promise.all([
+    const [allSessions, auditPage, purchaseOrders, db] = await Promise.all([
       postgres.readEntityDocumentCollectionFast("liveSessions"),
-      postgres.readWarehouseAudits(),
+      postgres.listWarehouseAuditsPage({ page: 1, pageSize: 100, sort: "newest" }),
       postgres.listPurchaseOrders({ limit: 500, excludeStatuses: ["canceled", "cancelled", "rejected", "superseded", "deleted"] }),
-      readDbFast({ skipInventory: true })
+      postgres.readStateFields(["channels", "connections", "systemSettings", "warehouses"], { fallbackToLegacy: false })
     ]);
-    const auditsById = new Map((audits || []).map((audit) => [String(audit.id || ""), audit]));
-    const scopedSessions = liveSessionRowsForScope(allSessions, scope).map((session) => liveSessionWithAudit(session, auditsById.get(String(session.linkedAuditId || "")) || null));
+    const audits = auditPage?.audits || [];
+    const scopedSessions = liveSessionRowsForScope(allSessions, scope).map((session) => liveSessionLedger.sessionTotals(session));
     const requestedSourceId = String(url.searchParams.get("sourceId") || "").trim().toLowerCase();
     const poReferences = (purchaseOrders || []).filter((po) => {
       if (String(po.fulfillmentMode || "").toLowerCase() === "dropship_per_order" || po.directToCustomer === true) return false;
@@ -61722,27 +61722,25 @@ async function handleApi(req, res) {
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "live-sessions" && postgres.isPostgresEnabled()) {
     const scope = liveSessionScope(req);
     if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
-    const [sessions, audits] = await Promise.all([
-      postgres.readEntityDocumentCollectionFast("liveSessions"),
-      postgres.readWarehouseAudits()
-    ]);
-    const auditsById = new Map((audits || []).map((audit) => [String(audit.id || ""), audit]));
-    const rows = liveSessionRowsForScope(sessions, scope).map((session) => {
-      const audit = auditsById.get(String(session.linkedAuditId || "")) || null;
-      return liveSessionWithAudit(session, audit);
-    }).sort((left, right) => new Date(String(right.updatedAt || right.createdAt || 0)).getTime() - new Date(String(left.updatedAt || left.createdAt || 0)).getTime());
+    const sessions = await postgres.readEntityDocumentCollectionFast("liveSessions");
+    const scopedSessions = liveSessionRowsForScope(sessions, scope);
     const requestedKey = decodeURIComponent(String(parts[2] || "")).trim();
     if (requestedKey) {
       const canonicalKey = canonicalLiveSessionReference(requestedKey).toLowerCase();
-      const session = rows.find((row) => String(row.id || "").toLowerCase() === requestedKey.toLowerCase()
+      const session = scopedSessions.find((row) => String(row.id || "").toLowerCase() === requestedKey.toLowerCase()
         || canonicalLiveSessionReference(row.sessionNumber, row.id).toLowerCase() === canonicalKey);
       if (!session) return notFound(res);
-      return sendJson(res, 200, { session });
+      const audit = session.linkedAuditId ? await postgres.readWarehouseAudit(session.linkedAuditId) : null;
+      return sendJson(res, 200, { session: audit ? liveSessionWithAudit(session, audit) : liveSessionLedger.sessionTotals(session) });
     }
     const sourceId = String(url.searchParams.get("sourceId") || "").trim().toLowerCase();
-    const filtered = sourceId ? rows.filter((session) => String(session.sourceId || session.sourcePurchaseOrderId || "").toLowerCase() === sourceId
-      || (session.items || []).some((item) => String(item.sourceId || "").toLowerCase() === sourceId)) : rows;
-    return sendJson(res, 200, { sessions: filtered });
+    const filtered = sourceId ? scopedSessions.filter((session) => String(session.sourceId || session.sourcePurchaseOrderId || "").toLowerCase() === sourceId
+      || (session.items || []).some((item) => String(item.sourceId || "").toLowerCase() === sourceId)) : scopedSessions;
+    const summaries = filtered.map((session) => {
+      const { items, audit, ...summary } = liveSessionLedger.sessionTotals(session);
+      return summary;
+    }).sort((left, right) => new Date(String(right.updatedAt || right.createdAt || 0)).getTime() - new Date(String(left.updatedAt || left.createdAt || 0)).getTime());
+    return sendJson(res, 200, { sessions: summaries });
   }
 
   if (req.method === "POST" && url.pathname === "/api/live-sessions" && postgres.isPostgresEnabled()) {

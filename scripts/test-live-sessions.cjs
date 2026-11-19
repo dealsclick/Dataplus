@@ -103,5 +103,10 @@ assert.match(uiSource, /Select only the items for this session/);
 assert.match(uiSource, /20%\+ markup/);
 assert.match(serverSource, /requestedLiveSessionSalePrice/);
 assert.match(serverSource, /price: group\.salePrice/);
+assert.match(serverSource, /\/api\/live-sessions\/references[\s\S]*listWarehouseAuditsPage\(\{ page: 1, pageSize: 100, sort: "newest" \}\)/);
+assert.match(serverSource, /const audit = session\.linkedAuditId \? await postgres\.readWarehouseAudit\(session\.linkedAuditId\) : null/);
+assert.match(serverSource, /const \{ items, audit, \.\.\.summary \} = liveSessionLedger\.sessionTotals\(session\)/);
+assert.doesNotMatch(uiSource, /const refsPromise =/);
+assert.match(uiSource, /if \(detailKey \|\| createOpen\) void loadReferences\(\)/);
 
 console.log("Live session audit-link regression tests passed.");
