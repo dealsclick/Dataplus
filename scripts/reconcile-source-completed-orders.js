@@ -25,7 +25,7 @@ async function main() {
       const { rows } = await client.query("select order_id, raw from order_records where order_id > $1 order by order_id limit 200 for update", [cursor]);
       if (!rows.length) { await client.query("commit"); break; }
       const lineResult = await client.query(`
-        select order_id, line_id, line_index, qty, line_fulfillment_status, line_fulfilled_qty, line_remaining_qty
+        select order_id, line_id, line_index, qty, raw
         from order_line_items
         where order_id = any($1::text[])
         order by order_id, line_index
@@ -34,12 +34,13 @@ async function main() {
       for (const line of lineResult.rows) {
         if (!linesByOrder.has(line.order_id)) linesByOrder.set(line.order_id, []);
         linesByOrder.get(line.order_id).push({
+          ...(line.raw || {}),
           lineId: line.line_id,
           lineIndex: Number(line.line_index || 0),
           qty: Number(line.qty || 0),
-          fulfillmentStatus: line.line_fulfillment_status || "",
-          fulfilledQty: Number(line.line_fulfilled_qty || 0),
-          remainingQty: line.line_remaining_qty == null ? Number(line.qty || 0) : Number(line.line_remaining_qty)
+          fulfillmentStatus: line.raw?.fulfillmentStatus || "",
+          fulfilledQty: Number(line.raw?.fulfilledQty || 0),
+          remainingQty: line.raw?.remainingQty == null ? Number(line.qty || 0) : Number(line.raw.remainingQty)
         });
       }
       for (const row of rows) {
@@ -55,12 +56,9 @@ async function main() {
           for (const line of relationalLines) {
             await client.query(`
               update order_line_items
-              set line_fulfillment_status = $3,
-                  line_fulfilled_qty = $4,
-                  line_remaining_qty = $5,
-                  updated_at = now()
+              set raw = $3::jsonb
               where order_id = $1 and line_id = $2
-            `, [row.order_id, line.lineId, line.fulfillmentStatus, line.fulfilledQty, line.remainingQty]);
+            `, [row.order_id, line.lineId, JSON.stringify(line)]);
           }
           if (retainedRawItems) order.items = retainedRawItems;
           else delete order.items;
