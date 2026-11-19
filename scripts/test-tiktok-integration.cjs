@@ -126,6 +126,7 @@ async function main() {
   assert.equal(sellerUrl.searchParams.get('service_id'), 'service-id');
   assert.equal(sellerUrl.searchParams.get('state'), 'production.state');
   assert.equal(isTikTokAuthorizationCallbackUrl('/auth/tiktok/callback?code=auth-code&state=production.state'), true);
+  assert.equal(isTikTokAuthorizationCallbackUrl('/?code=creator-code&state=creator.production.v2.payload.signature&app_key=app-key'), true);
   assert.equal(isTikTokAuthorizationCallbackUrl('/?auth_code=auth-code&state=production.v2.payload.signature'), true);
   assert.equal(isTikTokAuthorizationCallbackUrl('/?error=access_denied&state=development.v2.payload.signature'), true);
   assert.equal(isTikTokAuthorizationCallbackUrl('/?auth_code=auth-code&state=production.legacy-state'), true);
