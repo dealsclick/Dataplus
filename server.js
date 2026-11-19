@@ -13465,6 +13465,28 @@ function canonicalLiveSessionReference(value, fallback = "") {
   return String(fallback || reference).trim();
 }
 
+function normalizeLiveSessionLaunchImage(value) {
+  const dataUrl = String(value || "").trim();
+  if (!dataUrl) return "";
+  const match = /^data:(image\/(?:png|jpeg));base64,([A-Za-z0-9+/=\s]+)$/i.exec(dataUrl);
+  if (!match) throw Object.assign(new Error("Live-session photos must be PNG or JPEG images."), { statusCode: 400 });
+  let bytes;
+  try {
+    bytes = Buffer.from(match[2], "base64");
+  } catch {
+    throw Object.assign(new Error("The live-session product photo could not be read."), { statusCode: 400 });
+  }
+  if (!bytes.length || bytes.length > 5 * 1024 * 1024) throw Object.assign(new Error("Live-session product photos must be 5 MB or smaller."), { statusCode: 413 });
+  const mimeType = match[1].toLowerCase();
+  if (mimeType === "image/png" && bytes.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a") {
+    throw Object.assign(new Error("The uploaded file is not a valid PNG image."), { statusCode: 400 });
+  }
+  if (mimeType === "image/jpeg" && bytes.subarray(0, 2).toString("hex") !== "ffd8") {
+    throw Object.assign(new Error("The uploaded file is not a valid JPEG image."), { statusCode: 400 });
+  }
+  return `data:${mimeType};base64,${bytes.toString("base64")}`;
+}
+
 function liveSessionAuditUrl(audit = {}, mobile = false) {
   const auditNumber = String(audit.auditNumber || "").trim();
   const sequence = auditNumber.match(/^(?:(?:audit|a)[\s#_-]*)?(\d+)$/i);
@@ -62218,6 +62240,69 @@ async function handleApi(req, res) {
       const tiktokStatus = getTikTokCredentials().status((findChannelByName(db, "TikTok Shop")?.settings?.tiktokEnvironment === "development") ? "development" : "production");
       const creator = tiktokCreatorId ? (tiktokStatus.creatorAccounts || getTikTokCredentials().creators(tiktokStatus.environment)).find((entry) => String(entry.id) === tiktokCreatorId) : null;
       if (tiktokCreatorId && !creator) throw Object.assign(new Error("Choose an authorized official TikTok LIVE account."), { statusCode: 400 });
+      const requestedItemEdits = Array.isArray(body.items) ? body.items : [];
+      if (requestedItemEdits.length > 500) throw Object.assign(new Error("A live session can edit up to 500 products at a time."), { statusCode: 400 });
+      const itemEdits = new Map();
+      for (const requestedEdit of requestedItemEdits) {
+        const itemId = String(requestedEdit?.id || "").trim();
+        if (!itemId || itemEdits.has(itemId)) throw Object.assign(new Error("Each edited live-session product must have one unique item ID."), { statusCode: 400 });
+        itemEdits.set(itemId, requestedEdit);
+      }
+      const targetItemIds = new Set((target.items || []).map((item) => String(item.id || "")));
+      const unknownItemId = [...itemEdits.keys()].find((itemId) => !targetItemIds.has(itemId));
+      if (unknownItemId) throw Object.assign(new Error(`Live-session product ${unknownItemId} was not found. Refresh and try again.`), { statusCode: 409 });
+      const removedItems = [];
+      const nextItems = (target.items || []).flatMap((item) => {
+        const edit = itemEdits.get(String(item.id || ""));
+        if (!edit) return [item];
+        const launchStatus = String(item.launch?.status || "not_reviewed").toLowerCase();
+        const locked = Number(item.soldQty || 0) > 0 || Number(item.shippedQty || 0) > 0
+          || ["queued", "publishing", "scheduled", "submitted", "live", "complete"].includes(launchStatus);
+        if (edit.remove === true) {
+          if (locked) throw Object.assign(new Error(`${item.sku || item.id} cannot be removed because it has sales, shipments, or marketplace launch evidence.`), { statusCode: 409 });
+          removedItems.push(item);
+          return [];
+        }
+        if (locked && (edit.launchTitle !== undefined || edit.launchImage !== undefined)) {
+          throw Object.assign(new Error(`${item.sku || item.id} cannot be changed after it has entered the marketplace launch workflow.`), { statusCode: 409 });
+        }
+        const launchTitle = edit.launchTitle === undefined ? String(item.launchTitle || "") : String(edit.launchTitle || "").trim().slice(0, 255);
+        if (!launchTitle) throw Object.assign(new Error(`Enter a launch title for ${item.sku || item.id}.`), { statusCode: 400 });
+        const launchImage = edit.launchImage === undefined ? String(item.launchImage || "") : normalizeLiveSessionLaunchImage(edit.launchImage);
+        return [{
+          ...item,
+          launchTitle,
+          launchImage,
+          launch: {
+            ...(item.launch || {}),
+            status: "not_reviewed",
+            title: launchTitle,
+            imageDataUrl: launchImage,
+            blockers: [],
+            sessionBlockers: [],
+            productBlockers: [],
+            error: "",
+            reviewedAt: "",
+            updatedAt: new Date().toISOString()
+          }
+        }];
+      });
+      let workingSessions = sessions;
+      if (removedItems.length && String(target.parentSessionId || "")) {
+        const parentId = String(target.parentSessionId || "");
+        const returnedByItemId = new Map(removedItems.map((item) => [String(item.id || ""), Number(item.reservedQty || 0)]));
+        workingSessions = sessions.map((session) => {
+          if (String(session.id || "") !== parentId) return session;
+          return liveSessionLedger.sessionTotals({
+            ...session,
+            items: (session.items || []).map((item) => ({
+              ...item,
+              releasedQty: Math.max(0, Number(item.releasedQty || 0) - Number(returnedByItemId.get(String(item.id || "")) || 0))
+            })),
+            updatedAt: new Date().toISOString()
+          });
+        });
+      }
       const next = liveSessionLedger.sessionTotals({
         ...target,
         title: body.title === undefined ? target.title : String(body.title || "").trim().slice(0, 160),
@@ -62227,11 +62312,17 @@ async function handleApi(req, res) {
         tiktokCreatorId: channel === "tiktok_live" ? tiktokCreatorId : "",
         tiktokCreatorName: channel === "tiktok_live" ? String(creator?.username || creator?.label || target.tiktokCreatorName || "") : "",
         ...schedule,
+        items: nextItems,
+        launch: requestedItemEdits.length ? { ...(target.launch || {}), status: "not_reviewed", blockers: [], message: "Product launch details changed. Run readiness review again.", reviewedAt: "", updatedAt: new Date().toISOString() } : target.launch,
         updatedAt: new Date().toISOString()
       });
-      return { sessions: sessions.map((session) => String(session.id) === String(target.id) ? next : session), result: { session: next } };
+      return { sessions: workingSessions.map((session) => String(session.id) === String(target.id) ? next : session), result: { session: next, removedItems: removedItems.length } };
     });
-    return sendJson(res, 200, { session: mutation?.result?.session, message: "Live session updated." });
+    void recordUserActivity(req, authUser, {
+      eventType: "live_session", action: "Edited live session", entityType: "live_session", entityId: mutation?.result?.session?.id || key,
+      metadata: { removedItems: Number(mutation?.result?.removedItems || 0), editedItems: Array.isArray(body.items) ? body.items.length : 0 }
+    });
+    return sendJson(res, 200, { session: mutation?.result?.session, message: mutation?.result?.removedItems ? `Live session updated; ${mutation.result.removedItems} product(s) removed and released.` : "Live session updated." });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "live-sessions" && parts[2] && parts[3] === "actions" && postgres.isPostgresEnabled()) {

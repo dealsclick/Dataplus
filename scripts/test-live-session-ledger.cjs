@@ -314,6 +314,27 @@ test("TikTok Live uses a generated DataPlus SKU for audit-discovered inventory w
   assert.equal(review.groups.length, 1);
 });
 
+test("TikTok Live gives unidentified audit products stable editable launch titles and photos", () => {
+  const review = launchReadiness({
+    id: "session-anonymous",
+    status: "ready",
+    channel: "tiktok_live",
+    channelAccountId: "tiktok-primary",
+    items: [
+      { id: "item-1", productId: "product-1", sku: "DPS10299", title: "Unidentified product 8055443167126", launchImage: "data:image/png;base64,AAAA", reservedQty: 1 },
+      { id: "item-2", productId: "product-2", sku: "DPS10301", title: "Unidentified product 10078555825918", launchTitle: "Warehouse live special", reservedQty: 1 }
+    ]
+  }, [
+    { id: "product-1", sku: "DPS10299", title: "Unidentified product 8055443167126", status: "active" },
+    { id: "product-2", sku: "DPS10301", title: "Unidentified product 10078555825918", status: "active" }
+  ]);
+
+  assert.equal(review.session.items[0].launch.title, "Random live item #1");
+  assert.equal(review.session.items[1].launch.title, "Warehouse live special");
+  assert.equal(review.groups[0].title, "Random live item #1");
+  assert.equal(review.groups[0].imageDataUrl, "data:image/png;base64,AAAA");
+});
+
 test("session readiness blockers stay separate from product corrections", () => {
   const review = launchReadiness({
     id: "session-draft",

@@ -174,6 +174,8 @@ async function main() {
   assert.equal(tiktokChannelSource.includes('Setup running'), true, 'TikTok setup must make active setup work visible and prevent an ambiguous duplicate submission.');
   const tiktokMarketplaceSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'tiktok-marketplace.js'), 'utf8');
   assert.equal(tiktokMarketplaceSource.includes('launchOverrides:'), true, 'TikTok launch jobs must retain live-session merchant SKU and quantity overrides.');
+  assert.equal(tiktokMarketplaceSource.includes("'/product/202309/images/upload'"), true, 'TikTok live-session photo overrides must upload to the TikTok product image API.');
+  assert.equal(tiktokMarketplaceSource.includes('title: launchTitle'), true, 'TikTok live-session launches must use the reviewed session title.');
   assert.equal(tiktokMarketplaceSource.includes('seller_sku: merchantSku'), true, 'TikTok live-session launches must use the reviewed manufacturer SKU as seller SKU.');
   assert.equal(tiktokMarketplaceSource.includes('sourceLiveSessionId'), true, 'TikTok launch evidence must remain linked to the source live session.');
   assert.equal(tiktokMarketplaceSource.includes("'/seller/202407/shop_creators'"), true, 'TikTok verification must detect the official account bound to the selected shop.');
