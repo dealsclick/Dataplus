@@ -155,6 +155,16 @@ export function TikTokChannel({
         setError(event.data.message || "TikTok Shop authorization failed.")
         void refresh().catch(() => {})
       }
+      if (event.data?.type === "dataplus:tiktok-creator-authorized") {
+        setError("")
+        setMessage(event.data.message || "TikTok creator connected.")
+        void refresh().catch(reason => setError(reason instanceof Error ? reason.message : "TikTok creator status could not refresh."))
+      }
+      if (event.data?.type === "dataplus:tiktok-creator-authorization-error") {
+        setMessage("")
+        setError(event.data.message || "TikTok creator authorization failed.")
+        void refresh().catch(() => {})
+      }
     }
     window.addEventListener("message", receiveAuthorization)
     return () => window.removeEventListener("message", receiveAuthorization)
@@ -226,6 +236,27 @@ export function TikTokChannel({
     }
   }
 
+  const connectCreator = async (creatorId = "") => {
+    const popup = window.open("", "dataplus-tiktok-creator-auth", "popup,width=860,height=820")
+    setBusy(true)
+    setError("")
+    setMessage("")
+    try {
+      const environment = rules.tiktokEnvironment === "development" ? "development" : "production"
+      const returnTo = `${window.location.pathname}${window.location.search}`
+      const creatorQuery = creatorId ? `&creatorId=${encodeURIComponent(creatorId)}` : ""
+      const authPath = `/auth/tiktok/creator/start?environment=${encodeURIComponent(environment)}&returnTo=${encodeURIComponent(returnTo)}${creatorQuery}`
+      if (popup) popup.location.href = authPath
+      else window.location.assign(authPath)
+      setMessage("Sign in with the TikTok creator account that hosts LIVE sessions and approve the creator permissions.")
+    } catch (reason) {
+      popup?.close()
+      setError(reason instanceof Error ? reason.message : "TikTok creator connection could not start.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const verify = async () => {
     if (rules.channelEnabled !== true) {
       await onSave(channel.id, { channelEnabled: true })
@@ -278,6 +309,7 @@ export function TikTokChannel({
   const appConfigured = status.appConfigured === true
   const verified = status.connection?.verified === true
   const accounts = Array.isArray(status.accounts) ? status.accounts : []
+  const creatorAccounts = Array.isArray(status.creatorAccounts) ? status.creatorAccounts : []
   const activeAccount = accounts.find((account: Json) => String(account.id || "") === String(status.activeAccountId || "")) || null
   const activeShopName = activeAccount?.shopName || status.connection?.accountName || "this TikTok shop"
   const onboarding = status.onboarding || activeAccount?.onboarding || null
@@ -432,6 +464,35 @@ export function TikTokChannel({
                 </Table>
               </div>}
             </section>
+            <section className="rounded-md border" aria-labelledby="tiktok-creator-accounts-heading">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b px-3 py-3">
+                <div className="min-w-0">
+                  <p id="tiktok-creator-accounts-heading" className="text-sm font-medium">Creator accounts for LIVE</p>
+                  <p className="text-xs text-muted-foreground">{creatorAccounts.length ? `${creatorAccounts.length} connected · used to place session products in the creator's LIVE preparation list.` : "Connect the TikTok account that hosts your LIVE sessions."}</p>
+                </div>
+                <Button variant="outline" disabled={busy || !canSaveCredentials} onClick={() => void connectCreator()}>
+                  {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                  {creatorAccounts.length ? "Add creator" : "Connect creator"}
+                </Button>
+              </div>
+              {!canSaveCredentials && <p className="px-3 py-3 text-xs text-muted-foreground">Save the shared app key and app secret before connecting a creator.</p>}
+              {creatorAccounts.length > 0 && <div className="overflow-x-auto"><Table>
+                <TableHeader><TableRow><TableHead>Creator</TableHead><TableHead>Type</TableHead><TableHead>LIVE permission</TableHead><TableHead>Token</TableHead><TableHead className="w-14 text-right">Actions</TableHead></TableRow></TableHeader>
+                <TableBody>{creatorAccounts.map((creator: Json) => {
+                  const hasLivePermission = (creator.permissions || []).includes("LIVE_STREAM_PERMISSION")
+                  const scopes = new Set(creator.grantedScopes || [])
+                  const scopeReady = scopes.has("creator.showcase.read") && scopes.has("creator.showcase.write")
+                  const displayName = creator.username ? `@${creator.username}` : creator.label || creator.id
+                  return <TableRow key={creator.id}>
+                    <TableCell className="min-w-72"><div className="flex items-center gap-3">{creator.avatarUrl ? <img src={creator.avatarUrl} alt="" className="size-9 rounded-full border object-cover" /> : <span className="grid size-9 place-items-center rounded-full border bg-muted"><Radio className="size-4" /></span>}<div><p className="font-medium">{displayName}</p><p className="font-mono text-xs text-muted-foreground">{creator.creatorUserOpenId || creator.id}</p></div></div></TableCell>
+                    <TableCell>{String(creator.userType || "Creator").replaceAll("_", " ")}</TableCell>
+                    <TableCell><div className="flex flex-wrap gap-1"><Badge variant={scopeReady ? "default" : "destructive"}>{scopeReady ? "Scopes ready" : "Reconnect scopes"}</Badge><Badge variant={hasLivePermission ? "outline" : "destructive"}>{hasLivePermission ? "LIVE eligible" : "LIVE permission missing"}</Badge></div></TableCell>
+                    <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{creator.accessTokenExpiresAt ? new Date(creator.accessTokenExpiresAt).toLocaleDateString() : "Not available"}</TableCell>
+                    <TableCell className="text-right"><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" disabled={busy} aria-label={`Actions for ${displayName}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => void run(async () => { const result = await request("creators/verify", { creatorId: creator.id }); await refresh(); return result })}><ShieldCheck className="size-4" /> Verify</DropdownMenuItem><DropdownMenuItem onSelect={() => void connectCreator(String(creator.id))}><RefreshCw className="size-4" /> Reconnect</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem variant="destructive" onSelect={() => setDisconnectTarget({ ...creator, kind: "creator", displayName })}><Trash2 className="size-4" /> Disconnect</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell>
+                  </TableRow>
+                })}</TableBody>
+              </Table></div>}
+            </section>
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div>
                 <p className="text-sm font-medium">Shared TikTok app credentials</p>
@@ -544,8 +605,8 @@ export function TikTokChannel({
         </Tabs>
         <AlertDialog open={Boolean(disconnectTarget)} onOpenChange={open => { if (!open) setDisconnectTarget(null) }}>
           <AlertDialogContent>
-            <AlertDialogHeader><AlertDialogTitle>Disconnect TikTok account?</AlertDialogTitle><AlertDialogDescription>DataPlus will remove the saved access and refresh tokens for {String(disconnectTarget?.displayName || "this shop")}. Imported orders, jobs, and historical evidence will remain available.</AlertDialogDescription></AlertDialogHeader>
-            <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { const target = disconnectTarget; setDisconnectTarget(null); if (!target) return; void run(async () => { const result = await request("accounts/remove", { accountId: target.id }); await refresh(); await Promise.all([refreshLive(), refreshWorkspace()]); onRefresh?.(); return result }) }}>Disconnect</AlertDialogAction></AlertDialogFooter>
+            <AlertDialogHeader><AlertDialogTitle>Disconnect TikTok account?</AlertDialogTitle><AlertDialogDescription>DataPlus will remove the saved access and refresh tokens for {String(disconnectTarget?.displayName || "this account")}. Imported orders, sessions, jobs, and historical evidence will remain available.</AlertDialogDescription></AlertDialogHeader>
+            <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => { const target = disconnectTarget; setDisconnectTarget(null); if (!target) return; void run(async () => { const result = target.kind === "creator" ? await request("creators/remove", { creatorId: target.id }) : await request("accounts/remove", { accountId: target.id }); await refresh(); if (target.kind !== "creator") await Promise.all([refreshLive(), refreshWorkspace()]); onRefresh?.(); return result }) }}>Disconnect</AlertDialogAction></AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
       </CardContent>

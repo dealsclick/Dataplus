@@ -6,7 +6,9 @@ const path = require('node:path');
 const { tiktokSignature } = require('../lib/tiktok-client');
 const { createTikTokCredentials } = require('../lib/tiktok-credentials');
 const {
+  creatorAuthorizationUrl,
   exchangeAuthorizationCode,
+  exchangeCreatorAuthorizationCode,
   isTikTokAuthorizationCallbackUrl,
   recoverTikTokAuthorizationState,
   sellerAuthorizationUrl,
@@ -76,6 +78,15 @@ async function main() {
     assert.equal(consumed.actorName, 'Luis');
     assert.throws(() => credentials.consumeAuthorization(authorization.state, { sessionToken }), /invalid or expired/);
     assert.equal(credentials.consumeAuthorization(parallelAuthorization.state, { sessionToken }).returnTo, '/channels?channel=TikTok%20Shop&tab=sync');
+    const creatorAuthorization = credentials.beginCreatorAuthorization('production', {
+      actorId: 'user-1', actorName: 'Luis', returnTo: '/channels?channel=TikTok%20Shop', sessionToken
+    });
+    assert.match(creatorAuthorization.state, /^creator\.production\.v2\./);
+    assert.throws(() => credentials.consumeCreatorAuthorization(creatorAuthorization.state, { sessionToken: 'another-session' }), /did not match this DataPlus session/);
+    const consumedCreator = credentials.consumeCreatorAuthorization(creatorAuthorization.state, { sessionToken });
+    assert.equal(consumedCreator.environment, 'production');
+    assert.equal(consumedCreator.actorId, 'user-1');
+    assert.throws(() => credentials.consumeCreatorAuthorization(creatorAuthorization.state, { sessionToken }), /invalid or expired/);
     credentials.updateTokens('production', { access_token: 'next-access', refresh_token: 'refresh-token', expires_in: 3600, user_type: 0 });
     assert.equal(credentials.get('production').accessToken, 'next-access');
     assert.equal(credentials.get('production').refreshToken, 'refresh-token');
@@ -140,6 +151,12 @@ async function main() {
   assert.equal(tiktokChannelSource.includes('Use account'), true, 'TikTok settings must expose explicit seller-account selection.');
   assert.equal(tiktokChannelSource.includes('accounts/remove'), true, 'TikTok settings must allow a seller account to be disconnected.');
   assert.equal(tiktokChannelSource.includes('Shop ID'), true, 'TikTok settings must display the selected shop ID.');
+  assert.equal(tiktokChannelSource.includes('Creator accounts for LIVE'), true, 'TikTok settings must expose separate creator authorization.');
+  assert.equal(tiktokChannelSource.includes('/auth/tiktok/creator/start'), true, 'TikTok settings must start the creator authorization flow.');
+  const liveSessionsSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'live-sessions-route.tsx'), 'utf8');
+  assert.equal(liveSessionsSource.includes('Sync products to TikTok LIVE'), true, 'TikTok Live Sessions must expose creator product sync.');
+  const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.equal(serverSource.includes('parts[3] === "tiktok-live" && parts[4] === "sync"'), true, 'The server must expose a TikTok Live Session sync route.');
   assert.equal(tiktokChannelSource.includes('Shop code'), true, 'TikTok settings must display the selected shop code.');
   assert.equal(tiktokChannelSource.includes('Shared TikTok app credentials'), true, 'TikTok settings must distinguish app credentials from seller accounts.');
   assert.equal(tiktokChannelSource.includes('Saved securely'), true, 'TikTok settings must explain that saved app secrets are not displayed.');
@@ -195,7 +212,6 @@ async function main() {
   const fulfillmentSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'fulfillment-route.tsx'), 'utf8');
   assert.equal(fulfillmentSource.includes('TikTok LIVE'), true, 'Fulfillment must visibly distinguish TikTok LIVE orders.');
   assert.equal(fulfillmentSource.includes('channelOrderNumber'), true, 'Fulfillment must display marketplace order numbers.');
-  const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.equal(serverSource.includes('setTikTokOAuthRecoveryCookie(req, res, authorization.state)'), true, 'TikTok authorization must preserve its signed one-time state in the browser before redirecting to TikTok.');
   assert.equal(serverSource.includes('Restarted ${environment} seller authorization with DataPlus security state.'), false, 'A missing TikTok state must be recovered from the original signed attempt instead of starting a loop.');
   const exchanged = await exchangeAuthorizationCode({
@@ -209,6 +225,17 @@ async function main() {
   });
   assert.equal(exchanged.access_token, 'generated-access');
   assert.deepEqual(exchanged.granted_scopes, ['seller.order', 'seller.product']);
+  const creatorUrl = new URL(creatorAuthorizationUrl({ appKey: 'app-key', state: 'creator.production.v2.payload.signature' }));
+  assert.equal(creatorUrl.origin, 'https://shop.tiktok.com');
+  assert.equal(creatorUrl.pathname, '/alliance/creator/auth');
+  assert.equal(creatorUrl.searchParams.get('app_key'), 'app-key');
+  assert.equal(creatorUrl.searchParams.get('state'), 'creator.production.v2.payload.signature');
+  const creatorExchange = await exchangeCreatorAuthorizationCode({
+    appKey: 'app-key', appSecret: 'app-secret', authCode: 'creator-code',
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ code: 0, data: { access_token: 'creator-access', refresh_token: 'creator-refresh', user_type: 1, granted_scopes: 'creator.showcase.read,creator.showcase.write' } }) })
+  });
+  assert.equal(creatorExchange.access_token, 'creator-access');
+  assert.deepEqual(creatorExchange.granted_scopes, ['creator.showcase.read', 'creator.showcase.write']);
   await assert.rejects(exchangeAuthorizationCode({
     appKey: 'app-key', appSecret: 'app-secret', authCode: 'creator-code',
     fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ code: 0, data: { access_token: 'creator-access', refresh_token: 'creator-refresh', user_type: 1 } }) })
