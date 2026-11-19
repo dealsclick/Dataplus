@@ -61566,27 +61566,34 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/live-sessions/references" && postgres.isPostgresEnabled()) {
     const scope = liveSessionScope(req);
     if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
-    const [allSessions, auditPage, purchaseOrders, db] = await Promise.all([
+    const requestedSourceId = String(url.searchParams.get("sourceId") || "").trim();
+    const requestedSourceType = String(url.searchParams.get("sourceType") || "").trim().toLowerCase();
+    const [allSessions, auditPage, purchaseOrders, requestedAudit, requestedPurchaseOrder, db] = await Promise.all([
       postgres.readEntityDocumentCollectionFast("liveSessions"),
       postgres.listWarehouseAuditsPage({ page: 1, pageSize: 100, sort: "newest" }),
-      postgres.listPurchaseOrders({ limit: 500, excludeStatuses: ["canceled", "cancelled", "rejected", "superseded", "deleted"] }),
+      postgres.listPurchaseOrders({ limit: 250, createdWithinDays: 7, includeLines: false, excludeStatuses: ["canceled", "cancelled", "rejected", "superseded", "deleted"] }),
+      requestedSourceType === "warehouse_audit" && requestedSourceId ? postgres.readWarehouseAudit(requestedSourceId) : Promise.resolve(null),
+      requestedSourceType === "purchase_order" && requestedSourceId ? postgres.readPurchaseOrderByKey(requestedSourceId) : Promise.resolve(null),
       postgres.readStateFields(["channels", "connections", "systemSettings", "warehouses"], { fallbackToLegacy: false })
     ]);
-    const audits = auditPage?.audits || [];
+    const audits = [...(auditPage?.audits || [])];
+    if (requestedAudit && !audits.some((audit) => String(audit.id || "") === String(requestedAudit.id || ""))) audits.unshift(requestedAudit);
+    const recentPurchaseOrders = [...(purchaseOrders || [])];
+    if (requestedPurchaseOrder && !recentPurchaseOrders.some((po) => String(po.id || "") === String(requestedPurchaseOrder.id || ""))) recentPurchaseOrders.unshift(requestedPurchaseOrder);
     const scopedSessions = liveSessionRowsForScope(allSessions, scope).map((session) => liveSessionLedger.sessionTotals(session));
-    const requestedSourceId = String(url.searchParams.get("sourceId") || "").trim().toLowerCase();
-    const poReferences = (purchaseOrders || []).filter((po) => {
+    const poReferences = recentPurchaseOrders.filter((po) => {
       if (String(po.fulfillmentMode || "").toLowerCase() === "dropship_per_order" || po.directToCustomer === true) return false;
-      const purpose = purchaseOrderPurposeForRecord(po);
-      return purpose.inventoryPurpose === "live_selling"
-        || (requestedSourceId && [po.id, po.poNumber].some((value) => String(value || "").toLowerCase() === requestedSourceId));
+      return true;
     }).map((po) => {
       const purpose = purchaseOrderPurposeForRecord(po);
+      const date = new Date(String(po.createdAt || po.poDate || po.orderDate || po.updatedAt || ""));
+      const shortDate = Number.isFinite(date.getTime()) ? date.toLocaleDateString("en-US", { month: "numeric", day: "numeric", year: "2-digit", timeZone: "America/New_York" }) : "Date unavailable";
       return {
         id: po.id,
         number: po.poNumber || po.id,
-        label: `${po.poNumber || po.id} · ${po.supplier || "Supplier"}`,
+        label: `${po.poNumber || po.id} · ${shortDate} · ${po.supplier || "Supplier"}`,
         supplier: po.supplier || "",
+        createdAt: po.createdAt || po.poDate || po.orderDate || po.updatedAt || "",
         warehouseId: po.warehouseId || "",
         warehouseName: po.warehouseName || "",
         status: po.status || "",

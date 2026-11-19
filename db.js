@@ -14413,6 +14413,8 @@ async function listPurchaseOrders(options = {}) {
   await initRelationalSchema();
   const limit = Math.max(1, Math.min(10000, Number(options.limit || 5000)));
   const offset = Math.max(0, Number(options.offset || 0));
+  const includeLines = options.includeLines !== false;
+  const createdWithinDays = Math.max(0, Number(options.createdWithinDays || 0));
   const sku = nullableString(options.sku);
   const vendorId = nullableString(options.vendorId);
   const query = nullableString(options.query)?.toLowerCase();
@@ -14448,6 +14450,10 @@ async function listPurchaseOrders(options = {}) {
   if (vendorId) {
     params.push(vendorId);
     where.push(`vendor_id = $${params.length}`);
+  }
+  if (createdWithinDays > 0) {
+    params.push(createdWithinDays);
+    where.push(`coalesce(created_at, updated_at) >= now() - ($${params.length}::double precision * interval '1 day')`);
   }
   let compactQueryParameter = 0;
   if (query) {
@@ -14501,7 +14507,7 @@ async function listPurchaseOrders(options = {}) {
   `, params);
   const ids = result.rows.map((row) => row.po_id).filter(Boolean);
   let lineRows = [];
-  if (ids.length) {
+  if (includeLines && ids.length) {
     const lines = await client.query(`
       select *
       from purchase_order_line_items
@@ -14515,7 +14521,10 @@ async function listPurchaseOrders(options = {}) {
     if (!byPo.has(line.po_id)) byPo.set(line.po_id, []);
     byPo.get(line.po_id).push(line);
   }
-  return result.rows.map((row) => purchaseOrderRowToState(row, byPo.get(row.po_id) || []));
+  return result.rows.map((row) => {
+    const purchaseOrder = purchaseOrderRowToState(row, byPo.get(row.po_id) || []);
+    return includeLines ? purchaseOrder : { ...purchaseOrder, items: [] };
+  });
 }
 
 async function listSupplierReturns(options = {}) {

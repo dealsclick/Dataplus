@@ -110,5 +110,11 @@ assert.doesNotMatch(uiSource, /const refsPromise =/);
 assert.match(uiSource, /if \(detailKey \|\| createOpen\) void loadReferences\(\)/);
 assert.match(uiSource, /warehouseAuditUrl\(selectedSource\.number, selectedSource\.id\)/);
 assert.match(uiSource, /aria-label="Open selected warehouse audit"/);
+assert.match(serverSource, /listPurchaseOrders\(\{ limit: 250, createdWithinDays: 7, includeLines: false/);
+assert.match(serverSource, /label: `\$\{po\.poNumber \|\| po\.id\} · \$\{shortDate\} · \$\{po\.supplier \|\| "Supplier"\}`/);
+assert.match(uiSource, /referenceParams\.set\("sourceType", urlDefaults\.sourceType\)/);
+const warehouseUiSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "components", "warehouse-route.tsx"), "utf8");
+assert.match(warehouseUiSource, /\/live-sessions\?sourceType=warehouse_audit&sourceId=/);
+assert.match(warehouseUiSource, /> Create live session<\/a>/);
 
 console.log("Live session audit-link regression tests passed.");
