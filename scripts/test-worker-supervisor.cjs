@@ -73,7 +73,7 @@ try {
   assert.strictEqual(jobMemoryBudgetMb("orders-ebay", "ebay-return-import", {}), 900);
   assert.strictEqual(jobMemoryBudgetMb("orders-ebay", "ebay-return-import", { DATAPLUS_EBAY_ORDER_JOB_RSS_MB: "840" }), 840);
   assert.strictEqual(jobMemoryBudgetMb("orders-temu", "temu-order-import", {}), 1200);
-  assert.strictEqual(jobMemoryBudgetMb("orders-tiktok", "tiktok-orders", {}), 600);
+  assert.strictEqual(jobMemoryBudgetMb("orders-tiktok", "tiktok-orders", {}), 1200);
   assert.strictEqual(jobMemoryBudgetMb("walmart", "walmart-orders", {}), 820);
   assert.strictEqual(jobMemoryBudgetMb("walmart", "walmart-returns", { DATAPLUS_WALMART_ORDER_JOB_RSS_MB: "760" }), 760);
   assert.strictEqual(jobMemoryBudgetMb("manual", "postgres-backup", { DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: "900" }), 900);
