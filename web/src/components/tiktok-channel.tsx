@@ -83,6 +83,7 @@ export function TikTokChannel({
   const [edits, setEdits] = useState<Json>({})
   const [tab, setTab] = useState("connection")
   const [busy, setBusy] = useState(false)
+  const [savingFeature, setSavingFeature] = useState("")
   const [error, setError] = useState("")
   const [message, setMessage] = useState("")
   const [job, setJob] = useState<Json | null>(null)
@@ -106,6 +107,12 @@ export function TikTokChannel({
     const next = await request("status")
     setStatus(next)
     setCredentials(current => ({ ...current, appKey: next.appKey || "", appSecret: "", serviceId: next.serviceId || "" }))
+    return next
+  }
+
+  const refreshRecentJobs = async () => {
+    const next = await request("status/jobs")
+    setStatus(current => ({ ...current, recentJobs: next.recentJobs || [] }))
     return next
   }
 
@@ -137,6 +144,7 @@ export function TikTokChannel({
       if (!active) return
       setStatus(next)
       setCredentials({ appKey: next.appKey || "", appSecret: "", serviceId: next.serviceId || "" })
+      void refreshRecentJobs().catch(() => {})
     }).catch(reason => active && setError(reason instanceof Error ? reason.message : "TikTok status could not load."))
       .finally(() => active && setStatusLoading(false))
     return () => { active = false }
@@ -188,6 +196,24 @@ export function TikTokChannel({
   }
 
   const update = (key: string, value: unknown) => setEdits(current => ({ ...current, [key]: value }))
+  const updateFeature = async (key: string, label: string, value: boolean) => {
+    setEdits(current => ({ ...current, [key]: value }))
+    setSavingFeature(key)
+    setError("")
+    try {
+      await onSave(channel.id, { [key]: value })
+      setEdits(current => {
+        const next = { ...current }
+        delete next[key]
+        return next
+      })
+      setMessage(`${label} ${value ? "enabled" : "disabled"} and saved.`)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : `${label} could not be saved.`)
+    } finally {
+      setSavingFeature("")
+    }
+  }
   const saveSettings = async () => {
     await onSave(channel.id, edits)
     setEdits({})
@@ -346,6 +372,7 @@ export function TikTokChannel({
 
   const changeTab = (value: string) => {
     setTab(value)
+    if (value === "sync") void refreshRecentJobs().catch(() => {})
     if (value === "live" && !liveStatus.syncedAt && !liveLoading) void refreshLive().catch(() => {})
     if (["analytics", "webhooks", "fulfillment"].includes(value) && !workspaceLoading) void refreshWorkspace().catch(() => {})
   }
@@ -525,8 +552,8 @@ export function TikTokChannel({
 
           <TabsContent value="features" className="space-y-4">
             <div className="grid gap-2 sm:grid-cols-2">
-              <label className="flex min-w-0 items-center justify-between gap-4 rounded-md border p-3"><span><span className="block text-sm font-medium">Enable TikTok Shop</span><span className="block text-xs text-muted-foreground">Master switch for every TikTok operation.</span></span><Switch checked={rules.channelEnabled === true} onCheckedChange={value => update("channelEnabled", value)} /></label>
-              {features.map(([key, label, description]) => <label key={key} className="flex min-w-0 items-center justify-between gap-4 rounded-md border p-3"><span className="min-w-0"><span className="block text-sm font-medium">{label}</span><span className="block text-xs text-muted-foreground">{description}</span></span><Switch checked={rules[key] === true} onCheckedChange={value => update(key, value)} /></label>)}
+              <label className="flex min-w-0 items-center justify-between gap-4 rounded-md border p-3"><span><span className="block text-sm font-medium">Enable TikTok Shop</span><span className="block text-xs text-muted-foreground">Master switch for every TikTok operation.</span></span><Switch disabled={Boolean(savingFeature)} checked={rules.channelEnabled === true} onCheckedChange={value => void updateFeature("channelEnabled", "TikTok Shop", value)} /></label>
+              {features.map(([key, label, description]) => <label key={key} className="flex min-w-0 items-center justify-between gap-4 rounded-md border p-3"><span className="min-w-0"><span className="block text-sm font-medium">{label}</span><span className="block text-xs text-muted-foreground">{description}</span></span><Switch disabled={Boolean(savingFeature)} checked={rules[key] === true} onCheckedChange={value => void updateFeature(key, label, value)} /></label>)}
             </div>
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <label className="grid gap-1.5 text-sm">Order interval (hours)<Input type="number" min="1" max="24" value={rules.tiktokOrderScheduleHours ?? 1} onChange={event => update("tiktokOrderScheduleHours", Number(event.target.value))} /></label>
@@ -536,6 +563,7 @@ export function TikTokChannel({
               <label className="grid gap-1.5 text-sm">Message interval (hours)<Input type="number" min="1" max="24" value={rules.tiktokMessageScheduleHours ?? 1} onChange={event => update("tiktokMessageScheduleHours", Number(event.target.value))} /></label>
               <label className="grid gap-1.5 text-sm">Analytics interval (hours)<Input type="number" min="1" max="24" value={rules.tiktokAnalyticsScheduleHours ?? 24} onChange={event => update("tiktokAnalyticsScheduleHours", Number(event.target.value))} /></label>
             </div>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4"><p className="text-xs text-muted-foreground">Feature switches save immediately. Save after changing any schedule interval.</p><Button size="sm" disabled={busy || Boolean(savingFeature) || !dirty} onClick={() => void run(saveSettings)}><Save className="size-4" /> Save intervals</Button></div>
           </TabsContent>
 
           <TabsContent value="sync" className="space-y-4">
