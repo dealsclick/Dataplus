@@ -24502,7 +24502,10 @@ function getWalmartMarketplace() {
     },
     findActive: async task => findActiveImportJobByWorkerTask(await readDbFast({ skipInventory: true }), task),
     createJob: async attrs => {
-      const db = await readDbFast({ skipInventory: true });
+      // Webhook bursts only need the job store to create a queued operation.
+      // Loading thousands of complete orders here makes webhook acknowledgement
+      // contend with the interactive Orders and Fulfillment workspaces.
+      const db = await readDbFast({ skipInventory: true, skipOrders: true, skipPurchaseOrders: true });
       const job = createImportJob(db, attrs);
       await postgres.upsertOperationJob(job); upsertImportJobStore(job); return job;
     },
@@ -24596,7 +24599,7 @@ function getTikTokMarketplace() {
         && String(job.workerPayload?.accountId || job.raw?.workerPayload?.accountId || '') === String(accountId || '')) || null;
     },
     createJob: async attrs => {
-      const db = await readDbFast({ skipInventory: true });
+      const db = await readDbFast({ skipInventory: true, skipOrders: true, skipPurchaseOrders: true });
       const job = createImportJob(db, attrs);
       await postgres.upsertOperationJob(job);
       upsertImportJobStore(job);
@@ -37237,7 +37240,12 @@ async function readFulfillmentConsoleProjectionView(view = "ready") {
 async function readFulfillmentConsoleProjectionPage(view = "ready", options = {}) {
   const normalizedView = String(view || "ready").trim().toLowerCase();
   const supportKeys = normalizedView === "purchased-labels" ? ["print-queue", "print-stations", "batches"] : [];
-  const projection = await postgres.readFulfillmentConsoleProjection(supportKeys);
+  const projection = await postgres.readFulfillmentConsoleProjection(supportKeys, {
+    // The paged shipment rows are the primary dataset. Keep only the newest
+    // support records needed by the print picker instead of returning the
+    // entire label-batch history on every quiet refresh.
+    limitPerView: normalizedView === "purchased-labels" ? 100 : 0
+  });
   if (!projection) return null;
   const [page, facets] = await Promise.all([
     postgres.readFulfillmentConsoleProjectionPage(normalizedView, {

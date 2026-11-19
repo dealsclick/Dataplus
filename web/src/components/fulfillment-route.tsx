@@ -1014,6 +1014,7 @@ export function FulfillmentPage() {
   const [data, setData] = useState<Record<string, any>>(cachedReadyView || { work: [], allWork: [], batches: [], printQueue: [], printStations: [], shipments: [], doNotShip: [], exceptions: [], manifests: [], reports: {}, settings: {} })
   const fulfillmentTabMountedRef = useRef(false)
   const fulfillmentRequestRef = useRef(0)
+  const staleProjectionRetryRef = useRef(0)
   const fulfillmentLoadRef = useRef<(fresh?: boolean, quiet?: boolean, requestedView?: string) => Promise<Record<string, any> | null>>(async () => null)
   const [loading, setLoading] = useState(!cachedReadyView)
   const [busy, setBusy] = useState(false)
@@ -1384,7 +1385,12 @@ export function FulfillmentPage() {
           fresh,
         })
       }))
-      if (result.snapshotStale) window.setTimeout(() => void fulfillmentLoadRef.current(false, true), 2500)
+      if (result.snapshotStale && !staleProjectionRetryRef.current) {
+        staleProjectionRetryRef.current = window.setTimeout(() => {
+          staleProjectionRetryRef.current = 0
+          if (document.visibilityState === "visible") void fulfillmentLoadRef.current(false, true)
+        }, 15_000)
+      }
       return result
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to load fulfillment work.")
@@ -1582,7 +1588,13 @@ export function FulfillmentPage() {
     const timer = window.setInterval(() => {
       if (document.visibilityState === "visible") void fulfillmentLoadRef.current(false, true)
     }, 60_000)
-    return () => window.clearInterval(timer)
+    return () => {
+      window.clearInterval(timer)
+      if (staleProjectionRetryRef.current) {
+        window.clearTimeout(staleProjectionRetryRef.current)
+        staleProjectionRetryRef.current = 0
+      }
+    }
   }, [tab])
   useEffect(() => {
     if (!rateRefreshJobId) return

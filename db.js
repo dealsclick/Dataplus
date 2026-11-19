@@ -4905,7 +4905,7 @@ async function patchFulfillmentConsoleProjection(projection = {}) {
   }
 }
 
-async function readFulfillmentConsoleProjection(viewKeys = []) {
+async function readFulfillmentConsoleProjection(viewKeys = [], options = {}) {
   const client = getPool();
   if (!client) return null;
   await initRelationalSchema();
@@ -4917,13 +4917,25 @@ async function readFulfillmentConsoleProjection(viewKeys = []) {
   `);
   if (!meta.rows.length) return null;
   const active = meta.rows[0];
-  const result = keys.length ? await client.query(`
+  const limitPerView = Math.max(0, Math.min(1000, Number(options.limitPerView || 0)));
+  const result = keys.length ? await client.query(limitPerView ? `
+    select view_key, data
+    from (
+      select view_key, data, position,
+        row_number() over (partition by view_key order by position) as view_position
+      from fulfillment_console_projection_rows
+      where revision_id = $1
+        and view_key = any($2::text[])
+    ) projected
+    where view_position <= $3
+    order by view_key, position
+  ` : `
     select view_key, data
     from fulfillment_console_projection_rows
     where revision_id = $1
       and view_key = any($2::text[])
     order by view_key, position
-  `, [active.active_revision, keys]) : { rows: [] };
+  `, limitPerView ? [active.active_revision, keys, limitPerView] : [active.active_revision, keys]) : { rows: [] };
   const views = Object.fromEntries(keys.map((key) => [key, []]));
   for (const row of result.rows) views[row.view_key]?.push(row.data);
   return {
