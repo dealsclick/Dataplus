@@ -16,7 +16,7 @@ assert.ok(routeStart >= 0 && routeEnd > routeStart, "order-detail route must exi
 assert.match(route, /postgres\.readOrderReturns\(order\)/, "order detail must query only returns related to the selected order");
 assert.doesNotMatch(route, /readStateField\("returns"\)/, "order detail must not load the global returns document");
 assert.match(route, /Promise\.all\(\[\s*postgres\.readOrderCustomerSummary\(order\),[\s\S]*enrichOrderDetail\(order\)/, "optional order enrichment should run concurrently");
-assert.match(cache, /dataplus:order-detail:v9:\$\{orderId\}:/, "writes must invalidate only the changed order detail");
+assert.match(cache, /dataplus:order-detail:v10:\$\{orderId\}:/, "writes must invalidate only the changed order detail");
 assert.doesNotMatch(cache, /deleteByPrefix\("dataplus:order-detail:"\)/, "writes must not flush every cached order detail");
 assert.ok(appSource.includes('if (/^\\/orders\\/[^/]+\\/?$/.test(window.location.pathname)) { setLoading(false); return }'), "order details must not load the global application state");
 assert.match(source, /const omitOrders = lite && !includeOrders;/, "lite shell state must omit orders unless a caller explicitly requests them");
@@ -34,13 +34,20 @@ const productLookupStart = database.indexOf("async function readProductsForOrder
 const productLookupEnd = database.indexOf("async function listProducts", productLookupStart);
 const productLookup = database.slice(productLookupStart, productLookupEnd);
 assert.match(productLookup, /if \(fast\) \{[\s\S]*where lower\(sku\) = any\(\$1\)[\s\S]*const unresolved = normalized\.filter/, "order details must resolve exact SKU and aliases before broader identifiers");
-assert.match(productLookup, /if \(unresolved\.length\)/, "the fast lookup must skip broad identifier tables when exact matches resolve every key");
+assert.match(productLookup, /const fallbackKeys = unresolved\.filter\(\(key\) => key\.replace\([^\n]+\.length >= 4\)/, "short marketplace line IDs must not trigger broad catalog identity matching");
+assert.match(productLookup, /if \(fallbackKeys\.length\)/, "the fast lookup must skip broad identifier tables when exact matches resolve every key");
 assert.match(productLookup, /identifier_type = any\(array\[/, "fallback identifier lookup must preserve the identifier-type index");
 assert.match(route, /redisCache\.setJson\(requestedCacheKey, payload, 60\)/, "human order-number lookups should receive a short alias cache");
 assert.match(route, /enrichOrderDetail\(order\)/, "order detail enrichment must remain enabled");
 assert.match(source, /readProductsForOrderSkus\(keys, \{ fast: true \}\)/, "order detail enrichment must use the indexed product lookup");
 assert.match(source, /orderLineSkuLookupKeys\(lines, \{ preferredOnly: true \}\)/, "order details must not re-scan a line's channel identifiers after its catalog SKU resolves");
 assert.match(source, /if \(products\.length\) return products;/, "broader line identifiers must remain a fallback only when the preferred SKU is unresolved");
+
+const returnsStart = database.indexOf("async function readOrderReturns(order = {})");
+const returnsEnd = database.indexOf("const RETURNS_WORKSPACE_SOURCE_CTE", returnsStart);
+const returnsLookup = database.slice(returnsStart, returnsEnd);
+assert.match(returnsLookup, /data->>'orderId' = \$1[\s\S]*union[\s\S]*lower\(data->>'orderNumber'\) = lower\(\$2\)/, "order return links must use separate indexed probes");
+assert.doesNotMatch(returnsLookup, /data->>'orderId' = \$1 or/, "order return links must not combine indexed identities in an OR scan");
 
 const importedProductsStart = source.indexOf("async function ensureProductsForImportedOrders(");
 const importedProductsEnd = source.indexOf("\nasync function ", importedProductsStart + 1);

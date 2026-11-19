@@ -14079,9 +14079,14 @@ async function readOrderReturns(order = {}) {
   if (!client || !order.id) return [];
   await initRelationalSchema();
   const result = await client.query(`
-    select data from entity_documents
-    where collection = 'returns'
-      and (data->>'orderId' = $1 or ($2 <> '' and data->>'orderNumber' = $2))
+    select data
+    from (
+      select entity_id, data from entity_documents
+      where collection = 'returns' and data->>'orderId' = $1
+      union
+      select entity_id, data from entity_documents
+      where collection = 'returns' and $2 <> '' and lower(data->>'orderNumber') = lower($2)
+    ) related_returns
     order by entity_id
   `, [String(order.id), String(order.orderNumber || '')]);
   return result.rows.map(row => row.data);
@@ -17780,7 +17785,11 @@ async function readProductsForOrderSkus(keys = [], options = {}) {
     const matchedKeys = new Set(direct.rows.map((row) => row.match_key).filter(Boolean));
     const productIds = new Set(direct.rows.map((row) => row.product_id).filter(Boolean));
     const unresolved = normalized.filter((key) => !matchedKeys.has(key));
-    if (unresolved.length) {
+    // Marketplace line IDs can be tiny numeric values (for example "7").
+    // They are not useful UPC/MPN/vendor identifiers and broadening them into
+    // every catalog identity table can dominate order-detail latency.
+    const fallbackKeys = unresolved.filter((key) => key.replace(/[^a-z0-9]+/g, "").length >= 4);
+    if (fallbackKeys.length) {
       const fallback = await client.query(`
         with matched_product_ids as (
           select product_id
@@ -17811,7 +17820,7 @@ async function readProductsForOrderSkus(keys = [], options = {}) {
           select product_id from product_supplier_links where lower(source_sku) = any($1)
         )
         select product_id from matched_product_ids
-      `, [unresolved]);
+      `, [fallbackKeys]);
       for (const row of fallback.rows) if (row.product_id) productIds.add(row.product_id);
     }
     result = productIds.size
