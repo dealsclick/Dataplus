@@ -1092,6 +1092,8 @@ export type ProductItem = CatalogItem & {
   temuListingId?: string
   temuOfferId?: string
   temuSku?: string
+  temuListing?: TemuProductListing
+  temuListings?: Record<string, TemuProductListing>
   channelStatuses?: Record<string, unknown>
   channelSellingStatus?: Record<string, { status?: string; inactive?: boolean; updatedAt?: string; updatedBy?: string; reason?: string }>
   sources?: Record<string, unknown>
@@ -1265,6 +1267,22 @@ export type ProductItem = CatalogItem & {
   warehouseCount?: number
   warehouseStock?: Array<{ warehouseId?: string; warehouseCode?: string; warehouseName?: string; warehouse?: string; inventorySourceType?: string; isPhysical?: boolean; aggregate?: boolean; locationBin?: string; qty?: number; reserved?: number; available?: number; reorderPoint?: number; updatedAt?: string }>
   recentChanges?: Array<{ field?: string; previousValue?: string; nextValue?: string; updatedAt?: string; createdAt?: string }>
+}
+
+export type TemuProductListing = {
+  accountId?: string
+  accountName?: string
+  mallId?: string
+  goodsId?: string
+  skuId?: string
+  externalGoodsId?: string
+  merchantSku?: string
+  status?: string
+  launchedAt?: string
+  updatedAt?: string
+  lastError?: string
+  draft?: Record<string, unknown>
+  readiness?: { ready?: boolean; blockers?: Array<{ code?: string; field?: string; message?: string }>; warnings?: Array<{ code?: string; field?: string; message?: string }> }
 }
 
 type EbayListingBlockerSample = {

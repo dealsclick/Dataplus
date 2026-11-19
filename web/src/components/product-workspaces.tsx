@@ -104,6 +104,7 @@ import { catalogChannelState,ebayListingOperatorState,marketplaceListingUrl } fr
 import { api,dateLabel,moneyLabel,numberLabel } from "../lib/client-api"
 import { Detail,Field } from "./app-ui"
 import { shipmentDisplayValue,trackingUrlForShipment } from "./shipment-links"
+import { TemuProductWorkspace } from "./temu-product-workspace"
 
 function emptyVendorSupplierLocation(priority: number): VendorSupplierLocation {
   const now = new Date().toISOString()
@@ -2038,6 +2039,8 @@ function ProductChannelPanel({ channel, product, section, values, onEditEbay, on
     const commerceRows: Array<[string, string]> = [["DataPlus price", moneyLabel(product.shopifySystemPrice ?? product.websitePrice ?? product.price)], ["Live Shopify price", moneyLabel(product.shopifyLivePrice)], ["Compare-at price", moneyLabel(product.shopifyLiveCompareAtPrice ?? undefined)], ["Price difference", moneyLabel(product.shopifyPriceDelta ?? undefined)], ["Price match", product.shopifyPriceMismatch ? "Needs review" : "Matched"], ["Live inventory", numberLabel(product.shopifyLiveInventoryQuantity)], ["Inventory variant", product.shopifyLiveVariantSku || ""], ["Selling UOM", product.uomDisplay || "Each"]]
     return <>{section("Shopify product pair", "The parent product and sellable variant linked to this DataPlus SKU.", <><div className="mb-4 grid gap-3 rounded-md border bg-muted/20 p-3 sm:grid-cols-2"><div><p className="text-xs font-medium text-muted-foreground">Shopify SKU</p><p className="mt-1 font-mono text-sm">{shopifySku || "Not provided"}</p></div><div><p className="text-xs font-medium text-muted-foreground">Matching local SKU</p>{matchedLocalSku ? <a className="mt-1 inline-block font-mono text-sm font-medium text-primary hover:underline" href={`/products/${encodeURIComponent(matchedLocalSku)}`}>{matchedLocalSku}</a> : <p className="mt-1 flex items-center gap-1 text-sm text-amber-700"><AlertCircle className="size-4" /> No local SKU match</p>}</div></div>{values(productRows)}</>)}{section("Shopify commercial values", "Channel-specific price, inventory, and UOM sell-unit information for this product.", <><div className="mb-4">{values(commerceRows)}</div><ProductVariantsTable rows={product.shopifyPurchaseVariants || []} /></>)}</>
   }
+
+  if (kind === "temu") return <TemuProductWorkspace channel={channel} product={product} />
 
   if (kind === "ebay") {
     const ebay = product.ebayListing || {}

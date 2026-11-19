@@ -239,6 +239,7 @@ const { productIsMasterInactive } = require("./lib/product-selling-status");
 const { SUPPORTED_CHANNELS: SKU_CHANNELS, channelKey: skuChannelKey, productChannelInactive, setProductChannelStatus } = require("./lib/channel-selling-status");
 const channelDisplayName = (channel) => ({ ebay: "eBay", shopify: "Shopify", walmart: "Walmart", temu: "Temu", whatnot: "Whatnot", tiktok: "TikTok Shop" }[skuChannelKey(channel)] || String(channel || "Channel"));
 const { channelKey: inactiveInventoryChannelKey, requireInventoryChannel } = require("./lib/inactive-channel-inventory");
+const { addProductPayload: buildTemuAddProductPayload, launchFingerprint: temuLaunchFingerprint, launchResult: normalizeTemuLaunchResult, listingForAccount: temuListingForAccount, productLaunchReadiness: temuProductLaunchReadiness } = require("./lib/temu-products");
 const { createInactiveChannelJob } = require("./lib/inactive-channel-job");
 const AUTH_SESSIONS_FILE = path.join(DATA_DIR, "auth-sessions.json");
 const USER_TABLE_PREFERENCES_FILE = path.join(DATA_DIR, "user-table-preferences.json");
@@ -1143,6 +1144,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
   temuWebhookEndpoint: "",
   temuWebhookSecretConfigured: false,
   temuDefaultWarehouseId: "",
+  temuAccountSettings: {},
   temuInventoryMode: "available",
   temuInventorySafetyQty: 0,
   temuPriceMarkupPercent: 60,
@@ -5181,6 +5183,24 @@ function backfillAliasesFromMappedOrders(db = {}) {
   return changed;
 }
 
+function normalizeTemuAccountSettings(value = {}) {
+  const rows = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const normalized = {};
+  for (const [rawId, row] of Object.entries(rows)) {
+    const accountId = String(rawId || "").trim().slice(0, 256);
+    if (!accountId || !row || typeof row !== "object" || Array.isArray(row)) continue;
+    normalized[accountId] = {
+      defaultWarehouseId: String(row.defaultWarehouseId || "").trim().slice(0, 256),
+      connectionOk: row.connectionOk === true,
+      liveApiChecked: row.liveApiChecked === true,
+      verifiedAt: String(row.verifiedAt || "").trim().slice(0, 64),
+      verificationMessage: String(row.verificationMessage || "").trim().slice(0, 1000),
+      lastOrderSync: String(row.lastOrderSync || "").trim().slice(0, 64)
+    };
+  }
+  return normalized;
+}
+
 function normalizeChannel(channel = {}) {
   const rawSettings = channel.settings || {};
   const isShopify = String(channel.name || "").trim().toLowerCase() === "shopify";
@@ -5295,6 +5315,7 @@ function normalizeChannel(channel = {}) {
   settings.temuLastOrderSync = String(settings.temuLastOrderSync || "").trim();
   settings.temuWebhookEndpoint = String(settings.temuWebhookEndpoint || "").trim().replace(/\/+$/, "");
   settings.temuDefaultWarehouseId = String(settings.temuDefaultWarehouseId || "").trim();
+  settings.temuAccountSettings = normalizeTemuAccountSettings(settings.temuAccountSettings);
   settings.temuOrderImportStartDate = String(settings.temuOrderImportStartDate || "").trim();
   settings.temuInventoryMode = ["available", "fixed", "disabled"].includes(String(settings.temuInventoryMode || "").trim()) ? String(settings.temuInventoryMode).trim() : DEFAULT_CHANNEL_SETTINGS.temuInventoryMode;
   settings.temuInventorySafetyQty = Math.max(0, Math.floor(Number(settings.temuInventorySafetyQty || 0) || 0));
@@ -27439,6 +27460,181 @@ async function readChannelJobQueueState() {
   });
 }
 
+function temuLaunchAccount(db = {}, accountId = "") {
+  const config = getTemuConfig(db, accountId);
+  const summary = publicTemuAccounts(db).accounts.find((account) => account.id === config.accountId) || {};
+  return {
+    ...summary,
+    id: config.accountId,
+    accountId: config.accountId,
+    accountName: config.accountName,
+    mallId: config.mallId,
+    accessToken: config.accessToken,
+    configured: Boolean(config.accountId && config.accessToken),
+    credentialKey: config.credentialKey
+  };
+}
+
+async function saveTemuProductListing(product = {}, listing = {}) {
+  const accountId = String(listing.accountId || "").trim();
+  if (!accountId) throw new Error("Choose a Temu shop before saving this listing.");
+  if (postgres.isPostgresEnabled()) {
+    const productId = String(product.id || product.productId || "").trim();
+    const sku = String(product.sku || "").trim();
+    const result = await postgres.getPool().query(`
+      update products
+      set raw=jsonb_set(
+        jsonb_set(coalesce(raw,'{}'::jsonb),'{temuListing}',coalesce(raw->'temuListing','{}'::jsonb)||$3::jsonb),
+        '{temuListings}',
+        coalesce(raw->'temuListings','{}'::jsonb)||jsonb_build_object($4,$3::jsonb)
+      ),updated_at=now()
+      where ($1<>'' and product_id=$1) or ($2<>'' and upper(btrim(sku))=upper(btrim($2)))
+      returning product_id
+    `, [productId, sku, JSON.stringify(listing), accountId]);
+    if (!result.rowCount) throw new Error("The catalog SKU no longer exists.");
+    await Promise.all([
+      redisCache.deleteByPrefix("dataplus:products:"),
+      redisCache.deleteByPrefix("dataplus:product-detail:")
+    ]);
+    return result.rowCount;
+  }
+  const db = await readDb();
+  const target = (db.inventory || []).find((row) => [row.id, row.sku].some((value) => String(value || "").trim().toLowerCase() === String(product.id || product.sku || "").trim().toLowerCase()));
+  if (!target) throw new Error("The catalog SKU no longer exists.");
+  target.temuListing = { ...(target.temuListing || {}), ...listing };
+  target.temuListings = { ...(target.temuListings || {}), [accountId]: { ...(target.temuListings?.[accountId] || {}), ...listing } };
+  await writeDb(db);
+  return 1;
+}
+
+async function temuProductLaunchPreview(db = {}, body = {}, options = {}) {
+  const sku = String(body.sku || body.productId || "").trim();
+  if (!sku) throw new Error("Choose a catalog SKU.");
+  const product = postgres.isPostgresEnabled()
+    ? await postgres.readProductByKey(sku)
+    : (db.inventory || []).find((row) => [row.id, row.sku].some((value) => String(value || "").trim().toLowerCase() === sku.toLowerCase()));
+  if (!product) throw Object.assign(new Error(`SKU ${sku} was not found.`), { statusCode: 404 });
+  const account = temuLaunchAccount(db, body.accountId);
+  const overrides = body.draft && typeof body.draft === "object" ? body.draft : body;
+  const built = buildTemuAddProductPayload(product, account, overrides);
+  const existing = temuListingForAccount(product, account.id);
+  const listing = {
+    ...existing,
+    accountId: account.id,
+    accountName: account.accountName || account.label || account.mallId || account.id,
+    mallId: account.mallId || "",
+    merchantSku: built.readiness.draft.merchantSku,
+    status: existing.goodsId ? existing.status || "linked" : options.saveDraft ? "draft" : existing.status || "draft",
+    draft: built.readiness.draft,
+    readiness: { ready: built.readiness.ready, blockers: built.readiness.blockers, warnings: built.readiness.warnings },
+    draftFingerprint: temuLaunchFingerprint(product, account, overrides),
+    updatedAt: new Date().toISOString(),
+    ...(options.saveDraft ? { draftSavedAt: new Date().toISOString(), draftSavedBy: String(options.actor || "DataPlus") } : {})
+  };
+  if (options.saveDraft) await saveTemuProductListing(product, listing);
+  return {
+    product: { id: product.id, sku: product.sku, title: product.title, defaultImage: product.defaultImage },
+    account: { id: account.id, label: account.label || account.accountName, mallId: account.mallId, configured: account.configured },
+    listing,
+    readiness: built.readiness,
+    requestPreview: built.payload
+  };
+}
+
+async function queueTemuProductLaunchJob(db = {}, body = {}, options = {}) {
+  const channel = requireEnabledChannel(db, "Temu");
+  if (channel.settings?.temuListingLaunchEnabled !== true) throw Object.assign(new Error("Enable Launch listings in Temu Channel Settings before publishing products."), { statusCode: 409 });
+  const preview = await temuProductLaunchPreview(db, body, { saveDraft: true, actor: options.actor });
+  if (!preview.readiness.ready) throw Object.assign(new Error(`Temu launch needs review: ${preview.readiness.blockers.map((issue) => issue.message).join(" ")}`), { statusCode: 409, readiness: preview.readiness });
+  const account = temuLaunchAccount(db, preview.account.id);
+  const sku = String(preview.product.sku || preview.product.id || body.sku || "").trim();
+  const jobs = postgres.isPostgresEnabled() ? await mergedImportJobsAsync(db) : mergedImportJobs(db);
+  const active = (jobs || []).find((job) => ["queued", "running"].includes(String(job.status || "").toLowerCase())
+    && String(job.workerTask || "") === "temu-product-launch"
+    && String(job.workerPayload?.accountId || "") === account.id
+    && String(job.workerPayload?.sku || "").toLowerCase() === sku.toLowerCase());
+  if (active) return { duplicate: true, job: active, preview };
+  const job = createImportJob(db, {
+    section: "Products",
+    category: "Temu",
+    operation: `Launch ${sku} to Temu - ${account.accountName || account.mallId || account.id}`,
+    direction: "sync",
+    status: "queued",
+    phase: "queued",
+    totalRows: 1,
+    processedRows: 0,
+    workerTask: "temu-product-launch",
+    workerPayload: {
+      sku,
+      accountId: account.id,
+      accountName: account.accountName || account.mallId || account.id,
+      credentialKey: account.credentialKey,
+      draftFingerprint: preview.listing.draftFingerprint,
+      actor: String(options.actor || "DataPlus")
+    },
+    fileName: "temu-product-launch.json",
+    message: `Temu product launch queued for ${sku} in ${account.accountName || account.mallId || account.id}.`
+  });
+  upsertImportJobStore(job);
+  if (postgres.isPostgresEnabled()) await postgres.upsertOperationJob(job);
+  appendChannelApiLog({ channel: "Temu", transport: "Job", method: "QUEUE", path: "temu.local.goods.v3.add", operation: "Temu product launch", statusCode: 202, ok: true, jobId: job.id, message: job.message });
+  return { duplicate: false, job, preview };
+}
+
+async function runTemuProductLaunchWorkerJob(job = {}) {
+  const payload = job.workerPayload || {};
+  const db = await readDbFast({ skipInventory: true, skipOrders: true, skipPurchaseOrders: true });
+  const channel = requireEnabledChannel(db, "Temu");
+  if (channel.settings?.temuListingLaunchEnabled !== true) throw new Error("Temu listing launch was disabled after this job was queued.");
+  const account = temuLaunchAccount(db, payload.accountId);
+  if (!account.configured) throw new Error("The selected Temu shop is no longer connected.");
+  if (payload.credentialKey && payload.credentialKey !== account.credentialKey) throw new Error("The Temu shop credentials changed after this launch was queued. Review and queue the launch again.");
+  const product = await postgres.readProductByKey(payload.sku);
+  if (!product) throw new Error(`SKU ${payload.sku} was not found.`);
+  const existing = temuListingForAccount(product, account.id);
+  const draft = existing.draft || {};
+  const built = buildTemuAddProductPayload(product, account, draft);
+  const fingerprint = temuLaunchFingerprint(product, account, draft);
+  if (payload.draftFingerprint && payload.draftFingerprint !== fingerprint) throw new Error("The Temu launch draft changed after this job was queued. Review and queue it again.");
+  if (!built.readiness.ready) {
+    await saveTemuProductListing(product, { ...existing, accountId: account.id, accountName: account.accountName, mallId: account.mallId, merchantSku: built.readiness.draft.merchantSku, status: "blocked", draft: built.readiness.draft, readiness: { ready: false, blockers: built.readiness.blockers, warnings: built.readiness.warnings }, updatedAt: new Date().toISOString() });
+    throw new Error(`Temu launch blocked: ${built.readiness.blockers.map((issue) => issue.message).join(" ")}`);
+  }
+  job = await persistWorkerImportJob(job, { status: "running", phase: "launching_temu_product", processedRows: 0, totalRows: 1, progressPercent: 15, message: `Sending ${payload.sku} to ${account.accountName || account.mallId || account.id}.` });
+  const attemptId = crypto.randomUUID();
+  await saveTemuProductListing(product, { ...existing, accountId: account.id, accountName: account.accountName, mallId: account.mallId, merchantSku: built.readiness.draft.merchantSku, status: "submitting", draft: built.readiness.draft, launchAttemptId: attemptId, launchAttemptedAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+  try {
+    const response = await temuRequest("temu.local.goods.v3.add", built.payload, { db, accountId: account.id, allowErrorResult: true, timeoutMs: 60_000, maxResponseBytes: 2 * 1024 * 1024 });
+    const result = normalizeTemuLaunchResult(response);
+    if (!result.success || !result.goodsId) throw new Error(result.errorMessage || `Temu did not return a goods ID${result.errorCode ? ` (${result.errorCode})` : ""}.`);
+    const launchedAt = new Date().toISOString();
+    const listing = {
+      ...existing,
+      accountId: account.id,
+      accountName: account.accountName || account.mallId || account.id,
+      mallId: account.mallId,
+      merchantSku: built.readiness.draft.merchantSku,
+      goodsId: result.goodsId,
+      externalGoodsId: result.externalGoodsId || built.readiness.draft.externalGoodsId,
+      status: "submitted_for_review",
+      draft: built.readiness.draft,
+      readiness: { ready: true, blockers: [], warnings: built.readiness.warnings },
+      launchAttemptId: attemptId,
+      launchedAt,
+      updatedAt: launchedAt,
+      lastError: ""
+    };
+    await saveTemuProductListing(product, listing);
+    appendChannelApiLog({ channel: "Temu", transport: "OpenAPI", method: "POST", path: "temu.local.goods.v3.add", operation: "Temu product launch", statusCode: 200, ok: true, jobId: job.id, message: `${payload.sku} submitted as Temu goods ${result.goodsId} for ${account.accountName || account.mallId}.` });
+    return persistWorkerImportJob(job, { status: "success", phase: "complete", processedRows: 1, changed: 1, totalRows: 1, progressPercent: 100, finishedAt: launchedAt, message: `${payload.sku} was submitted to ${account.accountName || account.mallId || account.id} for Temu review as goods ${result.goodsId}.`, details: `Merchant SKU ${built.readiness.draft.merchantSku}. Each Temu shop keeps its own listing identity.` });
+  } catch (error) {
+    const failedAt = new Date().toISOString();
+    await saveTemuProductListing(product, { ...existing, accountId: account.id, accountName: account.accountName, mallId: account.mallId, merchantSku: built.readiness.draft.merchantSku, status: "verification_required", draft: built.readiness.draft, launchAttemptId: attemptId, launchAttemptedAt: failedAt, updatedAt: failedAt, lastError: error.message || "Temu launch failed." });
+    appendChannelApiLog({ channel: "Temu", transport: "OpenAPI", method: "POST", path: "temu.local.goods.v3.add", operation: "Temu product launch", statusCode: 502, ok: false, jobId: job.id, message: `${payload.sku}: ${error.message || "Temu launch failed."}` });
+    throw new Error(`Temu launch needs verification before retrying. ${error.message || "The API result was not confirmed."}`);
+  }
+}
+
 async function queueTemuReturnImportJob(db, body = {}, options = {}) {
   const channel = requireEnabledChannel(db, "Temu");
   if (!channel.settings?.temuReturnSyncEnabled && !options.ignoreDisabled) throw new Error("Enable Temu return sync in Channel Settings before importing returns.");
@@ -30265,6 +30461,64 @@ function legacyTemuAccount(db = {}, settings = temuChannelSettings(db)) {
   };
 }
 
+function temuOperationalAccountSettings(db = {}, accountId = "") {
+  const id = String(accountId || "").trim();
+  const settings = temuChannelSettings(db);
+  const rows = normalizeTemuAccountSettings(settings.temuAccountSettings);
+  return {
+    defaultWarehouseId: String(rows[id]?.defaultWarehouseId || settings.temuDefaultWarehouseId || "").trim(),
+    connectionOk: rows[id]?.connectionOk === true,
+    liveApiChecked: rows[id]?.liveApiChecked === true,
+    verifiedAt: String(rows[id]?.verifiedAt || "").trim(),
+    verificationMessage: String(rows[id]?.verificationMessage || "").trim(),
+    lastOrderSync: String(rows[id]?.lastOrderSync || "").trim()
+  };
+}
+
+function setTemuOperationalAccountSettings(db = {}, accountId = "", patch = {}) {
+  const id = String(accountId || "").trim();
+  if (!id) return null;
+  const channel = (db.connections || []).find((entry) => String(entry.name || "").trim().toLowerCase() === "temu");
+  if (!channel) return null;
+  const currentRows = normalizeTemuAccountSettings(channel.settings?.temuAccountSettings);
+  const current = currentRows[id] || {};
+  channel.settings = {
+    ...DEFAULT_CHANNEL_SETTINGS,
+    ...(channel.settings || {}),
+    temuAccountSettings: normalizeTemuAccountSettings({ ...currentRows, [id]: { ...current, ...patch } })
+  };
+  Object.assign(channel, normalizeChannel(channel));
+  return channel.settings.temuAccountSettings[id];
+}
+
+function syncLegacyTemuCredentialProjection(db = {}, accountId = "") {
+  const settings = temuChannelSettings(db);
+  const account = getTemuCredentials().get(accountId, {});
+  db.connectorState = { ...(db.connectorState || {}) };
+  for (const field of ["temuAccessToken", "temuRefreshToken", "temuAccessTokenExpiresAt", "temuMallId", "temuApiScopeList"]) delete db.connectorState[field];
+  if (account.accountId && account.accessToken) {
+    db.connectorState.temuAccessToken = account.accessToken;
+    db.connectorState.temuRefreshToken = account.refreshToken || "";
+    db.connectorState.temuAccessTokenExpiresAt = account.accessTokenExpiresAt || "";
+    db.connectorState.temuMallId = account.mallId || "";
+    db.connectorState.temuApiScopeList = account.apiScopeList || [];
+    db.connectorState.temuActiveAccountId = account.accountId;
+  } else {
+    delete db.connectorState.temuActiveAccountId;
+  }
+  const channel = (db.connections || []).find((entry) => String(entry.name || "").trim().toLowerCase() === "temu");
+  if (channel) {
+    channel.connected = Boolean(account.accountId && account.accessToken);
+    channel.settings = {
+      ...settings,
+      temuAccessToken: "",
+      temuMallId: account.mallId || ""
+    };
+    Object.assign(channel, normalizeChannel(channel));
+  }
+  return account;
+}
+
 function getTemuConfig(db = {}, accountId = "") {
   const settings = temuChannelSettings(db);
   const account = getTemuCredentials().get(accountId, legacyTemuAccount(db, settings));
@@ -30289,10 +30543,18 @@ function publicTemuAccounts(db = {}) {
   return {
     ...credentialStatus,
     appConfigured: Boolean((settings.temuAppKey || process.env.TEMU_APP_KEY) && (settings.temuAppSecret || process.env.TEMU_APP_SECRET)),
-    accounts: credentialStatus.accounts.map(account => ({
-      ...account,
-      connectionOk: account.id === credentialStatus.activeAccountId ? settings.temuConnectionOk === true : null
-    }))
+    accounts: credentialStatus.accounts.map(account => {
+      const operational = temuOperationalAccountSettings(db, account.id);
+      return {
+        ...account,
+        connectionOk: operational.verifiedAt ? operational.connectionOk : account.id === credentialStatus.activeAccountId ? settings.temuConnectionOk === true : null,
+        liveApiChecked: operational.liveApiChecked,
+        verifiedAt: operational.verifiedAt,
+        verificationMessage: operational.verificationMessage,
+        lastOrderSync: operational.lastOrderSync,
+        defaultWarehouseId: operational.defaultWarehouseId
+      };
+    })
   };
 }
 
@@ -30499,6 +30761,12 @@ async function exchangeTemuCode(db, code, accountId = "") {
   db.connectorState.temuTokenCreatedAt = new Date().toISOString();
   delete db.connectorState.temuOauthState;
   delete db.connectorState.temuOauthStateExpiresAt;
+  setTemuOperationalAccountSettings(db, connectedAccount.accountId, {
+    connectionOk: true,
+    liveApiChecked: false,
+    verifiedAt: new Date().toISOString(),
+    verificationMessage: "Temu access token generated from seller authorization."
+  });
 
   const connection = db.connections.find((item) => item.name === "Temu");
   if (connection) {
@@ -30529,6 +30797,7 @@ async function exchangeTemuCode(db, code, accountId = "") {
 async function testTemuConnection(db = {}, options = {}) {
   const config = getTemuConfig(db, options.accountId);
   const connectorState = mergedConnectorState(db);
+  const accountSettings = temuOperationalAccountSettings(db, config.accountId);
   const now = new Date().toISOString();
   const status = {
     ok: false,
@@ -30540,7 +30809,7 @@ async function testTemuConnection(db = {}, options = {}) {
     accountId: config.accountId || "",
     accountName: config.accountName || config.mallId || "",
     mallId: config.mallId || connectorState.temuMallId || "",
-    latestOrderSync: connectorState.temuLastOrderSync || "",
+    latestOrderSync: accountSettings.lastOrderSync || connectorState.temuLastOrderSync || "",
     verifiedAt: now,
     message: ""
   };
@@ -30619,6 +30888,13 @@ async function testTemuConnection(db = {}, options = {}) {
     };
     Object.assign(channel, normalizeChannel(channel));
   }
+  setTemuOperationalAccountSettings(db, config.accountId, {
+    connectionOk: status.ok,
+    liveApiChecked: status.liveApiChecked,
+    verifiedAt: status.verifiedAt,
+    verificationMessage: status.message,
+    lastOrderSync: status.latestOrderSync
+  });
   db.connectorState = {
     ...(db.connectorState || {}),
     temuConnectionOk: status.ok,
@@ -31131,7 +31407,8 @@ async function preflightTemuBeforeVeeqoLabel(order = {}, db = {}) {
   const parentOrderSn = String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
   if (!parentOrderSn) throw new Error("Temu order status could not be verified because the channel order number is missing. No Veeqo label was purchased.");
 
-  const request = (type, payload) => temuRequest(type, payload, { db, allowErrorResult: true, timeoutMs: 8000 });
+  const accountId = temuOrderAccountId(order);
+  const request = (type, payload) => temuRequest(type, payload, { db, accountId, allowErrorResult: true, timeoutMs: 8000 });
   const [detailResult, unshippedResult, combinedResult] = await Promise.allSettled([
     request("bg.order.detail.v2.get", { parentOrderSn }),
     request("bg.order.unshipped.package.get", { parentOrderSn }),
@@ -31241,19 +31518,28 @@ function normalizeTemuWarehouse(row = {}, index = 0) {
   };
 }
 
-let temuLogisticsWarehousesCache = { expiresAt: 0, warehouses: [], response: null };
-let temuLogisticsWarehousesPromise = null;
+const temuLogisticsWarehousesCache = new Map();
+const temuLogisticsWarehousesPromises = new Map();
 
-async function temuLogisticsWarehouses(db = {}) {
-  if (temuLogisticsWarehousesCache.expiresAt > Date.now()) return temuLogisticsWarehousesCache;
-  if (temuLogisticsWarehousesPromise) return temuLogisticsWarehousesPromise;
-  temuLogisticsWarehousesPromise = (async () => {
-    const response = await temuRequest("bg.logistics.warehouse.list.get", {}, { db, allowErrorResult: true, maxResponseBytes: 512 * 1024 });
+async function temuLogisticsWarehouses(db = {}, accountId = "") {
+  const config = getTemuConfig(db, accountId);
+  const key = config.accountId || "active";
+  const cached = temuLogisticsWarehousesCache.get(key);
+  if (cached?.expiresAt > Date.now()) return cached;
+  if (temuLogisticsWarehousesPromises.has(key)) return temuLogisticsWarehousesPromises.get(key);
+  const pending = (async () => {
+    const response = await temuRequest("bg.logistics.warehouse.list.get", {}, { db, accountId: config.accountId, allowErrorResult: true, maxResponseBytes: 512 * 1024 });
     const warehouses = temuLogisticsRows(response).slice(0, 100).map(normalizeTemuWarehouse).filter((row) => row.id);
-    temuLogisticsWarehousesCache = { expiresAt: Date.now() + 5 * 60_000, warehouses, response };
-    return temuLogisticsWarehousesCache;
-  })().finally(() => { temuLogisticsWarehousesPromise = null; });
-  return temuLogisticsWarehousesPromise;
+    const next = { accountId: config.accountId, expiresAt: Date.now() + 5 * 60_000, warehouses, response };
+    temuLogisticsWarehousesCache.set(key, next);
+    return next;
+  })().finally(() => { temuLogisticsWarehousesPromises.delete(key); });
+  temuLogisticsWarehousesPromises.set(key, pending);
+  return pending;
+}
+
+function temuOrderAccountId(order = {}) {
+  return String(order.channelAccountId || order.accountId || order.external?.channelAccountId || order.external?.temuAccountId || "").trim();
 }
 
 function mappedChannelWarehouse(db = {}, localWarehouseId = "", channelName = "") {
@@ -31427,10 +31713,11 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
   const orderSendInfoList = temuOrderSendInfoList(order, body);
   if (!parentOrderSn || !orderSendInfoList.length) return { rates: [], warnings: ["Temu needs order item, goods, and SKU IDs before it can create marketplace shipping options. Refresh the Temu order, then try again."] };
   const warnings = [];
-  const { warehouses } = await temuLogisticsWarehouses(db);
+  const accountId = temuOrderAccountId(order);
+  const { warehouses } = await temuLogisticsWarehouses(db, accountId);
   const localWarehouseId = String(body.warehouseId || order.fulfillmentWarehouseId || order.warehouseId || "").trim();
   const mappedWarehouseId = String(mappedChannelWarehouse(db, localWarehouseId, "Temu")?.externalWarehouseId || "").trim();
-  const configuredWarehouseId = mappedWarehouseId || String(temuChannelSettings(db).temuDefaultWarehouseId || "").trim();
+  const configuredWarehouseId = mappedWarehouseId || temuOperationalAccountSettings(db, accountId).defaultWarehouseId;
   const selectedWarehouse = warehouses.find((row) => row.id === configuredWarehouseId)
     || warehouses.find((row) => row.isDefault)
     || warehouses[0];
@@ -31449,7 +31736,7 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
   ];
   for (const payload of attempts) {
     try {
-      const response = await temuRequest("bg.logistics.shippingservices.get", payload, { db, allowErrorResult: true, lowMemoryTransport: true, maxResponseBytes: 1024 * 1024 });
+      const response = await temuRequest("bg.logistics.shippingservices.get", payload, { db, accountId, allowErrorResult: true, lowMemoryTransport: true, maxResponseBytes: 1024 * 1024 });
       fulfillmentRateMemoryStage(order, "temu-service-response");
       const rows = temuShippingServiceRows(response).slice(0, 100);
       if (rows.length) {
@@ -31463,7 +31750,7 @@ async function temuShippingServiceRates(order = {}, db = {}, body = {}, parcel =
   }
   if (!services.length) {
     try {
-      const companyResponse = await temuRequest("bg.logistics.companies.get", {}, { db, allowErrorResult: true, maxResponseBytes: 512 * 1024 });
+      const companyResponse = await temuRequest("bg.logistics.companies.get", {}, { db, accountId, allowErrorResult: true, maxResponseBytes: 512 * 1024 });
       fulfillmentRateMemoryStage(order, "temu-company-response");
       const companies = temuLogisticsRows(companyResponse).slice(0, 100);
       if (companies.length) warnings.push("Temu returned carrier companies, but did not return shipment service/channel IDs needed to quote or create a label.");
@@ -31536,10 +31823,11 @@ async function createTemuShipmentPackage(order, db = {}, options = {}) {
   if (!orderSendInfoList.length) throw new Error("Temu needs order item, goods, and SKU IDs before it can create a shipment. Refresh the Temu order, then try again.");
   const localWarehouseId = String(options.warehouseId || order.fulfillmentWarehouseId || order.warehouseId || "").trim();
   const mappedWarehouseId = String(mappedChannelWarehouse(db, localWarehouseId, "Temu")?.externalWarehouseId || "").trim();
+  const accountId = temuOrderAccountId(order);
   const warehouseId = temuShipmentWarehouseId({
     rate,
     mappedWarehouseId,
-    defaultWarehouseId: temuChannelSettings(db).temuDefaultWarehouseId,
+    defaultWarehouseId: temuOperationalAccountSettings(db, accountId).defaultWarehouseId,
     orderWarehouseId: order.external?.temuLogisticsWarehouse?.id,
     requestedWarehouseId: options.temuWarehouseId
   });
@@ -31558,7 +31846,7 @@ async function createTemuShipmentPackage(order, db = {}, options = {}) {
       orderSendInfoList
     }]
   };
-  const response = await temuRequest("bg.logistics.shipment.create", request, { db, allowErrorResult: true });
+  const response = await temuRequest("bg.logistics.shipment.create", request, { db, accountId, allowErrorResult: true });
   const packageSnList = [...new Set(extractTemuPackageSns(response))];
   order.external = { ...(order.external || {}), temuShipmentCreate: temuPayload(response) };
   if (!packageSnList.length) throw new Error(`Temu accepted the shipment request but did not return a package number yet: ${JSON.stringify(response).slice(0, 240)}`);
@@ -31685,7 +31973,7 @@ async function patchFulfillmentBatchTrackingReference(order = {}, shipment = {},
   return mutation?.result?.changed === true;
 }
 
-async function temuTrackingForPackages(packageSnList, db = {}) {
+async function temuTrackingForPackages(packageSnList, db = {}, accountId = "") {
   const packages = [...new Set((packageSnList || []).map(String).filter(Boolean))];
   if (!packages.length) return { trackingNumber: "", carrierName: "" };
   const attempts = [
@@ -31696,6 +31984,7 @@ async function temuTrackingForPackages(packageSnList, db = {}) {
     try {
       const response = await temuRequest(type, payload, {
         db,
+        accountId,
         allowErrorResult: true,
         timeoutMs: 15_000,
         maxResponseBytes: 2 * 1024 * 1024,
@@ -31729,9 +32018,10 @@ async function lookupTemuShipmentPackages(order = {}, db = {}, options = {}) {
     ["bg.logistics.shipment.result.get", { parentOrderSnList: [parentOrderSn] }],
     ["bg.logistics.shipment.result.get", { orderSnList }]
   );
+  const accountId = temuOrderAccountId(order);
   const results = await Promise.allSettled(attempts.map(([type, payload]) => {
     if (Object.values(payload).some((value) => Array.isArray(value) && !value.length)) return Promise.resolve({});
-    return temuRequest(type, payload, { db, allowErrorResult: true, timeoutMs: 8000 });
+    return temuRequest(type, payload, { db, accountId, allowErrorResult: true, timeoutMs: 8000 });
   }));
   const packageSnList = [...new Set(results.flatMap((result) => result.status === "fulfilled" ? extractTemuPackageSns(result.value) : []))];
   if (packageSnList.length) {
@@ -31791,6 +32081,7 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   const parentOrderSn = String(options.parentOrderSn || order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
   if (!parentOrderSn) throw new Error("This Temu order does not have a parent order number.");
 
+  const accountId = temuOrderAccountId(order);
   let packageSnList = Array.isArray(options.packageSnList) ? options.packageSnList.map(String).filter(Boolean) : [];
   packageSnList = packageSnList.length ? packageSnList : extractTemuPackageSns(order.external?.packageSnList, order.external?.unshippedPackage, order.external?.combinedShipment, order.shipments, order.external);
   if (!packageSnList.length) packageSnList = await lookupTemuShipmentPackages(order, db, {
@@ -31836,7 +32127,7 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   const documentAttempts = Math.max(1, Math.min(6, Number(options.documentAttempts || 4) || 4));
   for (let attempt = 0; attempt < documentAttempts; attempt += 1) {
     if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, attempt * 500));
-    response = await temuRequest("bg.logistics.shipment.document.get", { documentType, packageSnList }, { db, allowErrorResult: true });
+    response = await temuRequest("bg.logistics.shipment.document.get", { documentType, packageSnList }, { db, accountId, allowErrorResult: true });
     documentPayload = firstTemuDocumentPayload(response);
     labelUrl = temuDocumentHttpUrl(deepValueAt(documentPayload, ["url", "documentUrl", "downloadUrl", "fileUrl", "labelUrl", "shippingLabelUrl"], ""));
     encoded = String(deepValueAt(documentPayload, ["contentBase64", "fileBase64", "documentBase64", "labelBase64", "base64"], "")).replace(/^data:[^;]+;base64,/, "").trim();
@@ -31845,7 +32136,7 @@ async function attachTemuShippingLabel(order, db = {}, options = {}) {
   if (!labelUrl && !encoded && String(options.rate?.action || "").toLowerCase() === "retrieve_existing_label" && options.allowDocumentUnavailable !== false) {
     const now = new Date().toISOString();
     const selectedCarrier = String(options.rate?.carrier || options.rate?.raw?.shippingCompanyName || "Temu").trim() || "Temu";
-    const remoteTracking = await temuTrackingForPackages(packageSnList, db);
+    const remoteTracking = await temuTrackingForPackages(packageSnList, db, accountId);
     const trackingNumber = remoteTracking.trackingNumber;
     const trackingCarrier = remoteTracking.carrierName || selectedCarrier;
     if (!trackingNumber) {
@@ -38699,7 +38990,7 @@ async function marketplaceCancellationForLabelPurchase(order = {}, db = {}) {
   const parentOrderSn = String(order.marketplaceOrderNumber || order.marketplaceOrderId || order.external?.parentOrderSn || "").trim();
   if (!parentOrderSn) return saved;
   try {
-    const response = await temuRequest("bg.order.detail.v2.get", { parentOrderSn }, { db, allowErrorResult: true });
+    const response = await temuRequest("bg.order.detail.v2.get", { parentOrderSn }, { db, accountId: temuOrderAccountId(order), allowErrorResult: true });
     const payload = temuPayload(response);
     if (response?.success === false) return saved;
     const raw = { ...payload, ...(payload.parentOrderMap || {}) };
@@ -43044,6 +43335,22 @@ function collectTemuParentOrderSns(value, found = new Set()) {
   return found;
 }
 
+function temuWebhookAccountIds(db = {}, payload = {}, headers = {}) {
+  const accounts = (publicTemuAccounts(db).accounts || []).filter((account) => account.configured);
+  if (!accounts.length) return [];
+  const reference = String(
+    deepValueAt(payload, ["mallId", "mall_id", "shopId", "shop_id", "sellerId", "seller_id"], "")
+    || headers["x-temu-mall-id"]
+    || headers["x-temu-shop-id"]
+    || ""
+  ).trim();
+  if (reference) {
+    const matched = accounts.find((account) => [account.id, account.mallId].some((value) => String(value || "").trim() === reference));
+    if (matched) return [matched.id];
+  }
+  return accounts.map((account) => account.id);
+}
+
 const DUPLICATE_ORDER_VOID_NOTE = 'Voided due to duplicate.';
 
 function markDuplicateOrderVoided(order = {}, canonical = {}, nowIso = new Date().toISOString(), actor = 'DataPlus') {
@@ -43657,6 +43964,9 @@ async function importTemuOrders(db, options = {}) {
       temuLastBlindOrderRepairAt: repairBlind ? new Date().toISOString() : channel.settings?.temuLastBlindOrderRepairAt || ""
     };
     Object.assign(channel, normalizeChannel(channel));
+  }
+  if (options.historicalBackfill !== true && checkpointComplete) {
+    setTemuOperationalAccountSettings(db, accountConfig.accountId, { lastOrderSync: now });
   }
   return { fetched, created, updated, skipped, errors, rows, soldSkus: [...soldSkus], repairBlind, targetedRefresh, repairCandidateCount: repairOrderSns.length, requestedOrderCount: requestedOrderSns.length };
 }
@@ -55184,6 +55494,7 @@ function temuShipmentConfirmRequest({ warehouseId, carrierId, trackingNumber, or
 }
 
 async function syncTemuShipmentTracking(db, order, shipment) {
+  const accountId = temuOrderAccountId(order);
   const trackingNumber = normalizeTrackingNumber(shipment.trackingNumber);
   if (!trackingNumber) throw new Error("A tracking number is required before sending this shipment to Temu.");
   const orderSendInfoList = temuOrderSendInfoList(order, { lines: shipment.lines || [] }).map((line) => ({
@@ -55196,25 +55507,24 @@ async function syncTemuShipmentTracking(db, order, shipment) {
   let carrierRows = temuCarrierRows(order.external?.temuShippingServices || order.external?.temuLogisticsCompanies || {});
   let carrierId = temuCarrierIdFromRows(carrierRows, carrierName);
   if (!carrierId) {
-    const response = await temuRequest("bg.logistics.companies.get", {}, { db, allowErrorResult: true });
+    const response = await temuRequest("bg.logistics.companies.get", {}, { db, accountId, allowErrorResult: true });
     order.external = { ...(order.external || {}), temuLogisticsCompanies: temuPayload(response) };
     carrierRows = temuCarrierRows(temuPayload(response));
     carrierId = temuCarrierIdFromRows(carrierRows, carrierName);
   }
   if (!carrierId) throw new Error(`Temu did not return a carrier ID for ${carrierName || "this tracking number"}.`);
-  const settings = temuChannelSettings(db);
   const localWarehouseId = String(shipment.warehouseId || order.fulfillmentWarehouseId || order.warehouseId || "").trim();
   const mappedWarehouse = mappedChannelWarehouse(db, localWarehouseId, "Temu");
-  let warehouseId = String(mappedWarehouse?.externalWarehouseId || settings.temuDefaultWarehouseId || order.external?.temuLogisticsWarehouse?.id || shipment.temuWarehouseId || "").trim();
+  let warehouseId = String(mappedWarehouse?.externalWarehouseId || temuOperationalAccountSettings(db, accountId).defaultWarehouseId || order.external?.temuLogisticsWarehouse?.id || shipment.temuWarehouseId || "").trim();
   if (!warehouseId) {
-    const { warehouses } = await temuLogisticsWarehouses(db);
+    const { warehouses } = await temuLogisticsWarehouses(db, accountId);
     const warehouse = warehouses.find((row) => row.isDefault) || warehouses[0];
     warehouseId = String(warehouse?.id || "").trim();
     if (warehouse) order.external = { ...(order.external || {}), temuLogisticsWarehouse: warehouse };
   }
   if (!warehouseId) throw new Error("Temu did not return a ship-from warehouse. Refresh the Temu warehouse list in Channel settings before sending tracking.");
   const request = temuShipmentConfirmRequest({ warehouseId, carrierId, trackingNumber, orderSendInfoList });
-  const response = await temuRequest("bg.logistics.shipment.v2.confirm", request, { db, allowErrorResult: true });
+  const response = await temuRequest("bg.logistics.shipment.v2.confirm", request, { db, accountId, allowErrorResult: true });
   const errorCode = Number(response?.errorCode ?? response?.error_code ?? 0);
   const result = response?.result && typeof response.result === "object" ? response.result : {};
   if (response?.success === false || result?.success === false || (errorCode && errorCode !== 1000000)) {
@@ -57131,11 +57441,13 @@ async function handleApi(req, res) {
     const eventType = String(payload.eventType || payload.event_type || payload.type || payload.messageType || payload.msgType || payload.topic || req.headers["x-temu-topic"] || "Temu notification").trim();
     const eventId = String(payload.messageId || payload.message_id || payload.msgId || payload.id || req.headers["x-temu-message-id"] || crypto.createHash("sha256").update(rawBody).digest("hex")).trim();
     const parentOrderSnList = [...collectTemuParentOrderSns(payload)].slice(0, 250);
+    const webhookAccountHeaders = { "x-temu-mall-id": req.headers["x-temu-mall-id"], "x-temu-shop-id": req.headers["x-temu-shop-id"] };
     sendJson(res, 200, { success: true, accepted: true, eventType, parentOrderSnList, message: "Temu webhook accepted." });
     void (async () => {
       const db = await readDbFast({ skipInventory: true });
       const channel = findChannelByName(db, "Temu");
       const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
+      const accountIds = temuWebhookAccountIds(db, payload, webhookAccountHeaders);
       const logBase = { channel: "Temu", transport: "webhook", method: "POST", path: url.pathname, operation: eventType };
       if (settings.channelEnabled === false) {
         appendChannelApiLog({ ...logBase, statusCode: 202, ok: true, durationMs: Date.now() - startedAt, message: "Temu webhook received while the channel is disabled." });
@@ -57157,13 +57469,17 @@ async function handleApi(req, res) {
         || /order|shipment|fulfill|delivery|cancel|refund|return/i.test(eventType)
       ));
       if (shouldRefreshOrders) {
-        await queueTemuOrderImportJob(db, {
-          mode: "status",
-          lookbackDays: 1,
-          limit: limitedOrderSns.length ? limitedOrderSns.length : Math.min(250, Number(settings.temuOrderImportLimit || 250) || 250),
-          includeCanceled: true,
-          parentOrderSnList: limitedOrderSns
-        }, { operation: "Temu webhook order reconciliation", forceLookback: false });
+        if (!accountIds.length) throw new Error("Temu webhook order reconciliation needs at least one connected shop.");
+        for (const accountId of accountIds) {
+          await queueTemuOrderImportJob(db, {
+            accountId,
+            mode: "status",
+            lookbackDays: 1,
+            limit: limitedOrderSns.length ? limitedOrderSns.length : Math.min(250, Number(settings.temuOrderImportLimit || 250) || 250),
+            includeCanceled: true,
+            parentOrderSnList: limitedOrderSns
+          }, { accountId, operation: "Temu webhook order reconciliation", forceLookback: false });
+        }
       }
       appendChannelApiLog({
         ...logBase,
@@ -57172,8 +57488,8 @@ async function handleApi(req, res) {
         durationMs: Date.now() - startedAt,
         message: shouldRefreshOrders
           ? limitedOrderSns.length
-            ? `Temu event received; queued status refresh for ${limitedOrderSns.length} order${limitedOrderSns.length === 1 ? "" : "s"}.`
-            : "Temu event received; queued recent order reconciliation."
+            ? `Temu event received; queued status refresh for ${limitedOrderSns.length} order${limitedOrderSns.length === 1 ? "" : "s"} across ${accountIds.length} shop${accountIds.length === 1 ? "" : "s"}.`
+            : `Temu event received; queued recent order reconciliation across ${accountIds.length} shop${accountIds.length === 1 ? "" : "s"}.`
           : "Temu event received and recorded."
       });
     })().catch((error) => appendChannelApiLog({
@@ -72256,6 +72572,7 @@ async function handleApi(req, res) {
     const previous = await postgres.readOperationJob(retryJobId);
     if (!previous) return notFound(res);
     if (previous.workerTask === 'pricing-deployment-hold') return sendJson(res, 409, { error: 'This pricing hold has no resumable worker payload. Review the original run and prepare a replacement from Shopify settings.' });
+    if (previous.workerTask === 'temu-product-launch') return sendJson(res, 409, { error: 'Temu product creation is not retried blindly. Open the SKU, verify whether Temu created it, then submit a reviewed launch again.' });
     if (!previous.workerTask) return sendJson(res, 400, { error: "This job does not have a background worker task to retry yet." });
     if (["queued", "running"].includes(String(previous.status || "").toLowerCase())) {
       return sendJson(res, 400, { error: "This job is already active." });
@@ -77761,8 +78078,23 @@ async function handleApi(req, res) {
     const db = await readDbFast({ skipInventory: true });
     const status = getTemuCredentials().setActiveAccount(body.accountId, legacyTemuAccount(db));
     db.connectorState = { ...(db.connectorState || {}), temuActiveAccountId: status.activeAccountId };
+    syncLegacyTemuCredentialProjection(db, status.activeAccountId);
     await writeDb(normalizeDb({ ...db, inventory: [] }));
     return sendJson(res, 200, { ...publicTemuAccounts(db), message: "Temu shop selected." });
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/temu/accounts/disconnect") {
+    if (!userCan(authUser, "channels.settings", "credentials")) return sendJson(res, 403, { error: "Channel credential permission is required." });
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true });
+    try {
+      const result = getTemuCredentials().removeAccount(body.accountId, legacyTemuAccount(db));
+      syncLegacyTemuCredentialProjection(db, result.activeAccountId);
+      await writeDb(normalizeDb({ ...db, inventory: [] }));
+      return sendJson(res, 200, { ...publicTemuAccounts(db), removed: result.removed, message: `${result.removed.label} disconnected. Historical orders, jobs, and listing identities were preserved.` });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to disconnect the Temu shop." });
+    }
   }
 
   if (req.method === "POST" && url.pathname === "/api/temu/exchange-code" && postgres.isPostgresEnabled()) {
@@ -77795,13 +78127,52 @@ async function handleApi(req, res) {
   if (req.method === "GET" && url.pathname === "/api/temu/warehouses" && postgres.isPostgresEnabled()) {
     const db = await readDbFast({ skipInventory: true });
     try {
-      const { warehouses } = await temuLogisticsWarehouses(db);
+      const accountId = String(url.searchParams.get("accountId") || "").trim();
+      const account = temuLaunchAccount(db, accountId);
+      const { warehouses } = await temuLogisticsWarehouses(db, account.id);
       return sendJson(res, 200, {
+        account: { id: account.id, label: account.label || account.accountName || account.mallId, mallId: account.mallId },
         warehouses: warehouses.map(({ raw, ...warehouse }) => warehouse),
-        configuredWarehouseId: String(temuChannelSettings(db).temuDefaultWarehouseId || "")
+        configuredWarehouseId: temuOperationalAccountSettings(db, account.id).defaultWarehouseId
       });
     } catch (error) {
       return sendJson(res, error.statusCode || 502, { error: error.message || "Unable to load Temu warehouses." });
+    }
+  }
+
+  const temuProductReadinessMatch = req.method === "GET" ? url.pathname.match(/^\/api\/temu\/products\/([^/]+)\/readiness$/) : null;
+  if (temuProductReadinessMatch && postgres.isPostgresEnabled()) {
+    const db = await readDbFast({ skipInventory: true, skipOrders: true, skipPurchaseOrders: true });
+    try {
+      const result = await temuProductLaunchPreview(db, { sku: decodeURIComponent(temuProductReadinessMatch[1]), accountId: url.searchParams.get("accountId") });
+      return sendJson(res, 200, result);
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to review the Temu listing." });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/temu/listings/preview" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true, skipOrders: true, skipPurchaseOrders: true });
+    try {
+      const result = await temuProductLaunchPreview(db, body, { saveDraft: true, actor: authUser.username || authUser.id });
+      return sendJson(res, 200, { ...result, message: "Temu listing draft saved and checked." });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to save the Temu listing draft." });
+    }
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/temu/listings/launch" && postgres.isPostgresEnabled()) {
+    if (!userCan(authUser, "channels", "launch") && !userCan(authUser, "catalog.marketplace", "launch")) {
+      return sendJson(res, 403, { error: "Your account does not have marketplace launch access.", missingPermission: { area: "channels", action: "launch" } });
+    }
+    const body = await parseBody(req);
+    const db = await readDbFast({ skipInventory: true, skipOrders: true, skipPurchaseOrders: true });
+    try {
+      const result = await queueTemuProductLaunchJob(db, body, { actor: authUser.username || authUser.id });
+      return sendJson(res, result.duplicate ? 200 : 202, { queued: true, duplicate: result.duplicate, job: normalizeImportJob(result.job), preview: result.preview, message: result.job.message });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "Unable to queue the Temu product launch.", readiness: error.readiness });
     }
   }
 
@@ -84407,6 +84778,8 @@ module.exports = {
   queueShopifyOrderImportJob,
   queueShopifySkuMapSyncJob,
   publicTemuAccounts,
+  queueTemuProductLaunchJob,
+  runTemuProductLaunchWorkerJob,
   queueTemuOrderImportJob,
   reconcileStoredDuplicateTemuOrders,
   voidStoredDuplicateOrders,

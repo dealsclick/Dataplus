@@ -25,6 +25,14 @@ try {
   const stored = fs.readFileSync(path.join(root, 'temu-runtime-credentials.json'), 'utf8');
   assert.equal(stored.includes('token-shop-1'), false);
   assert.equal(stored.includes('token-shop-2'), false);
+  const removedFirst = credentials.removeAccount('mall-1');
+  assert.equal(removedFirst.removed.mallId, 'mall-1');
+  assert.equal(removedFirst.activeAccountId, 'mall-2');
+  assert.equal(credentials.get().accessToken, 'token-shop-2');
+  const removedSecond = credentials.removeAccount('mall-2');
+  assert.equal(removedSecond.activeAccountId, '');
+  assert.equal(credentials.status().accounts.length, 0);
+  assert.throws(() => credentials.removeAccount('mall-2'), /choose a connected temu shop/i);
 
   const legacyRoot = fs.mkdtempSync(path.join(root, 'legacy-'));
   const legacy = createTemuCredentials({ directory: legacyRoot, env });

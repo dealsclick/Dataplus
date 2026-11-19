@@ -91,6 +91,7 @@ const SUPPORTED_TASKS = [
   "temu-order-import",
   "temu-order-status",
   "temu-order-enrichment",
+  "temu-product-launch",
   "ai-category-review",
   "ebay-category-auto-map",
   "ebay-taxonomy-sync",
@@ -2715,6 +2716,7 @@ async function runJob(job) {
   if (task === "shopify-return-import") return dataplus.runShopifyReturnImportWorkerJob(job);
   if (task === "temu-return-import") return dataplus.runTemuReturnImportWorkerJob(job);
   if (["temu-order-import", "temu-order-status", "temu-order-enrichment"].includes(task)) return runTemuOrderImportJob(job);
+  if (task === "temu-product-launch") return dataplus.runTemuProductLaunchWorkerJob(job);
   if (task === "ebay-price-inventory-sync") return runEbayPriceInventorySyncJob(job);
   if (task === "ebay-listing-launch") return runEbayListingLaunchJob(job);
   if (task === "vendor-feed-import") return runVendorFeedImportJob(job);

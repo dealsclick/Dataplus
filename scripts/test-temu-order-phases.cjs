@@ -5,12 +5,14 @@ const { orderMode, mergePhase, selectOpenStatusSweep } = require('../lib/temu-or
 const source = fs.readFileSync(require('node:path').join(__dirname, '../server.js'), 'utf8');
 const body = source.slice(source.indexOf('async function importTemuOrders('), source.indexOf('async function queueTemuOrderImportJob('));
 const existing = { id:'local', source:'Temu', marketplaceOrderNumber:'one', status:'paid', fulfillmentStatus:'paid', total:99, items:[{sku:'MANUAL',qty:2}], address:{line1:'kept'}, notes:'operator', external:{} };
+const accountSyncState = db => db.connectorState.temuAccountSyncStates?.['mall-test'] || {};
 async function run(mode, hasExisting, limit = 10, options = {}) {
   const db = options.db || {orders:hasExisting?[structuredClone(existing)]:[],connections:[],connectorState:{}};
   const calls = [], saved = [], progress = [];
   const ctx = {
     require:()=>({orderMode,mergePhase}),
-    temuChannelSettings:()=>({}),getTemuConfig:()=>({pageSize:50}),unixStartOfDay:()=>0,
+    temuChannelSettings:()=>({}),getTemuConfig:()=>({pageSize:50,accountId:'mall-test',accessToken:'token-test'}),
+    temuOperationalAccountSettings:()=>({}),setTemuOperationalAccountSettings:()=>({}),unixStartOfDay:()=>0,
     chunkTemuList:(values,size)=>Array.from({length:Math.ceil(values.length/size)},(_,index)=>values.slice(index*size,(index+1)*size)),sourceOrderFullyShipped:(order)=>['shipped','fulfilled','completed'].includes(String(order.status||'').toLowerCase()),postgres:{isPostgresEnabled:()=>!!options.postgres,readChannelOrderForReturn:async(source,reference)=>{
       assert.equal(source,'Temu');
       if(reference.existsOnly) return hasExisting;
@@ -47,7 +49,7 @@ async function run(mode, hasExisting, limit = 10, options = {}) {
   assert.equal(orderMode({}), 'intake');assert.equal(orderMode({repairBlind:true}),'enrichment');
   assert.throws(()=>orderMode({mode:'bad'}));
   let r=await run('intake',true);assert.equal(r.calls.length,1);assert.equal(r.saved.length,0);
-  r=await run('intake',true,10,{postgres:true,duplicates:true});assert.equal(r.calls.length,1);assert.equal(r.saved.length,0);assert(r.db.connectorState.temuIntakeLastOrderSync);
+  r=await run('intake',true,10,{postgres:true,duplicates:true});assert.equal(r.calls.length,1);assert.equal(r.saved.length,0);assert(accountSyncState(r.db).temuIntakeLastOrderSync);
   r=await run('status',true,10,{postgres:true,duplicates:true});assert.equal(r.result.rows[0].action,'needs_review');assert.equal(r.saved.length,0);
   const duplicateReady={...structuredClone(existing),id:'older',orderNumber:'100',marketplaceOrderNumber:'one',status:'paid',items:[{sku:'MANUAL',qty:2,channelOrderItemId:'line-1',fulfilledQty:0,remainingQty:2,fulfillmentStatus:'ready'}]};
   const duplicateShipped={...structuredClone(existing),id:'newer',orderNumber:'200',marketplaceOrderNumber:'one',status:'shipped',fulfillmentStatus:'shipped',items:[{sku:'MANUAL',qty:2,channelOrderItemId:'line-1',fulfilledQty:2,remainingQty:0,fulfillmentStatus:'fulfilled'}],shipments:[{reference:'one',status:'fulfilled'}]};
@@ -61,11 +63,11 @@ async function run(mode, hasExisting, limit = 10, options = {}) {
   r=await run('status',false,10,{parentOrderSnList:['one']});assert.equal(r.saved.length,0);assert.deepEqual(r.calls,['bg.order.list.v2.get']);
   r=await run('enrichment',true);assert(!r.calls.includes('bg.order.amount.query'));assert.equal(r.db.orders[0].status,'paid');assert.equal(r.db.orders[0].total,99);assert.equal(r.db.orders[0].trackingNumber,'TRACK');
   r=await run('enrichment',false);assert.equal(r.saved.length,0);
-  r=await run('intake',true,1,{pageRows:50});assert.equal(r.db.connectorState.temuIntakeLastOrderSync,undefined);assert.equal(r.db.connectorState.temuIntakeLastOrderSyncCursor.offset,1);
-  r=await run('intake',true,1,{pageRows:50,db:r.db,resume:true});assert.equal(r.db.connectorState.temuIntakeLastOrderSyncCursor.offset,2);
-  r=await run('intake',true,48,{pageRows:50,db:r.db,resume:true});assert(r.db.connectorState.temuIntakeLastOrderSync);assert.equal(r.db.connectorState.temuIntakeLastOrderSyncCursor,undefined);
-  r=await run('intake',false,10,{noAmount:true});assert.equal(r.saved.length,0);assert(r.result.errors.length);assert.equal(r.db.connectorState.temuIntakeLastOrderSync,undefined);
-  r=await run('status',true);assert(r.db.connectorState.temuStatusLastOrderSync);assert.equal(r.db.connectorState.temuIntakeLastOrderSync,undefined);
+  r=await run('intake',true,1,{pageRows:50});assert.equal(accountSyncState(r.db).temuIntakeLastOrderSync,undefined);assert.equal(accountSyncState(r.db).temuIntakeLastOrderSyncCursor.offset,1);
+  r=await run('intake',true,1,{pageRows:50,db:r.db,resume:true});assert.equal(accountSyncState(r.db).temuIntakeLastOrderSyncCursor.offset,2);
+  r=await run('intake',true,48,{pageRows:50,db:r.db,resume:true});assert(accountSyncState(r.db).temuIntakeLastOrderSync);assert.equal(accountSyncState(r.db).temuIntakeLastOrderSyncCursor,undefined);
+  r=await run('intake',false,10,{noAmount:true});assert.equal(r.saved.length,0);assert(r.result.errors.length);assert.equal(accountSyncState(r.db).temuIntakeLastOrderSync,undefined);
+  r=await run('status',true);assert(accountSyncState(r.db).temuStatusLastOrderSync);assert.equal(accountSyncState(r.db).temuIntakeLastOrderSync,undefined);
   assert(mergePhase(existing,{status:'paid',fulfillmentStatus:'paid'},'status').marketplaceStatusCheckedAt);
   assert.equal(mergePhase({...existing,status:'void'},{status:'paid'},'status'),null);
   const completed = mergePhase(

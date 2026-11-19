@@ -1,5 +1,5 @@
 import { lazy, useEffect, useMemo, useState } from "react"
-import { AlertCircle, Ban, CheckCircle2, Copy, Database, ExternalLink, ListChecks, Loader2, RefreshCw, RotateCcw, Save, Search, ShieldCheck, ShoppingBag, Trash2 } from "lucide-react"
+import { AlertCircle, Ban, CheckCircle2, Copy, Database, ExternalLink, ListChecks, Loader2, MoreHorizontal, RefreshCw, RotateCcw, Save, Search, ShieldCheck, ShoppingBag, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -8,6 +8,8 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
@@ -154,9 +156,11 @@ function ChannelDetail({
   const [temuSetupGuideSaving, setTemuSetupGuideSaving] = useState(false)
   const [temuSetupGuideDraft, setTemuSetupGuideDraft] = useState({ downloadOrders: true, lookbackDays: "30", startDate: "", limit: "250", includeCanceled: false, prepareSkuMapping: true, enableSchedule: false, scheduleEveryHours: "12" })
   const [temuConnectionTest, setTemuConnectionTest] = useState<{ ok?: boolean; configured?: boolean; liveApiChecked?: boolean; hasAccessToken?: boolean; endpoint?: string; appKeyPreview?: string; mallId?: string; latestOrderSync?: string; verifiedAt?: string; message?: string } | null>(null)
-  const [temuAccounts, setTemuAccounts] = useState<{ activeAccountId?: string; encryptedStorageReady?: boolean; accounts?: Array<{ id: string; label?: string; mallId?: string; mallName?: string; configured?: boolean; active?: boolean; accessTokenExpiresAt?: string; connectionOk?: boolean | null }> }>({ accounts: [] })
+  const [temuAccounts, setTemuAccounts] = useState<{ activeAccountId?: string; encryptedStorageReady?: boolean; accounts?: Array<{ id: string; label?: string; mallId?: string; mallName?: string; configured?: boolean; active?: boolean; accessTokenExpiresAt?: string; connectionOk?: boolean | null; liveApiChecked?: boolean; verifiedAt?: string; verificationMessage?: string; lastOrderSync?: string; defaultWarehouseId?: string }> }>({ accounts: [] })
   const [temuTestingConnection, setTemuTestingConnection] = useState(false)
   const [temuConnecting, setTemuConnecting] = useState(false)
+  const [temuDisconnecting, setTemuDisconnecting] = useState(false)
+  const [temuDisconnectAccount, setTemuDisconnectAccount] = useState<{ id: string; label: string } | null>(null)
   const [temuWarehouses, setTemuWarehouses] = useState<Array<{ id: string; name: string; isDefault?: boolean; buyShippingEnabled?: boolean }>>([])
   const [temuWarehousesLoading, setTemuWarehousesLoading] = useState(false)
   const [ebayTemplatesOpen, setEbayTemplatesOpen] = useState(false)
@@ -238,6 +242,10 @@ function ChannelDetail({
   const temuConnectionVerifiedAt = temuConnectionTest?.verifiedAt || String(settings.temuConnectionVerifiedAt || "")
   const temuLatestOrderSync = temuConnectionTest?.latestOrderSync || String(settings.temuLastOrderSync || (channel as Record<string, unknown>).lastSync || "")
   const activeTemuAccount = (temuAccounts.accounts || []).find((account) => account.id === temuAccounts.activeAccountId)
+  const temuAccountSettings = settings.temuAccountSettings && typeof settings.temuAccountSettings === "object" && !Array.isArray(settings.temuAccountSettings)
+    ? settings.temuAccountSettings as Record<string, { defaultWarehouseId?: string }>
+    : {}
+  const activeTemuWarehouseId = String(temuAccountSettings[temuAccounts.activeAccountId || ""]?.defaultWarehouseId || activeTemuAccount?.defaultWarehouseId || settings.temuDefaultWarehouseId || "")
   const temuHasLiveToken = Boolean(activeTemuAccount?.configured || temuAccessTokenConfigured || temuConnectionTest?.hasAccessToken)
   const temuCanRunLive = temuHasLiveToken || Boolean(channel.connected)
   const temuSetupGuideCompleted = Boolean(settings.temuInitialSetupGuideCompleted)
@@ -366,21 +374,46 @@ function ChannelDetail({
     }
   }
 
-  async function loadTemuWarehouses(notify = true) {
+  async function loadTemuWarehouses(notify = true, requestedAccountId = "") {
     setTemuWarehousesLoading(true)
     try {
-      const result = await api<{ warehouses?: Array<{ id: string; name: string; isDefault?: boolean; buyShippingEnabled?: boolean }>; configuredWarehouseId?: string }>("/api/temu/warehouses")
+      const accountId = requestedAccountId || temuAccounts.activeAccountId || ""
+      const result = await api<{ account?: { id?: string }; warehouses?: Array<{ id: string; name: string; isDefault?: boolean; buyShippingEnabled?: boolean }>; configuredWarehouseId?: string }>(`/api/temu/warehouses${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ""}`)
       const rows = result.warehouses || []
       setTemuWarehouses(rows)
-      const configured = String(settings.temuDefaultWarehouseId || result.configuredWarehouseId || "")
+      const resolvedAccountId = result.account?.id || accountId
+      const configured = String(temuAccountSettings[resolvedAccountId]?.defaultWarehouseId || result.configuredWarehouseId || settings.temuDefaultWarehouseId || "")
       const preferred = rows.find((warehouse) => warehouse.id === configured) || rows.find((warehouse) => warehouse.isDefault) || rows[0]
-      if (!configured && preferred?.id) setDraft((current) => ({ ...current, temuDefaultWarehouseId: preferred.id }))
+      if (!configured && preferred?.id && resolvedAccountId) setDraft((current) => ({
+        ...current,
+        temuAccountSettings: {
+          ...temuAccountSettings,
+          [resolvedAccountId]: { ...(temuAccountSettings[resolvedAccountId] || {}), defaultWarehouseId: preferred.id }
+        }
+      }))
       if (notify) toast.success(`Loaded ${rows.length.toLocaleString()} Temu warehouse${rows.length === 1 ? "" : "s"}.`)
     } catch (error) {
       if (notify) toast.error(error instanceof Error ? error.message : "Unable to load Temu warehouses.")
     } finally {
       setTemuWarehousesLoading(false)
     }
+  }
+
+  function updateTemuWarehouse(value: string) {
+    const accountId = temuAccounts.activeAccountId || ""
+    if (!accountId) return
+    setDraft((current) => {
+      const currentSettings = current.temuAccountSettings && typeof current.temuAccountSettings === "object" && !Array.isArray(current.temuAccountSettings)
+        ? current.temuAccountSettings as Record<string, { defaultWarehouseId?: string }>
+        : temuAccountSettings
+      return {
+        ...current,
+        temuAccountSettings: {
+          ...currentSettings,
+          [accountId]: { ...(currentSettings[accountId] || {}), defaultWarehouseId: value === "none" ? "" : value }
+        }
+      }
+    })
   }
 
   function updateStringList(field: string, currentValues: string[], value: string, checked: boolean) {
@@ -927,6 +960,38 @@ function ChannelDetail({
     }
   }
 
+  async function selectTemuAccount(accountId: string) {
+    if (!accountId || accountId === temuAccounts.activeAccountId || temuConnecting) return
+    try {
+      const result = await api<typeof temuAccounts>("/api/temu/accounts/select", { method: "POST", body: JSON.stringify({ accountId }) })
+      setTemuAccounts(result)
+      setTemuConnectionTest(null)
+      await loadTemuWarehouses(false, accountId)
+      toast.success("Temu shop selected.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to select the Temu shop.")
+    }
+  }
+
+  async function disconnectTemuAccount() {
+    if (!temuDisconnectAccount) return
+    setTemuDisconnecting(true)
+    try {
+      const result = await api<typeof temuAccounts & { message?: string }>("/api/temu/accounts/disconnect", { method: "POST", body: JSON.stringify({ accountId: temuDisconnectAccount.id }) })
+      setTemuAccounts(result)
+      setTemuDisconnectAccount(null)
+      setTemuConnectionTest(null)
+      setTemuWarehouses([])
+      if (result.activeAccountId) await loadTemuWarehouses(false, result.activeAccountId)
+      toast.success(result.message || "Temu shop disconnected. Historical records were preserved.")
+      onRefreshData()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to disconnect the Temu shop.")
+    } finally {
+      setTemuDisconnecting(false)
+    }
+  }
+
   function openEbayTemplateControls() {
     const pretty = (value: unknown, fallback: string) => {
       try { return JSON.stringify(value ?? JSON.parse(fallback), null, 2) } catch { return fallback }
@@ -1263,8 +1328,8 @@ function ChannelDetail({
             </CardHeader>
             <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               {(temuAccounts.accounts || []).length > 0 && <div className="col-span-full overflow-hidden rounded-md border">
-                <div className="border-b px-3 py-2"><p className="text-sm font-medium">Temu shops</p><p className="text-xs text-muted-foreground">Every shop has its own encrypted token, order checkpoint, and marketplace jobs.</p></div>
-                <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Shop</TableHead><TableHead>Mall ID</TableHead><TableHead>Connection</TableHead><TableHead>Token</TableHead></TableRow></TableHeader><TableBody>{(temuAccounts.accounts || []).map((account) => <TableRow key={account.id} className={account.active ? "bg-muted/40" : "cursor-pointer"} onClick={() => { if (!account.active && !temuConnecting) void api<typeof temuAccounts>("/api/temu/accounts/select", { method: "POST", body: JSON.stringify({ accountId: account.id }) }).then((result) => { setTemuAccounts(result); setTemuConnectionTest(null); void loadTemuWarehouses(false); toast.success("Temu shop selected.") }).catch((error) => toast.error(error instanceof Error ? error.message : "Unable to select Temu shop.")) }}><TableCell><div className="flex items-center gap-2"><span className="font-medium">{account.label || account.mallName || account.mallId || account.id}</span>{account.active && <Badge variant="secondary">Selected</Badge>}</div></TableCell><TableCell>{account.mallId || "Not returned"}</TableCell><TableCell><Badge variant={account.configured ? "default" : "destructive"}>{account.configured ? "Connected" : "Needs authorization"}</Badge></TableCell><TableCell className="whitespace-nowrap text-xs text-muted-foreground">{account.accessTokenExpiresAt ? dateLabel(account.accessTokenExpiresAt) : "Not available"}</TableCell></TableRow>)}</TableBody></Table></div>
+                <div className="border-b px-3 py-2"><p className="text-sm font-medium">Temu shops</p><p className="text-xs text-muted-foreground">Each shop keeps separate tokens, warehouses, order checkpoints, listings, and jobs.</p></div>
+                <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Shop</TableHead><TableHead>Mall ID</TableHead><TableHead>Connection</TableHead><TableHead>Warehouse</TableHead><TableHead>Token</TableHead><TableHead className="w-12"><span className="sr-only">Actions</span></TableHead></TableRow></TableHeader><TableBody>{(temuAccounts.accounts || []).map((account) => <TableRow key={account.id} className={account.active ? "bg-muted/40" : ""}><TableCell><div className="flex items-center gap-2"><span className="font-medium">{account.label || account.mallName || account.mallId || account.id}</span>{account.active && <Badge variant="secondary">Selected</Badge>}</div><p className="mt-1 max-w-[280px] truncate text-xs text-muted-foreground">Account ID {account.id}</p></TableCell><TableCell>{account.mallId || "Not returned"}</TableCell><TableCell><Badge variant={account.configured ? "default" : "destructive"}>{account.configured ? "Connected" : "Needs authorization"}</Badge></TableCell><TableCell className="max-w-[220px] truncate text-xs text-muted-foreground">{account.defaultWarehouseId || "Not selected"}</TableCell><TableCell className="whitespace-nowrap text-xs text-muted-foreground">{account.accessTokenExpiresAt ? dateLabel(account.accessTokenExpiresAt) : "Not available"}</TableCell><TableCell><DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" aria-label={`Actions for ${account.label || account.mallId || account.id}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem disabled={account.active || temuConnecting} onClick={() => void selectTemuAccount(account.id)}>Select shop</DropdownMenuItem><DropdownMenuItem disabled={temuConnecting || hasUnsavedChannelChanges} onClick={() => void connectTemuSeller(account.id)}><RotateCcw className="size-4" />Reconnect</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive focus:text-destructive" onClick={() => setTemuDisconnectAccount({ id: account.id, label: account.label || account.mallName || account.mallId || account.id })}><Trash2 className="size-4" />Disconnect</DropdownMenuItem></DropdownMenuContent></DropdownMenu></TableCell></TableRow>)}</TableBody></Table></div>
               </div>}
               <Detail label="API credentials" value={temuCredentialsConfigured ? "Configured" : "Missing"} />
               <Detail label="App key" value={temuAppKeyConfigured ? "Configured" : "Missing"} />
@@ -1434,7 +1499,7 @@ function ChannelDetail({
                 <div className="col-span-full pt-2"><Separator /><p className="pt-3 text-sm font-semibold">Temu inventory and pricing</p></div>
                 <Field label="Inventory mode"><Select disabled={!editing} value={String(settings.temuInventoryMode || "available")} onValueChange={(value) => update("temuInventoryMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="available">Use available inventory</SelectItem><SelectItem value="fixed">Use fixed channel quantity</SelectItem><SelectItem value="disabled">Do not send inventory</SelectItem></SelectContent></Select></Field>
                 <Field label="Inventory safety qty"><Input disabled={!editing} type="number" min="0" value={String(settings.temuInventorySafetyQty ?? 0)} onChange={(event) => update("temuInventorySafetyQty", Number(event.target.value || 0))} /></Field>
-                <Field label="Default Temu ship-from warehouse"><div className="flex gap-2"><Select disabled={!editing || temuWarehousesLoading || !temuWarehouses.length} value={String(settings.temuDefaultWarehouseId || "none")} onValueChange={(value) => update("temuDefaultWarehouseId", value === "none" ? "" : value)}><SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder={temuWarehousesLoading ? "Loading Temu warehouses..." : "Select Temu warehouse"} /></SelectTrigger><SelectContent><SelectItem value="none">No default selected</SelectItem>{temuWarehouses.map((warehouse) => <SelectItem key={`connection-temu-${warehouse.id}`} value={warehouse.id}>{warehouse.name}{warehouse.isDefault ? " (Temu default)" : ""} · {warehouse.id}</SelectItem>)}</SelectContent></Select><Button type="button" size="icon" variant="outline" title="Refresh Temu warehouses" disabled={temuWarehousesLoading} onClick={() => void loadTemuWarehouses()}>{temuWarehousesLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button></div><p className="text-xs text-muted-foreground">Loaded from Temu and sent as the ship-from warehouse on labels and tracking confirmations.</p></Field>
+                <Field label="Default Temu ship-from warehouse"><div className="flex gap-2"><Select disabled={!editing || !activeTemuAccount || temuWarehousesLoading || !temuWarehouses.length} value={activeTemuWarehouseId || "none"} onValueChange={updateTemuWarehouse}><SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder={temuWarehousesLoading ? "Loading Temu warehouses..." : "Select Temu warehouse"} /></SelectTrigger><SelectContent><SelectItem value="none">No default selected</SelectItem>{temuWarehouses.map((warehouse) => <SelectItem key={`connection-temu-${warehouse.id}`} value={warehouse.id}>{warehouse.name}{warehouse.isDefault ? " (Temu default)" : ""} · {warehouse.id}</SelectItem>)}</SelectContent></Select><Button type="button" size="icon" variant="outline" title="Refresh Temu warehouses" disabled={temuWarehousesLoading || !activeTemuAccount} onClick={() => void loadTemuWarehouses()}>{temuWarehousesLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button></div><p className="text-xs text-muted-foreground">Saved only for {activeTemuAccount?.label || activeTemuAccount?.mallName || "the selected shop"} and used for that shop's labels and tracking.</p></Field>
                 <Field label="Price formula"><Select disabled={!editing} value={String(settings.temuPricingMode || "cost-plus")} onValueChange={(value) => update("temuPricingMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cost-plus">Cost plus markup</SelectItem><SelectItem value="higher-of-product-or-cost">Higher of catalog price or cost formula</SelectItem><SelectItem value="product-price">Use catalog price</SelectItem></SelectContent></Select></Field>
                 <Field label="Price markup percent"><Input disabled={!editing} type="number" min="0" max="1000" value={String(settings.temuPriceMarkupPercent ?? 60)} onChange={(event) => update("temuPriceMarkupPercent", Number(event.target.value || 0))} /></Field>
                 <Field label="Minimum margin percent"><Input disabled={!editing} type="number" min="0" max="99" value={String(settings.temuMinMarginPercent ?? 0)} onChange={(event) => update("temuMinMarginPercent", Number(event.target.value || 0))} /></Field>
@@ -2194,7 +2259,7 @@ function ChannelDetail({
                   </Select>
                 </Field>
                 <Field label="Temu safety quantity"><Input disabled={!editing} type="number" min="0" value={String(settings.temuInventorySafetyQty ?? 0)} onChange={(event) => update("temuInventorySafetyQty", Number(event.target.value || 0))} /></Field>
-                <Field label="Temu ship-from warehouse"><div className="flex gap-2"><Select disabled={!editing || temuWarehousesLoading || !temuWarehouses.length} value={String(settings.temuDefaultWarehouseId || "none")} onValueChange={(value) => update("temuDefaultWarehouseId", value === "none" ? "" : value)}><SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder={temuWarehousesLoading ? "Loading Temu warehouses..." : "Select Temu warehouse"} /></SelectTrigger><SelectContent><SelectItem value="none">No default selected</SelectItem>{temuWarehouses.map((warehouse) => <SelectItem key={`rules-temu-${warehouse.id}`} value={warehouse.id}>{warehouse.name}{warehouse.isDefault ? " (Temu default)" : ""} · {warehouse.id}</SelectItem>)}</SelectContent></Select><Button type="button" size="icon" variant="outline" title="Refresh Temu warehouses" disabled={temuWarehousesLoading} onClick={() => void loadTemuWarehouses()}>{temuWarehousesLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button></div><p className="text-xs text-muted-foreground">This is a Temu warehouse ID, not a DataPlus inventory-location ID.</p></Field>
+                <Field label="Temu ship-from warehouse"><div className="flex gap-2"><Select disabled={!editing || !activeTemuAccount || temuWarehousesLoading || !temuWarehouses.length} value={activeTemuWarehouseId || "none"} onValueChange={updateTemuWarehouse}><SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder={temuWarehousesLoading ? "Loading Temu warehouses..." : "Select Temu warehouse"} /></SelectTrigger><SelectContent><SelectItem value="none">No default selected</SelectItem>{temuWarehouses.map((warehouse) => <SelectItem key={`rules-temu-${warehouse.id}`} value={warehouse.id}>{warehouse.name}{warehouse.isDefault ? " (Temu default)" : ""} · {warehouse.id}</SelectItem>)}</SelectContent></Select><Button type="button" size="icon" variant="outline" title="Refresh Temu warehouses" disabled={temuWarehousesLoading || !activeTemuAccount} onClick={() => void loadTemuWarehouses()}>{temuWarehousesLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button></div><p className="text-xs text-muted-foreground">This Temu warehouse belongs only to the selected shop.</p></Field>
                 <Field label="Temu price formula"><Select disabled={!editing} value={String(settings.temuPricingMode || "cost-plus")} onValueChange={(value) => update("temuPricingMode", value)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="cost-plus">Cost plus markup</SelectItem><SelectItem value="higher-of-product-or-cost">Higher of catalog price or cost formula</SelectItem><SelectItem value="product-price">Use catalog price</SelectItem></SelectContent></Select></Field>
                 <Field label="Temu price markup percent"><Input disabled={!editing} type="number" min="0" max="1000" value={String(settings.temuPriceMarkupPercent ?? 60)} onChange={(event) => update("temuPriceMarkupPercent", Number(event.target.value || 0))} /></Field>
                 <Field label="Temu minimum margin percent"><Input disabled={!editing} type="number" min="0" max="99" value={String(settings.temuMinMarginPercent ?? 0)} onChange={(event) => update("temuMinMarginPercent", Number(event.target.value || 0))} /></Field>
@@ -2366,6 +2431,18 @@ function ChannelDetail({
           <ChannelLogsPanel channel={channel.name || ""} />
         </TabsContent>
       </Tabs>
+      <AlertDialog open={Boolean(temuDisconnectAccount)} onOpenChange={(open) => { if (!open && !temuDisconnecting) setTemuDisconnectAccount(null) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Disconnect {temuDisconnectAccount?.label || "Temu shop"}?</AlertDialogTitle>
+            <AlertDialogDescription>The encrypted seller token will be removed. Historical orders, jobs, and per-shop listing identities remain available for audit and can be reconnected later.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={temuDisconnecting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction disabled={temuDisconnecting} onClick={(event) => { event.preventDefault(); void disconnectTemuAccount() }} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">{temuDisconnecting && <Loader2 className="size-4 animate-spin" />}Disconnect shop</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
