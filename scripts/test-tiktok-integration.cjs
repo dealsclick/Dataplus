@@ -157,6 +157,8 @@ async function main() {
   assert.equal(tiktokMarketplaceSource.includes("checkpointTime - 3_600_000"), true, 'TikTok scheduled order sync must retain a safety overlap.');
   assert.equal(tiktokMarketplaceSource.includes("const canAdvance = failed === 0"), true, 'TikTok order checkpoints must not advance past failed order rows.');
   assert.equal(tiktokMarketplaceSource.includes("'/order/202507/orders'"), true, 'TikTok order imports must hydrate current full order details.');
+  assert.equal(tiktokMarketplaceSource.includes('/fulfillment/202309/packages/'), true, 'TikTok combined orders must hydrate package membership from Get Package Detail.');
+  assert.equal(tiktokMarketplaceSource.includes('split_and_combine_tag'), true, 'TikTok package evidence must retain the platform split/combine status.');
   assert.equal(tiktokMarketplaceSource.includes('index += 50'), true, 'TikTok order detail hydration must respect the 50-order API limit.');
   assert.equal(tiktokMarketplaceSource.includes("document_type: 'SHIPPING_LABEL'"), true, 'TikTok label retrieval must request the required shipping document type.');
   assert.equal(tiktokMarketplaceSource.includes("document_size: 'A6'"), true, 'TikTok shipping labels must request the warehouse A6 format.');
@@ -186,6 +188,7 @@ async function main() {
   const orderWorkspacesSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'order-workspaces.tsx'), 'utf8');
   assert.equal(orderWorkspacesSource.includes('seller-us.tiktok.com/order/detail?order_no='), true, 'TikTok marketplace order numbers must link to Seller Center.');
   assert.equal(orderWorkspacesSource.includes('TikTok masked these recipient details in the API.'), true, 'TikTok masked recipient addresses must be explained to operators.');
+  assert.equal(orderWorkspacesSource.includes('TikTok combined package'), true, 'Imported TikTok package groups must identify the orders that shipped together.');
   const ordersRouteSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'orders-route.tsx'), 'utf8');
   assert.equal(ordersRouteSource.includes('TikTok {tiktokOrderNumber}'), true, 'The main order list must display the TikTok order number.');
   assert.equal(ordersRouteSource.includes('channelOrderUrlFor(row, tiktokOrderNumber)'), true, 'The main order list must link TikTok order numbers to Seller Center.');
@@ -235,6 +238,28 @@ async function main() {
   assert.equal(order.items[0].qty, 2);
   assert.equal(order.items[0].price, 5);
   assert.equal(order.items[0].bundleComponents[0].quantity, 4);
+
+  const combinedOrder = mapTikTokOrder({
+    ...rawOrder,
+    status: 'IN_TRANSIT',
+    split_or_combine_tag: 'combined',
+    line_items: rawOrder.line_items.map((line) => ({ ...line, package_id: 'package-1', tracking_number: 'TRACK-1', shipping_provider: 'USPS' }))
+  }, {
+    packageGroups: new Map([['package-1', {
+      packageId: 'package-1',
+      orderIds: ['576000001', '576000002'],
+      packageStatus: 'SHIPPED',
+      splitOrCombineTag: 'COMBINE',
+      trackingNumber: 'TRACK-1'
+    }]])
+  });
+  assert.equal(combinedOrder.shipmentGroupId, 'tiktok-package:package-1');
+  assert.deepEqual(combinedOrder.shipmentGroupOrderIds, ['tiktok-576000001', 'tiktok-576000002']);
+  assert.equal(combinedOrder.shipmentGroupMatchSource, 'tiktok_package_id');
+  assert.equal(combinedOrder.shipmentGroupPackage.packageId, 'package-1');
+  assert.equal(combinedOrder.shipments[0].sharedLabel, true);
+  assert.equal(combinedOrder.shipments[0].sharedLabelMaster, true);
+  assert.equal(combinedOrder.shipments[0].packageId, 'package-1');
 
   const returnRecord = mapTikTokReturn({
     return_id: 'return-1', order_id: '576000001', return_status: 'RETURNED', create_time: 1700000200,

@@ -66230,24 +66230,50 @@ async function handleApi(req, res) {
     ]);
     if (!order) return notFound(res);
     const settings = normalizeFulfillmentSettings(savedSettings || {});
-    if (settings.shipmentConsolidationEnabled === false) return sendJson(res, 200, { orderId: order.id, eligible: false, reason: "Shipment consolidation is disabled in Fulfillment settings.", candidates: [] });
-    const currentBatches = await postgres.readFulfillmentBatchesByOrderIds([order.id]);
-    if (protectedShipmentConsolidationOrderIds(currentBatches).has(String(order.id || ""))) return sendJson(res, 200, { orderId: order.id, eligible: false, reason: "A label purchase is already active or recorded for this order.", candidates: [] });
-    const eligibility = shipmentGroupEligibility(order, { windowHours: settings.shipmentConsolidationWindowHours });
-    if (!eligibility.eligible) return sendJson(res, 200, { orderId: order.id, eligible: false, reason: eligibility.reason, candidates: [] });
-    const liveWindow = shipmentConsolidation.ebayLiveShippingWindow(order);
-    const candidateIdentity = String(order.customerId || order.external?.customerId || order.external?.accountId || order.external?.buyerId || order.buyer || "").trim();
-    const nearbyOrders = await postgres.listOrders({ limit: 5000, summary: true, q: candidateIdentity, openWorkOnly: true });
     const groupedOrderIds = [...new Set((Array.isArray(order.shipmentGroupOrderIds) ? order.shipmentGroupOrderIds : []).map(String).filter((id) => id && id !== String(order.id || "")))];
     const groupedOrders = groupedOrderIds.length ? await postgres.readOrdersByIds(groupedOrderIds) : [];
-    const orders = [...new Map([...(nearbyOrders || []), ...(groupedOrders || [])].map((candidate) => [String(candidate.id || candidate.orderId || ""), candidate])).values()];
-    const protectedBatches = await postgres.readFulfillmentBatchesByOrderIds(orders.map((candidate) => candidate.id || candidate.orderId));
-    const protectedOrderIds = protectedShipmentConsolidationOrderIds([...currentBatches, ...protectedBatches]);
     const displaySkus = (candidate) => [...new Set([
       candidate.sku,
       candidate.catalogSku,
       ...orderLineItems(candidate).flatMap((line) => [line.sku, line.originalSku, line.parentSku])
     ].map((value) => String(value || "").trim()).filter(Boolean))];
+    const persistedCandidates = groupedOrders.map((candidate) => ({
+      id: candidate.id,
+      orderNumber: candidate.orderNumber,
+      status: candidate.status,
+      fulfillmentStatus: candidate.fulfillmentStatus || "",
+      total: candidate.total,
+      buyer: candidate.buyer || candidate.customerName || candidate.address?.name || "Customer",
+      skus: displaySkus(candidate),
+      address: candidate.address || {},
+      createdAt: candidate.orderDate || candidate.createdAt,
+      fulfillmentPackage: fulfillmentPackageFor(candidate),
+      shipmentGroupId: candidate.shipmentGroupId || order.shipmentGroupId || "",
+      warehouseId: candidate.fulfillmentWarehouseId || "",
+      identitySource: "persisted_group",
+      matchSource: order.shipmentGroupMatchSource || candidate.shipmentGroupMatchSource || "persisted_group",
+      isEbayLive: candidate.isEbayLive === true || candidate.salesOrigin === "ebay_live",
+      matchReasons: ["same_group"]
+    }));
+    const existingGroupResponse = (reason, eligibility = {}) => sendJson(res, 200, {
+      orderId: order.id,
+      eligible: false,
+      reason,
+      existingGroup: persistedCandidates.length > 0,
+      warehouseId: eligibility.warehouseId || "",
+      candidates: persistedCandidates
+    });
+    if (settings.shipmentConsolidationEnabled === false) return existingGroupResponse("Shipment consolidation is disabled in Fulfillment settings.");
+    const currentBatches = await postgres.readFulfillmentBatchesByOrderIds([order.id]);
+    if (protectedShipmentConsolidationOrderIds(currentBatches).has(String(order.id || ""))) return existingGroupResponse("A label purchase is already active or recorded for this order.");
+    const eligibility = shipmentGroupEligibility(order, { windowHours: settings.shipmentConsolidationWindowHours });
+    if (!eligibility.eligible) return existingGroupResponse(eligibility.reason, eligibility);
+    const liveWindow = shipmentConsolidation.ebayLiveShippingWindow(order);
+    const candidateIdentity = String(order.customerId || order.external?.customerId || order.external?.accountId || order.external?.buyerId || order.buyer || "").trim();
+    const nearbyOrders = await postgres.listOrders({ limit: 5000, summary: true, q: candidateIdentity, openWorkOnly: true });
+    const orders = [...new Map([...(nearbyOrders || []), ...(groupedOrders || [])].map((candidate) => [String(candidate.id || candidate.orderId || ""), candidate])).values()];
+    const protectedBatches = await postgres.readFulfillmentBatchesByOrderIds(orders.map((candidate) => candidate.id || candidate.orderId));
+    const protectedOrderIds = protectedShipmentConsolidationOrderIds([...currentBatches, ...protectedBatches]);
     const primary = { id: order.id, orderNumber: order.orderNumber, buyer: order.buyer || order.customerName || order.address?.name || "Customer", skus: displaySkus(order), createdAt: order.orderDate || order.createdAt, isEbayLive: order.isEbayLive === true || order.salesOrigin === "ebay_live", fulfillmentPackage: fulfillmentPackageFor(order), shipmentGroupId: order.shipmentGroupId || "", shipmentGroupOrderIds: Array.isArray(order.shipmentGroupOrderIds) ? order.shipmentGroupOrderIds : [], shipmentGroupPackage: order.shipmentGroupPackage || null };
     const candidates = (orders || []).filter((candidate) => {
       if (candidate.id === order.id) return false;
@@ -66936,6 +66962,9 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const masterOrder = await postgres.readOrderByKey(parts[2]);
     if (!masterOrder) return notFound(res);
+    if (String(masterOrder.shipmentGroupMatchSource || "") === "tiktok_package_id") {
+      return sendJson(res, 409, { error: "TikTok already fulfilled this combined package. DataPlus retains the package membership as channel evidence and will not apply inventory or tracking again." });
+    }
     const groupId = String(masterOrder.shipmentGroupId || "").trim();
     if (!groupId) return sendJson(res, 400, { error: "Create a shipment group before applying a shared shipment." });
     const masterShipmentId = String(body.shipmentId || "").trim();
