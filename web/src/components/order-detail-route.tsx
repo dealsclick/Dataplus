@@ -514,14 +514,18 @@ function OrderDetailWorkspace() {
     return routeVendorId ? `/vendors/${encodeURIComponent(routeVendorId)}` : ""
   }
   const remaining = (line: Record<string, unknown>, index: number) => {
+    const orderStatus = String(order?.fulfillmentStatus || order?.status || "").toLowerCase()
+    if (["fulfilled", "shipped", "delivered", "completed", "complete", "done", "closed"].includes(orderStatus)) return 0
     const shipped = fulfilled.find((entry) => Number(entry.lineIndex || 0) === index && String(entry.sku || "").toLowerCase() === String(line.sku || "").toLowerCase())
+    const shipmentFulfilled = shipments.flatMap((shipment) => Array.isArray(shipment.lines) ? shipment.lines as Array<Record<string, unknown>> : [])
+      .find((entry) => Number(entry.lineIndex ?? -1) === index || (String(entry.sku || "").trim() && String(entry.sku || "").toLowerCase() === String(line.sku || "").toLowerCase()))
     const quantity = Number(line.qty || 0)
     const lineRemaining = Number(line.remainingQty ?? line.remainingQuantity ?? line.unfulfilledQuantity)
     if (Number.isFinite(lineRemaining) && lineRemaining >= 0) return Math.min(quantity, lineRemaining)
     const lineFulfilled = Number(line.fulfilledQty ?? line.fulfilledQuantity ?? 0)
     const lineStatus = String(line.fulfillmentStatus || line.status || "").toLowerCase()
     if (["fulfilled", "shipped", "completed", "complete", "done", "closed"].some((status) => lineStatus.includes(status))) return 0
-    return Math.max(0, quantity - Math.max(Number(shipped?.qtyFulfilled || 0), lineFulfilled))
+    return Math.max(0, quantity - Math.max(Number(shipped?.qtyFulfilled || 0), Number(shipmentFulfilled?.qtyFulfilled || 0), lineFulfilled))
   }
   const shipmentPackageDefaults = (quantities: Record<number, number>) => {
     return fulfillmentPackageDefaults(lines, (_line, index) => Number(quantities[index] || 0))

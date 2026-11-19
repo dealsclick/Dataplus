@@ -13,9 +13,12 @@ test("refunded eBay order 4295 moves to done without changing financials", () =>
 });
 
 for (const source of ["Temu", "Shopify", "eBay"]) test(`${source} completed shipment supersedes sourcing exceptions`, () => {
-  const order = { source, status: "shipped", workflowExceptions: [{ type: "missing_catalog_product", severity: "blocking", status: "open" }] };
+  const order = { source, status: "shipped", items: [{ sku: "TEST-1", qty: 2 }], workflowExceptions: [{ type: "missing_catalog_product", severity: "blocking", status: "open" }] };
   normalizeSourceOrderCompletion(order);
   assert.equal(order.operationalStatus, "completed");
+  assert.equal(order.items[0].fulfillmentStatus, "fulfilled");
+  assert.equal(order.items[0].fulfilledQty, 2);
+  assert.equal(order.items[0].remainingQty, 0);
 });
 
 test("partial shipments and reopened shipments are not closed", () => {

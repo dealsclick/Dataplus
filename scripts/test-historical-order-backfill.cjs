@@ -11,6 +11,12 @@ assert(start >= 0 && end > start, 'Historical backfill order guard must exist.')
 
 const context = {
   sourceOrderFullyShipped: order => ['shipped', 'fulfilled', 'completed', 'delivered'].includes(String(order.fulfillmentStatus || order.status || '').toLowerCase()),
+  normalizeSourceOrderCompletion: order => {
+    order.operationalStatus = 'completed';
+    order.workflowStatus = 'completed';
+    order.routingLastResult = 'terminal';
+    return true;
+  },
 };
 vm.createContext(context);
 vm.runInContext(`${source.slice(start, end)}\nthis.prepare = prepareHistoricalBackfillOrder;`, context);
@@ -20,6 +26,8 @@ assert.equal(completed.historicalBackfill, true);
 assert.equal(completed.excludedFromOperationalQueues, true);
 assert.equal(completed.historicalReviewRequired, false);
 assert.equal(completed.total, 12.5, 'Historical sales remain reportable.');
+assert.equal(completed.operationalStatus, 'completed');
+assert.equal(completed.routingLastResult, 'terminal');
 
 const open = context.prepare({ source: 'Temu', status: 'paid' }, { channel: 'Temu', jobId: 'job-2' });
 assert.equal(open.excludedFromOperationalQueues, true);

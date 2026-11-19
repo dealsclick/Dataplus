@@ -24470,6 +24470,7 @@ function getWalmartMarketplace() {
       if (!historicalBackfill) await ensureProductsForImportedOrders(policyDb, [order], { channel: "Walmart" });
       if (db) await postgres.writeStateField('sequence', db.sequence);
       await postgres.upsertOrdersFromState([order], { replace: false });
+      await reconcileOutboundAuditsAfterImport([order], { source: "Walmart order import" });
       if (!historicalBackfill) await reconcilePersistedTerminalOrders([order], { user: 'Walmart order import' });
       if (!historicalBackfill) await queuePaidOrderRoutingCandidates([order.id], { immediate: true, source: 'walmart-order-import', sourceJobId: options.jobId || '' });
       clearOrderApiCache();
@@ -24537,6 +24538,10 @@ function getTikTokMarketplace() {
       return job;
     },
     persistJob: persistWorkerImportJob,
+    reconcileOutboundAudits: options => reconcileOutboundAuditsAfterImport([], {
+      ...options,
+      source: "TikTok Shop order import"
+    }),
     readProducts: skus => postgres.readProductsByKeys(skus),
     listTikTokProducts: async ({ linkedOnly = false, limit = 1000 } = {}) => {
       const result = await postgres.getPool().query(`
@@ -27279,6 +27284,7 @@ async function runEbayOrderImportWorkerJob(job = {}, attrs = {}) {
           created.attentionSkus.forEach((sku) => systemCreatedSkus.add(sku));
           await hydrateOrdersLocalCosts(group.orders);
           await postgres.upsertOrdersFromState(group.orders, { replace: false, batchSize: 250 });
+          await reconcileOutboundAuditsAfterImport(group.orders, { source: group.source });
           if (!payload.historicalBackfill) await reconcilePersistedTerminalOrders(group.orders, { user: group.actor });
           if (!payload.historicalBackfill && group.source === "ebay-live-order-import") {
             for (const order of group.orders) importedLiveOrders.set(stableLiveOrderKey(order), order);
@@ -27737,6 +27743,7 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
         }
         await hydrateOrdersLocalCosts(importableOrders);
         await postgres.upsertOrdersFromState(importableOrders, { replace: false, batchSize: 250 });
+        await reconcileOutboundAuditsAfterImport(importableOrders, { source: "Temu order import" });
         await linkReturns(importableOrders);
         const withReturns = importableOrders.filter((order) => order.returns?.length);
         if (withReturns.length) await postgres.upsertOrdersFromState(withReturns, { replace: false, batchSize: 250 });
@@ -44841,6 +44848,68 @@ async function resolveOutboundAuditTracking(scannedValue = "") {
   };
 }
 
+function outboundAuditTrackingValuesForOrders(orders = []) {
+  const values = new Set();
+  const add = (value) => {
+    for (const candidate of trackingLookupCandidates(String(value || ""))) {
+      const normalized = canonicalTrackingValue(candidate);
+      if (normalized) values.add(normalized);
+    }
+  };
+  for (const order of Array.isArray(orders) ? orders : []) {
+    add(order?.trackingNumber);
+    add(order?.tracking_number);
+    for (const shipment of [
+      ...(Array.isArray(order?.shipments) ? order.shipments : []),
+      ...(Array.isArray(order?.fulfillments) ? order.fulfillments : []),
+      ...(Array.isArray(order?.shippingFulfillments) ? order.shippingFulfillments : [])
+    ]) {
+      add(shipment?.trackingNumber);
+      add(shipment?.tracking_number);
+      for (const tracking of Array.isArray(shipment?.trackingInfo) ? shipment.trackingInfo : []) {
+        add(tracking?.number || tracking?.trackingNumber);
+      }
+    }
+  }
+  return [...values];
+}
+
+async function reconcileOutboundAuditScansForOrders(orders = [], options = {}) {
+  if (!postgres.isPostgresEnabled()) return { checked: 0, linked: 0, errors: [] };
+  const trackingValues = outboundAuditTrackingValuesForOrders(orders);
+  if (!options.fullSweep && !trackingValues.length) return { checked: 0, linked: 0, errors: [] };
+  const scope = { tenantId: LEGACY_TENANT, companyId: LEGACY_COMPANY };
+  const pending = await outboundAuditStore.listUnmatched(scope, {
+    auditId: options.auditId,
+    trackingValues: options.fullSweep ? [] : trackingValues,
+    limit: options.limit || 5000
+  });
+  let linked = 0;
+  const errors = [];
+  for (const entry of pending) {
+    try {
+      const resolved = await resolveOutboundAuditTracking(entry.scan.trackingRaw || entry.scan.trackingNumber);
+      if (!resolved.matches.length) continue;
+      // Relinking is intentionally inventory-neutral. Inventory allocation and
+      // outbound item scans keep their own idempotency keys and ledger entries.
+      await outboundAuditStore.replaceScanMatches(scope, entry.auditId, entry.scan.id, resolved);
+      linked += 1;
+    } catch (error) {
+      errors.push({ auditId: entry.auditId, scanId: entry.scan.id, message: String(error?.message || error) });
+    }
+  }
+  return { checked: pending.length, linked, errors };
+}
+
+async function reconcileOutboundAuditsAfterImport(orders = [], options = {}) {
+  try {
+    return await reconcileOutboundAuditScansForOrders(orders, options);
+  } catch (error) {
+    console.warn(`Outbound audit reconciliation skipped after ${options.source || "order import"}:`, error.message || error);
+    return { checked: 0, linked: 0, errors: [{ message: String(error?.message || error) }] };
+  }
+}
+
 function outboundLiveLineKey(value = {}) {
   return `${String(value.orderId || "")}:${Number(value.listingLineIndex ?? value.lineIndex ?? -1)}`;
 }
@@ -54721,6 +54790,14 @@ function prepareHistoricalBackfillOrder(order = {}, options = {}) {
   if (!terminal) {
     next.operationalStatus = "on_hold";
     next.workflowStatus = "on_hold";
+  } else if (sourceOrderFullyShipped(next)) {
+    normalizeSourceOrderCompletion(next, {
+      user: `${String(options.channel || order.source || "Channel")} historical import`
+    });
+  } else {
+    next.operationalStatus = "canceled";
+    next.workflowStatus = "canceled";
+    next.routingLastResult = "terminal";
   }
   return next;
 }
@@ -54802,6 +54879,7 @@ async function importShopifyOrders(limit = 250, filters = {}) {
       }
       if (filters.historicalBackfill !== true) await postgres.writeStateField("sequence", db.sequence);
       await postgres.upsertOrdersFromState(savedPage, { replace: false, batchSize: 250 });
+      await reconcileOutboundAuditsAfterImport(savedPage, { source: "Shopify order import" });
       if (filters.historicalBackfill !== true) await reconcilePersistedTerminalOrders(savedPage, { user: "Shopify order import" });
       if (filters.historicalBackfill !== true) await queuePaidOrderRoutingCandidates(savedPage.map((order) => order.id), { immediate: true, source: "shopify-order-import", sourceJobId: filters.jobId || "" });
       clearOrderApiCache();
@@ -54842,6 +54920,7 @@ async function refreshShopifyOrderFromWebhook(orderId = "", settings = {}, webho
   await ensureProductsForImportedOrders(db, [merged], { channel: "Shopify", jobId: webhook.webhookId || "" });
   if (postgres.isPostgresEnabled()) await postgres.writeStateField("sequence", db.sequence);
   await postgres.saveOrder(merged);
+  await reconcileOutboundAuditsAfterImport([merged], { source: "Shopify order webhook" });
   await reconcilePersistedTerminalOrders([merged], { user: `Shopify ${String(webhook.topic || "orders/update")}` });
   const soldSkus = inventorySyncSkuSet(orderLineItems(merged).flatMap((line) => [line.sku, line.originalSku, line.channelVariantSku]));
   if (soldSkus.length) {
@@ -70885,16 +70964,15 @@ async function handleApi(req, res) {
     if (req.method === "POST" && action === "reconcile") {
       const audit = await outboundAuditStore.read(scope, auditId);
       if (!audit) return notFound(res);
-      let linked = 0;
-      const unmatched = audit.scans.filter((scan) => scan.matchStatus === "unmatched").slice(0, 100);
-      for (const scan of unmatched) {
-        const resolved = await resolveOutboundAuditTracking(scan.trackingRaw || scan.trackingNumber);
-        if (!resolved.matches.length) continue;
-        await outboundAuditStore.replaceScanMatches(scope, auditId, scan.id, resolved);
-        linked += 1;
-      }
+      const reconciliation = await reconcileOutboundAuditScansForOrders([], { auditId, fullSweep: true, limit: 5000 });
       const refreshed = await outboundAuditStore.read(scope, auditId);
-      return sendJson(res, 200, { ...refreshed, linked, checked: unmatched.length, message: linked ? `${linked} previously unmatched package${linked === 1 ? "" : "s"} linked to current orders.` : "No additional order matches were found." });
+      return sendJson(res, 200, {
+        ...refreshed,
+        ...reconciliation,
+        message: reconciliation.linked
+          ? `${reconciliation.linked} previously unmatched package${reconciliation.linked === 1 ? "" : "s"} linked to current orders.`
+          : "No additional order matches were found."
+      });
     }
     if (req.method === "POST" && action === "close") {
       const body = await parseBody(req);
