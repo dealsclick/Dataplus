@@ -19499,6 +19499,10 @@ function normalizeDraftLine(db, line = {}, index = 0) {
     catalogMatchReviewRequired: line.catalogMatchReviewRequired === true,
     manufacturerPartNumber: String(line.manufacturerPartNumber || line.mfrPartNumber || inventoryItem?.mfrPartNumber || "").trim().slice(0, 200),
     barcode: String(line.barcode || inventoryItem?.barcode || "").trim().slice(0, 120),
+    packageWeight: Math.max(0, Number(line.packageWeight || 0) || 0),
+    packageLength: Math.max(0, Number(line.packageLength || 0) || 0),
+    packageWidth: Math.max(0, Number(line.packageWidth || 0) || 0),
+    packageHeight: Math.max(0, Number(line.packageHeight || 0) || 0),
     selectedSupplierKey: String(line.selectedSupplierKey || "").trim(),
     selectedSupplierId: String(line.selectedSupplierId || "").trim(),
     selectedSupplierName: String(line.selectedSupplierName || "").trim(),
@@ -19559,15 +19563,44 @@ function normalizeDraftShippingEstimate(value) {
       manual: true
     };
   }
+  const normalizePackage = (source = {}, index = 0) => {
+    const dimensions = Object.fromEntries(["weight", "length", "width", "height"].map((key) => [key, Number(source[key] || 0)]));
+    return {
+      ...dimensions,
+      id: String(source.id || `package-${index + 1}`).trim().slice(0, 100),
+      name: String(source.name || `Package ${index + 1}`).trim().slice(0, 160),
+      items: (Array.isArray(source.items) ? source.items : []).slice(0, 500).map((item) => ({
+        lineIndex: Math.max(0, Number(item.lineIndex || 0) || 0),
+        sku: String(item.sku || "").trim().slice(0, 200),
+        title: String(item.title || "").trim().slice(0, 1000),
+        qty: Math.max(0, Number(item.qty || 0) || 0)
+      })).filter((item) => item.qty > 0),
+      providerId: String(source.providerId || "").trim().toLowerCase(),
+      providerName: String(source.providerName || "").trim().slice(0, 120),
+      carrier: String(source.carrier || "").trim().slice(0, 120),
+      service: String(source.service || "").trim().slice(0, 200),
+      serviceCode: String(source.serviceCode || "").trim().slice(0, 80),
+      amount: Math.max(0, Number(source.amount || 0) || 0),
+      currency: String(source.currency || "USD").trim().slice(0, 10) || "USD",
+      quotedAt: String(source.quotedAt || value.quotedAt || "").trim().slice(0, 40),
+      expiresAt: String(source.expiresAt || value.expiresAt || "").trim().slice(0, 40),
+      freightClass: String(source.freightClass || "").trim().slice(0, 20),
+      palletQuantity: Math.max(0, Number(source.palletQuantity || 0) || 0),
+      pickupDate: String(source.pickupDate || "").trim().slice(0, 20),
+      residentialDelivery: source.residentialDelivery === true
+    };
+  };
   const packageSource = value.package && typeof value.package === "object" && !Array.isArray(value.package) ? value.package : {};
-  const packageInfo = Object.fromEntries(["weight", "length", "width", "height"].map((key) => [key, Number(packageSource[key] || 0)]));
-  if (!Number.isFinite(amount) || amount < 0 || Object.values(packageInfo).some((number) => !Number.isFinite(number) || number <= 0)) return null;
+  const packageInfo = normalizePackage(packageSource, 0);
+  if (!Number.isFinite(amount) || amount < 0 || [packageInfo.weight, packageInfo.length, packageInfo.width, packageInfo.height].some((number) => !Number.isFinite(number) || number <= 0)) return null;
   const providerId = String(value.providerId || "ups").trim().toLowerCase();
   const carrier = String(value.carrier || (providerId === "usps" ? "USPS" : providerId === "veeqo" ? "Veeqo" : "UPS")).trim();
   const quotedAt = String(value.quotedAt || "").trim();
   const quotedAtMs = Date.parse(quotedAt);
   const expiresAt = String(value.expiresAt || (Number.isFinite(quotedAtMs) ? new Date(quotedAtMs + 30 * 60_000).toISOString() : "1970-01-01T00:00:00.000Z")).trim();
-  if (!new Set(["ups", "usps", "veeqo"]).has(providerId) || !carrier || !Number.isFinite(Date.parse(expiresAt))) return null;
+  if (!new Set(["ups", "usps", "veeqo", "echosync", "multiple"]).has(providerId) || !carrier || !Number.isFinite(Date.parse(expiresAt))) return null;
+  const packages = (Array.isArray(value.packages) && value.packages.length ? value.packages : [packageSource]).slice(0, 50).map(normalizePackage);
+  if (packages.some((entry) => [entry.weight, entry.length, entry.width, entry.height].some((number) => !Number.isFinite(number) || number <= 0))) return null;
   return {
     providerId,
     carrier,
@@ -19580,7 +19613,8 @@ function normalizeDraftShippingEstimate(value) {
     warehouseId: String(value.warehouseId || "").trim(),
     quotedAt: quotedAt || "1970-01-01T00:00:00.000Z",
     expiresAt,
-    package: packageInfo
+    package: packageInfo,
+    packages
   };
 }
 

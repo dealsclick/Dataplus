@@ -52,6 +52,7 @@ import {
   Archive,
   ArrowRight,
   Ban,
+  Boxes,
   CalendarDays,
   CheckCircle2,
   ChevronLeft,
@@ -173,6 +174,20 @@ type QuoteCarrierRate = {
   quotedAt?: string
   expiresAt: string
   warning?: string
+}
+
+type QuotePackageAllocation = { lineIndex: number; sku: string; title: string; qty: string }
+type QuotePackageDraft = {
+  id: string
+  name: string
+  weight: string
+  length: string
+  width: string
+  height: string
+  source: string
+  items: QuotePackageAllocation[]
+  rates: QuoteCarrierRate[]
+  selectedRateId: string
 }
 
 type QuoteCarrierAccess = { id: string; name: string; enabled: boolean; companyRates: boolean }
@@ -403,12 +418,10 @@ export function DraftQuoteFieldDetailPage() {
   const [manualShippingAmount, setManualShippingAmount] = useState("")
   const [manualShippingLabel, setManualShippingLabel] = useState("Manual shipping fee")
   const [shippingBusy, setShippingBusy] = useState(false)
-  const [shippingRates, setShippingRates] = useState<QuoteCarrierRate[]>([])
   const [shippingProviderErrors, setShippingProviderErrors] = useState<Array<{ provider?: string; message?: string }>>([])
   const [shippingAddressValidation, setShippingAddressValidation] = useState<QuoteAddressValidation | null>(null)
-  const [selectedShippingRateId, setSelectedShippingRateId] = useState("")
   const [shippingWarehouseId, setShippingWarehouseId] = useState("")
-  const [shippingPackage, setShippingPackage] = useState({ weight: "", length: "", width: "", height: "" })
+  const [shippingPackages, setShippingPackages] = useState<QuotePackageDraft[]>([])
   const [shippingFreight, setShippingFreight] = useState({ freightClass: "100", palletQuantity: "1", pickupDate: "", residentialDelivery: false })
   const [supplierOptionsBySku, setSupplierOptionsBySku] = useState<Record<string, QuoteSupplierOption[]>>({})
   const [supplierOptionsLoading, setSupplierOptionsLoading] = useState<Set<string>>(new Set())
@@ -775,54 +788,118 @@ export function DraftQuoteFieldDetailPage() {
   const openShippingRates = () => {
     if (isVoided) { toast.error("Voided quotes cannot request new carrier rates."); return }
     const estimate = draft?.shippingEstimate as Record<string, unknown> | undefined
-    const packageInfo = estimate?.package as Record<string, unknown> | undefined
-    setShippingPackage({
-      weight: packageInfo?.weight ? String(packageInfo.weight) : "",
-      length: packageInfo?.length ? String(packageInfo.length) : "",
-      width: packageInfo?.width ? String(packageInfo.width) : "",
-      height: packageInfo?.height ? String(packageInfo.height) : "",
+    const savedPackages = Array.isArray(estimate?.packages) && estimate.packages.length
+      ? estimate.packages as Array<Record<string, unknown>>
+      : estimate?.package ? [estimate.package as Record<string, unknown>] : []
+    const packageRows: QuotePackageDraft[] = savedPackages.length ? savedPackages.map((entry, index) => ({
+      id: String(entry.id || globalThis.crypto.randomUUID()), name: String(entry.name || `Package ${index + 1}`),
+      weight: entry.weight ? String(entry.weight) : "", length: entry.length ? String(entry.length) : "",
+      width: entry.width ? String(entry.width) : "", height: entry.height ? String(entry.height) : "", source: "Saved quote package",
+      items: Array.isArray(entry.items) ? entry.items.map((item) => { const row = item as Record<string, unknown>; return { lineIndex: Number(row.lineIndex || 0), sku: String(row.sku || ""), title: String(row.title || row.sku || ""), qty: String(row.qty || 0) } })
+        : lines.map((line, lineIndex) => ({ lineIndex, sku: String(line.sku || ""), title: String(line.title || line.sku || ""), qty: String(index === 0 ? Number(line.qty || 0) : 0) })),
+      rates: [], selectedRateId: "",
+    })) : lines.map((line, lineIndex) => {
+      const qty = Math.max(1, Number(line.qty || 1))
+      const weight = Number(line.packageWeight || 0), length = Number(line.packageLength || 0), width = Number(line.packageWidth || 0), height = Number(line.packageHeight || 0)
+      const complete = weight > 0 && length > 0 && width > 0 && height > 0
+      return {
+        id: globalThis.crypto.randomUUID(), name: lines.length === 1 ? "Package 1" : `Package ${lineIndex + 1}`,
+        weight: weight > 0 ? String(Math.round(weight * qty * 100) / 100) : "", length: length > 0 ? String(length) : "",
+        width: width > 0 ? String(width) : "", height: height > 0 ? String(height) : "",
+        source: complete ? `Catalog measurements from ${String(line.sku || "SKU")}` : `Measurements missing for ${String(line.sku || "SKU")}`,
+        items: lines.map((candidate, candidateIndex) => ({ lineIndex: candidateIndex, sku: String(candidate.sku || ""), title: String(candidate.title || candidate.sku || ""), qty: String(candidateIndex === lineIndex ? Number(candidate.qty || 0) : 0) })),
+        rates: [], selectedRateId: "",
+      }
     })
+    setShippingPackages(packageRows.length ? packageRows : [{ id: globalThis.crypto.randomUUID(), name: "Package 1", weight: "", length: "", width: "", height: "", source: "Manual package", items: [], rates: [], selectedRateId: "" }])
     setShippingFreight({
-      freightClass: String(packageInfo?.freightClass || "100"),
-      palletQuantity: String(packageInfo?.palletQuantity || "1"),
-      pickupDate: String(packageInfo?.pickupDate || ""),
-      residentialDelivery: packageInfo?.residentialDelivery === true,
+      freightClass: String((estimate?.package as Record<string, unknown> | undefined)?.freightClass || "100"),
+      palletQuantity: String((estimate?.package as Record<string, unknown> | undefined)?.palletQuantity || "1"),
+      pickupDate: String((estimate?.package as Record<string, unknown> | undefined)?.pickupDate || ""),
+      residentialDelivery: (estimate?.package as Record<string, unknown> | undefined)?.residentialDelivery === true,
     })
     setShippingWarehouseId(String(estimate?.warehouseId || warehouses.find((row) => row.isDefaultReceiving)?.id || warehouses[0]?.id || ""))
-    setShippingRates([])
     setShippingProviderErrors([])
     setShippingAddressValidation(null)
-    setSelectedShippingRateId("")
     setShippingOpen(true)
   }
+  const updateShippingPackage = (index: number, patch: Partial<QuotePackageDraft>) => setShippingPackages((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, ...patch, rates: patch.rates || [], selectedRateId: patch.selectedRateId || "" } : row))
+  const updatePackageAllocation = (packageIndex: number, lineIndex: number, qty: string) => setShippingPackages((current) => current.map((row, rowIndex) => rowIndex !== packageIndex ? row : {
+    ...row, rates: [], selectedRateId: "", items: row.items.map((item) => item.lineIndex === lineIndex ? { ...item, qty } : item)
+  }))
+  const addShippingPackage = () => setShippingPackages((current) => [...current, {
+    id: globalThis.crypto.randomUUID(), name: `Package ${current.length + 1}`, weight: "", length: "", width: "", height: "", source: "Manual package",
+    items: lines.map((line, lineIndex) => ({ lineIndex, sku: String(line.sku || ""), title: String(line.title || line.sku || ""), qty: "0" })), rates: [], selectedRateId: "",
+  }])
+  const splitShippingPackage = (index: number) => setShippingPackages((current) => {
+    const source = current[index]
+    if (!source) return current
+    const totalQty = source.items.reduce((sum, item) => sum + Math.max(0, Number(item.qty || 0)), 0)
+    if (totalQty <= 1) { toast.error("Assign at least two units before splitting this package."); return current }
+    const moved = source.items.map((item) => Math.floor(Math.max(0, Number(item.qty || 0)) / 2))
+    if (!moved.some(Boolean)) { const largest = source.items.reduce((best, item, itemIndex) => Number(item.qty || 0) > Number(source.items[best]?.qty || 0) ? itemIndex : best, 0); moved[largest] = 1 }
+    const movedQty = moved.reduce((sum, qty) => sum + qty, 0), ratio = movedQty / totalQty
+    const original = { ...source, weight: source.weight ? String(Math.round(Number(source.weight) * (1 - ratio) * 100) / 100) : "", rates: [], selectedRateId: "", items: source.items.map((item, itemIndex) => ({ ...item, qty: String(Math.max(0, Number(item.qty || 0) - moved[itemIndex])) })) }
+    const created = { ...source, id: globalThis.crypto.randomUUID(), name: `Package ${current.length + 1}`, weight: source.weight ? String(Math.round(Number(source.weight) * ratio * 100) / 100) : "", source: `Split from ${source.name}`, rates: [], selectedRateId: "", items: source.items.map((item, itemIndex) => ({ ...item, qty: String(moved[itemIndex]) })) }
+    return current.map((row, rowIndex) => rowIndex === index ? original : row).concat(created)
+  })
+  const removeShippingPackage = (index: number) => setShippingPackages((current) => {
+    if (current.length <= 1) return current
+    const removed = current[index], targetIndex = index === 0 ? 1 : 0
+    return current.filter((_, rowIndex) => rowIndex !== index).map((row) => row.id !== current[targetIndex]?.id ? row : {
+      ...row, rates: [], selectedRateId: "", items: row.items.map((item) => ({ ...item, qty: String(Number(item.qty || 0) + Number(removed.items.find((candidate) => candidate.lineIndex === item.lineIndex)?.qty || 0)) }))
+    })
+  })
   const requestShippingRates = async () => {
-    const parcel = Object.fromEntries(Object.entries(shippingPackage).map(([key, value]) => [key, Number(value)]))
-    if (Object.values(parcel).some((value) => !Number.isFinite(value) || value <= 0)) { toast.error("Enter weight and all package dimensions."); return }
+    if (!shippingPackages.length) return
+    for (const [index, packageRow] of shippingPackages.entries()) {
+      const parcel = { weight: Number(packageRow.weight), length: Number(packageRow.length), width: Number(packageRow.width), height: Number(packageRow.height) }
+      if (Object.values(parcel).some((value) => !Number.isFinite(value) || value <= 0)) { toast.error(`Enter weight and all dimensions for package ${index + 1}.`); return }
+    }
+    for (const [lineIndex, line] of lines.entries()) {
+      const assigned = shippingPackages.reduce((sum, row) => sum + Number(row.items.find((item) => item.lineIndex === lineIndex)?.qty || 0), 0)
+      if (assigned !== Number(line.qty || 0)) { toast.error(`${String(line.sku || `Line ${lineIndex + 1}`)} has ${assigned} of ${Number(line.qty || 0)} units assigned to packages.`); return }
+    }
     setShippingBusy(true)
     try {
-      const result = await api<{ rates?: QuoteCarrierRate[]; providerErrors?: Array<{ provider?: string; message?: string }>; addressValidation?: QuoteAddressValidation }>(`/api/order-drafts/${encodeURIComponent(draftId)}/shipping-rates`, { method: "POST", body: JSON.stringify({ warehouseId: shippingWarehouseId, package: parcel, ...shippingFreight, palletQuantity: Number(shippingFreight.palletQuantity || 0) }) })
-      const rates = result.rates || []
-      setShippingRates(rates)
-      setShippingProviderErrors(result.providerErrors || [])
-      setShippingAddressValidation(result.addressValidation || null)
-      setSelectedShippingRateId(rates[0]?.id || "")
-      if (!rates.length) toast.error("No enabled carrier returned an eligible rate for this package.")
+      const nextPackages: QuotePackageDraft[] = [], providerErrors: Array<{ provider?: string; message?: string }> = []
+      let addressValidation: QuoteAddressValidation | null = null
+      for (const packageRow of shippingPackages) {
+        const parcel = { weight: Number(packageRow.weight), length: Number(packageRow.length), width: Number(packageRow.width), height: Number(packageRow.height) }
+        const items = packageRow.items.filter((item) => Number(item.qty || 0) > 0).map((item) => ({ ...item, qty: Number(item.qty) }))
+        const result = await api<{ rates?: QuoteCarrierRate[]; providerErrors?: Array<{ provider?: string; message?: string }>; addressValidation?: QuoteAddressValidation }>(`/api/order-drafts/${encodeURIComponent(draftId)}/shipping-rates`, { method: "POST", body: JSON.stringify({ warehouseId: shippingWarehouseId, package: parcel, items, ...shippingFreight, palletQuantity: Number(shippingFreight.palletQuantity || 0) }) })
+        const rates = result.rates || []
+        nextPackages.push({ ...packageRow, rates, selectedRateId: rates[0]?.id || "" })
+        providerErrors.push(...(result.providerErrors || []).map((error) => ({ ...error, message: `${packageRow.name}: ${error.message || "Unavailable"}` })))
+        addressValidation ||= result.addressValidation || null
+      }
+      setShippingPackages(nextPackages); setShippingProviderErrors(providerErrors); setShippingAddressValidation(addressValidation)
+      if (nextPackages.some((row) => !row.rates.length)) toast.error("At least one package did not receive an eligible carrier rate.")
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to request carrier rates.") }
     finally { setShippingBusy(false) }
   }
   const saveShippingRate = async () => {
-    const rate = shippingRates.find((row) => row.id === selectedShippingRateId)
-    if (!rate) return
+    const selected = shippingPackages.map((packageRow) => ({ packageRow, rate: packageRow.rates.find((rate) => rate.id === packageRow.selectedRateId) }))
+    if (selected.some((entry) => !entry.rate)) { toast.error("Select a carrier rate for every package."); return }
+    const rates = selected.map((entry) => entry.rate as QuoteCarrierRate), providerIds = new Set(rates.map((rate) => rate.providerId)), carriers = new Set(rates.map((rate) => rate.carrier))
+    const expiresAt = new Date(Math.min(...rates.map((rate) => Date.parse(rate.expiresAt)))).toISOString()
+    const packages = selected.map(({ packageRow, rate }) => ({
+      id: packageRow.id, name: packageRow.name, weight: Number(packageRow.weight), length: Number(packageRow.length), width: Number(packageRow.width), height: Number(packageRow.height),
+      items: packageRow.items.filter((item) => Number(item.qty || 0) > 0).map((item) => ({ ...item, qty: Number(item.qty) })),
+      providerId: rate!.providerId, providerName: rate!.providerName, carrier: rate!.carrier, service: rate!.service, serviceCode: rate!.serviceCode || "", amount: rate!.amount,
+      currency: rate!.currency || "USD", quotedAt: rate!.quotedAt || new Date().toISOString(), expiresAt: rate!.expiresAt,
+    }))
+    const amount = rates.reduce((sum, rate) => sum + Number(rate.amount || 0), 0)
     setShippingBusy(true)
     try {
       await api(`/api/order-drafts/${encodeURIComponent(draftId)}`, { method: "PATCH", body: JSON.stringify({ shippingEstimate: {
-        providerId: rate.providerId, carrier: rate.carrier, service: rate.service, serviceCode: rate.serviceCode || "", amount: rate.amount, currency: rate.currency || "USD",
-        deliveryDays: rate.deliveryDays || null, deliveryEstimate: rate.deliveryEstimate || "", quotedAt: rate.quotedAt || new Date().toISOString(),
-        expiresAt: rate.expiresAt, warehouseId: shippingWarehouseId, package: { ...Object.fromEntries(Object.entries(shippingPackage).map(([key, value]) => [key, Number(value)])), ...shippingFreight, palletQuantity: Number(shippingFreight.palletQuantity || 0) },
+        providerId: providerIds.size === 1 ? rates[0].providerId : "multiple", carrier: carriers.size === 1 ? rates[0].carrier : "Multiple carriers", service: `${packages.length} package${packages.length === 1 ? "" : "s"}`, serviceCode: "", amount, currency: "USD",
+        deliveryDays: null, deliveryEstimate: "", quotedAt: new Date().toISOString(), expiresAt, warehouseId: shippingWarehouseId,
+        package: { ...packages[0], ...shippingFreight, palletQuantity: Number(shippingFreight.palletQuantity || 0) }, packages,
       } }) })
       setShippingOpen(false)
       await load()
-      toast.success(`${rate.carrier} shipping estimate added to the quote.`)
+      toast.success(`${packages.length} package shipping estimate added to the quote.`)
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to save the shipping estimate.") }
     finally { setShippingBusy(false) }
   }
@@ -1010,15 +1087,22 @@ export function DraftQuoteFieldDetailPage() {
       </div>
     </>}
 
-    <Dialog open={shippingOpen} onOpenChange={(open) => { if (!shippingBusy) setShippingOpen(open) }}><DialogContent className="flex max-h-[calc(100dvh-1rem)] w-[calc(100vw-1rem)] max-w-3xl flex-col overflow-hidden p-0 sm:max-h-[90vh]"><DialogHeader className="border-b px-4 py-5 sm:px-6"><DialogTitle>Get shipping quote rates</DialogTitle><DialogDescription>DataPlus validates the destination, then compares every enabled shared carrier. Label purchasing remains disabled for company quotes.</DialogDescription></DialogHeader><div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-6">
+    <Dialog open={shippingOpen} onOpenChange={(open) => { if (!shippingBusy) setShippingOpen(open) }}><DialogContent className="flex h-[100dvh] max-h-[100dvh] w-screen max-w-none flex-col overflow-hidden rounded-none p-0 sm:h-auto sm:max-h-[92vh] sm:w-[calc(100vw-2rem)] sm:!max-w-5xl sm:rounded-lg"><DialogHeader className="border-b px-4 py-5 pr-12 sm:px-6"><DialogTitle>Get shipping quote rates</DialogTitle><DialogDescription>Catalog package measurements are filled automatically. Split items across packages when one box is too large, then compare rates for every shipment.</DialogDescription></DialogHeader><div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-6">
       {warehouses.length ? <Field label="Ship from warehouse"><Select value={shippingWarehouseId} onValueChange={setShippingWarehouseId}><SelectTrigger><SelectValue placeholder="Use company address" /></SelectTrigger><SelectContent>{warehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || "Warehouse")}</SelectItem>)}</SelectContent></Select></Field> : <Alert><Info className="size-4" /><AlertTitle>Using company address</AlertTitle><AlertDescription>No company warehouse is configured, so carriers will use the saved company profile address.</AlertDescription></Alert>}
-      <div className="grid gap-3 sm:grid-cols-4"><Field label="Weight (lb)"><Input type="number" min="0.01" step="0.01" inputMode="decimal" value={shippingPackage.weight} onChange={(event) => setShippingPackage((current) => ({ ...current, weight: event.target.value }))} /></Field><Field label="Length (in)"><Input type="number" min="0.01" step="0.01" inputMode="decimal" value={shippingPackage.length} onChange={(event) => setShippingPackage((current) => ({ ...current, length: event.target.value }))} /></Field><Field label="Width (in)"><Input type="number" min="0.01" step="0.01" inputMode="decimal" value={shippingPackage.width} onChange={(event) => setShippingPackage((current) => ({ ...current, width: event.target.value }))} /></Field><Field label="Height (in)"><Input type="number" min="0.01" step="0.01" inputMode="decimal" value={shippingPackage.height} onChange={(event) => setShippingPackage((current) => ({ ...current, height: event.target.value }))} /></Field></div>
+      <section className="grid gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-sm font-semibold">Shipment packages</h3><p className="text-xs text-muted-foreground">Every quote line must be fully assigned before rates can be requested.</p></div><Button type="button" variant="outline" size="sm" onClick={addShippingPackage}><Plus className="size-4" /> Add package</Button></div>
+        {shippingPackages.map((packageRow, packageIndex) => <div key={packageRow.id} className="grid gap-4 rounded-md border p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3"><div className="flex min-w-0 items-start gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-md bg-muted"><Boxes className="size-4" /></span><div className="min-w-0"><Input aria-label={`Package ${packageIndex + 1} name`} value={packageRow.name} onChange={(event) => updateShippingPackage(packageIndex, { name: event.target.value })} className="h-8 max-w-64 font-semibold" /><p className={cn("mt-1 text-xs", packageRow.source.startsWith("Measurements missing") ? "text-amber-600" : "text-muted-foreground")}>{packageRow.source}</p></div></div><div className="flex items-center gap-2"><Button type="button" size="sm" variant="outline" onClick={() => splitShippingPackage(packageIndex)}><Boxes className="size-4" /> Split</Button><Tooltip><TooltipTrigger asChild><Button type="button" size="icon-sm" variant="ghost" disabled={shippingPackages.length === 1} onClick={() => removeShippingPackage(packageIndex)} aria-label={`Remove ${packageRow.name}`}><Trash2 className="size-4" /></Button></TooltipTrigger><TooltipContent>Remove package and return its items to another package</TooltipContent></Tooltip></div></div>
+          <div className="grid gap-3 sm:grid-cols-4"><Field label="Weight (lb)"><Input type="number" min="0.01" step="0.01" inputMode="decimal" value={packageRow.weight} onChange={(event) => updateShippingPackage(packageIndex, { weight: event.target.value })} /></Field><Field label="Length (in)"><Input type="number" min="0.01" step="0.01" inputMode="decimal" value={packageRow.length} onChange={(event) => updateShippingPackage(packageIndex, { length: event.target.value })} /></Field><Field label="Width (in)"><Input type="number" min="0.01" step="0.01" inputMode="decimal" value={packageRow.width} onChange={(event) => updateShippingPackage(packageIndex, { width: event.target.value })} /></Field><Field label="Height (in)"><Input type="number" min="0.01" step="0.01" inputMode="decimal" value={packageRow.height} onChange={(event) => updateShippingPackage(packageIndex, { height: event.target.value })} /></Field></div>
+          {lines.length ? <div className="overflow-hidden rounded-md border"><div className="grid grid-cols-[minmax(0,1fr)_6rem] gap-3 bg-muted/50 px-3 py-2 text-xs font-medium text-muted-foreground"><span>Quote item</span><span>In package</span></div>{packageRow.items.map((item) => { const required = Number(lines[item.lineIndex]?.qty || 0); const assigned = shippingPackages.reduce((sum, row) => sum + Number(row.items.find((candidate) => candidate.lineIndex === item.lineIndex)?.qty || 0), 0); return <div key={`${packageRow.id}-${item.lineIndex}`} className="grid grid-cols-[minmax(0,1fr)_6rem] items-center gap-3 border-t px-3 py-2"><div className="min-w-0"><p className="truncate text-sm font-medium">{item.sku || item.title}</p><p className={cn("truncate text-xs", assigned === required ? "text-muted-foreground" : "text-amber-600")}>{item.title}{item.sku && item.title !== item.sku ? ` · ${assigned} of ${required} assigned` : `${assigned} of ${required} assigned`}</p></div><Input aria-label={`${item.sku || item.title} quantity in ${packageRow.name}`} type="number" min="0" max={required} step="1" inputMode="numeric" value={item.qty} onChange={(event) => updatePackageAllocation(packageIndex, item.lineIndex, event.target.value)} /></div> })}</div> : null}
+          {packageRow.rates.length ? <div className="grid gap-2 border-t pt-4"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-semibold">Rates for {packageRow.name}</p><Badge variant="outline">{carrierPreference.selectionMode === "preferred_carrier" ? "Preferred carrier first" : "Lowest cost first"}</Badge></div>{packageRow.rates.map((rate) => { const selected = packageRow.selectedRateId === rate.id; return <button key={rate.id} type="button" onClick={() => setShippingPackages((current) => current.map((row, rowIndex) => rowIndex === packageIndex ? { ...row, selectedRateId: rate.id } : row))} className={cn("grid gap-1 rounded-md border p-3 text-left transition-colors sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center", selected && "border-primary bg-primary/5")}><span><span className="flex flex-wrap items-center gap-2"><span className="font-medium">{rate.carrier} {rate.service}</span><Badge variant="secondary">{rate.providerName || rate.providerId}</Badge></span><span className="block text-xs text-muted-foreground">{rate.deliveryDays ? `${rate.deliveryDays} business day${rate.deliveryDays === 1 ? "" : "s"}` : "Carrier delivery estimate"}{rate.warning ? ` · ${rate.warning}` : ""} · valid until {dateLabel(rate.expiresAt)}</span></span><span className="text-lg font-semibold">{moneyLabel(rate.amount)}</span></button> })}</div> : null}
+        </div>)}
+      </section>
       {echoRatesEnabled ? <div className="grid gap-3 rounded-md border border-blue-500/30 bg-blue-500/5 p-4"><div><p className="text-sm font-semibold">EchoSync freight details</p><p className="text-xs text-muted-foreground">These saved values are sent only to EchoSync when requesting LTL rates.</p></div><div className="grid gap-3 sm:grid-cols-3"><Field label="NMFC class"><Select value={shippingFreight.freightClass} onValueChange={(value) => setShippingFreight((current) => ({ ...current, freightClass: value }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{ECHO_FREIGHT_CLASSES.map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></Field><Field label="Pallets"><Input type="number" min="0" max="12" step="1" inputMode="numeric" value={shippingFreight.palletQuantity} onChange={(event) => setShippingFreight((current) => ({ ...current, palletQuantity: event.target.value }))} /></Field><Field label="Pickup date"><Input type="date" value={shippingFreight.pickupDate} onChange={(event) => setShippingFreight((current) => ({ ...current, pickupDate: event.target.value }))} /></Field></div><label className="flex items-center gap-2 text-sm"><Checkbox checked={shippingFreight.residentialDelivery} onCheckedChange={(checked) => setShippingFreight((current) => ({ ...current, residentialDelivery: checked === true }))} /> Residential delivery</label></div> : null}
       <Button type="button" variant="outline" disabled={shippingBusy} onClick={() => void requestShippingRates()}>{shippingBusy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Request carrier rates</Button>
       {shippingAddressValidation ? <Alert variant={shippingAddressValidation.status === "warning" ? "destructive" : "default"}>{shippingAddressValidation.status === "warning" ? <AlertTriangle className="size-4" /> : <CheckCircle2 className="size-4" />}<AlertTitle>{shippingAddressValidation.status === "corrected" ? "Address standardized" : shippingAddressValidation.status === "verified" ? "Address verified" : "Address validation notice"}</AlertTitle><AlertDescription>{shippingAddressValidation.message}</AlertDescription></Alert> : null}
       {shippingProviderErrors.length ? <div className="grid gap-2">{shippingProviderErrors.map((error, index) => <Alert key={`${error.provider}-${index}`}><AlertTriangle className="size-4" /><AlertTitle>{error.provider || "Carrier"} unavailable</AlertTitle><AlertDescription>{error.message}</AlertDescription></Alert>)}</div> : null}
-      {shippingRates.length ? <div className="grid gap-2"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm font-semibold">Available services</p><Badge variant="outline">{carrierPreference.selectionMode === "preferred_carrier" ? "Preferred carrier first" : "Lowest cost first"}</Badge></div>{shippingRates.map((rate) => { const selected = selectedShippingRateId === rate.id; return <button key={rate.id} type="button" onClick={() => setSelectedShippingRateId(rate.id)} className={cn("grid gap-1 rounded-md border p-3 text-left transition-colors sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center", selected && "border-primary bg-primary/5")}><span><span className="flex flex-wrap items-center gap-2"><span className="font-medium">{rate.carrier} {rate.service}</span><Badge variant="secondary">{rate.providerName || rate.providerId}</Badge></span><span className="block text-xs text-muted-foreground">{rate.deliveryDays ? `${rate.deliveryDays} business day${rate.deliveryDays === 1 ? "" : "s"}` : "Carrier delivery estimate"}{rate.warning ? ` · ${rate.warning}` : ""} · valid until {dateLabel(rate.expiresAt)}</span></span><span className="text-lg font-semibold">{moneyLabel(rate.amount)}</span></button> })}</div> : null}
-    </div><DialogFooter className="border-t bg-background px-4 py-4 sm:px-6"><Button variant="outline" disabled={shippingBusy} onClick={() => setShippingOpen(false)}>Cancel</Button><Button disabled={shippingBusy || !selectedShippingRateId} onClick={() => void saveShippingRate()}>{shippingBusy ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Add rate to quote</Button></DialogFooter></DialogContent></Dialog>
+    </div><DialogFooter className="border-t bg-background px-4 py-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:px-6"><Button variant="outline" disabled={shippingBusy} onClick={() => setShippingOpen(false)}>Cancel</Button><Button disabled={shippingBusy || !shippingPackages.length || shippingPackages.some((row) => !row.selectedRateId)} onClick={() => void saveShippingRate()}>{shippingBusy ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Add rates to quote</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={exportOpen} onOpenChange={setExportOpen}><DialogContent className="w-[calc(100vw-2rem)] max-w-3xl"><DialogHeader><DialogTitle>Print or save quote PDF</DialogTitle><DialogDescription>Choose the customer-facing version for this conversation. Internal notes are excluded from every version.</DialogDescription></DialogHeader><div className="grid gap-2">
       {quotePdfVersions.map((version) => { const disabled = version.id === "savings" && !hasCompleteMsrp; const selected = exportVariant === version.id; return <button key={version.id} type="button" disabled={disabled} onClick={() => setExportVariant(version.id)} className={cn("flex items-start gap-3 rounded-md border p-4 text-left transition-colors", selected && "border-primary bg-primary/5", disabled && "cursor-not-allowed opacity-50")}><span className={cn("mt-0.5 grid size-5 shrink-0 place-items-center rounded-full border", selected && "border-primary bg-primary text-primary-foreground")}>{selected ? <CheckCircle2 className="size-3.5" /> : null}</span><span className="min-w-0"><span className="block font-medium">{version.title}</span><span className="mt-1 block text-sm text-muted-foreground">{version.description}</span>{disabled ? <span className="mt-1 block text-xs font-medium text-amber-600">Add MSRP to every quote line to use this version.</span> : null}</span></button> })}
