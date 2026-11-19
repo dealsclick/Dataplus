@@ -121,7 +121,8 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   let state={orders:[],orderDrafts:[],returns:[],customers:[],connections:[],warehouses:[],inventory:[],purchaseOrders:[],suppliers:[],vendors:[],brands:[],sequence:{},orderViews:[]};
   let response=null,exported=null,selectedCompanyProduct=null,directCatalogLookups=0,wildcardCatalogLookups=0,targetedDraftReads=0;
   const catalogRows=[
-    {product_id:'current',source_sku:'ABC',title:'Current item',default_image:'/current.jpg',cost:999,raw:{secret:true}},
+    {product_id:'current',source_sku:'ABC',title:'Current item',default_image:'/current.jpg',cost:999,
+      item_weight:'2.5',item_length:'10',item_width:'6',item_height:'4',package_weight:'3',package_length:'12',package_width:'8',package_height:'6',raw:{secret:true}},
     {product_id:'alternate',source_sku:'ALT-1',title:'Alternative item',brand:'Brand',manufacturer:'Maker',mfr_part_number:'MPN-1',barcode:'0123',default_image:'/image.jpg',uom:'Each',sell_price:'25.50',cost:888,raw:{secret:true}},
     {product_id:'rfq-product',source_sku:'4510-01-521-9866',title:'PURELL-SKILCRAFT Wall Dispenser',brand:'AbilityOne',manufacturer:'AbilityOne',mfr_part_number:'4510-01-521-9866',default_image:'/rfq-product.jpg',uom:'Each'},
   ];
@@ -130,7 +131,7 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
     operationalState:async()=>state,
     orderDraftWorkspace:async(_user,_scope,key)=>{targetedDraftReads++;return {draft:state.orderDrafts.find(row=>row.id===key || row.draftNumber===key) || null,warehouses:state.warehouses,quoteTerms:state.quoteTerms || []};},
     updateOperationalState:async(_user,_scope,_action,work)=>work(state),
-    catalogProduct:async(_user,_scope,key)=>{directCatalogLookups++;return catalogRows.find(row=>String(row.source_sku).toLowerCase()===String(key).toLowerCase()) || null;},
+    catalogProduct:async(_user,_scope,key)=>{directCatalogLookups++;return catalogRows.find(row=>[row.product_id,row.source_sku].some(value=>String(value).toLowerCase()===String(key).toLowerCase())) || null;},
     catalog:async()=>{wildcardCatalogLookups++;return {rows:catalogRows};},
     costs:async(_user,_scope,productId)=>productId==='current' ? [
       {vendor_account_id:'vendor-standard',unit_cost:'6.00',uom:'Each',supplier_name:'Standard Supply'},
@@ -209,6 +210,8 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   assert.equal(created.items[0].catalogMatchedSku,'ABC');
   assert.equal(created.items[0].catalogMatchBasis,'Catalog SKU');
   assert.equal(created.items[0].image,'/current.jpg');
+  assert.equal(created.items[0].itemWeight,2.5);
+  assert.equal(created.items[0].packageLength,12);
   assert.ok(directCatalogLookups>0);
   assert.equal(wildcardCatalogLookups,0,'Exact draft SKUs use the indexed product lookup instead of wildcard search');
   const catalogLookupsBeforeDetail=directCatalogLookups;
@@ -216,6 +219,16 @@ test('company draft quotes use scoped storage for fields, exports, catalog sugge
   assert.equal(draftDetail.draft.id,created.id);
   assert.equal(targetedDraftReads,1,'Draft detail reads one company record instead of reconstructing the workspace');
   assert.equal(directCatalogLookups,catalogLookupsBeforeDetail,'Saved catalog matches do not block draft rendering on repeat enrichment');
+  created.items[0].sku='BUSB3035330GEC';
+  created.items[0].catalogMatchedSku='STALE-COMPANY-ALIAS';
+  created.items[0].itemWeight=0;
+  const aliasDetail=(await op(`/api/order-drafts/${created.id}`)).response.data;
+  assert.equal(aliasDetail.draft.items[0].catalogProductId,'current','The saved shared product ID remains authoritative when company aliases change');
+  assert.equal(aliasDetail.draft.items[0].catalogMatchedSku,'ABC');
+  assert.equal(aliasDetail.draft.items[0].itemWeight,2.5);
+  created.items[0].sku='ABC';
+  created.items[0].catalogMatchedSku='ABC';
+  created.items[0].itemWeight=2.5;
   assert.equal(created.salesOwner,'Owner');
   assert.equal(created.statusChangedBy,'Owner');
   assert.equal(created.quoteActivity[0].type,'created');
