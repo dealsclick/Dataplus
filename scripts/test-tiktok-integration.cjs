@@ -183,8 +183,12 @@ async function main() {
   const orderDetailSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'order-detail-route.tsx'), 'utf8');
   assert.equal(orderDetailSource.includes('TikTokShippingLabelDialog'), true, 'TikTok orders must open the TikTok shipping label workflow.');
   assert.equal(orderDetailSource.includes('TikTok order'), true, 'TikTok order detail must label the marketplace order number clearly.');
+  const orderWorkspacesSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'order-workspaces.tsx'), 'utf8');
+  assert.equal(orderWorkspacesSource.includes('seller-us.tiktok.com/order/detail?order_no='), true, 'TikTok marketplace order numbers must link to Seller Center.');
+  assert.equal(orderWorkspacesSource.includes('TikTok masked these recipient details in the API.'), true, 'TikTok masked recipient addresses must be explained to operators.');
   const ordersRouteSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'orders-route.tsx'), 'utf8');
   assert.equal(ordersRouteSource.includes('TikTok {tiktokOrderNumber}'), true, 'The main order list must display the TikTok order number.');
+  assert.equal(ordersRouteSource.includes('channelOrderUrlFor(row, tiktokOrderNumber)'), true, 'The main order list must link TikTok order numbers to Seller Center.');
   const fulfillmentSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'fulfillment-route.tsx'), 'utf8');
   assert.equal(fulfillmentSource.includes('TikTok LIVE'), true, 'Fulfillment must visibly distinguish TikTok LIVE orders.');
   assert.equal(fulfillmentSource.includes('channelOrderNumber'), true, 'Fulfillment must display marketplace order numbers.');

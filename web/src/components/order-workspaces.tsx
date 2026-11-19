@@ -1209,6 +1209,12 @@ function orderAddressText(value: unknown) {
   ].filter(Boolean).join("\n") || "Not provided"
 }
 
+function addressContainsMaskedValues(value: unknown) {
+  const address = (value || {}) as Record<string, unknown>
+  return [address.name, address.line1, address.address1, address.line2, address.address2, address.city, address.town, address.phone]
+    .some((entry) => /\*{2,}/.test(String(entry || "")))
+}
+
 export function OrderCustomerInformationCard({ order, collapsible = false }: { order: Record<string, unknown>; collapsible?: boolean }) {
   const source = String(order.channelSource || order.source || "Sales channel").trim()
   const sourceKey = source.toLowerCase()
@@ -1219,6 +1225,9 @@ export function OrderCustomerInformationCard({ order, collapsible = false }: { o
   const customerProfileHref = order.customerId && (!isTemuRelayContact || hasTemuCustomerAccount) ? `/customers/${encodeURIComponent(String(order.customerId))}` : ""
   const orderKey = String(order.id || order.orderNumber || "").trim()
   const orderNumber = String(order.orderNumber || order.id || "Not linked")
+  const channelOrderNumber = channelOrderNumberFor(order)
+  const channelOrderUrl = channelOrderUrlFor(order, channelOrderNumber)
+  const isTikTokAddressMasked = sourceKey.startsWith("tiktok") && addressContainsMaskedValues(order.address)
   const content = <CardContent className="grid gap-4 text-sm">
     <div className="grid gap-4 md:grid-cols-2">
       <div className="min-w-0 rounded-md border bg-muted/20 p-3">
@@ -1235,7 +1244,7 @@ export function OrderCustomerInformationCard({ order, collapsible = false }: { o
       </div>
     </div>
     <div className="grid gap-4 md:grid-cols-2">
-      <div className="rounded-md border p-3"><p className="text-xs font-semibold uppercase text-muted-foreground">Shipping address</p><p className="mt-2 whitespace-pre-line break-words text-muted-foreground">{orderAddressText(order.address)}</p></div>
+      <div className="rounded-md border p-3"><p className="text-xs font-semibold uppercase text-muted-foreground">Shipping address</p><p className="mt-2 whitespace-pre-line break-words text-muted-foreground">{orderAddressText(order.address)}</p>{isTikTokAddressMasked && <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-800 dark:text-amber-300"><ShieldAlert className="mt-0.5 size-4 shrink-0" /><p>TikTok masked these recipient details in the API. {channelOrderUrl ? <a href={channelOrderUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium underline underline-offset-2">Open TikTok order <ExternalLink className="size-3" /></a> : "Open Seller Center to view the authorized address."}</p></div>}</div>
       <div className="rounded-md border p-3"><p className="text-xs font-semibold uppercase text-muted-foreground">Billing address</p><p className="mt-2 whitespace-pre-line break-words text-muted-foreground">{orderAddressText(order.billingAddress)}</p></div>
     </div>
   </CardContent>
@@ -1495,6 +1504,7 @@ export function channelOrderUrlFor(order: Record<string, unknown>, channelOrderN
   if (!orderNumber) return ""
   if (source === "temu") return `https://seller.temu.com/order-detail.html?parent_order_sn=${encodeURIComponent(orderNumber)}`
   if (source === "ebay") return `https://www.ebay.com/sh/ord/details?orderid=${encodeURIComponent(orderNumber)}`
+  if (source.startsWith("tiktok")) return `https://seller-us.tiktok.com/order/detail?order_no=${encodeURIComponent(orderNumber)}&shop_region=US`
   if (source === "walmart") return `https://seller.walmart.com/orders/manage-orders?orderGroups=All&poNumber=${encodeURIComponent(orderNumber)}`
   if (source === "shopify") {
     if (shopifyAdminUrl) return shopifyAdminUrl
