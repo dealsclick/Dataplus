@@ -58,7 +58,7 @@ services:
       context: .
     container_name: dataplus
     restart: unless-stopped
-    mem_limit: 1536m
+    mem_limit: 3072m
     stop_grace_period: 65s
     env_file:
       - .env
@@ -68,7 +68,7 @@ services:
       TZ: "America/New_York"
       DATABASE_URL: postgres://postgres:${DATAPLUS_POSTGRES_PASSWORD:-dataplus_change_me}@postgres:5432/dataplus
       REDIS_URL: redis://redis:6379/0
-      NODE_OPTIONS: --max-old-space-size=${DATAPLUS_WEB_MAX_OLD_SPACE_MB:-1024}
+      NODE_OPTIONS: --max-old-space-size=${DATAPLUS_WEB_MAX_OLD_SPACE_MB:-2048}
       DATAPLUS_PRINT_PACKET_CACHE_MB: ${DATAPLUS_PRINT_PACKET_CACHE_MB:-32}
       DATAPLUS_PRINT_PACKET_CACHE_ENTRY_MB: ${DATAPLUS_PRINT_PACKET_CACHE_ENTRY_MB:-16}
     ports:
