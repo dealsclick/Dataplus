@@ -3,47 +3,155 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="DataPlus privacy policy for private marketplace order-management services operated by LINQ USA CORP." />
     <title>DataPlus Privacy Policy</title>
     <style>
+      :root {
+        color-scheme: light dark;
+        --background: #f5f7fa;
+        --surface: #ffffff;
+        --text: #17202a;
+        --muted: #5f6b7a;
+        --border: #d8dee7;
+        --accent: #1769e0;
+        --notice: #eef5ff;
+      }
+      * { box-sizing: border-box; }
       body {
-        color: #202124;
+        background: var(--background);
+        color: var(--text);
         font-family: Arial, sans-serif;
-        line-height: 1.55;
+        line-height: 1.6;
         margin: 0;
-        padding: 32px;
       }
       main {
-        max-width: 760px;
+        background: var(--surface);
+        border-left: 1px solid var(--border);
+        border-right: 1px solid var(--border);
+        margin: 0 auto;
+        max-width: 920px;
+        min-height: 100vh;
+        padding: 44px 52px 64px;
       }
-      h1 {
-        font-size: 28px;
-        margin: 0 0 12px;
+      h1 { font-size: 32px; line-height: 1.2; margin: 0 0 8px; }
+      h2 { border-top: 1px solid var(--border); font-size: 20px; margin: 32px 0 10px; padding-top: 24px; }
+      p { margin: 0 0 14px; }
+      ul { margin: 8px 0 16px; padding-left: 22px; }
+      li { margin: 5px 0; }
+      a { color: var(--accent); }
+      .meta { color: var(--muted); font-size: 14px; }
+      .notice {
+        background: var(--notice);
+        border: 1px solid #b8d4ff;
+        border-radius: 6px;
+        margin: 24px 0;
+        padding: 16px 18px;
       }
-      h2 {
-        font-size: 18px;
-        margin: 28px 0 8px;
+      table { border-collapse: collapse; margin: 12px 0 18px; width: 100%; }
+      th, td { border: 1px solid var(--border); padding: 10px 12px; text-align: left; vertical-align: top; }
+      th { background: var(--background); }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --background: #0d0f12;
+          --surface: #15181d;
+          --text: #f0f3f7;
+          --muted: #aeb7c4;
+          --border: #343a44;
+          --accent: #70a8ff;
+          --notice: #14233a;
+        }
+        .notice { border-color: #305b93; }
       }
-      p {
-        margin: 0 0 14px;
+      @media (max-width: 640px) {
+        main { border: 0; padding: 28px 20px 48px; }
+        h1 { font-size: 27px; }
+        table { display: block; overflow-x: auto; }
       }
     </style>
   </head>
   <body>
     <main>
       <h1>DataPlus Privacy Policy</h1>
-      <p>DataPlus is an internal catalog and marketplace operations tool used by LINQ USA CORP.</p>
+      <p class="meta"><strong>Effective date:</strong> November 18, 2026</p>
+      <p class="meta"><strong>Operator:</strong> LINQ USA CORP</p>
 
-      <h2>Information used</h2>
-      <p>When connected to marketplace accounts, DataPlus may access order, buyer shipping, product, and fulfillment information needed to manage orders and catalog operations.</p>
+      <div class="notice">
+        <strong>Private order-management system.</strong> DataPlus is a private, internal business application used by authorized LINQ USA CORP personnel to manage marketplace products, inventory, orders, fulfillment, shipping, returns, accounting support, and related compliance. It is not a consumer service, advertising platform, or data broker.
+      </div>
 
-      <h2>How information is stored</h2>
-      <p>DataPlus stores imported data in the local database controlled by LINQ USA CORP. Marketplace credentials and tokens are stored locally and are used only to connect to authorized marketplace APIs.</p>
+      <h2>1. Scope and processing role</h2>
+      <p>This policy explains how LINQ USA CORP processes information through DataPlus when an authorized seller connects a marketplace shop, including a Temu shop. DataPlus acts only on behalf of the authorized seller and connected marketplace for the operational purposes described in this policy.</p>
+      <p>DataPlus accesses marketplace information only after the seller authorizes the connection. Access is limited to the permissions approved for that shop and can be revoked by disconnecting the shop or revoking authorization in the marketplace.</p>
 
-      <h2>How information is shared</h2>
-      <p>DataPlus does not sell customer information. Information is used for order processing, catalog management, shipping, customer support, accounting, and marketplace compliance.</p>
+      <h2>2. Information processed</h2>
+      <p>Depending on the authorized features and the information supplied by the marketplace, DataPlus may process:</p>
+      <ul>
+        <li><strong>Seller and shop information:</strong> shop name, shop ID, account ID, region, authorization status, API permissions, and token metadata.</li>
+        <li><strong>Order information:</strong> marketplace order number, order status, dates, items, quantities, prices, discounts, taxes, shipping charges, refunds, cancellations, and transaction references.</li>
+        <li><strong>Buyer fulfillment information:</strong> recipient name, delivery address, telephone number, masked or marketplace-provided email address, and delivery instructions.</li>
+        <li><strong>Product information:</strong> SKU, merchant SKU, product identifiers, title, description, images, dimensions, inventory, pricing, and listing status.</li>
+        <li><strong>Shipping and return information:</strong> package details, carrier, service, label, tracking number, shipment status, return status, and supporting operational records.</li>
+        <li><strong>Operational and security information:</strong> authorized user, action time, job status, API result, error details, IP address, and security or audit events.</li>
+      </ul>
+      <p>DataPlus is not intended to collect payment-card numbers, bank credentials, government identification, precise location history, advertising profiles, or marketplace account passwords from buyers.</p>
 
-      <h2>Contact</h2>
-      <p>For privacy questions, contact LINQ USA CORP through the business contact information associated with the marketplace account.</p>
+      <h2>3. Sources of information</h2>
+      <p>Information is received from connected marketplace APIs, the authorized seller and its personnel, approved catalog or supplier sources, and carriers or logistics providers used to complete an order. DataPlus does not obtain buyer information from data brokers.</p>
+
+      <h2>4. How information is used</h2>
+      <p>DataPlus uses information only to provide private order-management and related operational services, including:</p>
+      <ul>
+        <li>importing, displaying, reviewing, and fulfilling authorized marketplace orders;</li>
+        <li>matching products, SKUs, listings, inventory, and warehouse stock;</li>
+        <li>preparing shipping rates, labels, tracking updates, returns, and customer-service responses;</li>
+        <li>publishing and maintaining products for an authorized shop;</li>
+        <li>reconciling sales, fees, costs, refunds, inventory movements, and accounting evidence;</li>
+        <li>preventing duplicate processing, troubleshooting failures, maintaining security, and complying with marketplace or legal requirements.</li>
+      </ul>
+      <p>DataPlus does not sell personal information, use buyer information for behavioral advertising, create unrelated consumer profiles, or use marketplace personal data for purposes outside the authorized seller relationship.</p>
+
+      <h2>5. Disclosure and subprocessors</h2>
+      <p>Information is disclosed only when needed to operate the authorized service, comply with law, protect the service, or complete an order.</p>
+      <table>
+        <thead><tr><th>Recipient or category</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td>DigitalOcean, LLC</td><td>United States cloud infrastructure used to host the private DataPlus application and database.</td></tr>
+          <tr><td>Connected marketplaces</td><td>Authorized order, catalog, inventory, fulfillment, return, and status synchronization.</td></tr>
+          <tr><td>Authorized carriers and logistics providers</td><td>Rate calculation, label generation, delivery, tracking, returns, and shipping support.</td></tr>
+          <tr><td>Professional advisers or public authorities</td><td>Legal, tax, accounting, audit, fraud-prevention, or regulatory obligations when applicable.</td></tr>
+        </tbody>
+      </table>
+      <p>Subprocessors are limited to the information needed for their service and are reviewed before receiving marketplace personal data. LINQ USA CORP remains responsible for its use of subprocessors.</p>
+
+      <h2>6. Security</h2>
+      <p>DataPlus uses administrative and technical safeguards designed to protect confidentiality, integrity, and availability. These safeguards include restricted authenticated access, role-based permissions, company and shop separation, HTTPS/TLS for external traffic, database and network access controls, audit records, controlled deployments, backups, and security monitoring.</p>
+      <p>Marketplace application secrets, access tokens, and refresh tokens are encrypted separately using AES-256-GCM and are not displayed after storage. Production credentials are kept outside source code. Access is limited to personnel who need the information for authorized operations.</p>
+      <p>No security measure is absolute. LINQ USA CORP reviews access, dependencies, changes, and incidents and takes corrective action when a risk is identified.</p>
+
+      <h2>7. Retention, service completion, and deletion</h2>
+      <p>Personal data is retained only while needed to provide the authorized order-management service, protect the service, resolve disputes, or satisfy applicable legal, tax, accounting, and audit obligations.</p>
+      <p>When services for a Temu shop are completed, or when Temu provides a valid deletion instruction, LINQ USA CORP will delete or de-identify Temu personal data within 30 days unless retention is required by applicable law. Information retained under a legal exception is restricted to that compliance purpose, is not used for unrelated operations or marketing, and is deleted when the applicable retention period ends.</p>
+      <p>Shop offboarding includes revoking or removing active credentials, stopping new synchronization, identifying retained copies, deleting or de-identifying personal data, addressing recoverable backups under the backup lifecycle, and documenting completion. An authorized administrator records any legal exception and its applicable retention period.</p>
+
+      <h2>8. Privacy requests and marketplace instructions</h2>
+      <p>LINQ USA CORP assists Temu and other connected marketplaces with verified requests to access, correct, export, restrict, or delete personal data. A buyer may submit a request through the marketplace where the order was placed or contact LINQ USA CORP using the address below.</p>
+      <p>Requests are verified before information is disclosed or changed. DataPlus personnel search the relevant shop, order, shipment, return, customer, and audit records; apply the approved action; and document completion. The target response period is 30 days unless a shorter period is required by the marketplace or applicable law.</p>
+
+      <h2>9. International processing</h2>
+      <p>DataPlus production infrastructure is located in the United States. Marketplace APIs, carriers, or authorized service providers may process information in other jurisdictions. Any cross-border transfer must follow applicable law and the connected marketplace's requirements.</p>
+
+      <h2>10. Security incidents</h2>
+      <p>Suspected unauthorized access, loss, alteration, or disclosure is investigated and contained promptly. When an incident affects Temu data, LINQ USA CORP will notify Temu within 24 hours after detection and will provide available information, remediation progress, and reasonable assistance.</p>
+
+      <h2>11. Governance</h2>
+      <p>LINQ USA CORP maintains an internal personal-data protection policy covering access, retention, deletion, incident response, subprocessors, change management, training, and audit evidence. The policy is reviewed at least annually and after material changes or security incidents.</p>
+
+      <h2>12. Changes to this policy</h2>
+      <p>This policy may be updated to reflect changes in DataPlus, marketplace requirements, subprocessors, or applicable law. The effective date above identifies the current version. Material changes are reviewed before publication.</p>
+
+      <h2>13. Contact</h2>
+      <p>For privacy questions, marketplace data instructions, or verified privacy requests, contact:</p>
+      <p><strong>LINQ USA CORP, DataPlus Privacy</strong><br />Email: <a href="mailto:luis@buysupply.com?subject=DataPlus%20Privacy%20Request">luis@buysupply.com</a><br />Suggested subject: DataPlus Privacy Request</p>
     </main>
   </body>
 </html>
