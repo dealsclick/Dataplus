@@ -165,6 +165,7 @@ async function main() {
   assert.equal(liveSessionsSource.includes('Streamer showcase'), true, 'TikTok Live Session creation must select the official streamer showcase.');
   assert.equal(liveSessionsSource.includes('tiktokCreatorId'), true, 'TikTok Live Sessions must persist the selected official account.');
   const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(serverSource, /!historicalBackfill && !existing\) await ensureProductsForImportedOrders/, 'Existing TikTok status refreshes must preserve their prior catalog mapping');
   assert.equal(serverSource.includes('parts[3] === "tiktok-live" && parts[4] === "sync"'), true, 'The server must expose a TikTok Live Session sync route.');
   assert.equal(tiktokChannelSource.includes('Shop code'), true, 'TikTok settings must display the selected shop code.');
   assert.equal(tiktokChannelSource.includes('Shared TikTok app credentials'), true, 'TikTok settings must distinguish app credentials from seller accounts.');

@@ -5,6 +5,13 @@ const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, 'dataplus-worker.js'), 'utf8');
 
 assert.match(source, /async function readSchedulerState[\s\S]*postgres\.readStateFields/);
+assert.match(source, /function scheduleSlotIsFresh[\s\S]*ageMinutes <=/);
+
+const vendorFeedStart = source.indexOf('async function checkScheduledVendorFeedImports');
+const vendorFeedEnd = source.indexOf('\nasync function ', vendorFeedStart + 1);
+const vendorFeedBody = source.slice(vendorFeedStart, vendorFeedEnd);
+assert.match(vendorFeedBody, /scheduleSlotIsFresh\(/, 'Clock-based feed imports must not run after their maintenance window');
+assert.match(vendorFeedBody, /lastSkippedDate/, 'Expired feed windows must be recorded so they are not reconsidered every minute');
 
 for (const name of [
   'checkScheduledShopifyInventoryUpdate',

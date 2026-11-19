@@ -24690,7 +24690,12 @@ function getTikTokMarketplace() {
       const order = historicalBackfill
         ? prepareHistoricalBackfillOrder(merged, { channel: 'TikTok Shop', jobId: options.jobId })
         : assignImportedOrderInternalNumber(db, merged, existing);
-      if (!historicalBackfill) await ensureProductsForImportedOrders(db, [order], { channel: 'TikTok Shop' });
+      // Existing TikTok orders already retain their resolved catalog identity
+      // through mergeOrderLines(). Re-running a multi-identifier catalog scan
+      // for every hourly status refresh turns a small order poll into a full
+      // catalog workload. Resolve only genuinely new operational orders here;
+      // dedicated catalog reconciliation handles older unmapped history.
+      if (!historicalBackfill && !existing) await ensureProductsForImportedOrders(db, [order], { channel: 'TikTok Shop' });
       // New TikTok orders reserve their number through nextOrderNumberAtomic().
       // Do not overwrite that committed sequence with this older state snapshot.
       await postgres.upsertOrdersFromState([order], { replace: false });

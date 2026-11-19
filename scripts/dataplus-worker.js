@@ -235,6 +235,12 @@ function dueScheduleSlot(settings = {}, prefix = "inventorySchedule", now = new 
     .pop() || "";
 }
 
+function scheduleSlotIsFresh(settings = {}, prefix = "inventorySchedule", slot = "", now = new Date(), graceMinutes = 90) {
+  if (!slot || String(settings[`${prefix}Type`] || "times").toLowerCase() === "interval") return Boolean(slot);
+  const ageMinutes = minutesSinceMidnight(now) - scheduledMinutes(slot);
+  return ageMinutes >= 0 && ageMinutes <= Math.max(1, Number(graceMinutes || 90));
+}
+
 async function readSchedulerState(fields = []) {
   return await postgres.readStateFields(
     [...new Set(["connections", "channels", ...fields])],
@@ -744,7 +750,16 @@ async function checkScheduledVendorFeedImports(force = false) {
       if (!slot) continue;
       const stateKey = `${feed.id}:${scheduledJob.key}:${today}:${slot}`;
       const previous = scheduleState[stateKey] || {};
-      if (previous.lastQueuedDate === today) continue;
+      if (previous.lastQueuedDate === today || previous.lastSkippedDate === today) continue;
+      if (!scheduleSlotIsFresh(scheduledJob.schedule, "schedule", slot, now)) {
+        scheduleState[stateKey] = {
+          ...previous,
+          lastCheckedAt: new Date(nowMs).toISOString(),
+          lastSkippedDate: today,
+          lastSkipReason: `The ${slot} maintenance window expired; waiting for the next scheduled window.`
+        };
+        continue;
+      }
       const localPath = vendorFeedLocalPath(feed);
       if (feed.dataSourceFeed && feed.fileFormat === "bson-gzip") {
         const result = await dataplus.queueProductDumpPipeline(schedulerDb(docs), {
