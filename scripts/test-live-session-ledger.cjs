@@ -297,7 +297,7 @@ test("eBay Live falls back to the DataPlus SKU when the manufacturer SKU is miss
   assert.equal(review.groups.length, 1);
 });
 
-test("TikTok Live still requires a manufacturer SKU", () => {
+test("TikTok Live uses a generated DataPlus SKU for audit-discovered inventory without an MPN", () => {
   const review = launchReadiness({
     id: "session-1",
     status: "ready",
@@ -306,10 +306,33 @@ test("TikTok Live still requires a manufacturer SKU", () => {
     items: [{ id: "item-1", productId: "product-1", sku: "DPS10221", reservedQty: 2 }],
   }, [{ id: "product-1", sku: "DPS10221", status: "active" }]);
 
-  assert.equal(review.session.items[0].launch.status, "blocked");
-  assert.equal(review.session.items[0].launch.merchantSku, "");
-  assert.match(review.session.items[0].launch.blockers.join(" "), /Manufacturer SKU is required/);
-  assert.equal(review.groups.length, 0);
+  assert.equal(review.session.items[0].launch.status, "ready");
+  assert.equal(review.session.items[0].launch.merchantSku, "DPS10221");
+  assert.equal(review.session.items[0].launch.merchantSkuSource, "dataplus_sku");
+  assert.deepEqual(review.session.items[0].launch.sessionBlockers, []);
+  assert.deepEqual(review.session.items[0].launch.productBlockers, []);
+  assert.equal(review.groups.length, 1);
+});
+
+test("session readiness blockers stay separate from product corrections", () => {
+  const review = launchReadiness({
+    id: "session-draft",
+    status: "draft",
+    channel: "tiktok_live",
+    channelAccountId: "tiktok-primary",
+    items: [
+      { id: "valid-item", productId: "valid-product", sku: "BUS119976TRV", manufacturerSku: "820RL-L", reservedQty: 6 },
+      { id: "missing-mpn", productId: "draft-product", sku: "TEMP10299", reservedQty: 1 },
+    ],
+  }, [
+    { id: "valid-product", sku: "BUS119976TRV", status: "active" },
+    { id: "draft-product", sku: "TEMP10299", status: "active" },
+  ]);
+
+  assert.deepEqual(review.summary.blockers, ["Mark the session ready before publishing."]);
+  assert.deepEqual(review.session.items[0].launch.productBlockers, []);
+  assert.deepEqual(review.session.items[1].launch.productBlockers, ["A manufacturer SKU or generated DataPlus DPS SKU is required as the channel merchant SKU."]);
+  assert.ok(review.session.items.every((item) => item.launch.sessionBlockers.includes("Mark the session ready before publishing.")));
 });
 
 test("channel job results persist listing identity and failed rows remain retryable", () => {
