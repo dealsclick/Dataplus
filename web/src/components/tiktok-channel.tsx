@@ -313,6 +313,7 @@ export function TikTokChannel({
   const activeAccount = accounts.find((account: Json) => String(account.id || "") === String(status.activeAccountId || "")) || null
   const shopLiveAccounts = Array.isArray(activeAccount?.shopCreators) ? activeAccount.shopCreators : []
   const officialLiveAccount = shopLiveAccounts.find((account: Json) => String(account.type || "").toUpperCase() === "OFFICIAL") || null
+  const authorizedOfficialLiveAccount = creatorAccounts.find((account: Json) => String(account.userType || "").toUpperCase() === "TIKTOK_SHOP_OFFICIAL_ACCOUNT") || null
   const activeShopName = activeAccount?.shopName || status.connection?.accountName || "this TikTok shop"
   const onboarding = status.onboarding || activeAccount?.onboarding || null
   const activeJobs = (status.recentJobs || []).filter((row: Json) => String(row.accountId || "") === String(status.activeAccountId || ""))
@@ -478,10 +479,10 @@ export function TikTokChannel({
                 </Button>
               </div>
               <div className="grid gap-2 border-b bg-muted/20 px-3 py-3 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-                <div><p className="font-medium">Shop-linked official account</p><p className="text-xs text-muted-foreground">Detected with the existing seller connection. The authorization below is optional unless DataPlus should automatically add, order, or pin products in LIVE.</p></div>
-                <Badge variant={officialLiveAccount?.bindingStatus === "ACTIVE" ? "default" : officialLiveAccount ? "outline" : "secondary"}>{officialLiveAccount ? `Official · ${String(officialLiveAccount.bindingStatus || "Unknown").replaceAll("_", " ")}` : verified ? "Not detected · verify connection" : "Verify shop first"}</Badge>
+                <div><p className="font-medium">Shop-linked official account</p><p className="text-xs text-muted-foreground">{authorizedOfficialLiveAccount ? "Confirmed by the official account authorization. DataPlus can use its approved scopes for automated LIVE product controls." : "Detected with the existing seller connection. Authorize it below when DataPlus should automatically add, order, or pin products in LIVE."}</p></div>
+                <Badge variant={authorizedOfficialLiveAccount || officialLiveAccount?.bindingStatus === "ACTIVE" ? "default" : officialLiveAccount ? "outline" : "secondary"}>{authorizedOfficialLiveAccount ? `Authorized · @${authorizedOfficialLiveAccount.username || "official account"}` : officialLiveAccount ? `Official · ${String(officialLiveAccount.bindingStatus || "Unknown").replaceAll("_", " ")}` : verified ? "Not detected · verify connection" : "Verify shop first"}</Badge>
               </div>
-              {activeAccount?.shopCreatorsWarning && <Alert className="m-3 w-auto"><Circle className="size-4" /><AlertTitle>Official account status unavailable</AlertTitle><AlertDescription>{activeAccount.shopCreatorsWarning}</AlertDescription></Alert>}
+              {activeAccount?.shopCreatorsWarning && !authorizedOfficialLiveAccount && <Alert className="m-3 w-auto"><Circle className="size-4" /><AlertTitle>Official account status unavailable</AlertTitle><AlertDescription>{activeAccount.shopCreatorsWarning}</AlertDescription></Alert>}
               {!canSaveCredentials && <p className="px-3 py-3 text-xs text-muted-foreground">Save the shared app key and app secret before authorizing the LIVE account.</p>}
               {creatorAccounts.length > 0 && <div className="overflow-x-auto"><Table>
                 <TableHeader><TableRow><TableHead>Authorized TikTok profile</TableHead><TableHead>Account type</TableHead><TableHead>LIVE automation</TableHead><TableHead>Token</TableHead><TableHead className="w-14 text-right">Actions</TableHead></TableRow></TableHeader>
