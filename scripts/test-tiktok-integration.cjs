@@ -242,8 +242,11 @@ async function main() {
   assert.equal(tiktokLabelDialogSource.includes('Open and print label'), true, 'TikTok labels must be printable from the order workflow.');
   const orderDetailSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'order-detail-route.tsx'), 'utf8');
   assert.equal(orderDetailSource.includes('TikTokShippingLabelDialog'), true, 'TikTok orders must open the TikTok shipping label workflow.');
+  assert.equal(orderDetailSource.includes('onClick={openShippingLabelWorkflow}'), true, 'The primary order label button must use the TikTok-aware shipping workflow.');
+  assert.equal(orderDetailSource.includes('usesTikTokShipping ? "Print TikTok label" : "Print shipping label"'), true, 'TikTok Shipping orders must label the primary action clearly.');
   assert.equal(orderDetailSource.includes('TikTok order'), true, 'TikTok order detail must label the marketplace order number clearly.');
   const orderWorkspacesSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'order-workspaces.tsx'), 'utf8');
+  assert.equal(orderWorkspacesSource.includes('label: isTikTok ? "Print TikTok label" : "Print shipping label"'), true, 'The order Actions menu must identify TikTok-owned labels.');
   assert.equal(orderWorkspacesSource.includes('seller-us.tiktok.com/order/detail?order_no='), true, 'TikTok marketplace order numbers must link to Seller Center.');
   assert.equal(orderWorkspacesSource.includes('TikTok masked these recipient details in the API.'), true, 'TikTok masked recipient addresses must be explained to operators.');
   assert.equal(orderWorkspacesSource.includes('TikTok combined package'), true, 'Imported TikTok package groups must identify the orders that shipped together.');

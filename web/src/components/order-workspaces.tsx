@@ -239,7 +239,7 @@ export function orderAttentionItems(order: Record<string, unknown>) {
   return [...exceptionItems, ...routeItems]
 }
 
-export function OrderActionsMenu({ order, busy, onAction, onRefresh, onRefreshRouting, onCreatePurchaseOrders, onPrintTemuLabel, unshippableShipments = [], onUnshipShipment }: { order: Record<string, unknown>; busy?: boolean; onAction: (action: string, body?: Record<string, unknown>) => Promise<void>; onRefresh?: () => void; onRefreshRouting?: () => void; onCreatePurchaseOrders?: () => void; onPrintTemuLabel?: () => void; unshippableShipments?: Array<Record<string, unknown>>; onUnshipShipment?: (shipment: Record<string, unknown>) => void }) {
+export function OrderActionsMenu({ order, busy, onAction, onRefresh, onRefreshRouting, onCreatePurchaseOrders, onPrintShippingLabel, unshippableShipments = [], onUnshipShipment }: { order: Record<string, unknown>; busy?: boolean; onAction: (action: string, body?: Record<string, unknown>) => Promise<void>; onRefresh?: () => void; onRefreshRouting?: () => void; onCreatePurchaseOrders?: () => void; onPrintShippingLabel?: () => void; unshippableShipments?: Array<Record<string, unknown>>; onUnshipShipment?: (shipment: Record<string, unknown>) => void }) {
   const [cancelOpen, setCancelOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [voidOpen, setVoidOpen] = useState(false)
@@ -251,6 +251,7 @@ export function OrderActionsMenu({ order, busy, onAction, onRefresh, onRefreshRo
   const [confirmation, setConfirmation] = useState("")
   const isShopify = String(order.source || "").toLowerCase() === "shopify"
   const isTemu = String(order.source || "").toLowerCase() === "temu"
+  const isTikTok = ["tiktok", "tiktok shop"].includes(String(order.source || order.channelSource || "").trim().toLowerCase())
   const reference = String(order.internalOrderNumber || order.orderNumber || order.id || "")
   const packingSlipUrl = `/api/orders/${encodeURIComponent(String(order.id || ""))}/packing-slip`
   const cancel = async () => {
@@ -270,7 +271,7 @@ export function OrderActionsMenu({ order, busy, onAction, onRefresh, onRefreshRo
       ...(onRefresh ? [{ id: "refresh", label: "Refresh order", description: "Reload the order, its channel data, and current workflow state.", icon: <RefreshCw className="size-4" />, onSelect: onRefresh }] : []),
       ...(onRefreshRouting ? [{ id: "refresh-routing", label: "Refresh routing", description: "Re-evaluate warehouse stock, allocations, and supplier purchase requirements.", icon: <RefreshCw className="size-4" />, onSelect: onRefreshRouting }] : []),
       { id: "packing-slip", label: "Print packing slip", description: "Open a printable packing slip in a new tab.", icon: <FileDown className="size-4" />, onSelect: () => window.open(packingSlipUrl, "_blank", "noopener,noreferrer") },
-      ...(onPrintTemuLabel ? [{ id: "shipping-label", label: "Print shipping label", description: isTemu ? "Load Temu and universal carrier label options." : "Load universal carrier label options for this order.", icon: <Truck className="size-4" />, onSelect: onPrintTemuLabel }] : []),
+      ...(onPrintShippingLabel ? [{ id: "shipping-label", label: isTikTok ? "Print TikTok label" : "Print shipping label", description: isTikTok ? "Load the existing TikTok Shipping package label or create one after review." : isTemu ? "Load Temu and universal carrier label options." : "Load universal carrier label options for this order.", icon: <Truck className="size-4" />, onSelect: onPrintShippingLabel }] : []),
       { id: "accounting-export", label: "Accounting exports", description: "Review posted ledger entries and export history.", icon: <FileDown className="size-4" />, group: "Utilities", onSelect: () => { window.location.href = `/accounting?order=${encodeURIComponent(String(order.id))}&transactionsView=exports` } },
       ...(isShopify ? [{ id: "sync-address", label: "Send address to Shopify", description: "Push the current order address to Shopify.", icon: <RefreshCw className="size-4" />, onSelect: () => void onAction("sync-address") }] : []),
       { id: "fulfill-all", label: "Record full shipment", description: "Open fulfillment for every remaining line item.", icon: <Truck className="size-4" />, onSelect: () => window.dispatchEvent(new CustomEvent("dataplus:order-detail-action", { detail: { action: "fulfill-all" } })) },
