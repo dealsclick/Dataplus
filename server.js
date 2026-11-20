@@ -61992,6 +61992,13 @@ async function handleApi(req, res) {
     const exactSavedRoom = Boolean(studio.room?.liveId) && Boolean(target.tiktokStudio?.liveId) && String(target.tiktokStudio.liveId) === String(studio.room.liveId);
     const trackedRoom = exactSavedRoom && (Boolean(target.tiktokStudio?.trackingStartedAt) || String(target.status || "") === "live");
     const staleUntrustedRoom = exactSavedRoom && !trackedRoom && !remoteLive;
+    const staleClosureTotals = liveSessionLedger.sessionTotals(target);
+    const shouldRepairStaleClosure = staleUntrustedRoom
+      && liveSessionLedger.sessionIsTerminal(target)
+      && String(target.closedBy || "") === "DataPlus Studio"
+      && String(target.closeReason || "").startsWith("TikTok ended the tracked LIVE room;")
+      && Number(staleClosureTotals.soldUnits || 0) === 0
+      && Number(staleClosureTotals.shippedUnits || 0) === 0;
     const remoteEnded = trackedRoom && ["ENDED", "FINISHED", "CLOSED", "COMPLETED"].includes(remoteStatus);
     const endingGraceMs = 5 * 60 * 1000;
     const existingEndedAt = Date.parse(String(target.tiktokStudio?.endedDetectedAt || ""));
@@ -62028,7 +62035,7 @@ async function handleApi(req, res) {
       orderSyncJobNumber: target.tiktokStudio?.orderSyncJobNumber || orderSync?.job?.jobNumber || "",
       orderSyncError: orderSync?.error || target.tiktokStudio?.orderSyncError || ""
     } : staleUntrustedRoom ? null : target.tiktokStudio || null;
-    const meaningfulChange = staleUntrustedRoom || (Boolean(nextStudio) && (
+    const meaningfulChange = staleUntrustedRoom || shouldRepairStaleClosure || (Boolean(nextStudio) && (
       String(target.tiktokStudio?.liveId || "") !== String(nextStudio.liveId || "")
       || String(target.tiktokStudio?.status || "") !== String(nextStudio.status || "")
       || (remoteLive && String(target.status || "") !== "live")
@@ -62054,17 +62061,22 @@ async function handleApi(req, res) {
           workingSessions = sessions.map((row) => reconciledById.get(String(row.id)) || row);
           nextTarget = reconciledById.get(String(target.id)) || target;
         }
+        const repairedItems = shouldRepairStaleClosure ? (nextTarget.items || []).map((item) => {
+          const measured = liveSessionLedger.itemMetrics(item);
+          const incorrectlyReleased = Math.max(0, Number(measured.reservedQty || 0) - Number(measured.soldQty || 0) - Number(measured.shippedQty || 0));
+          return { ...measured, releasedQty: Math.max(0, Number(measured.releasedQty || 0) - incorrectlyReleased) };
+        }) : nextTarget.items;
         session = liveSessionLedger.sessionTotals({
           ...nextTarget,
-          status: shouldFinalize ? "completed" : remoteLive && !liveSessionLedger.sessionIsTerminal(nextTarget) ? "live" : nextTarget.status,
+          status: shouldRepairStaleClosure ? "ready" : shouldFinalize ? "completed" : remoteLive && !liveSessionLedger.sessionIsTerminal(nextTarget) ? "live" : nextTarget.status,
           startedAt: remoteLive ? (nextTarget.startedAt || studio.room?.startTime || now) : nextTarget.startedAt,
-          completedAt: shouldFinalize ? now : nextTarget.completedAt,
-          closedBy: shouldFinalize ? "DataPlus Studio" : nextTarget.closedBy,
-          closeReason: shouldFinalize ? "TikTok ended the tracked LIVE room; DataPlus allowed the order-import grace period, reconciled sales, and released unused inventory." : nextTarget.closeReason,
+          completedAt: shouldRepairStaleClosure ? "" : shouldFinalize ? now : nextTarget.completedAt,
+          closedBy: shouldRepairStaleClosure ? "" : shouldFinalize ? "DataPlus Studio" : nextTarget.closedBy,
+          closeReason: shouldRepairStaleClosure ? "" : shouldFinalize ? "TikTok ended the tracked LIVE room; DataPlus allowed the order-import grace period, reconciled sales, and released unused inventory." : nextTarget.closeReason,
           items: shouldFinalize ? (nextTarget.items || []).map((item) => {
             const measured = liveSessionLedger.itemMetrics(item);
             return { ...measured, releasedQty: Number(measured.releasedQty || 0) + Number(measured.remainingQty || 0) };
-          }) : nextTarget.items,
+          }) : repairedItems,
           tiktokStudio: shouldFinalize ? { ...nextStudio, finalizationStatus: "completed", finalizedAt: now } : nextStudio,
           updatedAt: now
         });

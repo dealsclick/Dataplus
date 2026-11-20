@@ -21,6 +21,8 @@ assert.match(server, /parts\[3\] === "studio"/, 'Server should expose the sessio
 assert.match(server, /remoteEnded[\s\S]*reconcileLiveSessions/, 'A tracked room ending should reconcile sales');
 assert.match(server, /endingGraceMs = 5 \* 60 \* 1000/, 'Studio should allow late TikTok orders to import before releasing inventory');
 assert.match(server, /trackingStartedAt/, 'Studio should persist evidence that an active room was deliberately tracked');
+assert.match(server, /shouldRepairStaleClosure/, 'Studio should repair an erroneous zero-sale closure caused by an untrusted historical room');
+assert.match(server, /String\(target\.closedBy \|\| ""\) === "DataPlus Studio"/, 'The stale closure repair must be limited to DataPlus Studio closures');
 assert.match(server, /slice\(0, 100\)/, 'Studio should bound the LIVE order feed');
 assert.match(server, /parts\[4\] === "finalize"/, 'Studio should expose a recovery finalization action');
 assert.match(server, /DataPlus has not tracked an active TikTok LIVE room/, 'Finalization should reject an untracked historical room');
@@ -28,6 +30,7 @@ assert.match(server, /parts\[4\] === "report\.csv"/, 'Studio should expose a dow
 assert.match(route, /TikTok LIVE orders/, 'Studio should show attributed LIVE orders');
 assert.match(route, /Final order reconciliation in progress/, 'Studio should explain delayed finalization');
 assert.match(route, /studio\?\.tracked && !studioLive/, 'Only a tracked room should offer final sync and close');
+assert.match(route, /Historical TikTok room, not linked/, 'Studio should identify an untracked historical broadcast');
 assert.match(route, /document\.visibilityState !== "visible"/, 'Hidden tabs should not poll Studio');
 assert.match(route, /window\.setInterval\(\(\) => void poll\(\), 30_000\)/, 'Visible Studio should poll no faster than every 30 seconds');
 assert.match(route, /Normal live-session pages and background workers do not poll TikTok/, 'The UI should explain the performance boundary');
