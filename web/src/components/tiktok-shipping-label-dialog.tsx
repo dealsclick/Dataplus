@@ -100,6 +100,12 @@ export function TikTokShippingLabelDialog({
     createdPackageId,
   ].map((value) => String(value || "").trim()).filter(Boolean))], [createdPackageId, detail?.packageIds])
   const selectedService = services.find((service) => String(service.id || "") === selectedServiceId)
+  const combinedOrderIds = useMemo<string[]>(() => [...new Set<string>(
+    (Array.isArray(detail?.combinablePackage?.orderIds) ? detail.combinablePackage.orderIds : [])
+      .map((value: unknown) => String(value || "").trim())
+      .filter(Boolean)
+  )], [detail?.combinablePackage?.orderIds])
+  const isCombinedShipment = combinedOrderIds.length > 1
   const measurementReady = [measurements.weight, measurements.length, measurements.width, measurements.height]
     .every((value) => Number(value) > 0)
 
@@ -192,8 +198,8 @@ export function TikTokShippingLabelDialog({
         body: JSON.stringify({
           accountId,
           package: {
-            ship_type: "1",
-            order_id: orderId,
+            ship_type: isCombinedShipment ? "3" : "1",
+            ...(isCombinedShipment ? { order_list_ids: combinedOrderIds } : { order_id: orderId }),
             shipping_service_id: selectedServiceId,
             ...packageInput(),
             ...(detail.warehouseId ? { warehouse_id: detail.warehouseId } : {}),
@@ -268,6 +274,15 @@ export function TikTokShippingLabelDialog({
           <span className="text-muted-foreground">{String(detail.accountName || accountName)}</span>
         </div>
 
+        {isCombinedShipment && !packageIds.length ? <Alert className="border-blue-500/40 bg-blue-500/5">
+          <PackageCheck className="size-4" />
+          <AlertTitle>Combined TikTok shipment</AlertTitle>
+          <AlertDescription className="grid gap-2">
+            <span>TikTok grouped {combinedOrderIds.length} orders for one carton, one label, and one tracking number. Arrange and purchase it once from any member order.</span>
+            <div className="flex flex-wrap gap-1.5">{combinedOrderIds.map((memberOrderId) => <Badge key={memberOrderId} variant="outline" className="font-mono">{memberOrderId}</Badge>)}</div>
+          </AlertDescription>
+        </Alert> : null}
+
         {packageIds.length ? <section className="grid gap-2 rounded-md border p-3">
           <div><p className="text-sm font-semibold">Existing TikTok package</p><p className="text-xs text-muted-foreground">This order already has a package. Retrieve its label without purchasing another one.</p></div>
           <div className="flex flex-wrap gap-2">{packageIds.map((packageId) => <Button key={packageId} variant="outline" disabled={busy} onClick={() => void retrieveDocument(packageId)}><RefreshCw className="size-4" /> Get label {packageId}</Button>)}</div>
@@ -286,13 +301,13 @@ export function TikTokShippingLabelDialog({
           </section>
 
           {services.length ? <section className="grid gap-3 rounded-md border p-3">
-            <div><p className="text-sm font-semibold">Eligible TikTok service</p><p className="text-xs text-muted-foreground">Service IDs are checked for this order and carton. They are never reused across orders.</p></div>
+            <div><p className="text-sm font-semibold">Eligible TikTok service</p><p className="text-xs text-muted-foreground">{isCombinedShipment ? "This service applies to the single carton shared by every order shown above." : "Service IDs are checked for this order and carton. They are never reused across orders."}</p></div>
             <Select value={selectedServiceId} onValueChange={(value) => { setSelectedServiceId(value); setPreview(null) }}><SelectTrigger><SelectValue placeholder="Choose a TikTok service" /></SelectTrigger><SelectContent>{services.map((service) => <SelectItem key={String(service.id)} value={String(service.id)}>{String(service.shipping_provider_name || service.name || "TikTok service")} · {String(service.name || "Service")} · {moneyLabel(Number(service.price || 0))} {String(service.currency || "USD")}</SelectItem>)}</SelectContent></Select>
             {selectedService ? <div className="flex flex-wrap items-center gap-2 text-sm"><Badge variant="outline">{String(selectedService.shipping_provider_name || "Carrier")}</Badge><span>{String(selectedService.name || "Service")}</span><span className="font-semibold">{moneyLabel(Number(selectedService.price || 0))} {String(selectedService.currency || "USD")}</span><span className="text-muted-foreground">{Number(selectedService.earliest_delivery_days || 0)}-{Number(selectedService.latest_delivery_days || 0)} days</span></div> : null}
-            <div className="flex justify-end"><Button disabled={busy || !selectedServiceId} onClick={() => void reviewPurchase()}><ShieldCheck className="size-4" /> Review label purchase</Button></div>
+            <div className="flex justify-end"><Button disabled={busy || !selectedServiceId} onClick={() => void reviewPurchase()}><ShieldCheck className="size-4" /> {isCombinedShipment ? "Review combined label" : "Review label purchase"}</Button></div>
           </section> : null}
 
-          {preview ? <Alert className="border-blue-500/40 bg-blue-500/5"><ShieldCheck className="size-4" /><AlertTitle>Ready for final confirmation</AlertTitle><AlertDescription className="grid gap-3"><span>No package or label has been created yet. Confirm once to purchase the selected TikTok Shipping label.</span><Button className="w-fit" disabled={busy} onClick={() => void purchase()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <PackageCheck className="size-4" />} Purchase TikTok label</Button></AlertDescription></Alert> : null}
+          {preview ? <Alert className="border-blue-500/40 bg-blue-500/5"><ShieldCheck className="size-4" /><AlertTitle>Ready for final confirmation</AlertTitle><AlertDescription className="grid gap-3"><span>{isCombinedShipment ? `Confirm once to arrange all ${combinedOrderIds.length} orders and purchase their one shared TikTok Shipping label.` : "No package or label has been created yet. Confirm once to purchase the selected TikTok Shipping label."}</span><Button className="w-fit" disabled={busy} onClick={() => void purchase()}>{busy ? <Loader2 className="size-4 animate-spin" /> : <PackageCheck className="size-4" />} {isCombinedShipment ? "Arrange and purchase shared label" : "Purchase TikTok label"}</Button></AlertDescription></Alert> : null}
         </> : null}
 
         {!detail.labelEligible ? <Alert><Truck className="size-4" /><AlertTitle>TikTok does not provide this label</AlertTitle><AlertDescription>This order uses {String(detail.shippingType || "seller")} shipping. Use the universal carrier label action and send its tracking number back to TikTok.</AlertDescription></Alert> : null}
