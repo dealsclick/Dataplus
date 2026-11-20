@@ -24580,6 +24580,98 @@ function getTemuCredentials() {
 }
 
 let tiktokMarketplace;
+function tiktokLocalProductType(product = {}) {
+  return sourceTextValue(
+    product.productType
+    || product.mainCategory
+    || product.category
+    || product.attributes?.productType
+    || product.productManagerFields?.productType
+    || product.sourceCategory
+    || product.vendorCategory
+  );
+}
+
+async function tiktokCategorySettings() {
+  const docs = await postgres.readStateFields(["categorySettings"], { fallbackToLegacy: false });
+  return normalizeCategorySettings(Array.isArray(docs.categorySettings) ? docs.categorySettings : []);
+}
+
+async function enrichTikTokProductCategoryMappings(products = []) {
+  const settings = await tiktokCategorySettings();
+  const byName = new Map(settings.map((category) => [formatCategoryName(category.name).toLowerCase(), category]));
+  return (Array.isArray(products) ? products : []).map((product) => {
+    if (sourceTextValue(product.tiktokCategoryId || product.tiktokCategory?.categoryId)) return product;
+    const productType = tiktokLocalProductType(product);
+    const mapping = byName.get(formatCategoryName(productType).toLowerCase())?.mappings?.tiktok;
+    if (!mapping?.categoryId) return product;
+    const categoryPath = String(mapping.categoryPath || "").split(">").map((part) => part.trim()).filter(Boolean);
+    return {
+      ...product,
+      tiktokCategoryId: mapping.categoryId,
+      tiktokCategory: {
+        categoryId: mapping.categoryId,
+        categoryName: categoryPath.at(-1) || "",
+        categoryPath,
+        categorySource: mapping.matchSource || "catalog_product_type_mapping",
+        sourceProductType: productType
+      }
+    };
+  });
+}
+
+async function saveTikTokProductCategoryMapping(product = {}, mapping = {}) {
+  const productType = tiktokLocalProductType(product);
+  if (!productType || !sourceTextValue(mapping.categoryId)) return null;
+  const settings = await tiktokCategorySettings();
+  const db = { categorySettings: settings };
+  const category = findOrCreateCategorySetting(db, productType);
+  const current = normalizeChannelCategoryMapping(category.mappings?.tiktok || {});
+  const currentStatus = String(current.status || "").toLowerCase();
+  if (current.categoryId || categoryMappingIsLocked(current) || ["blocked", "denied"].includes(currentStatus)) {
+    const blocked = !current.categoryId && (categoryMappingIsLocked(current) || ["blocked", "denied"].includes(currentStatus));
+    return {
+      categoryId: current.categoryId,
+      categoryName: String(current.categoryPath || "").split(">").map((part) => part.trim()).filter(Boolean).at(-1) || "",
+      categoryPath: String(current.categoryPath || "").split(">").map((part) => part.trim()).filter(Boolean),
+      categorySource: current.matchSource || "catalog_product_type_mapping",
+      blocked,
+      reason: blocked
+        ? sourceTextValue(current.notes || `TikTok mapping for ${productType} is protected without an approved category.`)
+        : ""
+    };
+  }
+  const categoryPath = (Array.isArray(mapping.categoryPath) ? mapping.categoryPath : [])
+    .map((part) => String(part || "").trim())
+    .filter(Boolean);
+  const now = new Date().toISOString();
+  category.mappings.tiktok = withCategoryMappingHistory(current, {
+    ...current,
+    categoryId: sourceTextValue(mapping.categoryId),
+    categoryPath: categoryPath.join(" > "),
+    taxonomyVersion: "v2",
+    categoryTreeVersion: "v2",
+    status: "mapped",
+    confidence: 1,
+    confidenceLevel: "high",
+    matchSource: "tiktok-product-type-recommendation",
+    matchedQuery: sourceTextValue(mapping.categoryMatchQuery),
+    matchedAt: now,
+    reviewedBy: "TikTok recommendation API",
+    reviewedAt: now,
+    notes: `Automatically mapped from DataPlus product type ${productType}.`
+  }, "auto_mapped", "TikTok recommendation API");
+  category.updatedBy = "TikTok recommendation API";
+  category.updatedAt = now;
+  await postgres.writeStateDocuments({ categorySettings: db.categorySettings });
+  return {
+    categoryId: category.mappings.tiktok.categoryId,
+    categoryName: categoryPath.at(-1) || sourceTextValue(mapping.categoryName),
+    categoryPath,
+    categorySource: category.mappings.tiktok.matchSource
+  };
+}
+
 function getTikTokMarketplace() {
   if (!tiktokMarketplace) tiktokMarketplace = require('./lib/tiktok-marketplace').createTikTokMarketplace({
     postgres,
@@ -24613,6 +24705,8 @@ function getTikTokMarketplace() {
       source: "TikTok Shop order import"
     }),
     readProducts: skus => postgres.readProductsByKeys(skus),
+    enrichProductCategoryMappings: enrichTikTokProductCategoryMappings,
+    saveProductCategoryMapping: saveTikTokProductCategoryMapping,
     listTikTokProducts: async ({ linkedOnly = false, limit = 1000 } = {}) => {
       const result = await postgres.getPool().query(`
         select sku

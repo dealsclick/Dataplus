@@ -281,7 +281,7 @@ function categoryMappingState(mapping?: CategoryChannelMapping): CategoryMapping
   return "manual"
 }
 
-function CategoryMappingBadge({ channel, mapping }: { channel: "shopify" | "ebay" | "walmart"; mapping?: CategoryChannelMapping }) {
+function CategoryMappingBadge({ channel, mapping }: { channel: "shopify" | "ebay" | "walmart" | "tiktok"; mapping?: CategoryChannelMapping }) {
   const state = categoryMappingState(mapping)
   const confidence = categoryMappingConfidence(mapping)
   const score = confidence === null ? "" : `${Math.round(confidence * 100)}%`
@@ -294,13 +294,13 @@ function CategoryMappingBadge({ channel, mapping }: { channel: "shopify" | "ebay
         ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
         : "text-muted-foreground"
   return <div className="grid gap-1">
-    <span className="text-[10px] font-semibold uppercase text-muted-foreground">{channel === "walmart" ? "Walmart" : channel === "shopify" ? "Shopify / Google" : "eBay"}</span>
+    <span className="text-[10px] font-semibold uppercase text-muted-foreground">{channel === "walmart" ? "Walmart" : channel === "shopify" ? "Shopify / Google" : channel === "tiktok" ? "TikTok" : "eBay"}</span>
     <Badge variant="outline" className={`w-fit whitespace-nowrap ${className}`}>{['manual', 'auto-applied'].includes(state) && <CheckCircle2 className="mr-1 size-3" />}{label.trim()}</Badge>
   </div>
 }
 
 function CategoryMappingHistory({ profile }: { profile: CategoryProfile }) {
-  const rows = (["shopify", "ebay"] as const).flatMap((channel) => (profile.mappings?.[channel]?.history || []).map((entry) => ({ ...entry, channel })))
+  const rows = (["shopify", "ebay", "tiktok"] as const).flatMap((channel) => (profile.mappings?.[channel]?.history || []).map((entry) => ({ ...entry, channel })))
     .sort((left, right) => String(right.createdAt || "").localeCompare(String(left.createdAt || "")))
   if (!rows.length) return null
   return <Card>
@@ -309,7 +309,7 @@ function CategoryMappingHistory({ profile }: { profile: CategoryProfile }) {
       <TableHeader><TableRow><TableHead>When</TableHead><TableHead>Channel</TableHead><TableHead>Change</TableHead><TableHead>Previous</TableHead><TableHead>Current</TableHead><TableHead>Confidence</TableHead><TableHead>Actor</TableHead></TableRow></TableHeader>
       <TableBody>{rows.map((entry, index) => <TableRow key={entry.id || `${entry.channel}-${entry.createdAt}-${index}`}>
         <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{dateLabel(entry.createdAt)}</TableCell>
-        <TableCell><Badge variant="outline">{entry.channel === "shopify" ? "Shopify / Google" : "eBay"}</Badge></TableCell>
+        <TableCell><Badge variant="outline">{entry.channel === "shopify" ? "Shopify / Google" : entry.channel === "tiktok" ? "TikTok" : "eBay"}</Badge></TableCell>
         <TableCell className="whitespace-nowrap text-sm">{String(entry.action || "updated").replace(/-/g, " ")}</TableCell>
         <TableCell className="max-w-72 truncate text-xs text-muted-foreground">{entry.previousCategoryPath || entry.previousCategoryId || "-"}</TableCell>
         <TableCell className="max-w-72 truncate text-sm">{entry.categoryPath || entry.categoryId || "-"}</TableCell>

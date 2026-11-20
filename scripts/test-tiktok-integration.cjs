@@ -15,7 +15,7 @@ const {
   tiktokAuthorizationEnvironmentForAppKey
 } = require('../lib/tiktok-oauth');
 const { componentRows, mapTikTokOrder, mapTikTokReturn } = require('../lib/tiktok-mappers');
-const { recommendedCategory } = require('../lib/tiktok-marketplace');
+const { productCategoryContext, recommendedCategory } = require('../lib/tiktok-marketplace');
 const { EVENT_TOPICS, reconcileOperation, verifyTikTokShopWebhook, webhookEntity, webhookIdentity, webhookTopic } = require('../lib/tiktok-webhooks');
 const {
   applyTikTokLiveAttribution,
@@ -41,6 +41,16 @@ async function main() {
     { id: '824328', name: 'Menswear', level: 1 },
     { id: '824328123', name: 'Gloves', level: 2, is_leaf: true }
   ] } }, 'Tools & Hardware').familyMatched, false);
+  assert.deepEqual(productCategoryContext({ productType: 'Power Tools', mainCategory: 'Tools' }), {
+    productType: 'Power Tools',
+    key: 'power tools',
+    source: 'product_type'
+  });
+  assert.deepEqual(productCategoryContext({ mainCategory: 'Tool Organizers' }), {
+    productType: 'Tool Organizers',
+    key: 'tool organizers',
+    source: 'main_category'
+  });
   const marketplaceSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'tiktok-marketplace.js'), 'utf8');
   assert.match(marketplaceSource, /sort_field: 'update_time', sort_order: 'DESC'/, 'TikTok order intake should prioritize current updates');
 
@@ -198,6 +208,7 @@ async function main() {
   assert.equal(tiktokMarketplaceSource.includes('title: launchTitle'), true, 'TikTok live-session launches must use the reviewed session title.');
   assert.equal(tiktokMarketplaceSource.includes('seller_sku: merchantSku'), true, 'TikTok live-session launches must use the reviewed manufacturer SKU as seller SKU.');
   assert.equal(tiktokMarketplaceSource.includes('sourceLiveSessionId'), true, 'TikTok launch evidence must remain linked to the source live session.');
+  assert.equal(tiktokMarketplaceSource.includes('tiktok_product_type_recommendation'), true, 'TikTok launch must retain product-type category recommendation evidence.');
   assert.equal(tiktokMarketplaceSource.includes("'/seller/202407/shop_creators'"), true, 'TikTok verification must detect the official account bound to the selected shop.');
   assert.equal(tiktokMarketplaceSource.includes("action === 'status/jobs'"), true, 'TikTok connection status must not block on job history.');
   assert.equal(tiktokMarketplaceSource.includes("orderCheckpointKey"), true, 'TikTok scheduled order sync must keep a per-shop checkpoint.');
@@ -243,6 +254,7 @@ async function main() {
   assert.equal(fulfillmentSource.includes('TikTok LIVE'), true, 'Fulfillment must visibly distinguish TikTok LIVE orders.');
   assert.equal(fulfillmentSource.includes('channelOrderNumber'), true, 'Fulfillment must display marketplace order numbers.');
   assert.equal(serverSource.includes('setTikTokOAuthRecoveryCookie(req, res, authorization.state)'), true, 'TikTok authorization must preserve its signed one-time state in the browser before redirecting to TikTok.');
+  assert.equal(serverSource.includes('saveTikTokProductCategoryMapping'), true, 'TikTok product-type mappings must be persisted to the shared category workspace.');
   assert.equal(serverSource.includes('Restarted ${environment} seller authorization with DataPlus security state.'), false, 'A missing TikTok state must be recovered from the original signed attempt instead of starting a loop.');
   const exchanged = await exchangeAuthorizationCode({
     appKey: 'app-key', appSecret: 'app-secret', authCode: 'auth-code',
