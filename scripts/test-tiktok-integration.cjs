@@ -240,6 +240,9 @@ async function main() {
   assert.equal(tiktokLabelDialogSource.includes('/api/tiktok/fulfillment/packages/preview'), true, 'TikTok label generation must require a preview before purchase.');
   assert.equal(tiktokLabelDialogSource.includes('/api/tiktok/fulfillment/packages/apply'), true, 'TikTok label generation must use the reviewed package purchase endpoint.');
   assert.equal(tiktokLabelDialogSource.includes('Open and print label'), true, 'TikTok labels must be printable from the order workflow.');
+  assert.equal(tiktokLabelDialogSource.includes('TIKTOK_DEFAULT_PACKAGE = { weight: "3", length: "5", width: "5", height: "10" }'), true, 'TikTok labels must start with the approved temporary package defaults.');
+  assert.equal(tiktokLabelDialogSource.includes('/api/inventory/${encodeURIComponent(sku)}'), true, 'TikTok labels must load package measurements from the detected catalog SKU.');
+  assert.equal(tiktokLabelDialogSource.includes('Catalog SKU ${match.sku}'), true, 'TikTok labels must show when catalog measurements supplied the package defaults.');
   const orderDetailSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'order-detail-route.tsx'), 'utf8');
   assert.equal(orderDetailSource.includes('TikTokShippingLabelDialog'), true, 'TikTok orders must open the TikTok shipping label workflow.');
   assert.equal(orderDetailSource.includes('onClick={openShippingLabelWorkflow}'), true, 'The primary order label button must use the TikTok-aware shipping workflow.');

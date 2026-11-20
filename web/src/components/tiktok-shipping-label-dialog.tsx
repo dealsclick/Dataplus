@@ -13,6 +13,8 @@ import { api, moneyLabel } from "../lib/client-api"
 
 type Json = Record<string, any>
 
+const TIKTOK_DEFAULT_PACKAGE = { weight: "3", length: "5", width: "5", height: "10" }
+
 function object(value: unknown): Json {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Json : {}
 }
@@ -24,12 +26,45 @@ function positiveInput(value: unknown) {
 
 function orderPackageDefaults(order: Json) {
   const saved = object(order.fulfillmentPackage || order.package || order.shippingPackage)
-  return {
+  const measurements = {
     weight: positiveInput(saved.weight || saved.weightLb || order.shippingWeight),
     length: positiveInput(saved.length || saved.lengthIn),
     width: positiveInput(saved.width || saved.widthIn),
     height: positiveInput(saved.height || saved.heightIn),
   }
+  const complete = Object.values(measurements).every(Boolean)
+  return {
+    measurements: complete ? measurements : TIKTOK_DEFAULT_PACKAGE,
+    source: complete ? "Saved final carton" : "Temporary default",
+    saved: complete,
+  }
+}
+
+function orderCatalogSkus(order: Json) {
+  const rows = [order.lines, order.items, order.lineItems].find(Array.isArray) || []
+  return [...new Set(rows.flatMap((line: Json) => {
+    const identity = object(line.catalogIdentityMatch)
+    return [identity.catalogSku, line.catalogSku, line.mappedFromSku, line.sku]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+  }))]
+}
+
+function catalogPackageDefaults(product: Json) {
+  const packageMeasurements = {
+    weight: positiveInput(product.packageWeight || product.package_weight),
+    length: positiveInput(product.packageLength || product.package_length),
+    width: positiveInput(product.packageWidth || product.package_width),
+    height: positiveInput(product.packageHeight || product.package_height),
+  }
+  if (Object.values(packageMeasurements).every(Boolean)) return packageMeasurements
+  const itemMeasurements = {
+    weight: positiveInput(product.itemWeight || product.item_weight || (Number(product.weightOz || 0) > 0 ? Number(product.weightOz) / 16 : 0)),
+    length: positiveInput(product.itemLength || product.item_length || product.lengthIn),
+    width: positiveInput(product.itemWidth || product.item_width || product.widthIn),
+    height: positiveInput(product.itemHeight || product.item_height || product.heightIn),
+  }
+  return Object.values(itemMeasurements).every(Boolean) ? itemMeasurements : null
 }
 
 export function TikTokShippingLabelDialog({
@@ -48,7 +83,9 @@ export function TikTokShippingLabelDialog({
   const accountName = String(order.channelAccountName || external.channelAccountName || "TikTok seller account").trim()
   const orderId = String(order.marketplaceOrderNumber || order.marketplaceOrderId || external.orderId || "").trim()
   const [detail, setDetail] = useState<Json | null>(null)
-  const [measurements, setMeasurements] = useState(() => orderPackageDefaults(order))
+  const initialPackage = orderPackageDefaults(order)
+  const [measurements, setMeasurements] = useState(() => initialPackage.measurements)
+  const [measurementSource, setMeasurementSource] = useState(initialPackage.source)
   const [services, setServices] = useState<Json[]>([])
   const [selectedServiceId, setSelectedServiceId] = useState("")
   const [preview, setPreview] = useState<Json | null>(null)
@@ -68,7 +105,9 @@ export function TikTokShippingLabelDialog({
 
   useEffect(() => {
     if (!open) return
-    setMeasurements(orderPackageDefaults(order))
+    const packageDefaults = orderPackageDefaults(order)
+    setMeasurements(packageDefaults.measurements)
+    setMeasurementSource(packageDefaults.source)
     setServices([])
     setSelectedServiceId("")
     setPreview(null)
@@ -85,6 +124,27 @@ export function TikTokShippingLabelDialog({
       .then(setDetail)
       .catch((loadError) => setError(loadError instanceof Error ? loadError.message : "Unable to load current TikTok fulfillment details."))
       .finally(() => setLoading(false))
+
+    if (!packageDefaults.saved) {
+      let canceled = false
+      const skus = orderCatalogSkus(order)
+      void Promise.all(skus.map(async (sku) => {
+        try {
+          const response = await api<{ item?: Json }>(`/api/inventory/${encodeURIComponent(sku)}`)
+          const measurements = catalogPackageDefaults(response.item || {})
+          return measurements ? { sku, measurements } : null
+        } catch {
+          return null
+        }
+      })).then((matches) => {
+        if (canceled) return
+        const match = matches.find(Boolean)
+        if (!match) return
+        setMeasurements(match.measurements)
+        setMeasurementSource(`Catalog SKU ${match.sku}`)
+      })
+      return () => { canceled = true }
+    }
   }, [accountId, open, order, orderId])
 
   const packageInput = () => ({
@@ -215,7 +275,7 @@ export function TikTokShippingLabelDialog({
 
         {detail.labelEligible && !packageIds.length ? <>
           <section className="grid gap-3 rounded-md border p-3">
-            <div><p className="text-sm font-semibold">Package measurements</p><p className="text-xs text-muted-foreground">Enter the final packed carton. TikTok calculates eligible services and the estimated label price from these values.</p></div>
+            <div><div className="flex flex-wrap items-center gap-2"><p className="text-sm font-semibold">Package measurements</p><Badge variant="outline">{measurementSource}</Badge></div><p className="text-xs text-muted-foreground">Catalog measurements are preferred when the order SKU is detected. Otherwise DataPlus starts with 3 lb and 5 × 5 × 10 in. Verify the final packed carton before requesting rates.</p></div>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               <div className="grid gap-1.5"><Label htmlFor="tiktok-weight">Weight (lb)</Label><Input id="tiktok-weight" inputMode="decimal" type="number" min="0.01" step="0.01" value={measurements.weight} onChange={(event) => setMeasurements((current) => ({ ...current, weight: event.target.value }))} /></div>
               <div className="grid gap-1.5"><Label htmlFor="tiktok-length">Length (in)</Label><Input id="tiktok-length" inputMode="decimal" type="number" min="0.01" step="0.01" value={measurements.length} onChange={(event) => setMeasurements((current) => ({ ...current, length: event.target.value }))} /></div>
