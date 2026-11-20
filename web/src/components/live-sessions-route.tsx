@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { AlertCircle, AlertTriangle, ArrowLeft, Boxes, CheckCircle2, ClipboardCheck, CopyPlus, ExternalLink, ImagePlus, Loader2, MoreHorizontal, PackagePlus, Play, RadioTower, RefreshCw, Rocket, ScanBarcode, Search, ShoppingBag, Trash2, Undo2, Warehouse, XCircle } from "lucide-react"
+import { AlertCircle, AlertTriangle, ArrowLeft, Boxes, CheckCircle2, ClipboardCheck, CopyPlus, Download, ExternalLink, ImagePlus, Loader2, MoreHorizontal, PackagePlus, Play, RadioTower, RefreshCw, Rocket, ScanBarcode, Search, ShoppingBag, Trash2, Undo2, Warehouse, XCircle } from "lucide-react"
 import { toast } from "sonner"
 import { Field, MetricCard, PageHeader } from "./app-ui"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -58,6 +58,8 @@ type StudioData = {
   metrics?: { gmv?: number; currency?: string; skuOrders?: number; mainOrders?: number; itemsSold?: number; viewers?: number; views?: number; productClicks?: number; comments?: number; likes?: number; shares?: number } | null
   products?: StudioProduct[]; productPerformance?: StudioPerformance[]
 }
+type StudioOrder = { id?: string; orderNumber?: string; marketplaceOrderId?: string; status?: string; createdAt?: string; shippedAt?: string; items?: Array<{ sku?: string; title?: string; quantity?: number }> }
+type StudioFinalization = { status?: string; finalizeAfter?: string; orderSyncJobId?: string; error?: string }
 
 const destinations = [
   { value: "unassigned", label: "Not assigned yet" },
@@ -220,6 +222,8 @@ function SessionDetail({ session, loading, error, references, onReload }: { sess
   const [studioLoading, setStudioLoading] = useState(false)
   const [studioError, setStudioError] = useState("")
   const [studio, setStudio] = useState<StudioData | null>(null)
+  const [studioOrders, setStudioOrders] = useState<StudioOrder[]>([])
+  const [studioFinalization, setStudioFinalization] = useState<StudioFinalization | null>(null)
   const [edit, setEdit] = useState<EditSession>({ title: "", channel: "unassigned", channelAccountId: "", tiktokCreatorId: "", scheduledStartAt: "", scheduledEndAt: "", scheduleTimeZone: browserTimeZone(), channelEventId: "", notes: "", items: [] })
 
   useEffect(() => {
@@ -230,8 +234,10 @@ function SessionDetail({ session, loading, error, references, onReload }: { sess
     if (!session?.id || session.channel !== "tiktok_live" || studioLoading) return
     if (!quiet) setStudioLoading(true)
     try {
-      const result = await api<{ studio?: StudioData; session?: LiveSession }>(`/api/live-sessions/${encodeURIComponent(session.id)}/studio${refresh ? "?refresh=1" : ""}`)
+      const result = await api<{ studio?: StudioData; session?: LiveSession; orderFeed?: StudioOrder[]; finalization?: StudioFinalization | null }>(`/api/live-sessions/${encodeURIComponent(session.id)}/studio${refresh ? "?refresh=1" : ""}`)
       setStudio(result.studio || null)
+      setStudioOrders(result.orderFeed || [])
+      setStudioFinalization(result.finalization || null)
       setStudioError("")
       if (result.session?.status && result.session.status !== session.status) await onReload()
     } catch (studioRequestError) {
@@ -365,7 +371,7 @@ function SessionDetail({ session, loading, error, references, onReload }: { sess
     finally { setWorking("") }
   }
 
-  const controlStudioProduct = async (action: "pin" | "unpin" | "top", productId = "") => {
+  const controlStudioProduct = async (action: "pin" | "unpin" | "top" | "remove", productId = "") => {
     if (!session?.id || !studio?.room?.liveId || !productId || working) return
     setWorking(`studio-${action}-${productId}`)
     try {
@@ -376,6 +382,17 @@ function SessionDetail({ session, loading, error, references, onReload }: { sess
       toast.success(result.message || "TikTok LIVE product updated.")
       await loadStudio(true)
     } catch (controlError) { toast.error(controlError instanceof Error ? controlError.message : "Unable to update the TikTok LIVE product.") }
+    finally { setWorking("") }
+  }
+
+  const finalizeStudio = async () => {
+    if (!session?.id || working) return
+    setWorking("studio-finalize")
+    try {
+      const result = await api<{ message?: string }>(`/api/live-sessions/${encodeURIComponent(session.id)}/studio/finalize`, { method: "POST", body: "{}" })
+      toast.success(result.message || "Final TikTok order sync queued.")
+      await loadStudio(true)
+    } catch (finalizeError) { toast.error(finalizeError instanceof Error ? finalizeError.message : "Unable to finalize this LIVE session.") }
     finally { setWorking("") }
   }
 
@@ -413,8 +430,9 @@ function SessionDetail({ session, loading, error, references, onReload }: { sess
     {session.channel === "tiktok_live" && <Card>
       <CardHeader className="border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="flex items-center gap-2 text-base"><RadioTower className="size-4" /> DataPlus Studio</CardTitle><CardDescription>Track the official TikTok LIVE room, sales performance, and product tray. Start the video broadcast in TikTok; DataPlus Studio detects it and begins tracking automatically.</CardDescription></div><div className="flex flex-wrap items-center gap-2">{studio && <Badge variant={studioLive ? "success" : "outline"}>{studioLive ? "LIVE" : studioStatus.replaceAll("_", " ")}</Badge>}<Button size="sm" variant={studioOpen ? "outline" : "default"} disabled={studioLoading} onClick={() => { const next = !studioOpen; setStudioOpen(next); if (next && !studio) void loadStudio() }}>{studioLoading ? <Loader2 className="size-4 animate-spin" /> : <RadioTower className="size-4" />}{studioOpen ? "Close Studio" : "Open Studio"}</Button></div></div></CardHeader>
       {studioOpen && <CardContent className="grid gap-5 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{studio?.creator?.username ? `@${studio.creator.username}` : session.tiktokCreatorName || "Official LIVE account"}</Badge>{studio?.room?.liveId && <Badge variant="outline">Room {studio.room.liveId}</Badge>}{studio?.room?.title && <span className="text-sm font-medium">{studio.room.title}</span>}</div><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={studioLoading} onClick={() => void loadStudio(true)}>{studioLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh now</Button>{studio?.openUrl && <Button size="sm" variant="outline" asChild><a href={studio.openUrl} target="_blank" rel="noreferrer">Open on TikTok<ExternalLink className="size-3.5" /></a></Button>}</div></div>
+        <div className="flex flex-wrap items-center justify-between gap-3"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline">{studio?.creator?.username ? `@${studio.creator.username}` : session.tiktokCreatorName || "Official LIVE account"}</Badge>{studio?.room?.liveId && <Badge variant="outline">Room {studio.room.liveId}</Badge>}{studio?.room?.title && <span className="text-sm font-medium">{studio.room.title}</span>}</div><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={studioLoading} onClick={() => void loadStudio(true)}>{studioLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh now</Button><Button size="sm" variant="outline" asChild><a href={`/api/live-sessions/${encodeURIComponent(session.id)}/studio/report.csv`}><Download className="size-3.5" /> Report</a></Button>{studio?.openUrl && <Button size="sm" variant="outline" asChild><a href={studio.openUrl} target="_blank" rel="noreferrer">Open on TikTok<ExternalLink className="size-3.5" /></a></Button>}</div></div>
         {studioError && <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Studio connection needs attention</AlertTitle><AlertDescription>{studioError}</AlertDescription></Alert>}
+        {studioFinalization?.status === "syncing_orders" && <Alert className="border-blue-500/30 bg-blue-500/5"><RefreshCw className="size-4 animate-spin" /><AlertTitle>Final order reconciliation in progress</AlertTitle><AlertDescription>DataPlus is allowing late TikTok orders to import before unused inventory is released.{studioFinalization.finalizeAfter ? ` Final check after ${dateLabel(studioFinalization.finalizeAfter)}.` : ""}{studioFinalization.error ? ` ${studioFinalization.error}` : ""}</AlertDescription></Alert>}
         {!studioLoading && !studioError && !studio?.room && <Alert><RadioTower className="size-4" /><AlertTitle>No LIVE room detected yet</AlertTitle><AlertDescription>Start the broadcast with this official account in TikTok. This panel checks every 30 seconds only while it is open and this browser tab is visible.</AlertDescription></Alert>}
         {studio?.room && <>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8">
@@ -429,8 +447,9 @@ function SessionDetail({ session, loading, error, references, onReload }: { sess
           </div>
           {(studio.warnings || []).length > 0 && <Alert className="border-amber-500/40 bg-amber-500/5"><AlertTriangle className="size-4" /><AlertTitle>Some TikTok metrics are unavailable</AlertTitle><AlertDescription>{studio.warnings?.join(" ")}</AlertDescription></Alert>}
           <section className="grid gap-3"><div className="flex flex-wrap items-end justify-between gap-2"><div><h3 className="text-sm font-semibold">LIVE product tray</h3><p className="text-xs text-muted-foreground">Pin the active product or move a product to the top of the host's tray.</p></div><span className="text-xs text-muted-foreground">{studio.fetchedAt ? `Checked ${dateLabel(studio.fetchedAt)}${studio.cached ? " · cached" : ""}` : ""}</span></div>
-            {(studio.products || []).length > 0 ? <MobileTables><Table><TableHeader><TableRow><TableHead>Product</TableHead><TableHead>Status</TableHead><TableHead className="text-right">GMV</TableHead><TableHead className="text-right">Orders</TableHead><TableHead className="text-right">Units</TableHead><TableHead className="text-right">Clicks</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader><TableBody>{(studio.products || []).map((product) => { const performance = studioPerformance.get(String(product.productId || "")); return <TableRow key={String(product.productId)}><TableCell><div className="flex min-w-56 items-center gap-3">{product.image ? <img src={product.image} alt="" className="size-10 rounded border object-contain" /> : <span className="grid size-10 place-items-center rounded border bg-muted"><Boxes className="size-4 text-muted-foreground" /></span>}<div className="min-w-0"><p className="max-w-72 truncate font-medium">{product.title || performance?.name || `TikTok product ${product.productId}`}</p><p className="font-mono text-xs text-muted-foreground">{product.productId}</p></div></div></TableCell><TableCell><Badge variant={product.pinned ? "success" : "outline"}>{product.pinned ? "Pinned" : product.status || "In tray"}</Badge></TableCell><TableCell className="text-right">{moneyLabel(Number(performance?.gmv || 0))}</TableCell><TableCell className="text-right">{numberLabel(performance?.mainOrders || performance?.skuOrders)}</TableCell><TableCell className="text-right">{numberLabel(performance?.itemsSold)}</TableCell><TableCell className="text-right">{numberLabel(performance?.productClicks)}</TableCell><TableCell><div className="flex justify-end gap-1"><Button size="sm" variant="outline" disabled={Boolean(working) || !studioLive} onClick={() => void controlStudioProduct(product.pinned ? "unpin" : "pin", String(product.productId || ""))}>{product.pinned ? "Unpin" : "Pin"}</Button><Button size="sm" variant="ghost" disabled={Boolean(working) || !studioLive} onClick={() => void controlStudioProduct("top", String(product.productId || ""))}>Move to top</Button></div></TableCell></TableRow> })}</TableBody></Table></MobileTables> : <div className="rounded-md border px-4 py-8 text-center text-sm text-muted-foreground">TikTok has not returned products for this LIVE room yet.</div>}
+            {(studio.products || []).length > 0 ? <MobileTables><Table><TableHeader><TableRow><TableHead>Product</TableHead><TableHead>Status</TableHead><TableHead className="text-right">GMV</TableHead><TableHead className="text-right">Orders</TableHead><TableHead className="text-right">Units</TableHead><TableHead className="text-right">Clicks</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader><TableBody>{(studio.products || []).map((product) => { const performance = studioPerformance.get(String(product.productId || "")); return <TableRow key={String(product.productId)}><TableCell><div className="flex min-w-56 items-center gap-3">{product.image ? <img src={product.image} alt="" className="size-10 rounded border object-contain" /> : <span className="grid size-10 place-items-center rounded border bg-muted"><Boxes className="size-4 text-muted-foreground" /></span>}<div className="min-w-0"><p className="max-w-72 truncate font-medium">{product.title || performance?.name || `TikTok product ${product.productId}`}</p><p className="font-mono text-xs text-muted-foreground">{product.productId}</p></div></div></TableCell><TableCell><Badge variant={product.pinned ? "success" : "outline"}>{product.pinned ? "Pinned" : product.status || "In tray"}</Badge></TableCell><TableCell className="text-right">{moneyLabel(Number(performance?.gmv || 0))}</TableCell><TableCell className="text-right">{numberLabel(performance?.mainOrders || performance?.skuOrders)}</TableCell><TableCell className="text-right">{numberLabel(performance?.itemsSold)}</TableCell><TableCell className="text-right">{numberLabel(performance?.productClicks)}</TableCell><TableCell><div className="flex justify-end gap-1"><Button size="sm" variant="outline" disabled={Boolean(working) || !studioLive} onClick={() => void controlStudioProduct(product.pinned ? "unpin" : "pin", String(product.productId || ""))}>{product.pinned ? "Unpin" : "Pin"}</Button><Button size="sm" variant="ghost" disabled={Boolean(working) || !studioLive} onClick={() => void controlStudioProduct("top", String(product.productId || ""))}>Move to top</Button><Button size="icon" variant="ghost" title="Remove from LIVE tray" disabled={Boolean(working) || !studioLive} onClick={() => void controlStudioProduct("remove", String(product.productId || ""))}><Trash2 className="size-4" /></Button></div></TableCell></TableRow> })}</TableBody></Table></MobileTables> : <div className="rounded-md border px-4 py-8 text-center text-sm text-muted-foreground">TikTok has not returned products for this LIVE room yet.</div>}
           </section>
+          <section className="grid gap-3"><div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="text-sm font-semibold">TikTok LIVE orders</h3><p className="text-xs text-muted-foreground">Orders attributed to this room, without customer personal data.</p></div>{!studioLive && !["completed", "canceled"].includes(String(session.status || "")) && <Button size="sm" variant="outline" disabled={Boolean(working)} onClick={() => void finalizeStudio()}>{working === "studio-finalize" ? <Loader2 className="size-4 animate-spin" /> : <ClipboardCheck className="size-4" />} Final sync and close</Button>}</div>{studioOrders.length ? <MobileTables><Table><TableHeader><TableRow><TableHead>DataPlus</TableHead><TableHead>TikTok order</TableHead><TableHead>Status</TableHead><TableHead>Items</TableHead><TableHead>Created</TableHead></TableRow></TableHeader><TableBody>{studioOrders.map((order) => <TableRow key={String(order.id || order.marketplaceOrderId)}><TableCell><a className="text-primary hover:underline" href={`/orders/${encodeURIComponent(String(order.id || order.orderNumber || ""))}`}>{order.orderNumber || order.id}</a></TableCell><TableCell className="font-mono text-xs">{order.marketplaceOrderId || "-"}</TableCell><TableCell><Badge variant="outline">{order.status || "Imported"}</Badge></TableCell><TableCell>{(order.items || []).map((item) => `${item.sku || item.title || "Item"} x${numberLabel(item.quantity)}`).join(", ") || "-"}</TableCell><TableCell>{dateLabel(order.createdAt)}</TableCell></TableRow>)}</TableBody></Table></MobileTables> : <div className="rounded-md border px-4 py-6 text-center text-sm text-muted-foreground">No imported orders are attributed to this LIVE room yet.</div>}</section>
         </>}
         <p className="text-xs text-muted-foreground">Studio polling stops when this panel closes, this tab is hidden, or you leave the page. Normal live-session pages and background workers do not poll TikTok.</p>
       </CardContent>}
