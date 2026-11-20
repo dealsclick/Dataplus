@@ -8,6 +8,7 @@ const {
   familyProductsForWarehouse,
   importedOrderProductMatch,
   orderLineWithDiscoveredProductIdentity,
+  orderLineTitleIdentityNeedsRepair,
   orderIdentityPriority,
   outboundInventoryAvailableQuantity,
   outboundInventoryProductForWarehouse,
@@ -165,6 +166,30 @@ test("supplier SKU lookup inherits UPC and MPN before choosing physical family s
   const selected = selectImportedOrderProduct({}, [trueValueSeed, physicalSibling], "BUS252246TRV", discoveredLine);
   assert.equal(selected.product.id, "physical-sibling");
   assert.equal(selected.match.mode, "upc");
+});
+
+test("TikTok refresh repairs a channel SKU that overwrote its saved MPN catalog mapping", () => {
+  assert.equal(orderLineTitleIdentityNeedsRepair({
+    sku: "4",
+    mappedFromSku: "48-22-2921",
+    title: "Milwaukee 6-in-1 Impact Multi-Nut Driver - 48-22-2921",
+    catalogIdentityMatch: {
+      mode: "manufacturer-part-number",
+      importedSku: "48-22-2921",
+      catalogSku: "BUS403964DIB",
+    },
+  }), true);
+
+  assert.equal(orderLineTitleIdentityNeedsRepair({
+    sku: "BUS495-48-22-2921ESB",
+    mappedFromSku: "48-22-2921",
+    title: "Milwaukee 6-in-1 Impact Multi-Nut Driver - 48-22-2921",
+    catalogIdentityMatch: {
+      mode: "manufacturer-part-number",
+      importedSku: "48-22-2921",
+      catalogSku: "BUS495-48-22-2921ESB",
+    },
+  }), false);
 });
 
 test("supplier priority is used when no MPN match has physical stock", () => {

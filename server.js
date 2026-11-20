@@ -24693,12 +24693,7 @@ function getTikTokMarketplace() {
       const order = historicalBackfill
         ? prepareHistoricalBackfillOrder(merged, { channel: 'TikTok Shop', jobId: options.jobId })
         : assignImportedOrderInternalNumber(db, merged, existing);
-      const titleIdentityNeedsRepair = Boolean(existing && orderLineItems(order).some((line) => {
-        const titleMpn = manufacturerPartNumberFromOrderTitle(line.title || line.name || line.productName || line.itemName);
-        if (!titleMpn) return false;
-        const resolvedIdentity = String(line.mappedFromSku || line.catalogIdentityMatch?.importedSku || "").trim();
-        return compactCatalogIdentifier(resolvedIdentity) !== compactCatalogIdentifier(titleMpn);
-      }));
+      const titleIdentityNeedsRepair = Boolean(existing && orderLineItems(order).some(orderLineTitleIdentityNeedsRepair));
       // Ordinary status refreshes preserve the stored catalog identity. A line
       // whose title exposes a different MPN is the narrow exception: repair it
       // through the indexed identifier lookup without scanning all products.
@@ -39776,6 +39771,16 @@ function credibleOrderManufacturerSku(value = "") {
   const compact = compactCatalogIdentifier(candidate);
   if (compact.length < 4 || /^\d{1,3}$/.test(candidate)) return "";
   return /[-./]/.test(candidate) || (/[a-z]/i.test(candidate) && /\d/.test(candidate)) ? candidate : "";
+}
+
+function orderLineTitleIdentityNeedsRepair(line = {}) {
+  const titleMpn = manufacturerPartNumberFromOrderTitle(line.title || line.name || line.productName || line.itemName);
+  if (!titleMpn) return false;
+  const resolvedIdentity = String(line.mappedFromSku || line.catalogIdentityMatch?.importedSku || "").trim();
+  if (compactCatalogIdentifier(resolvedIdentity) !== compactCatalogIdentifier(titleMpn)) return true;
+  const currentSku = String(line.sku || "").trim();
+  const savedCatalogSku = String(line.catalogIdentityMatch?.catalogSku || "").trim();
+  return Boolean(savedCatalogSku && currentSku.toLowerCase() !== savedCatalogSku.toLowerCase());
 }
 
 function supplierSourcingPriority(db = {}, value = {}) {
@@ -85319,6 +85324,7 @@ module.exports = {
   consolidateDropshipPurchaseOrders,
   importedOrderProductMatch,
   orderLineWithDiscoveredProductIdentity,
+  orderLineTitleIdentityNeedsRepair,
   selectImportedOrderProduct,
   orderIdentityPriority,
   supplierSourcingPriority,
