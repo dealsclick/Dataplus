@@ -61954,6 +61954,88 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "live-sessions" && parts[2] && parts[3] === "studio" && postgres.isPostgresEnabled()) {
+    const scope = liveSessionScope(req);
+    if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
+    const rows = await postgres.readEntityDocumentCollectionFast("liveSessions");
+    const target = liveSessionRecordForKey(rows, scope, parts[2]);
+    if (!target) return notFound(res);
+    if (normalizeLiveInventoryChannel(target.channel) !== "tiktok_live") return sendJson(res, 409, { error: "DataPlus Studio is available for TikTok Live sessions." });
+    if (!String(target.channelAccountId || "").trim()) return sendJson(res, 409, { error: "Select the TikTok seller account for this session first." });
+    if (!String(target.tiktokCreatorId || "").trim()) return sendJson(res, 409, { error: "Select the official TikTok LIVE account for this session first." });
+    let studio;
+    try {
+      studio = await getTikTokMarketplace().studioStatus({
+        accountId: target.channelAccountId,
+        creatorId: target.tiktokCreatorId,
+        liveId: target.tiktokStudio?.liveId,
+        refresh: url.searchParams.get("refresh") === "1"
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 502, { error: error.message || "DataPlus Studio could not reach TikTok LIVE." });
+    }
+    const remoteStatus = String(studio.room?.status || "").toUpperCase();
+    const remoteLive = ["LIVE", "ONGOING", "STARTED"].includes(remoteStatus);
+    const remoteEnded = ["ENDED", "FINISHED", "CLOSED", "COMPLETED"].includes(remoteStatus)
+      && String(target.tiktokStudio?.liveId || "") === String(studio.room?.liveId || "")
+      && ["LIVE", "ONGOING", "STARTED"].includes(String(target.tiktokStudio?.status || "").toUpperCase());
+    const nextStudio = studio.room ? {
+      liveId: String(studio.room.liveId || ""),
+      title: String(studio.room.title || ""),
+      status: remoteStatus || "UNKNOWN",
+      startTime: studio.room.startTime || "",
+      endTime: studio.room.endTime || "",
+      creatorId: target.tiktokCreatorId,
+      creatorName: studio.creator?.username || target.tiktokCreatorName || "",
+      lastSeenAt: studio.fetchedAt
+    } : target.tiktokStudio || null;
+    const meaningfulChange = Boolean(nextStudio) && (
+      String(target.tiktokStudio?.liveId || "") !== String(nextStudio.liveId || "")
+      || String(target.tiktokStudio?.status || "") !== String(nextStudio.status || "")
+      || (remoteLive && String(target.status || "") !== "live")
+    );
+    let session = target;
+    let finalReconciled = false;
+    if (meaningfulChange) {
+      const now = new Date().toISOString();
+      let liveOrders = [];
+      if (remoteEnded && !liveSessionLedger.sessionIsTerminal(target)) {
+        const createdAt = new Date(target.startedAt || target.createdAt || Date.now());
+        liveOrders = await postgres.listOrders({ channel: "tiktok_live", dateFrom: new Date(createdAt.getTime() - 86_400_000).toISOString().slice(0, 10), includeOpenWork: true, limit: 50000 });
+      }
+      const mutation = await postgres.mutateLiveSessionsAtomically((sessions) => {
+        let nextTarget = target;
+        let workingSessions = sessions;
+        if (remoteEnded && !liveSessionLedger.sessionIsTerminal(target)) {
+          const scoped = liveSessionRowsForScope(sessions, scope);
+          const reconciled = liveSessionLedger.reconcileLiveSessions(scoped, liveOrders);
+          const reconciledById = new Map(reconciled.map((row) => [String(row.id), row]));
+          workingSessions = sessions.map((row) => reconciledById.get(String(row.id)) || row);
+          nextTarget = reconciledById.get(String(target.id)) || target;
+        }
+        session = liveSessionLedger.sessionTotals({
+          ...nextTarget,
+          status: remoteEnded ? "completed" : remoteLive && !liveSessionLedger.sessionIsTerminal(nextTarget) ? "live" : nextTarget.status,
+          startedAt: remoteLive ? (nextTarget.startedAt || studio.room?.startTime || now) : nextTarget.startedAt,
+          completedAt: remoteEnded ? now : nextTarget.completedAt,
+          closedBy: remoteEnded ? "DataPlus Studio" : nextTarget.closedBy,
+          closeReason: remoteEnded ? "TikTok reported that the tracked LIVE room ended; sales were reconciled automatically." : nextTarget.closeReason,
+          items: remoteEnded ? (nextTarget.items || []).map((item) => {
+            const measured = liveSessionLedger.itemMetrics(item);
+            return { ...measured, releasedQty: Number(measured.releasedQty || 0) + Number(measured.remainingQty || 0) };
+          }) : nextTarget.items,
+          tiktokStudio: nextStudio,
+          updatedAt: now
+        });
+        const persisted = liveSessionWithoutEmbeddedAudit(session);
+        return { sessions: workingSessions.map((row) => String(row.id) === String(target.id) ? persisted : row), result: { session: persisted } };
+      });
+      session = mutation?.result?.session || session;
+      finalReconciled = remoteEnded;
+    }
+    return sendJson(res, 200, { studio, session, finalReconciled, message: finalReconciled ? "TikTok ended the tracked LIVE room. DataPlus reconciled sales, completed the session, and released unused inventory." : studio.message });
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "live-sessions" && postgres.isPostgresEnabled()) {
     const scope = liveSessionScope(req);
     if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
@@ -62418,6 +62500,37 @@ async function handleApi(req, res) {
       metadata: { creatorId, requestedCount: synced.requestedCount, syncedCount: synced.syncedCount, failedCount: synced.failedCount }
     });
     return sendJson(res, Number(synced.failedCount || 0) ? 207 : 200, { session: mutation?.result?.session, ...synced });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "live-sessions" && parts[2] && parts[3] === "studio" && parts[4] === "products" && postgres.isPostgresEnabled()) {
+    if (!userCan(authUser, "channels", "launch") && !userCan(authUser, "catalog.marketplace", "launch")) {
+      return sendJson(res, 403, { error: "Your account does not have marketplace launch access." });
+    }
+    const body = await parseBody(req);
+    const scope = liveSessionScope(req);
+    if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
+    const rows = await postgres.readEntityDocumentCollectionFast("liveSessions");
+    const target = liveSessionRecordForKey(rows, scope, parts[2]);
+    if (!target) return notFound(res);
+    if (normalizeLiveInventoryChannel(target.channel) !== "tiktok_live") return sendJson(res, 409, { error: "DataPlus Studio is available for TikTok Live sessions." });
+    const liveId = String(body.liveId || target.tiktokStudio?.liveId || "").trim();
+    let result;
+    try {
+      result = await getTikTokMarketplace().studioProductAction({
+        accountId: target.channelAccountId,
+        creatorId: target.tiktokCreatorId,
+        liveId,
+        productId: body.productId,
+        action: body.action
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 502, { error: error.message || "TikTok LIVE product control failed." });
+    }
+    void recordUserActivity(req, authUser, {
+      eventType: "channel", action: `DataPlus Studio ${result.action} product`, entityType: "live_session", entityId: target.id,
+      metadata: { liveId: result.liveId, productId: result.productId }
+    });
+    return sendJson(res, 200, result);
   }
 
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "live-sessions" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
