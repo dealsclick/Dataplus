@@ -1210,6 +1210,7 @@ const DEFAULT_CHANNEL_SETTINGS = {
   tiktokWarehouseId: "",
   tiktokShippingTemplateId: "",
   tiktokCategoryVersion: "v2",
+  tiktokAutoCategoryFamily: "Tools & Hardware",
   tiktokCurrency: "USD",
   tiktokInventorySafetyQty: 0,
   ebayPriceInventorySyncScheduleEnabled: false,
@@ -5241,6 +5242,7 @@ function normalizeChannel(channel = {}) {
   settings.replenishableRequireFreshVendorFeed = settings.replenishableRequireFreshVendorFeed === true || String(settings.replenishableRequireFreshVendorFeed).toLowerCase() === "true";
   settings.replenishableBlockVendorUnavailable = settings.replenishableBlockVendorUnavailable === true || String(settings.replenishableBlockVendorUnavailable).toLowerCase() === "true";
   settings.channelEnabled = channelIsEnabled({ ...channel, settings });
+  settings.tiktokAutoCategoryFamily = String(settings.tiktokAutoCategoryFamily || "").trim().slice(0, 120);
   for (const field of ["inventoryScheduleEnabled", "inventoryScheduleRequireSuccessfulDump", "shopifySkuMapScheduleEnabled"]) {
     settings[field] = settings[field] === true || String(settings[field]).toLowerCase() === "true";
   }

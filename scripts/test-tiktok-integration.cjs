@@ -15,6 +15,7 @@ const {
   tiktokAuthorizationEnvironmentForAppKey
 } = require('../lib/tiktok-oauth');
 const { componentRows, mapTikTokOrder, mapTikTokReturn } = require('../lib/tiktok-mappers');
+const { recommendedCategory } = require('../lib/tiktok-marketplace');
 const { EVENT_TOPICS, reconcileOperation, verifyTikTokShopWebhook, webhookEntity, webhookIdentity, webhookTopic } = require('../lib/tiktok-webhooks');
 const {
   applyTikTokLiveAttribution,
@@ -25,6 +26,21 @@ const {
 } = require('../lib/tiktok-live');
 
 async function main() {
+  const toolCategory = recommendedCategory({ data: {
+    leaf_category_id: '604579123',
+    categories: [
+      { id: '604579', name: 'Tools & Hardware', level: 1, is_leaf: false, permission_statuses: ['AVAILABLE'] },
+      { id: '604579123', name: 'Hand Tools', level: 2, is_leaf: true, permission_statuses: ['AVAILABLE'] }
+    ]
+  } }, 'Tools & Hardware');
+  assert.equal(toolCategory.categoryId, '604579123');
+  assert.equal(toolCategory.familyMatched, true);
+  assert.equal(toolCategory.available, true);
+  assert.deepEqual(toolCategory.categoryPath, ['Tools & Hardware', 'Hand Tools']);
+  assert.equal(recommendedCategory({ data: { leaf_category_id: '824328123', categories: [
+    { id: '824328', name: 'Menswear', level: 1 },
+    { id: '824328123', name: 'Gloves', level: 2, is_leaf: true }
+  ] } }, 'Tools & Hardware').familyMatched, false);
   const marketplaceSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'tiktok-marketplace.js'), 'utf8');
   assert.match(marketplaceSource, /sort_field: 'update_time', sort_order: 'DESC'/, 'TikTok order intake should prioritize current updates');
 
