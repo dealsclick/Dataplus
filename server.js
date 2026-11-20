@@ -24693,12 +24693,16 @@ function getTikTokMarketplace() {
       const order = historicalBackfill
         ? prepareHistoricalBackfillOrder(merged, { channel: 'TikTok Shop', jobId: options.jobId })
         : assignImportedOrderInternalNumber(db, merged, existing);
-      // Existing TikTok orders already retain their resolved catalog identity
-      // through mergeOrderLines(). Re-running a multi-identifier catalog scan
-      // for every hourly status refresh turns a small order poll into a full
-      // catalog workload. Resolve only genuinely new operational orders here;
-      // dedicated catalog reconciliation handles older unmapped history.
-      if (!historicalBackfill && !existing) await ensureProductsForImportedOrders(db, [order], { channel: 'TikTok Shop' });
+      const titleIdentityNeedsRepair = Boolean(existing && orderLineItems(order).some((line) => {
+        const titleMpn = manufacturerPartNumberFromOrderTitle(line.title || line.name || line.productName || line.itemName);
+        if (!titleMpn) return false;
+        const resolvedIdentity = String(line.mappedFromSku || line.catalogIdentityMatch?.importedSku || "").trim();
+        return compactCatalogIdentifier(resolvedIdentity) !== compactCatalogIdentifier(titleMpn);
+      }));
+      // Ordinary status refreshes preserve the stored catalog identity. A line
+      // whose title exposes a different MPN is the narrow exception: repair it
+      // through the indexed identifier lookup without scanning all products.
+      if (!historicalBackfill && (!existing || titleIdentityNeedsRepair)) await ensureProductsForImportedOrders(db, [order], { channel: 'TikTok Shop' });
       // New TikTok orders reserve their number through nextOrderNumberAtomic().
       // Do not overwrite that committed sequence with this older state snapshot.
       await postgres.upsertOrdersFromState([order], { replace: false });
@@ -39757,6 +39761,23 @@ function compactCatalogIdentifier(value) {
   return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
+function manufacturerPartNumberFromOrderTitle(value = "") {
+  const title = String(value || "").trim();
+  if (!title) return "";
+  const explicit = title.match(/(?:mpn|mfr(?:\.?\s*(?:part|sku))?|manufacturer\s*(?:part|sku)|part\s*(?:number|no\.?|#))\s*[:#-]?\s*([a-z0-9][a-z0-9./-]{3,})\b/i);
+  const trailing = title.match(/\s[-\u2013\u2014]\s*([a-z0-9][a-z0-9./-]{3,})\s*$/i);
+  const candidate = String(explicit?.[1] || trailing?.[1] || "").trim();
+  if (!candidate || compactCatalogIdentifier(candidate).length < 4 || !/\d/.test(candidate)) return "";
+  return candidate;
+}
+
+function credibleOrderManufacturerSku(value = "") {
+  const candidate = String(value || "").trim();
+  const compact = compactCatalogIdentifier(candidate);
+  if (compact.length < 4 || /^\d{1,3}$/.test(candidate)) return "";
+  return /[-./]/.test(candidate) || (/[a-z]/i.test(candidate) && /\d/.test(candidate)) ? candidate : "";
+}
+
 function supplierSourcingPriority(db = {}, value = {}) {
   const vendor = findVendorById(db, value.vendorId || value.id)
     || findVendorByName(db, String(value.vendorName || value.supplier || value.vendor || "").trim());
@@ -39788,9 +39809,10 @@ function importedOrderLineLookupValues(importedSku = "", line = {}) {
   const clean = (values) => [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
   const literalSku = String(importedSku || "").trim();
   const numericSku = literalSku.replace(/[\s-]+/g, "");
+  const titleManufacturerSku = manufacturerPartNumberFromOrderTitle(line.title || line.name || line.productName || line.itemName);
   return {
     upcs: clean([line.upc, line.upcCode, line.barcode, line.gtin, line.ean, line.productBarcode, line.variantBarcode, /^\d{8,14}$/.test(numericSku) ? literalSku : ""]),
-    manufacturerSkus: clean([line.mfrPartNumber, line.manufacturerPartNumber, line.mpn, line.manufacturerSku, line.manufacturerSKU, literalSku]),
+    manufacturerSkus: clean([line.mfrPartNumber, line.manufacturerPartNumber, line.mpn, line.manufacturerSku, line.manufacturerSKU, titleManufacturerSku, credibleOrderManufacturerSku(literalSku)]),
     supplierSkus: clean([importedSku, line.originalSku, line.channelSku, line.channelVariantSku, line.vendorSku, line.supplierSku, line.sourceSku])
   };
 }
@@ -39842,7 +39864,7 @@ function importedOrderProductMatch(product = {}, importedSku = "", line = {}) {
   ];
   let result = null;
   if (matchesAny(productUpcs, lineValues.upcs)) result = { mode: "upc", score: 300 };
-  else if (matchesAny(productManufacturerSkus, lineValues.manufacturerSkus)) result = { mode: "manufacturer-part-number", score: 260 };
+  else if (matchesAny(productManufacturerSkus, lineValues.manufacturerSkus, false)) result = { mode: "manufacturer-part-number", score: 260 };
   else if (directValues.includes(literal)) result = { mode: "catalog-sku", score: 240 };
   else if (aliasValues.includes(literal)) result = { mode: "catalog-alias", score: 230 };
   else if (matchesAny(productSupplierSkus, lineValues.supplierSkus)) result = { mode: "supplier-sku", score: 220 };
@@ -39862,6 +39884,17 @@ function selectImportedOrderProduct(db = {}, products = [], importedSku = "", li
       if (score) return score;
       const active = Number(right.product.active !== false && !right.product.toBeDiscontinued) - Number(left.product.active !== false && !left.product.toBeDiscontinued);
       if (active) return active;
+      const inventoryKeys = inventoryMetricLocationKeys({}, db.warehouses || []);
+      const physicalAvailable = (product) => {
+        const measured = inventoryOwnershipForLocations(product, inventoryKeys).physicalAvailable;
+        if ((db.warehouses || []).length || measured > 0) return measured;
+        return (product.warehouseStock || []).filter((row) => isPhysicalWarehouse(row)).reduce((sum, row) => sum + Math.max(0, Number(row.available ?? (Number(row.qty || 0) - Number(row.reserved || 0)))), 0);
+      };
+      const leftPhysical = physicalAvailable(left.product);
+      const rightPhysical = physicalAvailable(right.product);
+      const physicalStocked = Number(rightPhysical > 0) - Number(leftPhysical > 0);
+      if (physicalStocked) return physicalStocked;
+      if (leftPhysical > 0 && rightPhysical > 0 && rightPhysical !== leftPhysical) return rightPhysical - leftPhysical;
       const priority = supplierSourcingPriority(db, left.product) - supplierSourcingPriority(db, right.product);
       if (priority) return priority;
       const stock = Number(right.product.available ?? right.product.qty ?? 0) - Number(left.product.available ?? left.product.qty ?? 0);
@@ -39915,7 +39948,11 @@ async function ensureProductsForImportedOrders(db = {}, orders = [], options = {
       if (!selected) continue;
       const product = selected.product;
       const lookupValues = importedOrderLineLookupValues(importedSku, line);
-      const importedIdentity = importedSku || lookupValues.upcs[0] || lookupValues.manufacturerSkus[0] || "catalog identifier";
+      const importedIdentity = selected.match.mode === "upc"
+        ? (lookupValues.upcs[0] || importedSku || "catalog identifier")
+        : selected.match.mode === "manufacturer-part-number"
+          ? (lookupValues.manufacturerSkus[0] || importedSku || "catalog identifier")
+          : (importedSku || lookupValues.upcs[0] || lookupValues.manufacturerSkus[0] || "catalog identifier");
       line.productId = product.id || line.productId || "";
       line.catalogIdentityMatch = {
         mode: selected.match.mode,
@@ -62656,9 +62693,8 @@ async function handleApi(req, res) {
       ? normalizeInventoryPurpose(audit.inventoryPurpose, "stock")
       : reason === "live_selling_inventory" ? "live_selling" : "stock";
     const liveChannel = inventoryPurpose === "live_selling"
-      ? normalizeLiveInventoryChannel(body.liveChannel || audit.liveChannel)
+      ? normalizeLiveInventoryChannel(body.liveChannel || "")
       : "";
-    if (reason === "live_selling_inventory" && !liveChannel) return sendJson(res, 400, { error: "Choose eBay Live or TikTok Live for this audit." });
     const supplierId = receivingReason ? String(body.supplierId || audit.supplierId || "").trim() : "";
     const supplierName = receivingReason ? String(body.supplierName || audit.supplierName || "").trim() : "";
     const externalPurchaseOrderNumber = reason === "external_po_receipt" ? String(body.externalPurchaseOrderNumber || audit.externalPurchaseOrderNumber || "").trim() : "";
@@ -62809,9 +62845,8 @@ async function handleApi(req, res) {
     const inventoryPurpose = linkedPurpose?.inventoryPurpose
       || (reason === "live_selling_inventory" ? "live_selling" : "stock");
     const liveChannel = inventoryPurpose === "live_selling"
-      ? normalizeLiveInventoryChannel(linkedPurpose?.liveChannel || body.liveChannel)
+      ? normalizeLiveInventoryChannel(linkedPurpose?.liveChannel || body.liveChannel || "")
       : "";
-    if (reason === "live_selling_inventory" && !liveChannel) return sendJson(res, 400, { error: "Choose eBay Live or TikTok Live for this audit." });
     const supplierId = receivingReason ? String(linkedPurchaseOrder?.vendorId || body.supplierId || "").trim() : "";
     const supplierName = receivingReason ? String(linkedPurchaseOrder?.supplier || body.supplierName || "").trim() : "";
     const externalPurchaseOrderNumber = reason === "external_po_receipt" ? String(body.externalPurchaseOrderNumber || "").trim() : "";
@@ -68252,9 +68287,16 @@ async function handleApi(req, res) {
       channel: orderSourceChannelName(order, "")
     }));
     const sessionScope = liveSessionScope(req);
+    const relatedAuditIds = new Set([
+      po.sourceAuditId,
+      po.activeReceivingAudit?.auditId,
+      ...(Array.isArray(po.receipts) ? po.receipts.map((receipt) => receipt?.sourceAuditId) : [])
+    ].map((value) => String(value || "").trim()).filter(Boolean));
     const relatedLiveSessions = liveSessionRowsForScope(storedLiveSessions, sessionScope)
       .filter((session) => String(session.sourcePurchaseOrderId || session.sourceId || "") === String(po.id || "")
-        || (session.items || []).some((item) => String(item.sourceId || "") === String(po.id || "")))
+        || (session.items || []).some((item) => String(item.sourceId || "") === String(po.id || ""))
+        || relatedAuditIds.has(String(session.sourceAuditId || (session.sourceType === "warehouse_audit" ? session.sourceId : "") || ""))
+        || (session.items || []).some((item) => relatedAuditIds.has(String(item.sourceAuditId || (item.sourceType === "warehouse_audit" ? item.sourceId : "") || ""))))
       .map((session) => liveSessionLedger.sessionTotals(session))
       .sort((left, right) => new Date(String(right.updatedAt || right.createdAt || 0)).getTime() - new Date(String(left.updatedAt || left.createdAt || 0)).getTime());
     return sendJson(res, 200, {
@@ -69082,6 +69124,11 @@ async function handleApi(req, res) {
         db.warehouses = Array.isArray(db.warehouses) ? db.warehouses : [];
         db.sequence = db.sequence && typeof db.sequence === "object" ? db.sequence : {};
         db.purchaseOrders = [];
+        const sourceAuditId = String(body.sourceAuditId || "").trim();
+        const sourceAudit = sourceAuditId ? await postgres.readWarehouseAudit(sourceAuditId) : null;
+        if (sourceAuditId && !sourceAudit) return sendJson(res, 404, { error: "The source warehouse audit was not found." });
+        if (sourceAudit?.linkedPurchaseOrderId) return sendJson(res, 409, { error: `${sourceAudit.auditNumber || "This audit"} is already linked to ${sourceAudit.linkedPurchaseOrderNumber || "another purchase order"}.` });
+        if (sourceAudit && String(sourceAudit.status || "").toLowerCase() !== "completed") return sendJson(res, 409, { error: "Finish and apply the warehouse audit before creating its historical purchase order." });
         await reservePurchaseOrderNumbers(db, 1);
         const po = createManualPurchaseOrder(db, {
           vendorId: body.vendorId,
@@ -69094,8 +69141,57 @@ async function handleApi(req, res) {
           allowIncompleteDraft: true,
           user: actor
         });
-        const response = { purchaseOrder: po, message: `${po.poNumber} created as a draft.` };
+        if (sourceAudit) {
+          const auditLines = Array.isArray(sourceAudit.lines) ? sourceAudit.lines : [];
+          const now = new Date().toISOString();
+          const receiptItems = [];
+          for (const [lineIndex, line] of (po.items || []).entries()) {
+            const auditLine = auditLines.find((candidate) => String(candidate.sku || candidate.productId || "").trim().toLowerCase() === String(line.sku || "").trim().toLowerCase());
+            const receivedQty = Math.max(0, Number(auditLine?.countedQty ?? auditLine?.count ?? 0));
+            line.receivedQty = receivedQty;
+            line.inventoryPostedReceivedQty = receivedQty;
+            line.receivingStatus = receivedQty >= Number(line.qty || 0) ? "received" : receivedQty > 0 ? "partial" : "not_received";
+            receiptItems.push({
+              lineId: line.id || "", lineIndex, sku: line.sku, title: line.title, qtyReceived: receivedQty,
+              inventoryQtyReceived: receivedQty, inventoryPostedQty: 0, inventoryStatus: "already_posted_by_warehouse_audit",
+              sourceAuditLineId: auditLine?.id || "", unitCost: Number(line.estimatedUnitCost || 0)
+            });
+          }
+          const receivedUnits = receiptItems.reduce((sum, item) => sum + Number(item.qtyReceived || 0), 0);
+          po.sourceAuditId = sourceAudit.id;
+          po.sourceAuditNumber = sourceAudit.auditNumber || "";
+          po.receipts = [{
+            id: crypto.randomUUID(), receiptNumber: `RCV-${String(po.poNumber || "PO").replace(/\D/g, "")}-A`,
+            sourceAuditId: sourceAudit.id, sourceAuditNumber: sourceAudit.auditNumber || "", warehouseId: po.warehouseId,
+            warehouseName: po.warehouseName, receivedAt: sourceAudit.completedAt || sourceAudit.updatedAt || now,
+            receivedBy: sourceAudit.approvedBy || sourceAudit.createdBy || actor, items: receiptItems,
+            note: "Historical PO linked after the warehouse audit. Inventory was already posted by the audit and was not added again."
+          }];
+          po.status = receivedUnits >= Number(po.totalUnits || 0) ? "received" : "partially_received";
+          po.workflowStage = "complete";
+          po.receivedAt = sourceAudit.completedAt || sourceAudit.updatedAt || now;
+          po.updatedAt = now;
+          po.draftIncomplete = false;
+          po.draftMissingFields = [];
+          addPoTimeline(po, {
+            type: "receipt", title: "Warehouse audit linked as receipt",
+            message: `${sourceAudit.auditNumber || "Warehouse audit"} supplied ${receivedUnits} already-posted unit${receivedUnits === 1 ? "" : "s"}. No inventory was added again.`,
+            user: actor
+          });
+        }
+        const response = { purchaseOrder: po, message: sourceAudit ? `${po.poNumber} created and linked to ${sourceAudit.auditNumber || "the warehouse audit"} without adding inventory again.` : `${po.poNumber} created as a draft.` };
         const saved = await saveIdempotentPurchaseOrderMutation(req, body, "manual-po", actorIdentity, actor, { purchaseOrders: [po], state: { sequence: db.sequence || {} } }, response);
+        if (sourceAudit && !sourceAudit.linkedPurchaseOrderId) {
+          const now = new Date().toISOString();
+          sourceAudit.linkedPurchaseOrderId = po.id;
+          sourceAudit.linkedPurchaseOrderNumber = po.poNumber;
+          sourceAudit.purchaseOrderLinkedAt = now;
+          sourceAudit.updatedAt = now;
+          sourceAudit.lifecycleEvents = [...(Array.isArray(sourceAudit.lifecycleEvents) ? sourceAudit.lifecycleEvents : []), {
+            type: "purchase_order_linked_after_audit", at: now, user: actor, purchaseOrderId: po.id, purchaseOrderNumber: po.poNumber
+          }].slice(-100);
+          await postgres.saveWarehouseAudit(sourceAudit);
+        }
         res.setHeader("Server-Timing", `total;dur=${Date.now() - createStartedAt}`);
         res.setHeader("X-DataPlus-PO-Save-Ms", String(Date.now() - createStartedAt));
         return sendJson(res, saved.replayed ? 200 : 201, { ...saved.response, replayed: saved.replayed });

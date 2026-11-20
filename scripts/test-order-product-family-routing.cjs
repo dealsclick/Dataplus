@@ -101,6 +101,36 @@ test("an order line can resolve by UPC when the channel omitted its SKU", () => 
   assert.equal(selected.match.mode, "upc");
 });
 
+test("TikTok title MPN resolves physical stock instead of a short channel SKU", () => {
+  const warehouse = { id: "si2", name: "Staten Island 2", inventorySourceType: "physical" };
+  const wrongShortSku = {
+    id: "wrong-short-sku", sku: "BUS897507TRV", supplier: "True Value", mfrPartNumber: "4",
+    warehouseStock: [{ warehouseId: "si2", warehouseName: "Staten Island 2", qty: 80, reserved: 0 }],
+  };
+  const physicalMpn = {
+    id: "physical-mpn", sku: "BUS204218DIB", supplier: "Do It Best", mfrPartNumber: "48-22-7400",
+    warehouseStock: [{ warehouseId: "si2", warehouseName: "Staten Island 2", qty: 6, reserved: 1 }],
+  };
+  const supplierOnlyMpn = {
+    id: "supplier-mpn", sku: "BUS252246TRV", supplier: "True Value", mfrPartNumber: "48-22-7400",
+    warehouseStock: [{ warehouseId: "datawarehouse", warehouseName: "DataWarehouse", inventorySourceType: "supplier_feed", qty: 100 }],
+  };
+  const line = { title: "Milwaukee 2-Piece Adjustable Wrench Set - 48-22-7400" };
+
+  assert.equal(importedOrderProductMatch(wrongShortSku, "4", line), null);
+  const selected = selectImportedOrderProduct({ vendors, warehouses: [warehouse] }, [wrongShortSku, supplierOnlyMpn, physicalMpn], "4", line);
+  assert.equal(selected.product.id, "physical-mpn");
+  assert.equal(selected.match.mode, "manufacturer-part-number");
+});
+
+test("supplier priority is used when no MPN match has physical stock", () => {
+  const trueValue = { id: "tv", sku: "TV-7400", supplier: "True Value", mfrPartNumber: "48-22-7400", qty: 0 };
+  const rjs = { id: "rjs", sku: "RJS-7400", supplier: "RJS", mfrPartNumber: "48-22-7400", qty: 100 };
+  const line = { title: "Milwaukee wrench - 48-22-7400" };
+  const selected = selectImportedOrderProduct({ vendors }, [rjs, trueValue], "4", line);
+  assert.equal(selected.product.id, "tv");
+});
+
 test("physical family allocation skips an empty preferred supplier and uses stocked related inventory", () => {
   const warehouse = { id: "si2", name: "Staten Island 2" };
   const trueValue = {

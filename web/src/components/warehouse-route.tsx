@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react"
-import { Activity, AlertCircle, AlertTriangle, ArrowRight, Boxes, Camera, CheckCircle2, ChevronDown, Copy, Database, ExternalLink, Eye, FileDown, FileText, FileUp, Flashlight, Loader2, LockKeyhole, MessageSquare, MoreHorizontal, PackageCheck, Pencil, Play, Plus, Printer, RefreshCw, Save, ScanBarcode, ScanSearch, Search, Settings, Share2, Sparkles, Store, Trash2, Truck, Users, Warehouse, X } from "lucide-react"
+import { Activity, AlertCircle, AlertTriangle, ArrowRight, Boxes, Camera, CheckCircle2, ChevronDown, Copy, Database, ExternalLink, Eye, FileDown, FileText, FileUp, Flashlight, Loader2, LockKeyhole, MessageSquare, MoreHorizontal, PackageCheck, Pencil, Play, Plus, Printer, RefreshCw, Save, ScanBarcode, ScanSearch, Search, Settings, Share2, ShoppingCart, Sparkles, Store, Trash2, Truck, Users, Warehouse, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -1168,12 +1168,6 @@ const warehouseAuditReasonOptions = [
   { value: "external_po_receipt", label: "External PO receipt" },
 ] as const;
 
-const liveInventoryChannelOptions = [
-  { value: "ebay_live", label: "eBay Live" },
-  { value: "tiktok_live", label: "TikTok Live" },
-  { value: "whatnot_live", label: "Whatnot" },
-] as const;
-
 const warehouseUomOptions = [
   { value: "EA", label: "Each" },
   { value: "CS", label: "Case" },
@@ -1356,7 +1350,6 @@ function WarehouseAuditPanel({
   const [barcode, setBarcode] = useState("");
   const [warehouse, setWarehouse] = useState("Staten Island");
   const [auditReason, setAuditReason] = useState("cycle_count");
-  const [liveChannel, setLiveChannel] = useState("ebay_live");
   const [receivingSupplier, setReceivingSupplier] = useState("True Value");
   const [receivingSupplierId, setReceivingSupplierId] = useState("");
   const [externalPurchaseOrderNumber, setExternalPurchaseOrderNumber] = useState("");
@@ -1780,7 +1773,6 @@ function WarehouseAuditPanel({
           warehouseId: selectedCreateWarehouse?.id || "",
           warehouseName: selectedCreateWarehouse?.name || warehouse,
           reason: auditReason,
-          liveChannel: auditReason === "live_selling_inventory" ? liveChannel : "",
           supplierId: isReceivingAuditReason(auditReason) ? receivingSupplierId : "",
           supplierName: isReceivingAuditReason(auditReason) ? receivingSupplier : "",
           externalPurchaseOrderNumber: auditReason === "external_po_receipt" ? externalPurchaseOrderNumber.trim() : "",
@@ -2604,7 +2596,6 @@ function WarehouseAuditPanel({
   };
   const openPurposeEditor = () => {
     setPurposeDraft(String(resumedAudit?.reason || ""));
-    setLiveChannel(String(resumedAudit?.liveChannel || "ebay_live"));
     setReceivingSupplier(String(resumedAudit?.supplierName || ""));
     setReceivingSupplierId(String(resumedAudit?.supplierId || receivingSupplierId || ""));
     setExternalPurchaseOrderNumber(String(resumedAudit?.externalPurchaseOrderNumber || ""));
@@ -2616,7 +2607,7 @@ function WarehouseAuditPanel({
     try {
       const result = await api<{ audit?: Record<string, unknown>; message?: string }>(
         `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}`,
-        { method: "PATCH", body: JSON.stringify({ reason: purposeDraft, liveChannel: purposeDraft === "live_selling_inventory" ? liveChannel : "", supplierId: isReceivingAuditReason(purposeDraft) ? receivingSupplierId : "", supplierName: isReceivingAuditReason(purposeDraft) ? receivingSupplier : "", externalPurchaseOrderNumber: purposeDraft === "external_po_receipt" ? externalPurchaseOrderNumber.trim() : "", user: auditOwner || "Luis" }) },
+        { method: "PATCH", body: JSON.stringify({ reason: purposeDraft, supplierId: isReceivingAuditReason(purposeDraft) ? receivingSupplierId : "", supplierName: isReceivingAuditReason(purposeDraft) ? receivingSupplier : "", externalPurchaseOrderNumber: purposeDraft === "external_po_receipt" ? externalPurchaseOrderNumber.trim() : "", user: auditOwner || "Luis" }) },
       );
       applyAuditUpdate(result.audit || resumedAudit);
       setPurposeEditorOpen(false);
@@ -2792,11 +2783,11 @@ function WarehouseAuditPanel({
               <SelectContent>{warehouseAuditReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
             </Select>
           </Field>
-          {auditReason === "live_selling_inventory" && <Field label="Live destination"><Select value={liveChannel} onValueChange={setLiveChannel}><SelectTrigger className="min-w-48"><SelectValue /></SelectTrigger><SelectContent>{liveInventoryChannelOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></Field>}
+          {auditReason === "live_selling_inventory" && <p className="max-w-sm text-sm text-muted-foreground">Choose the channel later when these units are assigned to a live session.</p>}
           {isReceivingAuditReason(auditReason) && <Field label="Supplier">{receivingSupplierPicker(auditReason === "external_po_receipt")}</Field>}
           {auditReason === "external_po_receipt" && <Field label="External PO or reference (optional)"><Input value={externalPurchaseOrderNumber} onChange={(event) => setExternalPurchaseOrderNumber(event.target.value)} placeholder="PO, invoice, shipment, or other reference" /></Field>}
           <Button
-            disabled={busy || !warehouse.trim() || !auditOwner.trim() || (isReceivingAuditReason(auditReason) && !receivingSupplierId) || (auditReason === "live_selling_inventory" && !liveChannel)}
+            disabled={busy || !warehouse.trim() || !auditOwner.trim() || (isReceivingAuditReason(auditReason) && !receivingSupplierId)}
             onClick={() => void create()}
           >
             {busy ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} Create audit
@@ -2837,11 +2828,11 @@ function WarehouseAuditPanel({
                 <SelectContent>{warehouseAuditReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
               </Select>
             </Field>
-            {auditReason === "live_selling_inventory" && <Field label="Live destination"><Select value={liveChannel} onValueChange={setLiveChannel}><SelectTrigger className="min-w-48"><SelectValue /></SelectTrigger><SelectContent>{liveInventoryChannelOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></Field>}
+            {auditReason === "live_selling_inventory" && <p className="max-w-sm text-sm text-muted-foreground">Choose the channel later when these units are assigned to a live session.</p>}
             {isReceivingAuditReason(auditReason) && <Field label="Supplier">{receivingSupplierPicker(auditReason === "external_po_receipt")}</Field>}
             {auditReason === "external_po_receipt" && <Field label="External PO or reference (optional)"><Input value={externalPurchaseOrderNumber} onChange={(event) => setExternalPurchaseOrderNumber(event.target.value)} placeholder="PO, invoice, shipment, or other reference" /></Field>}
             <Button
-              disabled={busy || !warehouse.trim() || (isReceivingAuditReason(auditReason) && !receivingSupplierId) || (auditReason === "live_selling_inventory" && !liveChannel)}
+              disabled={busy || !warehouse.trim() || (isReceivingAuditReason(auditReason) && !receivingSupplierId)}
               onClick={() => void create()}
             >
               Start warehouse audit
@@ -2864,7 +2855,7 @@ function WarehouseAuditPanel({
                   ) : (
                     <Badge variant="outline" className="border-amber-400 bg-amber-50 text-amber-950 dark:border-amber-600 dark:bg-amber-950/50 dark:text-amber-100"><AlertTriangle className="mr-1 size-3" /> Reason missing</Badge>
                   )}
-                  {isLiveSellingAudit && <Badge variant="outline" className="border-pink-500/40 bg-pink-500/10 text-pink-700 dark:text-pink-300"><Store className="mr-1 size-3" />{liveChannelLabel}</Badge>}
+                  {isLiveSellingAudit && <Badge variant="outline" className="border-pink-500/40 bg-pink-500/10 text-pink-700 dark:text-pink-300"><Store className="mr-1 size-3" />{current.liveChannel ? liveChannelLabel : "Live inventory pool"}</Badge>}
                   {Boolean(current.liveSessionId) && <Badge asChild variant="outline" className="border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-300"><a href={`/live-sessions/${encodeURIComponent(String(current.liveSessionNumber || current.liveSessionId))}`}>Session {String(current.liveSessionNumber || current.liveSessionId)}</a></Badge>}
                   {String(current.externalPurchaseOrderNumber || "") && <Badge variant="outline">External PO {String(current.externalPurchaseOrderNumber)}</Badge>}
                   {String(current.linkedPurchaseOrderNumber || "") && <a href={purchaseOrderUrl(current.linkedPurchaseOrderNumber, current.linkedPurchaseOrderId)}><Badge variant="outline" className="cursor-pointer hover:bg-muted">DataPlus PO {String(current.linkedPurchaseOrderNumber)} <ExternalLink className="ml-1 size-3" /></Badge></a>}
@@ -2899,7 +2890,7 @@ function WarehouseAuditPanel({
                 {["in_progress", "pending_review"].includes(auditStatus) && <Button size="sm" disabled={busy || !lines.length} onClick={() => void openInventoryAction()}><ArrowRight className="size-4" /> {isPurchaseOrderRecount ? "Finish PO recount" : isReceivingAudit ? "Finish receipt" : isLiveSellingAudit ? "Prepare live items" : isEbayOneTimeAudit ? "Create shadows" : "Finish count"}</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}><Play className="size-4" /> Continue counting</Button>}
                 {auditStatus === "completed" && (isEbayOneTimeAudit || isEbayLiveAudit) && <Button size="sm" disabled={ebayShadowLaunchBusy} onClick={() => void launchAuditShadowsOnEbay()}>{ebayShadowLaunchBusy ? <Loader2 className="size-4 animate-spin" /> : <Store className="size-4" />} {isEbayLiveAudit ? "Publish eBay listing" : "Launch shadows"}</Button>}
-                <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem asChild><a href={`/live-sessions?sourceType=warehouse_audit&sourceId=${encodeURIComponent(String(current.id))}`}><Store className="size-4" /> Create live session</a></DropdownMenuItem><DropdownMenuItem onSelect={() => setBinLabelsOpen(true)}><Printer className="size-4" /> Print bin labels</DropdownMenuItem><DropdownMenuItem onSelect={() => void shareAuditLink()}><Share2 className="size-4" /> Share audit link</DropdownMenuItem>{activeBin && auditStatus === "in_progress" && <DropdownMenuItem disabled={busy || clearBinBusy} onSelect={requestClearBin}><X className="size-4" /> Clear bin</DropdownMenuItem>}{!mobile && desktopAuditTools && <DropdownMenuItem onSelect={() => setAuditToolsOpen(true)}><FileUp className="size-4" /> Import stock / eBay tools</DropdownMenuItem>}{!isLinkedPurchaseOrderReceipt && !isPurchaseOrderRecount && <DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem>}<DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+                <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem asChild><a href={`/live-sessions?sourceType=warehouse_audit&sourceId=${encodeURIComponent(String(current.id))}`}><Store className="size-4" /> Create live session</a></DropdownMenuItem>{!current.linkedPurchaseOrderId && <DropdownMenuItem asChild><a href={`/purchasing?createFromAudit=${encodeURIComponent(String(current.id))}`}><ShoppingCart className="size-4" /> Create and link PO</a></DropdownMenuItem>}<DropdownMenuItem onSelect={() => setBinLabelsOpen(true)}><Printer className="size-4" /> Print bin labels</DropdownMenuItem><DropdownMenuItem onSelect={() => void shareAuditLink()}><Share2 className="size-4" /> Share audit link</DropdownMenuItem>{activeBin && auditStatus === "in_progress" && <DropdownMenuItem disabled={busy || clearBinBusy} onSelect={requestClearBin}><X className="size-4" /> Clear bin</DropdownMenuItem>}{!mobile && desktopAuditTools && <DropdownMenuItem onSelect={() => setAuditToolsOpen(true)}><FileUp className="size-4" /> Import stock / eBay tools</DropdownMenuItem>}{!isLinkedPurchaseOrderReceipt && !isPurchaseOrderRecount && <DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem>}<DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
               </div>
             </div>
             {!mobile && isReceivingAudit && ["in_progress", "pending_review"].includes(auditStatus) && <section data-testid="receiving-progress" className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 px-4 py-3">
@@ -2942,10 +2933,10 @@ function WarehouseAuditPanel({
                     <SelectContent>{warehouseAuditReasonOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent>
                   </Select>
                 </Field>
-                {purposeDraft === "live_selling_inventory" && <Field label="Live destination"><Select value={liveChannel} onValueChange={setLiveChannel}><SelectTrigger><SelectValue placeholder="Select a destination" /></SelectTrigger><SelectContent>{liveInventoryChannelOptions.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}</SelectContent></Select></Field>}
+                {purposeDraft === "live_selling_inventory" && <Alert><Store className="size-4" /><AlertTitle>Channel is selected by the live session</AlertTitle><AlertDescription>This audit creates a shared live-inventory pool. eBay Live, TikTok Live, and other sessions can reserve separate quantities from it.</AlertDescription></Alert>}
                 {isReceivingAuditReason(purposeDraft) && <Field label="Supplier">{receivingSupplierPicker(purposeDraft === "external_po_receipt")}</Field>}
                 {purposeDraft === "external_po_receipt" && <Field label="External PO or reference (optional)"><Input value={externalPurchaseOrderNumber} onChange={(event) => setExternalPurchaseOrderNumber(event.target.value)} placeholder="PO, invoice, shipment, or other reference" /></Field>}
-                <DialogFooter><Button variant="outline" onClick={() => setPurposeEditorOpen(false)}>Cancel</Button><Button disabled={purposeSaving || !purposeDraft || (purposeDraft === "live_selling_inventory" && !liveChannel) || (isReceivingAuditReason(purposeDraft) && !receivingSupplierId)} onClick={() => void saveAuditPurpose()}>{purposeSaving && <Loader2 className="size-4 animate-spin" />} Save purpose</Button></DialogFooter>
+                <DialogFooter><Button variant="outline" onClick={() => setPurposeEditorOpen(false)}>Cancel</Button><Button disabled={purposeSaving || !purposeDraft || (isReceivingAuditReason(purposeDraft) && !receivingSupplierId)} onClick={() => void saveAuditPurpose()}>{purposeSaving && <Loader2 className="size-4 animate-spin" />} Save purpose</Button></DialogFooter>
               </DialogContent>
             </Dialog>
 

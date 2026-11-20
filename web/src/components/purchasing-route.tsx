@@ -964,9 +964,11 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
   const [createPoOpen, setCreatePoOpen] = useState(false)
   const [createPoSaving, setCreatePoSaving] = useState(false)
   const createPoRequestIdRef = useRef("")
+  const auditPoPrefillRef = useRef("")
+  const [sourceAuditId, setSourceAuditId] = useState("")
   const [createPoMode, setCreatePoMode] = useState<"choose" | "new" | "external">("choose")
   const [purchaseReferences, setPurchaseReferences] = useState<{ vendors: Array<Record<string, unknown>>; warehouses: Array<Record<string, unknown>> }>({ vendors: [], warehouses: [] })
-  const [createPoForm, setCreatePoForm] = useState({ vendorId: "", warehouseId: "", expectedAt: "", notes: "", inventoryPurpose: "stock", liveChannel: "", items: [] as Array<{ sku: string; title: string; qty: string; unitCost: string; vendorSku?: string; brand?: string; manufacturer?: string; catalogProduct?: boolean }> })
+  const [createPoForm, setCreatePoForm] = useState({ vendorId: "", warehouseId: "", expectedAt: "", notes: "", inventoryPurpose: "stock", liveChannel: "", items: [] as Array<{ sku: string; title: string; qty: string; unitCost: string; vendorSku?: string; mfrPartNumber?: string; upc?: string; brand?: string; manufacturer?: string; image?: string; catalogProduct?: boolean }> })
   const [externalPoFile, setExternalPoFile] = useState<File | null>(null)
   const [externalPoPreview, setExternalPoPreview] = useState<null | { document: Record<string, unknown>; vendor: Record<string, unknown>; catalogSupplier?: Record<string, unknown> | null; file: Record<string, unknown>; duplicate?: { id?: string; poNumber?: string } | null; readyToCreate?: boolean; unresolvedLineCount?: number; items: Array<Record<string, unknown>> }>(null)
   const [externalPoPreviewing, setExternalPoPreviewing] = useState(false)
@@ -1095,6 +1097,39 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
       .catch(() => undefined)
   }, [])
   useEffect(() => {
+    const auditId = new URLSearchParams(window.location.search).get("createFromAudit") || ""
+    if (!auditId || auditPoPrefillRef.current === auditId || !purchaseReferences.warehouses.length) return
+    auditPoPrefillRef.current = auditId
+    void api<{ audit?: Record<string, unknown> }>(`/api/warehouse-audits/${encodeURIComponent(auditId)}`)
+      .then(({ audit }) => {
+        if (!audit) throw new Error("The warehouse audit was not found.")
+        if (audit.linkedPurchaseOrderId) throw new Error(`${canonicalWarehouseAuditReference(audit.auditNumber, audit.id)} is already linked to a purchase order.`)
+        const vendor = purchaseReferences.vendors.find((row) => String(row.id || "") === String(audit.supplierId || ""))
+          || purchaseReferences.vendors.find((row) => String(row.name || "").trim().toLowerCase() === String(audit.supplierName || "").trim().toLowerCase())
+        const warehouse = purchaseReferences.warehouses.find((row) => String(row.id || "") === String(audit.warehouseId || ""))
+          || purchaseReferences.warehouses.find((row) => String(row.name || "").trim().toLowerCase() === String(audit.warehouseName || "").trim().toLowerCase())
+        const lines = (Array.isArray(audit.lines) ? audit.lines as Array<Record<string, unknown>> : [])
+          .filter((line) => Number(line.countedQty ?? line.count ?? 0) > 0 && String(line.sku || "").trim())
+          .map((line) => ({
+            sku: String(line.sku || ""), title: String(line.title || line.sku || ""), qty: String(Number(line.countedQty ?? line.count ?? 0)),
+            unitCost: String(Number(line.selectedSupplierCost || line.unitCost || line.cost || 0) || ""), vendorSku: String(line.selectedVendorSku || line.selectedSupplierSku || ""),
+            mfrPartNumber: String(line.selectedManufacturerSku || line.mfrPartNumber || ""), upc: String(line.selectedSupplierUpc || line.barcode || line.upc || ""),
+            image: String(line.image || ""), catalogProduct: true,
+          }))
+        if (!lines.length) throw new Error("This audit has no counted catalog lines to place on a PO.")
+        setSourceAuditId(String(audit.id || auditId))
+        setCreatePoForm({
+          vendorId: String(vendor?.id || ""), warehouseId: String(warehouse?.id || ""), expectedAt: "",
+          notes: `Created from ${canonicalWarehouseAuditReference(audit.auditNumber, audit.id)}. Inventory was already posted by the audit and must not be added again.`,
+          inventoryPurpose: String(audit.inventoryPurpose || "stock") === "live_selling" ? "live_selling" : "stock", liveChannel: "", items: lines,
+        })
+        setCreatePoMode("new")
+        createPoRequestIdRef.current = crypto.randomUUID()
+        setCreatePoOpen(true)
+      })
+      .catch((error) => { auditPoPrefillRef.current = ""; toast.error(error instanceof Error ? error.message : "Unable to prepare a PO from this audit.") })
+  }, [purchaseReferences])
+  useEffect(() => {
     const normalizedQuery = query.trim()
     const compactQuery = normalizedQuery.toLowerCase().replace(/[^a-z0-9]+/g, "")
     if (normalizedQuery.length < 2 || compactQuery.length < 2 || /[\r\n,;]/.test(normalizedQuery)) {
@@ -1183,6 +1218,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     setCreatePoMode("choose")
     setExternalPoFile(null)
     setExternalPoPreview(null)
+    setSourceAuditId("")
     createPoRequestIdRef.current = crypto.randomUUID()
     setCreatePoOpen(true)
   }
@@ -1203,7 +1239,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     const requestId = createPoRequestIdRef.current || crypto.randomUUID()
     createPoRequestIdRef.current = requestId
     try {
-      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ requestId, manual: true, ...createPoForm, items: createPoForm.items.map((line) => ({ ...line, qty: Number(line.qty), estimatedUnitCost: Number(line.unitCost || 0) })), user: operatorName }) })
+      const result = await api<{ purchaseOrder?: Record<string, unknown>; message?: string }>("/api/purchase-orders", { method: "POST", body: JSON.stringify({ requestId, manual: true, sourceAuditId, ...createPoForm, items: createPoForm.items.map((line) => ({ ...line, qty: Number(line.qty), estimatedUnitCost: Number(line.unitCost || 0) })), user: operatorName }) })
       const poId = String(result.purchaseOrder?.id || "")
       toast.success(result.message || "Purchase order draft saved.")
       createPoRequestIdRef.current = ""
@@ -1783,8 +1819,8 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
     <Dialog open={createPoOpen} onOpenChange={(open) => { if (!createPoSaving) setCreatePoOpen(open) }}>
       <DialogContent className="flex max-h-[92vh] w-[calc(100vw-1rem)] max-w-6xl flex-col overflow-hidden p-0">
         <DialogHeader className="border-b px-5 py-4 sm:px-6">
-          <DialogTitle>{createPoMode === "choose" ? "Create or add purchase order" : createPoMode === "external" ? "Add existing purchase order" : "Create new purchase order"}</DialogTitle>
-          <DialogDescription>{createPoMode === "choose" ? "Start a new DataPlus PO or bring in an existing PO created in another system." : createPoMode === "external" ? "Select the supplier, upload its text-based PDF, and review every product match before creating the receiving PO." : "Create a warehouse-bound Draft PO now. It will not be sent to the supplier until the normal approval and submission steps are completed."}</DialogDescription>
+          <DialogTitle>{createPoMode === "choose" ? "Create or add purchase order" : createPoMode === "external" ? "Add existing purchase order" : sourceAuditId ? "Create PO from warehouse audit" : "Create new purchase order"}</DialogTitle>
+          <DialogDescription>{createPoMode === "choose" ? "Start a new DataPlus PO or bring in an existing PO created in another system." : createPoMode === "external" ? "Select the supplier, upload its text-based PDF, and review every product match before creating the receiving PO." : sourceAuditId ? "Review the audit items and supplier mapping. Saving links the PO as historical receiving evidence without adding physical inventory again." : "Create a warehouse-bound Draft PO now. It will not be sent to the supplier until the normal approval and submission steps are completed."}</DialogDescription>
         </DialogHeader>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4 sm:px-6">
           {createPoMode === "choose" ? <div className="grid gap-3 md:grid-cols-2">
@@ -1829,6 +1865,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
             </div> : null}
             <FormField><FieldLabel>Internal notes</FieldLabel><Textarea className="min-h-20" value={createPoForm.notes} onChange={(event) => setCreatePoForm((current) => ({ ...current, notes: event.target.value }))} placeholder="Optional import or receiving context" /></FormField>
           </div> : <div className="grid gap-5">
+            {sourceAuditId ? <Alert className="border-blue-500/30 bg-blue-500/10"><Warehouse className="size-4" /><AlertTitle>Inventory already received by audit</AlertTitle><AlertDescription>Confirm the supplier, product mappings, quantities, and costs. This creates the PO and receipt history only; it does not increase stock.</AlertDescription></Alert> : null}
             <div className="grid gap-4 md:grid-cols-3">
               <FormField><FieldLabel>Supplier</FieldLabel><Select value={createPoForm.vendorId} onValueChange={(vendorId) => setCreatePoForm((current) => ({ ...current, vendorId }))}><SelectTrigger><SelectValue placeholder="Choose supplier" /></SelectTrigger><SelectContent>{activePurchaseVendors.map((vendor) => <SelectItem key={String(vendor.id)} value={String(vendor.id)}>{String(vendor.name || vendor.id)}</SelectItem>)}</SelectContent></Select><FieldDescription>Only active suppliers can receive a new PO.</FieldDescription></FormField>
               <FormField><FieldLabel>Receiving warehouse</FieldLabel><Select value={createPoForm.warehouseId} onValueChange={(warehouseId) => setCreatePoForm((current) => ({ ...current, warehouseId }))}><SelectTrigger><SelectValue placeholder="Choose warehouse" /></SelectTrigger><SelectContent>{receivingWarehouses.map((warehouse) => <SelectItem key={String(warehouse.id)} value={String(warehouse.id)}>{String(warehouse.name || warehouse.code || warehouse.id)}</SelectItem>)}</SelectContent></Select><FieldDescription>Virtual and dropship locations are excluded.</FieldDescription></FormField>
@@ -1854,7 +1891,7 @@ function PurchasingPage({ operatorName = "Buyer" }: { operatorName?: string } = 
             <FormField><FieldLabel>Buyer notes</FieldLabel><Textarea className="min-h-24" value={createPoForm.notes} onChange={(event) => setCreatePoForm((current) => ({ ...current, notes: event.target.value }))} placeholder="Terms, supplier instructions, reason for purchase, or internal receiving notes" /></FormField>
           </div>}
         </div>
-        <DialogFooter className="border-t bg-muted/20 px-5 py-4 sm:px-6">{createPoMode !== "choose" ? <Button variant="outline" disabled={createPoSaving || externalPoPreviewing} onClick={() => { setCreatePoMode("choose"); setExternalPoPreview(null) }}><ArrowLeft className="size-4" /> Back</Button> : null}<Button variant="outline" disabled={createPoSaving || externalPoPreviewing} onClick={() => setCreatePoOpen(false)}>Cancel</Button>{createPoMode === "new" ? <Button disabled={createPoSaving} onClick={() => void saveManualPo()}>{createPoSaving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} Save draft</Button> : createPoMode === "external" ? <Button disabled={createPoSaving || externalPoPreviewing || !externalPoPreview?.readyToCreate} onClick={() => void saveExternalPo()}>{createPoSaving ? <Loader2 className="size-4 animate-spin" /> : <FileUp className="size-4" />} Add existing PO</Button> : null}</DialogFooter>
+        <DialogFooter className="border-t bg-muted/20 px-5 py-4 sm:px-6">{createPoMode !== "choose" && !sourceAuditId ? <Button variant="outline" disabled={createPoSaving || externalPoPreviewing} onClick={() => { setCreatePoMode("choose"); setExternalPoPreview(null) }}><ArrowLeft className="size-4" /> Back</Button> : null}<Button variant="outline" disabled={createPoSaving || externalPoPreviewing} onClick={() => setCreatePoOpen(false)}>Cancel</Button>{createPoMode === "new" ? <Button disabled={createPoSaving || !createPoForm.vendorId || !createPoForm.warehouseId || !createPoForm.items.length} onClick={() => void saveManualPo()}>{createPoSaving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />} {sourceAuditId ? "Create and link PO" : "Save draft"}</Button> : createPoMode === "external" ? <Button disabled={createPoSaving || externalPoPreviewing || !externalPoPreview?.readyToCreate} onClick={() => void saveExternalPo()}>{createPoSaving ? <Loader2 className="size-4 animate-spin" /> : <FileUp className="size-4" />} Add existing PO</Button> : null}</DialogFooter>
       </DialogContent>
     </Dialog>
     <AlertDialog open={forcePoolOpen} onOpenChange={setForcePoolOpen}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Attach older lines to Draft POs?</AlertDialogTitle><AlertDialogDescription>DataPlus will group {numberLabel(pooledRequirements.length)} older purchase line{pooledRequirements.length === 1 ? "" : "s"} by supplier and receiving warehouse, then create or update local numbered Draft POs. It will not approve, submit, or send anything to a supplier.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel disabled={poolingBusy}>Cancel</AlertDialogCancel><AlertDialogAction disabled={poolingBusy} onClick={(event) => { event.preventDefault(); void runPurchasePool(true) }}>{poolingBusy ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Attach to Draft POs</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
