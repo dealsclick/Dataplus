@@ -38427,7 +38427,7 @@ async function queueFulfillmentLabelPurchaseJob(options = {}) {
 }
 
 async function queueFulfillmentRateRefreshJob(options = {}) {
-  const routeIds = [...new Set((options.routeIds || []).map(String).filter(Boolean))].slice(0, 500);
+  const routeIds = [...new Set((options.routeIds || []).map(String).filter(Boolean))].slice(0, 500).sort((left, right) => left.localeCompare(right));
   if (!routeIds.length) return null;
   const db = options.db || (postgres.isPostgresEnabled()
     ? { importJobs: [] }
@@ -38436,11 +38436,32 @@ async function queueFulfillmentRateRefreshJob(options = {}) {
   const totalRows = suppliedTargets.length || routeIds.length;
   const background = options.background === true;
   const inline = shouldRunJobsInline();
-  const job = createImportJob(db, {
+  const workerPayload = {
+    routeIds,
+    selectionMode: options.selectionMode === "rules" ? "rules" : "cheapest",
+    requestedBy: options.actor || "DataPlus",
+    // Carrier rate work uses the carrier lane; `scheduled` only identifies
+    // the trigger as Manual or Automated in Jobs.
+    background: true,
+    scheduled: options.scheduled === true
+  };
+  const attrs = {
     section: "Fulfillment",
     category: "Shipping",
     operation: `${background ? "Scheduled refresh" : "Refresh"} shipping rates for ${totalRows} selected order${totalRows === 1 ? "" : "s"}`,
     direction: "internal",
+    fileName: "fulfillment-rate-refresh",
+    workerTask: inline ? "" : "fulfillment-rate-refresh",
+    workerPayload
+  };
+  const duplicate = await findActiveDuplicateImportJob(db, attrs);
+  if (duplicate) return normalizeImportJob({
+    ...duplicate,
+    duplicateOfActiveJob: true,
+    message: `The same carrier rate refresh is already ${String(duplicate.status || "running").toLowerCase()}.`
+  });
+  const job = createImportJob(db, {
+    ...attrs,
     status: "queued",
     phase: "queued",
     totalRows,
@@ -38449,16 +38470,6 @@ async function queueFulfillmentRateRefreshJob(options = {}) {
     rowLabel: "orders",
     progressLabel: background ? "Queued automatic carrier rate refresh" : "Queued carrier rate refresh",
     queuePriority: background ? 80 : 130,
-    workerTask: inline ? "" : "fulfillment-rate-refresh",
-    workerPayload: {
-      routeIds,
-      selectionMode: options.selectionMode === "rules" ? "rules" : "cheapest",
-      requestedBy: options.actor || "DataPlus",
-      // Carrier rate work uses the carrier lane; `scheduled` only identifies
-      // the trigger as Manual or Automated in Jobs.
-      background: true,
-      scheduled: options.scheduled === true
-    },
     rateRefreshTargets: suppliedTargets,
     rateRefreshResults: [],
     message: background

@@ -1044,6 +1044,7 @@ export function FulfillmentPage() {
   const [selectedRouteIds, setSelectedRouteIds] = useState<Set<string>>(new Set())
   const [rateRefreshProgress, setRateRefreshProgress] = useState<{ active: boolean; items: FulfillmentRateRefreshItem[]; jobNumber?: number; message?: string }>({ active: false, items: [] })
   const [rateStatusOpen, setRateStatusOpen] = useState(false)
+  const [rateReviewOverrides, setRateReviewOverrides] = useState<Record<string, Record<string, any>>>({})
   const rateRefreshSelectionKeyRef = useRef("")
   const rateRefreshOpenLabelOnCompleteRef = useRef(false)
   const consolidationPurchaseInlineRef = useRef(false)
@@ -1164,12 +1165,18 @@ export function FulfillmentPage() {
   const carrierTrackingEnabled = data.capabilities?.carrierTracking !== false
   const carrierRatesEnabled = data.capabilities?.carrierRates !== false
   const labelPurchaseEnabled = data.capabilities?.labelPurchase !== false
-  const pendingRows = normalizeWorkRows(data.work).filter((row) => {
+  const selectedRouteIdsKey = [...selectedRouteIds].sort().join("|")
+  const latestRefreshMatchesSelection = Boolean(selectedRouteIdsKey) && latestRateAuthorization.selectionKey === selectedRouteIdsKey
+  const applyAuthorizedRateReview = (row: Record<string, any>) => {
+    const review = latestRefreshMatchesSelection ? rateReviewOverrides[String(row.id || "")] : null
+    return review?.selectedRate ? { ...row, rateReview: review } : row
+  }
+  const pendingRows = normalizeWorkRows(data.work).map(applyAuthorizedRateReview).filter((row) => {
     if (row.historyOnly === true) return false
     const statuses = [row.status, row.operationalStatus].map((value) => String(value || "").toLowerCase())
     return !statuses.some((value) => ["shipped", "fulfilled", "closed", "delivered", "expired", "canceled", "cancelled", "void", "voided"].includes(value))
   })
-  const allShipmentRows = normalizeWorkRows(Array.isArray(data.allWork) ? data.allWork : data.work).filter((row) => {
+  const allShipmentRows = normalizeWorkRows(Array.isArray(data.allWork) ? data.allWork : data.work).map(applyAuthorizedRateReview).filter((row) => {
     const statuses = [row.status, row.operationalStatus, row.warehouseStage, row.paymentStatus]
       .map((value) => String(value || "").trim().toLowerCase())
       .filter(Boolean)
@@ -1651,6 +1658,11 @@ export function FulfillmentPage() {
           if (!result.review) continue
           for (const routeId of result.routeIds || []) reviewsByRoute.set(String(routeId), result.review)
         }
+        if (reviewsByRoute.size) setRateReviewOverrides((current) => {
+          const next = { ...current }
+          for (const [routeId, review] of reviewsByRoute) next[routeId] = review
+          return next
+        })
         if (reviewsByRoute.size) setData((current) => ({
           ...current,
           work: (Array.isArray(current.work) ? current.work : []).map((row: Record<string, any>) => reviewsByRoute.has(String(row.id)) ? { ...row, rateReview: reviewsByRoute.get(String(row.id)) } : row),
@@ -1668,7 +1680,7 @@ export function FulfillmentPage() {
           if (rateRefreshSelectionKeyRef.current) {
             setLatestRateAuthorization({
               selectionKey: rateRefreshSelectionKeyRef.current,
-              routeIds: new Set(items.flatMap((item) => item.routeIds.map(String))),
+              routeIds: new Set([...reviewsByRoute.entries()].filter(([, review]) => Boolean(review?.selectedRate)).map(([routeId]) => routeId)),
             })
           }
           await fulfillmentLoadRef.current(false, true)
@@ -2106,6 +2118,11 @@ export function FulfillmentPage() {
     if (!quiet) {
       setBusy(true)
       const selectedRouteIdSet = new Set(targets.flatMap((item) => item.routeIds))
+      setRateReviewOverrides((current) => {
+        const next = { ...current }
+        for (const routeId of selectedRouteIdSet) delete next[routeId]
+        return next
+      })
       setRateRefreshProgress({ active: true, items: targets, message: "Queueing carrier rate refresh." })
       setData((current) => ({
         ...current,
@@ -2192,6 +2209,11 @@ export function FulfillmentPage() {
               items: current.items.map((item) => item.orderId === target.orderId ? { ...item, status, selectedRate: review?.selectedRate || null, error: String(refreshed?.error || review?.error || "") } : item),
             }))
           }
+          if (reviewByRoute.size) setRateReviewOverrides((current) => {
+            const next = { ...current }
+            for (const [routeId, review] of reviewByRoute) next[routeId] = review
+            return next
+          })
           if (reviewByRoute.size) setData((current) => ({
             ...current,
             work: (Array.isArray(current.work) ? current.work : []).map((workRow: Record<string, any>) => reviewByRoute.has(String(workRow.id)) ? { ...workRow, rateReview: reviewByRoute.get(String(workRow.id)) } : workRow),
@@ -2281,6 +2303,9 @@ export function FulfillmentPage() {
         ? { ...workRow, rateReview: { ...workRow.rateReview, selectedRate } }
         : workRow),
     }))
+    setRateReviewOverrides((current) => current[String(row.id)]
+      ? { ...current, [String(row.id)]: { ...current[String(row.id)], selectedRate } }
+      : current)
     try {
       await api(`/api/fulfillment/rates/${encodeURIComponent(String(row.id))}`, { method: "PATCH", body: JSON.stringify(patch) })
       toast.success("Shipping choice saved.")
@@ -2929,6 +2954,8 @@ export function FulfillmentPage() {
         }
       })
       setData((current) => ({ ...current, work: applyPackageValues(current.work), allWork: applyPackageValues(current.allWork) }))
+      setLatestRateAuthorization({ selectionKey: "", routeIds: new Set() })
+      setRateReviewOverrides({})
       const packageSummary = `${packageValues.packageWeight} lb · ${packageValues.packageLength} × ${packageValues.packageWidth} × ${packageValues.packageHeight} in`
       if (warning) toast.warning(warning)
       else if (!projectionUpdated) toast.warning(`Package saved as ${packageSummary}. The live queue is still catching up; the saved measurements will remain visible.`)
@@ -3047,8 +3074,6 @@ export function FulfillmentPage() {
   const selectedRateReadyRows = selectedRateReadyPackageEntries.flatMap(([, packageRows]) => fulfillmentPackageOwnerRows(packageRows))
   const selectedRateReadyPackages = selectedRateReadyPackageEntries.map(([, packageRows]) => fulfillmentSharedRateRow(packageRows))
   const selectedRateSkippedCount = Math.max(0, selectedPackageRows.length - selectedRateReadyPackages.length)
-  const selectedRouteIdsKey = [...selectedRouteIds].sort().join("|")
-  const latestRefreshMatchesSelection = latestRateAuthorization.selectionKey === selectedRouteIdsKey
   const routeHasCurrentRate = (row: Record<string, any>) => fulfillmentRateIsCurrent(row.rateReview)
     || (latestRefreshMatchesSelection && latestRateAuthorization.routeIds.has(String(row.id)))
   const selectedPurchaseEligiblePackageEntries = selectedRateReadyPackageEntries.filter(([, packageRows]) => Boolean(fulfillmentSharedRateRow(packageRows)?.rateReview?.selectedRate))

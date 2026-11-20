@@ -12,9 +12,13 @@ assert.match(source, /disabled=\{busy \|\| rateRefreshProgress\.active \|\| !sel
 assert.doesNotMatch(source, /!allSelectedReady/, "one unready shipment must not disable bulk rate refresh");
 assert.match(source, /resultStatus === "blocked" \? "blocked" : resultStatus === "failed" \? "failed" : resultStatus === "purchased" \? "recorded" : review\?\.selectedRate \? "rated" : "failed"/, "an explicit worker failure must never be promoted to rate ready by a stale selected rate");
 assert.match(source, /rateProgressRecorded = rateRefreshProgress\.items\.filter\(\(item\) => item\.status === "recorded"\)\.length/, "existing marketplace labels must be counted separately from carrier rates");
+assert.match(source, /setRateReviewOverrides\(\(current\) => \{[\s\S]*for \(const \[routeId, review\] of reviewsByRoute\) next\[routeId\] = review/, "completed background rate results must remain authoritative by route while the projection catches up");
+assert.match(source, /normalizeWorkRows\(data\.work\)\.map\(applyAuthorizedRateReview\)/, "a stale fulfillment reload must reapply the authorized result before purchase eligibility is calculated");
+assert.match(source, /setLatestRateAuthorization\(\{ selectionKey: "", routeIds: new Set\(\) \}\)[\s\S]{0,100}setRateReviewOverrides\(\{\}\)/, "changing package measurements must invalidate previously authorized rates");
 assert.match(source, /existing labels recorded/, "the progress summary must name recorded marketplace labels accurately");
 assert.match(source, /break-words text-xs leading-relaxed text-destructive/, "long provider errors must wrap inside the result table");
 assert.match(serverSource, /invalidateFulfillmentConsoleSnapshot\(\[order\.id, \.\.\.\(order\.shipmentGroupOrderIds \|\| \[\]\)\]\)/, "saved rates must invalidate the primary order and every combined-shipment member");
 assert.match(serverSource, /const projectionUpdated = await drainFulfillmentConsoleProjectionPatches\(\);[\s\S]{0,100}return \{ results, total: context\.rows\.length, projectionUpdated \}/, "bulk rate refresh must finish its projection patch before reporting completion");
+assert.match(serverSource, /queueFulfillmentRateRefreshJob[\s\S]*findActiveDuplicateImportJob\(db, attrs\)[\s\S]*duplicateOfActiveJob: true/, "identical active carrier refreshes must reuse the existing job");
 
 console.log("Fulfillment bulk rate selection tests passed.");
