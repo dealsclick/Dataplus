@@ -1098,6 +1098,7 @@ export function FulfillmentPage() {
   const [purchasedLabelSourceFilter, setPurchasedLabelSourceFilter] = useState("all")
   const [purchasedChannelSyncFilter, setPurchasedChannelSyncFilter] = useState("all")
   const [printBatchPickerOpen, setPrintBatchPickerOpen] = useState(false)
+  const [printBatchPickerLoading, setPrintBatchPickerLoading] = useState(false)
   const [printBatchSearch, setPrintBatchSearch] = useState("")
   const doNotShipFilter = "all"
   const [consolidationOrder, setConsolidationOrder] = useState<Record<string, any> | null>(null)
@@ -1400,6 +1401,35 @@ export function FulfillmentPage() {
     }
   }
   fulfillmentLoadRef.current = load
+
+  const refreshPrintBatchPicker = async () => {
+    if (printBatchPickerLoading) return
+    setPrintBatchPickerLoading(true)
+    try {
+      const result = await api<Record<string, any>>("/api/fulfillment/shipping-batches?page=1&pageSize=100")
+      setData((current) => {
+        const mergeById = (preferred: unknown, existing: unknown, idField: string) => {
+          const seen = new Set<string>()
+          return [...(Array.isArray(preferred) ? preferred : []), ...(Array.isArray(existing) ? existing : [])]
+            .filter((record: Record<string, any>) => {
+              const id = String(record?.[idField] || record?.id || "").trim()
+              if (!id || seen.has(id)) return false
+              seen.add(id)
+              return true
+            })
+        }
+        return {
+          ...current,
+          batches: mergeById(result.batches, current.batches, "id"),
+          printQueue: mergeById(result.printQueue, current.printQueue, "id"),
+        }
+      })
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to refresh shipping batches.")
+    } finally {
+      setPrintBatchPickerLoading(false)
+    }
+  }
 
   const loadConsolidationCartonization = async (row: Record<string, any>, orderIds: string[]) => {
     if (!orderIds.length) { setConsolidationCartonization(null); return }
@@ -3273,12 +3303,13 @@ export function FulfillmentPage() {
             <CardHeader className="gap-3 border-b lg:flex-row lg:items-start lg:justify-between">
               <div><CardTitle>Purchased labels</CardTitle><CardDescription>Print one order from its row, or choose a batch packet to print all labels purchased together. Print status shows whether each label has already been printed.{trackingRefresh?.completedAt ? ` Last checked ${dateLabel(String(trackingRefresh.completedAt))}.` : ""}</CardDescription></div>
               <div className="flex flex-wrap gap-2">
-                <Popover open={printBatchPickerOpen} onOpenChange={(open) => { setPrintBatchPickerOpen(open); if (!open) setPrintBatchSearch("") }}>
-                  <PopoverTrigger asChild><Button size="sm" variant="outline" disabled={!batchPickerEntries.length}><Printer className="size-4" /> Print batch <ChevronDown className="size-4" /></Button></PopoverTrigger>
+                <Popover open={printBatchPickerOpen} onOpenChange={(open) => { setPrintBatchPickerOpen(open); if (open) void refreshPrintBatchPicker(); else setPrintBatchSearch("") }}>
+                  <PopoverTrigger asChild><Button size="sm" variant="outline" disabled={printBatchPickerLoading}>{printBatchPickerLoading ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />} Print batch <ChevronDown className="size-4" /></Button></PopoverTrigger>
                   <PopoverContent align="end" className="w-[min(22rem,calc(100vw-1rem))] overflow-hidden p-0">
                     <div className="relative border-b p-2"><Search className="absolute left-4 top-4 size-4 text-muted-foreground" /><Input autoFocus className="h-9 pl-9" value={printBatchSearch} onChange={(event) => setPrintBatchSearch(event.target.value)} placeholder="Filter batch, customer, order, or SKU" /></div>
                     <ScrollArea className="h-[min(18rem,45vh)]">
                       <div className="p-1">
+                        {printBatchPickerLoading ? <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground"><Loader2 className="size-3.5 animate-spin" /> Refreshing latest batches...</div> : null}
                         {filteredBatchPickerEntries.map((job) => <button key={String(job.id)} type="button" className="w-full rounded-sm px-2.5 py-2 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => openBatchPickerEntry(job)}>
                           <span className="flex items-center justify-between gap-2"><span className="flex min-w-0 items-center gap-1.5"><span className="truncate text-sm font-medium">{String(job.batchNumber || job.printNumber || "Label batch")}</span><BatchOrderTypeIndicators hasCombinedOrders={job.hasCombinedOrders === true} hasEbayLiveOrders={job.hasEbayLiveOrders === true} hasTikTokLiveOrders={job.hasTikTokLiveOrders === true} /></span><span className="flex shrink-0 items-center gap-1"><Badge variant={job.pickerStatus.startsWith("Ready") ? "success" : job.pickerStatus === "Needs attention" ? "destructive" : "warning"}>{job.pickerStatus}</Badge><Badge variant={String(job.warehouseStatus || "open") === "closed" ? "success" : "outline"}>{String(job.warehouseStatus || "open") === "closed" ? "Closed" : "Open"}</Badge></span></span>
                           <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground"><span>{numberLabel(Number(job.orderCount || job.batchRecord?.counts?.total || 0))} label{Number(job.orderCount || job.batchRecord?.counts?.total || 0) === 1 ? "" : "s"}{job.printable ? ` · ${String(job.lastOutputAction || "") === "saved_pdf" ? "Saved PDF" : isPrintedJob(job) ? "Printed" : "Not printed"}${Number(job.batchRecord?.counts?.label_pending || job.pendingDocumentCount || 0) > 0 ? ` · ${numberLabel(Number(job.batchRecord?.counts?.label_pending || job.pendingDocumentCount || 0))} still generating` : ""}` : job.pickerStatus === "Pending labels" ? ` · ${numberLabel(Number(job.batchRecord?.counts?.label_pending || job.pendingDocumentCount || 0))} generating` : " · Open batch details"}</span><RecoverySourceLabel record={job} /></span>
