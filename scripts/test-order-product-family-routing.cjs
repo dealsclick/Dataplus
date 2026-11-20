@@ -123,6 +123,22 @@ test("TikTok title MPN resolves physical stock instead of a short channel SKU", 
   assert.equal(selected.match.mode, "manufacturer-part-number");
 });
 
+test("TikTok title MPN can match a catalog SKU when the separate MPN field is empty", () => {
+  const shortChannelSku = { id: "channel-4", sku: "4", title: "As seen", qty: 0 };
+  const stockedManufacturerSku = {
+    id: "mpn-as-sku",
+    sku: "48-22-7400",
+    title: "6 in. and 10 in. Adjustable Wrench",
+    mfrPartNumber: "",
+    warehouseStock: [{ warehouseId: "si2", warehouseName: "Staten Island 2", qty: 2, reserved: 0 }],
+  };
+  const line = { title: "Milwaukee Adjustable Wrench Set - 48-22-7400" };
+
+  const selected = selectImportedOrderProduct({}, [shortChannelSku, stockedManufacturerSku], "4", line);
+  assert.equal(selected.product.id, "mpn-as-sku");
+  assert.equal(selected.match.mode, "manufacturer-part-number");
+});
+
 test("supplier priority is used when no MPN match has physical stock", () => {
   const trueValue = { id: "tv", sku: "TV-7400", supplier: "True Value", mfrPartNumber: "48-22-7400", qty: 0 };
   const rjs = { id: "rjs", sku: "RJS-7400", supplier: "RJS", mfrPartNumber: "48-22-7400", qty: 100 };

@@ -39865,6 +39865,7 @@ function importedOrderProductMatch(product = {}, importedSku = "", line = {}) {
   let result = null;
   if (matchesAny(productUpcs, lineValues.upcs)) result = { mode: "upc", score: 300 };
   else if (matchesAny(productManufacturerSkus, lineValues.manufacturerSkus, false)) result = { mode: "manufacturer-part-number", score: 260 };
+  else if (matchesAny(directValues, lineValues.manufacturerSkus, false)) result = { mode: "manufacturer-part-number", score: 260 };
   else if (directValues.includes(literal)) result = { mode: "catalog-sku", score: 240 };
   else if (aliasValues.includes(literal)) result = { mode: "catalog-alias", score: 230 };
   else if (matchesAny(productSupplierSkus, lineValues.supplierSkus)) result = { mode: "supplier-sku", score: 220 };
