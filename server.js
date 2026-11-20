@@ -61993,8 +61993,7 @@ async function handleApi(req, res) {
     const trackedRoom = exactSavedRoom && (Boolean(target.tiktokStudio?.trackingStartedAt) || String(target.status || "") === "live");
     const staleUntrustedRoom = exactSavedRoom && !trackedRoom && !remoteLive;
     const staleClosureTotals = liveSessionLedger.sessionTotals(target);
-    const shouldRepairStaleClosure = staleUntrustedRoom
-      && liveSessionLedger.sessionIsTerminal(target)
+    const shouldRepairStaleClosure = liveSessionLedger.sessionIsTerminal(target)
       && String(target.closedBy || "") === "DataPlus Studio"
       && String(target.closeReason || "").startsWith("TikTok ended the tracked LIVE room;")
       && Number(staleClosureTotals.soldUnits || 0) === 0

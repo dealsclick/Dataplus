@@ -23,6 +23,7 @@ assert.match(server, /endingGraceMs = 5 \* 60 \* 1000/, 'Studio should allow lat
 assert.match(server, /trackingStartedAt/, 'Studio should persist evidence that an active room was deliberately tracked');
 assert.match(server, /shouldRepairStaleClosure/, 'Studio should repair an erroneous zero-sale closure caused by an untrusted historical room');
 assert.match(server, /String\(target\.closedBy \|\| ""\) === "DataPlus Studio"/, 'The stale closure repair must be limited to DataPlus Studio closures');
+assert.doesNotMatch(server, /shouldRepairStaleClosure = staleUntrustedRoom/, 'The repair must still work after the stale room association has already been cleared');
 assert.match(server, /slice\(0, 100\)/, 'Studio should bound the LIVE order feed');
 assert.match(server, /parts\[4\] === "finalize"/, 'Studio should expose a recovery finalization action');
 assert.match(server, /DataPlus has not tracked an active TikTok LIVE room/, 'Finalization should reject an untracked historical room');
