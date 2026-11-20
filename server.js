@@ -51014,6 +51014,7 @@ function purchaseOrderReceivingExtraItemsFromAudit(audit = {}) {
 
 function purchaseOrderReceivingProgressFromAudit(audit = {}) {
   const countedLines = (Array.isArray(audit.lines) ? audit.lines : []).filter((line) => Number(line.countedQty || 0) > 0);
+  const expectedLines = Array.isArray(audit.purchaseOrderExpectedLines) ? audit.purchaseOrderExpectedLines : [];
   const unknownBarcodes = (Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes : []).filter((entry) => Number(entry.count || 0) > 0);
   const scannedUnits = countedLines.reduce((sum, line) => sum + Number(line.countedQty || 0), 0);
   const unknownUnits = unknownBarcodes.reduce((sum, entry) => sum + Number(entry.count || 0), 0);
@@ -51042,17 +51043,24 @@ function purchaseOrderReceivingProgressFromAudit(audit = {}) {
     scannedSkuCount: countedLines.length,
     extraItemUnits: extraItems.reduce((sum, item) => sum + Number(item.qtyReceived || 0), 0),
     extraItems,
-    lineProgress: countedLines.map((line) => ({
-      sku: String(line.sku || ""),
-      title: String(line.title || line.productTitle || line.sku || ""),
-      countedQty: Number(line.countedQty || 0),
-      expectedQty: Number(line.expectedQty || line.purchaseOrderExpectedQty || 0),
-      upc: String(line.upc || line.barcode || line.gtin || ""),
-      manufacturerSku: String(line.manufacturerSku || line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || ""),
-      vendorSku: String(line.vendorSku || line.sourceSku || ""),
-      lastScannedAt: String(line.lastScannedAt || ""),
-      lastScannedBy: String(line.lastScannedBy || "")
-    })),
+    lineProgress: countedLines.map((line) => {
+      const expectedLine = expectedLines.find((candidate) => purchaseOrderReceivingLineMatch(line, candidate)) || null;
+      return {
+        sku: String(line.sku || ""),
+        title: String(line.title || line.productTitle || line.sku || ""),
+        countedQty: Number(line.countedQty || 0),
+        expectedQty: Number(expectedLine?.expectedQty ?? line.expectedQty ?? line.purchaseOrderExpectedQty ?? 0),
+        upc: String(line.upc || line.barcode || line.gtin || ""),
+        manufacturerSku: String(line.manufacturerSku || line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || ""),
+        vendorSku: String(line.vendorSku || line.sourceSku || ""),
+        purchaseOrderLineId: String(expectedLine?.id || line.receivingPurchaseOrderLineId || ""),
+        purchaseOrderLineIndex: Number(expectedLine?.lineIndex ?? line.receivingPurchaseOrderLineIndex ?? -1),
+        orderedSku: String(expectedLine?.sku || ""),
+        substitution: line.receivingSubstitution === true,
+        lastScannedAt: String(line.lastScannedAt || ""),
+        lastScannedBy: String(line.lastScannedBy || "")
+      };
+    }),
     unknownBarcodeCount: unknownBarcodes.length,
     documentCount: documents.length,
     packingSlipCount: documents.filter((document) => String(document.documentType || "") === "packing_slip").length,

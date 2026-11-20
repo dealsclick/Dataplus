@@ -2392,7 +2392,9 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
   const postedExtraItems = receipts.flatMap((receipt) => (Array.isArray(receipt.items) ? receipt.items as Array<Record<string, unknown>> : [])
     .filter((item) => item.extraItem === true || String(item.extraItemStatus || "") === "unexpected_on_selected_po")
     .map((item) => ({ ...item, receiptId: receipt.id, receiptNumber: receipt.receiptNumber, receivedAt: receipt.receivedAt, sourceAuditId: receipt.sourceAuditId, sourceAuditNumber: receipt.sourceAuditNumber, warehouseName: receipt.warehouseName })))
-  const activeReceivingProgressForLine = (line: Record<string, unknown>) => {
+  const activeReceivingProgressForLine = (line: Record<string, unknown>, lineIndex: number) => {
+    const purchaseOrderLineId = String(line.id || "").trim()
+    const purchaseOrderLineIndex = Number(line.lineIndex ?? lineIndex)
     const identifiers = new Set([
       line.sku,
       line.sourceSku,
@@ -2406,10 +2408,14 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
       line.mpn,
     ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean))
     return activeReceivingLineProgress.reduce((total, progress) => {
-      const progressIdentifiers = [progress.sku, progress.vendorSku, progress.upc, progress.manufacturerSku]
+      const progressLineId = String(progress.purchaseOrderLineId || "").trim()
+      const progressLineIndex = Number(progress.purchaseOrderLineIndex)
+      const assignedToLine = Boolean(purchaseOrderLineId && progressLineId === purchaseOrderLineId)
+        || (Number.isInteger(progressLineIndex) && progressLineIndex >= 0 && progressLineIndex === purchaseOrderLineIndex)
+      const progressIdentifiers = [progress.orderedSku, progress.sku, progress.vendorSku, progress.upc, progress.manufacturerSku]
         .map((value) => String(value || "").trim().toLowerCase())
         .filter(Boolean)
-      return progressIdentifiers.some((value) => identifiers.has(value)) ? total + Number(progress.countedQty || 0) : total
+      return assignedToLine || progressIdentifiers.some((value) => identifiers.has(value)) ? total + Number(progress.countedQty || 0) : total
     }, 0)
   }
   const poStatus = String(po.status || "draft").toLowerCase()
@@ -2963,7 +2969,7 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
       </div>
       {lines.map((line, index) => {
         const lineReceivers = purchaseOrderLineReceiverNames(line, receipts)
-        const pendingScanned = activeReceivingProgressForLine(line)
+        const pendingScanned = activeReceivingProgressForLine(line, index)
         return <Card key={purchaseOrderLineKey(line, index)}><CardContent className="grid gap-3 p-4">
           <strong>{String(line.sku)}</strong>
           <p className="text-sm" title={String(line.title || "")}>{compactPurchaseItemTitle(line.title)}</p>
@@ -3168,7 +3174,7 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
                   const purchaseMultiple = purchaseLinePurchaseMultiple(line)
                   const purchaseUom = String(line.purchaseUomLabel || purchaseUomLabel(line.uom, line.uomQty))
                   const purchaseSurplusQty = Math.max(0, Number(line.purchaseSurplusQty ?? Number(line.qty || 0) - customerDemandQty))
-                  const pendingScanned = activeReceivingProgressForLine(line)
+                  const pendingScanned = activeReceivingProgressForLine(line, index)
                   const createdNeedsReview = line.catalogProductCreatedBySystem === true && line.catalogAttentionRequired === true
                   return <TableRow key={`${sku}-${index}`} className={createdNeedsReview ? "bg-amber-500/10 hover:bg-amber-500/15" : undefined}>
                     <TableCell className="align-top">

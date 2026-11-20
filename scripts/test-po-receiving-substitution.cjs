@@ -5,6 +5,7 @@ const vm = require('node:vm');
 
 const server = fs.readFileSync(path.resolve(__dirname, '..', 'server.js'), 'utf8');
 const ui = fs.readFileSync(path.resolve(__dirname, '..', 'web', 'src', 'components', 'warehouse-route.tsx'), 'utf8');
+const purchasingUi = fs.readFileSync(path.resolve(__dirname, '..', 'web', 'src', 'components', 'purchasing-workspaces.tsx'), 'utf8');
 
 function functionSource(name) {
   const start = server.indexOf(`function ${name}(`);
@@ -50,6 +51,8 @@ assert.match(server, /parts\[5\] === "match-po-line"/, 'the API exposes an audit
 assert.match(server, /receivingSubstitutionReason/, 'the substitution reason is persisted');
 assert.match(server, /const sku = String\(substitution \? line\.sku/, 'physical inventory posts to the scanned SKU');
 assert.match(server, /poLine\.receivedQty = Number\(poLine\.receivedQty/, 'the ordered PO line receives credit');
+assert.match(server, /purchaseOrderLineId: String\(expectedLine\?\.id/, 'pending receiving progress carries the ordered PO line identity');
+assert.match(purchasingUi, /progress\.purchaseOrderLineId/, 'the PO line table credits pending substitutions to the ordered line');
 assert.match(ui, /Match to PO line/, 'warehouse users can assign an extra scan to the intended PO line');
 assert.match(ui, /Catalog products stay separate/, 'the UI explains that the catalog identities are not merged');
 
