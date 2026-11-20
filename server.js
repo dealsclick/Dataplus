@@ -16457,6 +16457,11 @@ async function purchaseOrdersForReturn(record = {}) {
 function findPurchaseOrderReceiptLine(po = {}, input = {}) {
   if (input.extraItem === true) return null;
   const lines = Array.isArray(po.items) ? po.items : [];
+  const purchaseOrderLineId = String(input.purchaseOrderLineId || "").trim();
+  if (purchaseOrderLineId) {
+    const matchedById = lines.find((line) => String(line.id || "") === purchaseOrderLineId);
+    if (matchedById && (input.substitution === true || !input.sku || String(matchedById.sku || "").toLowerCase() === String(input.sku || "").toLowerCase())) return matchedById;
+  }
   const routeId = String(input.routeId || "").trim();
   if (routeId) {
     const matchedByRoute = lines.find((line) => String(line.routeId || "") === routeId);
@@ -16465,7 +16470,7 @@ function findPurchaseOrderReceiptLine(po = {}, input = {}) {
   const lineIndex = Number(input.lineIndex);
   if (Number.isInteger(lineIndex) && lineIndex >= 0 && lineIndex < lines.length) {
     const indexed = lines[lineIndex];
-    if (!input.sku || String(indexed.sku || "").toLowerCase() === String(input.sku || "").toLowerCase()) return indexed;
+    if (input.substitution === true || !input.sku || String(indexed.sku || "").toLowerCase() === String(input.sku || "").toLowerCase()) return indexed;
   }
   const sku = String(input.sku || "").trim().toLowerCase();
   return sku ? lines.find((line) => String(line.sku || "").trim().toLowerCase() === sku) || null : null;
@@ -50953,6 +50958,12 @@ function purchaseOrderReceivingParticipants(audit = {}) {
 }
 
 function purchaseOrderReceivingLineMatch(auditLine = {}, expectedLine = {}) {
+  const assignedLineId = String(auditLine.receivingPurchaseOrderLineId || "").trim();
+  const expectedLineId = String(expectedLine.id || "").trim();
+  if (assignedLineId && expectedLineId && assignedLineId === expectedLineId) return true;
+  const assignedLineIndex = Number(auditLine.receivingPurchaseOrderLineIndex);
+  const expectedLineIndex = Number(expectedLine.lineIndex);
+  if (auditLine.receivingSubstitution === true && Number.isInteger(assignedLineIndex) && assignedLineIndex === expectedLineIndex) return true;
   const skuKeys = new Set([auditLine.sku, auditLine.selectedSupplierSku].flatMap(externalOperationalPoIdentifierKeys));
   if (externalOperationalPoIdentifierKeys(expectedLine.sku).some((key) => skuKeys.has(key))) return true;
   const vendorKeys = new Set([auditLine.selectedVendorSku, auditLine.vendorSku].flatMap(externalOperationalPoIdentifierKeys));
@@ -64192,6 +64203,55 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { audit, message: note ? "Item note saved." : "Item note cleared." });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "match-po-line" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const audit = await postgres.readWarehouseAudit(parts[2]);
+    if (!audit) return notFound(res);
+    if (audit.status !== "in_progress" || String(audit.reason || "") !== "purchase_order_receipt" || !audit.linkedPurchaseOrderId) {
+      return sendJson(res, 400, { error: "PO substitutions can be assigned only while a linked PO receipt is in progress." });
+    }
+    const lineKey = decodeURIComponent(parts[4]);
+    const line = (audit.lines || []).find((entry) => String(entry.id || `${entry.productId || entry.sku}::${entry.locationBin || ""}`) === lineKey);
+    if (!line) return sendJson(res, 404, { error: "The scanned audit item was not found." });
+    if (!(Number(line.countedQty || 0) > 0)) return sendJson(res, 400, { error: "Count this item before assigning it to a PO line." });
+    const expectedLineId = String(body.expectedLineId || "").trim();
+    const expectedLine = (audit.purchaseOrderExpectedLines || []).find((entry) => String(entry.id || "") === expectedLineId);
+    if (!expectedLine) return sendJson(res, 404, { error: "The selected open PO line is no longer available." });
+    const reason = String(body.reason || "").trim();
+    if (reason.length < 5 || reason.length > 500) return sendJson(res, 400, { error: "Enter a short reason for the supplier substitution." });
+    const inventoryMultiplier = Math.max(1, Number(expectedLine.inventoryMultiplier || 1));
+    const receivedPurchaseUnits = Math.floor(Number(line.countedQty || 0) / inventoryMultiplier);
+    if (receivedPurchaseUnits <= 0) return sendJson(res, 400, { error: `This PO line requires ${inventoryMultiplier} physical units per purchase unit.` });
+    if (receivedPurchaseUnits > Number(expectedLine.expectedQty || 0)) return sendJson(res, 409, { error: `Only ${Number(expectedLine.expectedQty || 0)} purchase unit(s) remain open on this PO line.` });
+    const now = new Date().toISOString();
+    const actor = warehouseReceivingActor(body, authUser);
+    Object.assign(line, purchaseOrderAuditSupplierSelection(audit, expectedLine, {}, {}, line, { now, actor }), {
+      receivingPurchaseOrderLineId: String(expectedLine.id || ""),
+      receivingPurchaseOrderLineIndex: Number(expectedLine.lineIndex),
+      receivingSubstitution: true,
+      receivingSubstitutionReason: reason,
+      receivingSubstitutionActualSku: String(line.sku || ""),
+      receivingSubstitutionExpectedSku: String(expectedLine.sku || ""),
+      receivingSubstitutionAt: now,
+      receivingSubstitutionBy: actor,
+      reviewStatus: "unreviewed"
+    });
+    audit.lifecycleEvents = [...(Array.isArray(audit.lifecycleEvents) ? audit.lifecycleEvents : []), {
+      type: "purchase_order_substitution_assigned",
+      at: now,
+      user: actor,
+      actualSku: String(line.sku || ""),
+      expectedSku: String(expectedLine.sku || ""),
+      expectedLineId: String(expectedLine.id || ""),
+      quantity: Number(line.countedQty || 0),
+      reason
+    }].slice(-250);
+    audit.updatedAt = now;
+    await postgres.saveWarehouseAudit(audit);
+    await syncPurchaseOrderReceivingProgress(audit);
+    return sendJson(res, 200, { audit, line, expectedLine, message: `${line.sku || "Scanned item"} assigned as a substitution for ${expectedLine.sku || "the PO line"}.` });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "count" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const audit = await postgres.readWarehouseAudit(parts[2]);
@@ -70094,6 +70154,18 @@ async function handleApi(req, res) {
     const workflowSettings = await readOrderWorkflowSettings();
     const vendor = findVendorById(db, po.vendorId) || findVendorByName(db, po.supplier);
     const receivedLines = Array.isArray(body.items) ? body.items : [];
+    for (const input of receivedLines.filter((line) => line.substitution === true)) {
+      const sourceLine = (sourceAudit?.lines || []).find((line) => String(line.id || line.productId || line.sku || "") === String(input.sourceAuditLineId || ""));
+      const assignedId = String(sourceLine?.receivingPurchaseOrderLineId || "");
+      const assignedIndex = Number(sourceLine?.receivingPurchaseOrderLineIndex);
+      const requestedIndex = Number(input.lineIndex);
+      if (!sourceLine || sourceLine.receivingSubstitution !== true || String(sourceLine.sku || "").toLowerCase() !== String(input.sku || "").toLowerCase()
+        || (assignedId && assignedId !== String(input.purchaseOrderLineId || ""))
+        || (!assignedId && (!Number.isInteger(assignedIndex) || assignedIndex !== requestedIndex))) {
+        return sendJson(res, 409, { error: "Refresh the PO receipt. Its supplier-substitution assignment changed before posting." });
+      }
+      if (!String(sourceLine.receivingSubstitutionReason || "").trim()) return sendJson(res, 409, { error: "A supplier-substitution reason is required before posting." });
+    }
     const receiptValidationError = validatePurchaseOrderReceiptLines(po, receivedLines);
     if (receiptValidationError) return sendJson(res, 400, { error: receiptValidationError });
     const extraExpectationRows = await postgres.findOpenPurchaseOrdersExpectingSkus(
@@ -70166,15 +70238,19 @@ async function handleApi(req, res) {
       const extraItem = line.extraItem === true;
       const poLine = findPurchaseOrderReceiptLine(po, line);
       if (!poLine && !extraItem) continue;
-      const sku = String(poLine?.sku || line.sku || "").trim();
+      const orderedSku = String(poLine?.sku || "").trim();
+      const substitution = line.substitution === true;
+      const sku = String(substitution ? line.sku : poLine?.sku || line.sku || "").trim();
       const unresolved = !extraItem && (!sku || poLine?.resolutionStatus === "unresolved");
       const product = unresolved ? null : await postgres.readProductByKey(sku);
       const inventoryMultiplier = product && !extraItem ? purchaseReceiptInventoryMultiplier(product) : 1;
       const inventoryQtyReceived = qtyReceived * inventoryMultiplier;
-      const varianceStatus = extraItem ? "extra_item" : String(line.varianceStatus || "none").toLowerCase();
+      const varianceStatus = extraItem ? "extra_item" : substitution ? "supplier_substitution" : String(line.varianceStatus || "none").toLowerCase();
       const varianceNote = extraItem
         ? String(line.varianceNote || `Not ordered on ${po.poNumber || "the selected PO"}.`).trim()
-        : String(line.varianceNote || "").trim();
+        : substitution
+          ? String(line.substitutionReason || line.varianceNote || "Supplier substitution received.").trim()
+          : String(line.varianceNote || "").trim();
       const locationBin = String(line.locationBin || defaultLocationBin || "").trim();
       const expectedPurchaseOrders = extraItem ? extraExpectationsBySku.get(sku.toLowerCase()) || [] : [];
       const providedSerials = Array.isArray(line.serials) ? line.serials : [];
@@ -70205,6 +70281,7 @@ async function handleApi(req, res) {
       }
       receipt.items.push({
         sku,
+        orderedSku,
         lineId: String(poLine?.id || ""),
         lineIndex: Number(line.lineIndex),
         sourceItemNumber: String(poLine?.sourceItemNumber || poLine?.vendorSku || ""),
@@ -70223,6 +70300,8 @@ async function handleApi(req, res) {
         orderedQty: Number(poLine?.qty || 0),
         receivedBefore: Number(poLine?.receivedQty || 0),
         extraItem,
+        substitution,
+        substitutionReason: substitution ? varianceNote : "",
         extraItemStatus: extraItem ? "unexpected_on_selected_po" : "",
         expectedPurchaseOrders,
         varianceStatus,
@@ -70300,7 +70379,7 @@ async function handleApi(req, res) {
         reservedBefore,
         reservedAfter: Number(warehouseStockRow?.reserved ?? product.reserved ?? 0),
         serials,
-        reason: `${note || `Received on ${po.poNumber}`}${extraItem ? ` / extra item not ordered on this PO${expectedPurchaseOrders.length ? `; expected on ${expectedPurchaseOrders.map((entry) => entry.purchaseOrderNumber).join(", ")}` : ""}` : ""}${inventoryMultiplier > 1 ? ` / ${qtyReceived} purchase unit${qtyReceived === 1 ? "" : "s"} = ${inventoryQtyReceived} pieces` : ""}${varianceStatus !== "none" ? ` / variance: ${varianceStatus}${varianceNote ? ` (${varianceNote})` : ""}` : ""}${locationBin ? ` / bin: ${locationBin}` : ""}`,
+        reason: `${note || `Received on ${po.poNumber}`}${extraItem ? ` / extra item not ordered on this PO${expectedPurchaseOrders.length ? `; expected on ${expectedPurchaseOrders.map((entry) => entry.purchaseOrderNumber).join(", ")}` : ""}` : ""}${substitution ? ` / ${sku} substituted for ordered SKU ${orderedSku}` : ""}${inventoryMultiplier > 1 ? ` / ${qtyReceived} purchase unit${qtyReceived === 1 ? "" : "s"} = ${inventoryQtyReceived} pieces` : ""}${varianceStatus !== "none" ? ` / variance: ${varianceStatus}${varianceNote ? ` (${varianceNote})` : ""}` : ""}${locationBin ? ` / bin: ${locationBin}` : ""}`,
         user: receivingUser
       });
       touchedProducts.push(product);

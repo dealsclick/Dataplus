@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react"
-import { Activity, AlertCircle, AlertTriangle, ArrowRight, Boxes, Camera, CheckCircle2, ChevronDown, Copy, Database, ExternalLink, Eye, FileDown, FileText, FileUp, Flashlight, Loader2, LockKeyhole, MessageSquare, MoreHorizontal, PackageCheck, Pencil, Play, Plus, Printer, RefreshCw, Save, ScanBarcode, ScanSearch, Search, Settings, Share2, ShoppingCart, Sparkles, Store, Trash2, Truck, Users, Warehouse, X } from "lucide-react"
+import { Activity, AlertCircle, AlertTriangle, ArrowRight, Boxes, Camera, CheckCircle2, ChevronDown, Copy, Database, ExternalLink, Eye, FileDown, FileText, FileUp, Flashlight, Link2, Loader2, LockKeyhole, MessageSquare, MoreHorizontal, PackageCheck, Pencil, Play, Plus, Printer, RefreshCw, Save, ScanBarcode, ScanSearch, Search, Settings, Share2, ShoppingCart, Sparkles, Store, Trash2, Truck, Users, Warehouse, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -1195,6 +1195,10 @@ function receivingIdentifierKeys(value: unknown) {
 }
 
 function receivingLineMatch(auditLine: Record<string, unknown>, poLine: Record<string, unknown>) {
+  const assignedLineId = String(auditLine.receivingPurchaseOrderLineId || "").trim();
+  if (assignedLineId && assignedLineId === String(poLine.id || "").trim()) return "substitution";
+  const assignedLineIndex = Number(auditLine.receivingPurchaseOrderLineIndex);
+  if (auditLine.receivingSubstitution === true && Number.isInteger(assignedLineIndex) && assignedLineIndex === Number(poLine.lineIndex)) return "substitution";
   const skuKeys = new Set([auditLine.sku, auditLine.selectedSupplierSku].flatMap(receivingIdentifierKeys));
   if (receivingIdentifierKeys(poLine.sku).some((key) => skuKeys.has(key))) return "sku";
   const vendorKeys = new Set([auditLine.selectedVendorSku, auditLine.vendorSku].flatMap(receivingIdentifierKeys));
@@ -1262,8 +1266,13 @@ function buildLinkedPurchaseOrderReceiptItems(
       }));
       items.push({
         lineIndex: Number(expected.lineIndex),
+        purchaseOrderLineId: String(expected.id || ""),
         routeId: String(expected.routeId || ""),
-        sku: String(expected.sku || line.sku || ""),
+        sku: line.receivingSubstitution === true ? String(line.sku || "") : String(expected.sku || line.sku || ""),
+        orderedSku: String(expected.sku || ""),
+        substitution: line.receivingSubstitution === true,
+        substitutionReason: String(line.receivingSubstitutionReason || ""),
+        sourceAuditLineId: String(line.id || line.productId || ""),
         qtyReceived,
         inventoryQtyReceived: physicalQtyReceived,
         inventoryMultiplier,
@@ -1433,6 +1442,10 @@ function WarehouseAuditPanel({
   const [countEditNote, setCountEditNote] = useState("");
   const [countEditBin, setCountEditBin] = useState("");
   const [countEditBusy, setCountEditBusy] = useState(false);
+  const [substitutionLine, setSubstitutionLine] = useState<Record<string, unknown> | null>(null);
+  const [substitutionExpectedLineId, setSubstitutionExpectedLineId] = useState("");
+  const [substitutionReason, setSubstitutionReason] = useState("Supplier sent a different catalog item for this PO line.");
+  const [substitutionBusy, setSubstitutionBusy] = useState(false);
   const [scannerSettings, setScannerSettings] = useState<SystemSettings>({});
   const [quickPreviewItem, setQuickPreviewItem] = useState<CatalogItem | null>(null);
   const [foundStockFileName, setFoundStockFileName] = useState("");
@@ -2594,6 +2607,31 @@ function WarehouseAuditPanel({
       setCountEditBusy(false);
     }
   };
+  const openSubstitutionMatch = (line: Record<string, unknown>) => {
+    setSubstitutionLine(line);
+    setSubstitutionExpectedLineId("");
+    setSubstitutionReason("Supplier sent a different catalog item for this PO line.");
+  };
+  const saveSubstitutionMatch = async () => {
+    if (!resumedAudit || !substitutionLine || !substitutionExpectedLineId || substitutionReason.trim().length < 5) {
+      toast.error("Choose the ordered PO line and enter a substitution reason.");
+      return;
+    }
+    setSubstitutionBusy(true);
+    try {
+      const result = await api<{ audit?: Record<string, unknown>; message?: string }>(
+        `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/lines/${encodeURIComponent(auditLineKey(substitutionLine))}/match-po-line`,
+        { method: "POST", body: JSON.stringify({ expectedLineId: substitutionExpectedLineId, reason: substitutionReason.trim(), user: operatorName }) },
+      );
+      applyAuditUpdate(result.audit || resumedAudit);
+      setSubstitutionLine(null);
+      toast.success(result.message || "Supplier substitution assigned to the PO line.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to assign the supplier substitution.");
+    } finally {
+      setSubstitutionBusy(false);
+    }
+  };
   const openPurposeEditor = () => {
     setPurposeDraft(String(resumedAudit?.reason || ""));
     setReceivingSupplier(String(resumedAudit?.supplierName || ""));
@@ -2666,7 +2704,7 @@ function WarehouseAuditPanel({
     };
     return { ...row, receivingPoLine: poLine, receivingPoLines: poLines, receivingMatchBasis: receivingLineMatch(row, poLines[0]) };
   });
-  const expectedOnlyItems = receivingExpectedLines.filter((line) => !matchedReceivingIds.has(String(line.id))).map((line) => ({ ...line, auditItemKind: "po_expected", receivingPoLine: line, receivingMatchBasis: "", barcode: line.upc, selectedVendorSku: line.vendorItemNumber, selectedManufacturerSku: line.manufacturerSku, title: line.description || line.title, countedQty: 0 }));
+  const expectedOnlyItems: Array<Record<string, unknown>> = receivingExpectedLines.filter((line) => !matchedReceivingIds.has(String(line.id))).map((line) => ({ ...line, auditItemKind: "po_expected", receivingPoLine: line, receivingMatchBasis: "", barcode: line.upc, selectedVendorSku: line.vendorItemNumber, selectedManufacturerSku: line.manufacturerSku, title: line.description || line.title, countedQty: 0 }));
   const sortedItems = sortWarehouseAuditRows([...receivingAuditItems, ...expectedOnlyItems], itemSort, true);
   const receivingScannedUnits = baseAuditItems.reduce((sum, line) => sum + Number(line.countedQty ?? line.count ?? 0), 0);
   const receivingMatchedLines = receivingAuditItems.filter((line) => Boolean(line.receivingPoLine)).length;
@@ -3557,9 +3595,9 @@ function WarehouseAuditPanel({
                     const rowCountedQty = Number(line.countedQty ?? line.count ?? 0);
                     const itemTitle = String(line.title || poLine?.description || poLine?.title || line.sku || line.barcode || "Product");
                     const recentPoMatches = Array.isArray(line.recentOpenPurchaseOrders) ? line.recentOpenPurchaseOrders as Array<Record<string, unknown>> : [];
-                    const poMatchBadge = poLine ? <Badge className="border-yellow-400 bg-yellow-100 text-yellow-950 dark:border-yellow-600 dark:bg-yellow-400/20 dark:text-yellow-100" variant="outline" title={line.receivingMatchBasis === "vendor_sku" ? "Matched by vendor SKU" : line.receivingMatchBasis === "upc" ? "Matched by UPC" : line.receivingMatchBasis === "sku" ? "Matched by catalog SKU" : "Expected from packing slip"}><CheckCircle2 className="mr-1 size-3" /> Yes</Badge> : isManualExternalReceipt && recentPoMatches.length > 0 ? <Badge className="border-blue-400 bg-blue-50 text-blue-800 dark:border-blue-700 dark:bg-blue-950/40 dark:text-blue-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Found</Badge> : isLinkedPurchaseOrderReceipt && rowCountedQty > 0 ? <Badge className="border-amber-400 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline"><AlertTriangle className="mr-1 size-3" /> Extra item</Badge> : <span className="text-xs text-muted-foreground">No</span>;
+                    const poMatchBadge = poLine ? <Badge className="border-yellow-400 bg-yellow-100 text-yellow-950 dark:border-yellow-600 dark:bg-yellow-400/20 dark:text-yellow-100" variant="outline" title={line.receivingMatchBasis === "substitution" ? "Supplier substitution assigned to this PO line" : line.receivingMatchBasis === "vendor_sku" ? "Matched by vendor SKU" : line.receivingMatchBasis === "upc" ? "Matched by UPC" : line.receivingMatchBasis === "sku" ? "Matched by catalog SKU" : "Expected from packing slip"}><CheckCircle2 className="mr-1 size-3" />{line.receivingMatchBasis === "substitution" ? "Substitution" : "Yes"}</Badge> : isManualExternalReceipt && recentPoMatches.length > 0 ? <Badge className="border-blue-400 bg-blue-50 text-blue-800 dark:border-blue-700 dark:bg-blue-950/40 dark:text-blue-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Found</Badge> : isLinkedPurchaseOrderReceipt && rowCountedQty > 0 ? <Badge className="border-amber-400 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline"><AlertTriangle className="mr-1 size-3" /> Extra item</Badge> : <span className="text-xs text-muted-foreground">No</span>;
                     const poReference = poLine ? <a className="font-mono text-xs font-medium text-primary hover:underline" href={purchaseOrderUrl(poNumber, current?.linkedPurchaseOrderId || poLine.purchaseOrderId)} target="_blank" rel="noreferrer">{poNumber || "Open PO"}</a> : recentPoMatches.length > 0 ? <div className="flex min-w-40 flex-wrap gap-1">{recentPoMatches.map((purchaseOrder) => <a key={String(purchaseOrder.purchaseOrderId)} href={purchaseOrderUrl(purchaseOrder.purchaseOrderNumber, purchaseOrder.purchaseOrderId)} target="_blank" rel="noreferrer" title={`${String(purchaseOrder.supplier || "Supplier")} · ${numberLabel(Number(purchaseOrder.remainingQty || 0))} open`}><Badge variant="secondary" className="hover:bg-muted">{String(purchaseOrder.purchaseOrderNumber || "Open PO")}<ExternalLink className="ml-1 size-3" /></Badge></a>)}</div> : <span className="text-xs text-muted-foreground">-</span>;
-                    const poStatusBadge = poLine ? rowCountedQty === expectedQty ? <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Matched</Badge> : <Badge variant="destructive">Variance {rowCountedQty - expectedQty > 0 ? "+" : ""}{numberLabel(rowCountedQty - expectedQty)}</Badge> : isLinkedPurchaseOrderReceipt && rowCountedQty > 0 ? <Badge className="border-amber-400 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Extra item</Badge> : null;
+                    const poStatusBadge = poLine ? rowCountedQty === expectedQty ? <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" />{line.receivingMatchBasis === "substitution" ? "Substitution matched" : "Matched"}</Badge> : <Badge variant="destructive">Variance {rowCountedQty - expectedQty > 0 ? "+" : ""}{numberLabel(rowCountedQty - expectedQty)}</Badge> : isLinkedPurchaseOrderReceipt && rowCountedQty > 0 ? <Badge className="border-amber-400 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Extra item</Badge> : null;
                     if (line.auditItemKind === "po_expected") {
                       return (<TableRow className="bg-yellow-50/50 dark:bg-yellow-400/5" key={`po-expected-${String(line.id)}`}>
                         <TableCell className="warehouse-audit-product-image"><span className="grid size-8 place-items-center rounded-full border border-yellow-400 bg-yellow-100 text-yellow-800 dark:border-yellow-700 dark:bg-yellow-400/15 dark:text-yellow-200"><FileText className="size-4" /></span></TableCell>
@@ -3613,7 +3651,7 @@ function WarehouseAuditPanel({
                       </TableCell>
                     </TableRow>);
                     }
-                    const workingSku = String(line.selectedSupplierSku || line.sku || "");
+                    const workingSku = String(line.receivingSubstitution === true ? line.sku : line.selectedSupplierSku || line.sku || "");
                     const catalogSku = String(line.sku || "");
                     return (
                     <TableRow className={line.quickCreated ? "bg-amber-50/50 dark:bg-amber-400/5" : ""} key={`${String(line.productId || line.sku)}-${String(line.locationBin || "")}`}>
@@ -3621,11 +3659,11 @@ function WarehouseAuditPanel({
                         {String(line.image || "") ? <button type="button" className="relative block size-10 overflow-hidden rounded-md border bg-muted" title="Open product image" data-no-image-preview onClick={() => setItemImage({ src: String(line.image), title: String(line.title || line.sku || "Item photo") })}><img src={String(line.image)} alt={String(line.sku || "Catalog item")} className="size-full object-cover" /><span className="absolute -bottom-0.5 -right-0.5 grid size-4 place-items-center rounded-full bg-emerald-600 text-white shadow"><CheckCircle2 className="size-3" /></span></button> : <span className="grid size-8 place-items-center rounded-full border border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300" title="Catalog item matched"><CheckCircle2 className="size-4" /></span>}
                       </TableCell>
                       <TableCell className="warehouse-audit-product-title max-w-80"><p data-testid="receiving-item-title" className="truncate font-medium" title={itemTitle}>{itemTitle}</p></TableCell>
-                      <TableCell className="warehouse-audit-upc font-mono text-xs">{String(line.selectedSupplierUpc || line.barcode || line.upc || "-")}</TableCell>
+                      <TableCell className="warehouse-audit-upc font-mono text-xs">{String(line.receivingSubstitution === true ? line.barcode || line.upc : line.selectedSupplierUpc || line.barcode || line.upc || "-")}</TableCell>
                       <TableCell className="warehouse-audit-working-sku font-medium">
                         {workingSku ? (
                           <div className="min-w-32"><a className="inline-flex min-h-11 items-center font-mono font-medium text-primary underline underline-offset-4" href={`/products/${encodeURIComponent(catalogSku || workingSku)}`} target="_blank" rel="noreferrer" title={`Open ${workingSku} product details`}>{workingSku}</a><Button size="icon" variant="ghost" aria-label={`Quick view ${workingSku}`} onClick={() => setQuickPreviewItem({ sku: workingSku, title: String(line.title || workingSku), defaultImage: String(line.image || "") })} title={`Preview ${workingSku}`}><Eye className="size-3.5" /></Button>{catalogSku && workingSku !== catalogSku && <p className="mt-0.5 text-xs text-muted-foreground">Matched from: {catalogSku}</p>}</div>
-                        ) : "-"}
+                        ) : "-"}{line.receivingSubstitution === true && <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">Replaces ordered SKU {String(line.receivingSubstitutionExpectedSku || "")}</p>}
                       </TableCell>
                       <TableCell>{isLinkedPurchaseOrderReceipt ? <div className="min-w-32"><Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" />{String(line.selectedSupplierName || current.supplierName || "PO supplier")}</Badge><p className="mt-1 text-xs text-muted-foreground">Inherited from PO</p></div> : <AuditSupplierCell auditId={String(current?.id || "")} auditStatus={auditStatus} line={line} onLineUpdate={applyAuditLineUpdate} />}</TableCell>
                       <TableCell className="warehouse-audit-secondary font-mono text-xs">{String(line.selectedVendorSku || "-")}</TableCell>
@@ -3641,7 +3679,7 @@ function WarehouseAuditPanel({
                           {auditStatus === "in_progress" && <Button size="icon" variant="ghost" className="size-7" title="Edit audit item" onClick={() => openCountEdit(line)}><Pencil className="size-3.5" /></Button>}
                         </div>
                       </TableCell>
-                      <TableCell className="text-right"><div className="flex flex-wrap items-center justify-end gap-1">{itemNoteButton(line)}{line.quickCreated ? <Badge variant="warning">Needs product details</Badge> : null}{!isLinkedPurchaseOrderReceipt && Number(line.supplierCount || 0) >= 2 && !String(line.selectedSupplierName || "").trim() && <Badge className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Supplier needed</Badge>}{poStatusBadge || <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Counted</Badge>}</div></TableCell>
+                      <TableCell className="text-right"><div className="flex flex-wrap items-center justify-end gap-1">{itemNoteButton(line)}{isLinkedPurchaseOrderReceipt && !poLine && rowCountedQty > 0 && auditStatus === "in_progress" ? <Button size="sm" variant="outline" onClick={() => openSubstitutionMatch(line)}><Link2 className="size-4" /> Match to PO line</Button> : null}{line.quickCreated ? <Badge variant="warning">Needs product details</Badge> : null}{!isLinkedPurchaseOrderReceipt && Number(line.supplierCount || 0) >= 2 && !String(line.selectedSupplierName || "").trim() && <Badge className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Supplier needed</Badge>}{poStatusBadge || <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Counted</Badge>}</div></TableCell>
                     </TableRow>
                     );
                   })}
@@ -3703,6 +3741,26 @@ function WarehouseAuditPanel({
                   <Field label="Reason"><Textarea value={countEditNote} onChange={(event) => setCountEditNote(event.target.value)} placeholder="Example: carton was scanned twice" /></Field>
                 </div>
                 <DialogFooter><Button variant="outline" onClick={() => setCountEditLine(null)}>Cancel</Button><Button disabled={countEditBusy} onClick={() => void saveCountEdit()}>{countEditBusy && <Loader2 className="size-4 animate-spin" />} Save item</Button></DialogFooter>
+              </DialogContent>
+            </Dialog>
+            <Dialog open={Boolean(substitutionLine)} onOpenChange={(open) => { if (!open && !substitutionBusy) setSubstitutionLine(null); }}>
+              <DialogContent className="max-h-[100dvh] overflow-y-auto rounded-none sm:max-h-[90dvh] sm:max-w-xl sm:rounded-lg">
+                <DialogHeader>
+                  <DialogTitle>Match supplier substitution</DialogTitle>
+                  <DialogDescription>Use this only when the supplier sent a different catalog item instead of an ordered PO line. DataPlus will stock the scanned SKU and credit the selected ordered line.</DialogDescription>
+                </DialogHeader>
+                <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Catalog products stay separate</AlertTitle><AlertDescription>The UPCs and package descriptions will not be merged. This link applies only to this receipt and is saved in the PO history.</AlertDescription></Alert>
+                <div className="grid gap-4">
+                  <div className="rounded-md border bg-muted/30 p-3 text-sm"><p className="font-medium">Received: {String(substitutionLine?.title || substitutionLine?.sku || "Scanned item")}</p><p className="mt-1 font-mono text-xs text-muted-foreground">{String(substitutionLine?.sku || "-")} · UPC {String(substitutionLine?.barcode || substitutionLine?.upc || "-")} · {numberLabel(Number(substitutionLine?.countedQty || 0))} counted</p></div>
+                  <Field label="Ordered PO line">
+                    <Select value={substitutionExpectedLineId} disabled={substitutionBusy} onValueChange={setSubstitutionExpectedLineId}>
+                      <SelectTrigger className="w-full min-w-0"><SelectValue placeholder="Choose the item this replaces" /></SelectTrigger>
+                      <SelectContent>{expectedOnlyItems.map((line) => <SelectItem key={String(line.id)} value={String(line.id)}>{String(line.title || line.description || line.sku)} · {numberLabel(Number(line.expectedQty || 0))} open</SelectItem>)}</SelectContent>
+                    </Select>
+                  </Field>
+                  <Field label="Substitution reason"><Textarea value={substitutionReason} maxLength={500} disabled={substitutionBusy} onChange={(event) => setSubstitutionReason(event.target.value)} placeholder="Example: Supplier replaced the discontinued package size" /></Field>
+                </div>
+                <DialogFooter className="sticky bottom-0 bg-background pb-[max(0.25rem,env(safe-area-inset-bottom))]"><Button variant="outline" disabled={substitutionBusy} onClick={() => setSubstitutionLine(null)}>Cancel</Button><Button disabled={substitutionBusy || !substitutionExpectedLineId || substitutionReason.trim().length < 5} onClick={() => void saveSubstitutionMatch()}>{substitutionBusy ? <Loader2 className="size-4 animate-spin" /> : <Link2 className="size-4" />} Match substitution</Button></DialogFooter>
               </DialogContent>
             </Dialog>
           </>
