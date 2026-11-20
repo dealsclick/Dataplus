@@ -221,8 +221,11 @@ async function main() {
   assert.equal(tiktokMarketplaceSource.includes('order_list_ids'), true, 'TikTok combined label creation must submit every member order ID.');
   assert.equal(tiktokMarketplaceSource.includes('split_and_combine_tag'), true, 'TikTok package evidence must retain the platform split/combine status.');
   assert.equal(tiktokMarketplaceSource.includes('index += 50'), true, 'TikTok order detail hydration must respect the 50-order API limit.');
-  assert.equal(tiktokMarketplaceSource.includes("document_type: 'SHIPPING_LABEL'"), true, 'TikTok label retrieval must request the required shipping document type.');
-  assert.equal(tiktokMarketplaceSource.includes("document_size: 'A6'"), true, 'TikTok shipping labels must request the warehouse A6 format.');
+  assert.equal(tiktokMarketplaceSource.includes('document_type: documentType'), true, 'TikTok document retrieval must send the reviewed shipping document type.');
+  assert.equal(tiktokMarketplaceSource.includes("'SHIPPING_LABEL_AND_PACKING_SLIP'"), true, 'TikTok package retrieval must support the combined label and packing-slip packet.');
+  assert.equal(tiktokMarketplaceSource.includes("'PACKING_SLIP'"), true, 'TikTok package retrieval must support the platform packing slip.');
+  assert.equal(tiktokMarketplaceSource.includes("'SHIPPING_LABEL_PICTURE'"), true, 'TikTok package retrieval must support PNG shipping labels.');
+  assert.equal(tiktokMarketplaceSource.includes("'HAZMAT_LABEL'"), true, 'TikTok package retrieval must support fixed-size hazmat labels.');
   assert.equal(tiktokMarketplaceSource.includes('fulfillmentOrder, fulfillmentServices, previewPackage, createPackage, shippingDocument'), true, 'TikTok fulfillment must expose the complete order-to-label workflow.');
   assert.equal(tiktokMarketplaceSource.includes("status: Number(match?.matched || 0) > 0 ? 'linked' : 'needs_mapping'"), true, 'TikTok catalog reconciliation must expose unmatched seller SKUs for review.');
   assert.equal(tiktokMarketplaceSource.includes("action === 'setup/initial'"), true, 'TikTok must expose the initial setup endpoint.');
@@ -242,10 +245,12 @@ async function main() {
   assert.equal(tiktokLabelDialogSource.includes('/api/tiktok/fulfillment/services'), true, 'TikTok label generation must quote eligible services dynamically.');
   assert.equal(tiktokLabelDialogSource.includes('/api/tiktok/fulfillment/packages/preview'), true, 'TikTok label generation must require a preview before purchase.');
   assert.equal(tiktokLabelDialogSource.includes('/api/tiktok/fulfillment/packages/apply'), true, 'TikTok label generation must use the reviewed package purchase endpoint.');
-  assert.equal(tiktokLabelDialogSource.includes('Open and print label'), true, 'TikTok labels must be printable from the order workflow.');
+  assert.equal(tiktokLabelDialogSource.includes('Open and print document'), true, 'TikTok package documents must be printable from the order workflow.');
   assert.equal(tiktokLabelDialogSource.includes('TIKTOK_DEFAULT_PACKAGE = { weight: "3", length: "5", width: "5", height: "10" }'), true, 'TikTok labels must start with the approved temporary package defaults.');
   assert.equal(tiktokLabelDialogSource.includes('/api/inventory/${encodeURIComponent(sku)}'), true, 'TikTok labels must load package measurements from the detected catalog SKU.');
   assert.equal(tiktokLabelDialogSource.includes('Catalog SKU ${match.sku}'), true, 'TikTok labels must show when catalog measurements supplied the package defaults.');
+  assert.equal(tiktokLabelDialogSource.includes('TikTok package documents'), true, 'Existing TikTok packages must expose every supported document type.');
+  assert.equal(tiktokLabelDialogSource.includes('Shipping label + packing slip'), true, 'TikTok package documents must default to a warehouse-ready combined packet.');
   assert.equal(tiktokLabelDialogSource.includes('Combined TikTok shipment'), true, 'TikTok label generation must identify a platform-approved combined shipment.');
   assert.equal(tiktokLabelDialogSource.includes('Arrange and purchase shared label'), true, 'Combined TikTok orders must use one explicit shared-label action.');
   const orderDetailSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'order-detail-route.tsx'), 'utf8');

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
-import { ExternalLink, Loader2, PackageCheck, Printer, RefreshCw, ShieldCheck, Truck } from "lucide-react"
+import { ExternalLink, FileText, Loader2, PackageCheck, Printer, RefreshCw, ShieldCheck, Truck } from "lucide-react"
 import { toast } from "sonner"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -14,6 +14,17 @@ import { api, moneyLabel } from "../lib/client-api"
 type Json = Record<string, any>
 
 const TIKTOK_DEFAULT_PACKAGE = { weight: "3", length: "5", width: "5", height: "10" }
+const TIKTOK_DOCUMENT_OPTIONS = [
+  { value: "SHIPPING_LABEL_AND_PACKING_SLIP", label: "Shipping label + packing slip", description: "One PDF packet from TikTok" },
+  { value: "SHIPPING_LABEL", label: "Shipping label", description: "Carrier label PDF only" },
+  { value: "PACKING_SLIP", label: "Packing slip", description: "TikTok packing slip PDF only" },
+  { value: "SHIPPING_LABEL_PICTURE", label: "Shipping label picture", description: "PNG label image" },
+  { value: "HAZMAT_LABEL", label: "Hazmat label", description: "A4 PDF for hazardous items only" },
+] as const
+
+function tiktokDocumentLabel(value: string) {
+  return TIKTOK_DOCUMENT_OPTIONS.find((option) => option.value === value)?.label || "TikTok package document"
+}
 
 function object(value: unknown): Json {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Json : {}
@@ -91,6 +102,8 @@ export function TikTokShippingLabelDialog({
   const [preview, setPreview] = useState<Json | null>(null)
   const [createdPackageId, setCreatedPackageId] = useState("")
   const [document, setDocument] = useState<Json | null>(null)
+  const [documentType, setDocumentType] = useState("SHIPPING_LABEL_AND_PACKING_SLIP")
+  const [documentSize, setDocumentSize] = useState("A6")
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
@@ -119,6 +132,8 @@ export function TikTokShippingLabelDialog({
     setPreview(null)
     setCreatedPackageId("")
     setDocument(null)
+    setDocumentType("SHIPPING_LABEL_AND_PACKING_SLIP")
+    setDocumentSize("A6")
     setError("")
     if (!accountId || !orderId) {
       setDetail(null)
@@ -218,10 +233,11 @@ export function TikTokShippingLabelDialog({
     setBusy(true)
     setError("")
     try {
-      const response = await api<Json>(`/api/tiktok/fulfillment/packages/${encodeURIComponent(packageId)}/document?accountId=${encodeURIComponent(accountId)}`)
+      const query = new URLSearchParams({ accountId, documentType, documentSize })
+      const response = await api<Json>(`/api/tiktok/fulfillment/packages/${encodeURIComponent(packageId)}/document?${query}`)
       setCreatedPackageId(packageId)
-      setDocument(response.data || {})
-      if (!response.data?.doc_url) setError("TikTok created the package, but the label document is not ready yet. Retry Get label in a moment.")
+      setDocument({ ...(response.data || {}), documentType: response.documentType || documentType, documentSize: response.documentSize || documentSize, documentFormat: response.documentFormat || "PDF" })
+      if (!response.data?.doc_url) setError(`TikTok did not return the ${tiktokDocumentLabel(documentType).toLowerCase()} yet. Retry in a moment.`)
     } catch (documentError) {
       setError(documentError instanceof Error ? documentError.message : "Unable to retrieve the TikTok label document.")
     } finally {
@@ -242,7 +258,7 @@ export function TikTokShippingLabelDialog({
       if (!packageId) throw new Error("TikTok accepted the label request but did not return a package ID. Reconcile the order in TikTok Shop before retrying.")
       setCreatedPackageId(packageId)
       setPreview(null)
-      toast.success("TikTok Shipping label purchased.")
+      toast.success("TikTok Shipping label purchased. Preparing package documents.")
       await retrieveDocument(packageId)
       await onUpdated?.()
     } catch (purchaseError) {
@@ -252,7 +268,7 @@ export function TikTokShippingLabelDialog({
     }
   }
 
-  const openLabel = () => {
+  const openDocument = () => {
     const url = String(document?.doc_url || "")
     if (url) window.open(url, "_blank", "noopener,noreferrer")
   }
@@ -284,8 +300,13 @@ export function TikTokShippingLabelDialog({
         </Alert> : null}
 
         {packageIds.length ? <section className="grid gap-2 rounded-md border p-3">
-          <div><p className="text-sm font-semibold">Existing TikTok package</p><p className="text-xs text-muted-foreground">This order already has a package. Retrieve its label without purchasing another one.</p></div>
-          <div className="flex flex-wrap gap-2">{packageIds.map((packageId) => <Button key={packageId} variant="outline" disabled={busy} onClick={() => void retrieveDocument(packageId)}><RefreshCw className="size-4" /> Get label {packageId}</Button>)}</div>
+          <div><p className="text-sm font-semibold">TikTok package documents</p><p className="text-xs text-muted-foreground">This order already has a package. Download TikTok's label, packing slip, combined packet, picture label, or hazmat label without purchasing another shipment.</p></div>
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_8rem]">
+            <div className="grid gap-1.5"><Label htmlFor="tiktok-document-type">Document</Label><Select value={documentType} onValueChange={(value) => { setDocumentType(value); setDocument(null) }}><SelectTrigger id="tiktok-document-type"><SelectValue /></SelectTrigger><SelectContent>{TIKTOK_DOCUMENT_OPTIONS.map((option) => <SelectItem key={option.value} value={option.value}><span className="flex flex-col"><span>{option.label}</span><span className="text-xs text-muted-foreground">{option.description}</span></span></SelectItem>)}</SelectContent></Select></div>
+            <div className="grid gap-1.5"><Label htmlFor="tiktok-document-size">PDF size</Label><Select disabled={["SHIPPING_LABEL_PICTURE", "HAZMAT_LABEL"].includes(documentType)} value={documentSize} onValueChange={(value) => { setDocumentSize(value); setDocument(null) }}><SelectTrigger id="tiktok-document-size"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="A6">A6</SelectItem><SelectItem value="A5">A5</SelectItem></SelectContent></Select></div>
+          </div>
+          {documentType === "HAZMAT_LABEL" ? <Alert className="border-amber-500/40 bg-amber-500/5"><FileText className="size-4" /><AlertTitle>Hazardous items only</AlertTitle><AlertDescription>TikTok fixes this document at A4. Request it only when the package contains a TikTok-recognized hazardous item.</AlertDescription></Alert> : null}
+          <div className="grid gap-2">{packageIds.map((packageId) => <div key={packageId} className="flex min-w-0 flex-col gap-2 rounded-md border bg-muted/20 p-2 sm:flex-row sm:items-center sm:justify-between"><span className="min-w-0 break-all font-mono text-xs text-muted-foreground">Package {packageId}</span><Button className="shrink-0" variant="outline" disabled={busy} onClick={() => void retrieveDocument(packageId)}>{busy ? <Loader2 className="size-4 animate-spin" /> : <FileText className="size-4" />} Get document</Button></div>)}</div>
         </section> : null}
 
         {detail.labelEligible && !packageIds.length ? <>
@@ -312,7 +333,7 @@ export function TikTokShippingLabelDialog({
 
         {!detail.labelEligible ? <Alert><Truck className="size-4" /><AlertTitle>TikTok does not provide this label</AlertTitle><AlertDescription>This order uses {String(detail.shippingType || "seller")} shipping. Use the universal carrier label action and send its tracking number back to TikTok.</AlertDescription></Alert> : null}
 
-        {document?.doc_url ? <Alert className="border-emerald-500/40 bg-emerald-500/5"><Printer className="size-4" /><AlertTitle>Label ready</AlertTitle><AlertDescription className="grid gap-3"><span>{document.tracking_number ? `Tracking ${String(document.tracking_number)}. ` : ""}TikTok label links expire, so print or save it now.</span><Button className="w-fit" onClick={openLabel}><ExternalLink className="size-4" /> Open and print label</Button></AlertDescription></Alert> : null}
+        {document?.doc_url ? <Alert className="border-emerald-500/40 bg-emerald-500/5"><Printer className="size-4" /><AlertTitle>{tiktokDocumentLabel(String(document.documentType || documentType))} ready</AlertTitle><AlertDescription className="grid gap-3"><span>{document.tracking_number ? `Tracking ${String(document.tracking_number)}. ` : ""}TikTok document links expire after 24 hours, so print or save this {String(document.documentFormat || "PDF")} now.</span><Button className="w-fit" onClick={openDocument}><ExternalLink className="size-4" /> Open and print document</Button></AlertDescription></Alert> : null}
       </div> : null}
 
       <DialogFooter><Button variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>Close</Button></DialogFooter>
