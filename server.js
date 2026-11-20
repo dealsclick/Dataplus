@@ -39817,6 +39817,26 @@ function importedOrderLineLookupValues(importedSku = "", line = {}) {
   };
 }
 
+function orderLineWithDiscoveredProductIdentity(line = {}, product = {}) {
+  if (!product) return line;
+  const identifiers = Array.isArray(product.orderIdentifiers) ? product.orderIdentifiers : [];
+  const current = importedOrderLineLookupValues("", line);
+  const discoveredUpc = [
+    product.barcode, product.upc, product.gtin, product.upcCode,
+    ...identifiers.filter((entry) => /upc|gtin|barcode|ean/i.test(String(entry.type || ""))).map((entry) => entry.value)
+  ].map((value) => String(value || "").trim()).find(Boolean);
+  const discoveredMpn = [
+    product.mfrPartNumber, product.manufacturerPartNumber, product.mpn,
+    ...identifiers.filter((entry) => /manufacturer|mpn/i.test(String(entry.type || ""))).map((entry) => entry.value)
+  ].map((value) => String(value || "").trim()).find(Boolean);
+  if ((!discoveredUpc || current.upcs.length) && (!discoveredMpn || current.manufacturerSkus.length)) return line;
+  return {
+    ...line,
+    ...(!current.upcs.length && discoveredUpc ? { upc: discoveredUpc } : {}),
+    ...(!current.manufacturerSkus.length && discoveredMpn ? { mfrPartNumber: discoveredMpn } : {})
+  };
+}
+
 function importedOrderLineLookupKey(importedSku = "", line = {}) {
   const values = importedOrderLineLookupValues(importedSku, line);
   return [
@@ -39928,16 +39948,32 @@ async function ensureProductsForImportedOrders(db = {}, orders = [], options = {
     const values = importedOrderLineLookupValues(entry.sku, entry.line);
     return [...values.upcs, ...values.manufacturerSkus, ...values.supplierSkus];
   }))];
-  const existing = await postgres.readProductsForOrderSkus(productLookupValues, { fast: true });
+  const initialProducts = await postgres.readProductsForOrderSkus(productLookupValues, { fast: true });
+  const seedByImportedSku = new Map();
+  const discoveredLookupValues = new Set();
+  for (const [key, entry] of firstLineBySku) {
+    const seed = selectImportedOrderProduct(db, initialProducts, entry.sku, entry.line);
+    if (!seed) continue;
+    const effectiveLine = orderLineWithDiscoveredProductIdentity(entry.line, seed.product);
+    seedByImportedSku.set(key, { seed, effectiveLine });
+    const values = importedOrderLineLookupValues(entry.sku, effectiveLine);
+    for (const value of [...values.upcs, ...values.manufacturerSkus]) discoveredLookupValues.add(value);
+  }
+  const expandedProducts = discoveredLookupValues.size
+    ? await postgres.readProductsForOrderSkus([...discoveredLookupValues], { fast: true })
+    : [];
+  const existing = [...initialProducts, ...expandedProducts]
+    .filter((product, index, all) => product?.id && all.findIndex((candidate) => String(candidate.id || "") === String(product.id || "")) === index);
   const resolved = new Set();
   const selectedByImportedSku = new Map();
   for (const [key, entry] of firstLineBySku) {
-    const selected = selectImportedOrderProduct(db, existing, entry.sku, entry.line);
+    const effectiveLine = seedByImportedSku.get(key)?.effectiveLine || entry.line;
+    const selected = selectImportedOrderProduct(db, existing, entry.sku, effectiveLine);
     if (!selected) continue;
     const family = (existing || [])
-      .map((product) => ({ product, match: importedOrderProductMatch(product, entry.sku, entry.line) }))
+      .map((product) => ({ product, match: importedOrderProductMatch(product, entry.sku, effectiveLine) }))
       .filter((candidate) => candidate.match);
-    selectedByImportedSku.set(key, { ...selected, family });
+    selectedByImportedSku.set(key, { ...selected, family, effectiveLine });
     resolved.add(key);
   }
   const touchedOrders = new Set();
@@ -39948,7 +39984,7 @@ async function ensureProductsForImportedOrders(db = {}, orders = [], options = {
       const selected = selectedByImportedSku.get(importedOrderLineLookupKey(importedSku, line));
       if (!selected) continue;
       const product = selected.product;
-      const lookupValues = importedOrderLineLookupValues(importedSku, line);
+      const lookupValues = importedOrderLineLookupValues(importedSku, selected.effectiveLine || line);
       const importedIdentity = selected.match.mode === "upc"
         ? (lookupValues.upcs[0] || importedSku || "catalog identifier")
         : selected.match.mode === "manufacturer-part-number"
@@ -42557,12 +42593,12 @@ async function fulfillmentProductFamilyForOrderedSku(importedSku = "", db = {}, 
   const orderedSku = String(importedSku || "").trim();
   if (!orderedSku) return { product: null, products: [], match: null, similarity: null };
   const lineLookupValues = importedOrderLineLookupValues(orderedSku, line);
-  const candidates = await postgres.readProductsForOrderSkus([...new Set([
+  let candidates = await postgres.readProductsForOrderSkus([...new Set([
     ...lineLookupValues.upcs,
     ...lineLookupValues.manufacturerSkus,
     ...lineLookupValues.supplierSkus
   ])], { fast: true });
-  const selected = selectImportedOrderProduct(db, candidates, orderedSku, line);
+  let selected = selectImportedOrderProduct(db, candidates, orderedSku, line);
   let product = selected ? await postgres.readProductByKey(selected.product.id || selected.product.sku) : null;
   if (!product) {
     const direct = await postgres.readProductByKey(orderedSku);
@@ -42581,6 +42617,19 @@ async function fulfillmentProductFamilyForOrderedSku(importedSku = "", db = {}, 
     }
   }
   if (!product) return { product: null, products: [], match: selected?.match || null, similarity: null };
+  const effectiveLine = orderLineWithDiscoveredProductIdentity(line, product);
+  const discoveredValues = importedOrderLineLookupValues(orderedSku, effectiveLine);
+  const expanded = await postgres.readProductsForOrderSkus([...new Set([
+    ...discoveredValues.upcs,
+    ...discoveredValues.manufacturerSkus
+  ])], { fast: true });
+  candidates = [...candidates, ...expanded]
+    .filter((candidate, index, all) => candidate?.id && all.findIndex((member) => String(member.id || "") === String(candidate.id || "")) === index);
+  const expandedSelection = selectImportedOrderProduct(db, candidates, orderedSku, effectiveLine);
+  if (expandedSelection) {
+    selected = expandedSelection;
+    product = await postgres.readProductByKey(expandedSelection.product.id || expandedSelection.product.sku) || product;
+  }
   const similarity = await postgres.readProductSimilarityGroup({ productId: product.id, sku: product.sku }).catch(() => null);
   const familyKeys = [...new Set([
     product.id,
@@ -42601,13 +42650,14 @@ async function fulfillmentProductFamilyForOrderedSku(importedSku = "", db = {}, 
   const similarityMembers = new Map((similarity?.members || []).map((member) => [String(member.productId || ""), member]));
   const primaryMatch = String(line.catalogIdentityMatch?.productId || "") === String(primary.id || "")
     ? line.catalogIdentityMatch
-    : selected?.match || importedOrderProductMatch(primary, orderedSku, line);
+    : selected?.match || importedOrderProductMatch(primary, orderedSku, effectiveLine);
   const identityMatches = new Map();
   for (const member of products.length ? products : [primary]) {
     const saved = savedFamilyMatches.get(String(member.id || ""));
     const similarityMember = similarityMembers.get(String(member.id || ""));
     const match = saved
       || (String(member.id || "") === String(primary.id || "") ? primaryMatch : null)
+      || importedOrderProductMatch(member, orderedSku, effectiveLine)
       || (similarityMember ? { mode: similarityMember.matchType, matchTypes: similarityMember.matchTypes } : null)
       || { mode: "supplier-sku" };
     identityMatches.set(String(member.id || ""), { ...match, priority: orderIdentityPriority(match) });
@@ -85268,6 +85318,7 @@ module.exports = {
   splitPurchaseOrderIntoDropshipPos,
   consolidateDropshipPurchaseOrders,
   importedOrderProductMatch,
+  orderLineWithDiscoveredProductIdentity,
   selectImportedOrderProduct,
   orderIdentityPriority,
   supplierSourcingPriority,

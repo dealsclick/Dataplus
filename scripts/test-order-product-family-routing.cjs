@@ -7,6 +7,7 @@ const postgres = require("../db");
 const {
   familyProductsForWarehouse,
   importedOrderProductMatch,
+  orderLineWithDiscoveredProductIdentity,
   orderIdentityPriority,
   outboundInventoryAvailableQuantity,
   outboundInventoryProductForWarehouse,
@@ -137,6 +138,33 @@ test("TikTok title MPN can match a catalog SKU when the separate MPN field is em
   const selected = selectImportedOrderProduct({}, [shortChannelSku, stockedManufacturerSku], "4", line);
   assert.equal(selected.product.id, "mpn-as-sku");
   assert.equal(selected.match.mode, "manufacturer-part-number");
+});
+
+test("supplier SKU lookup inherits UPC and MPN before choosing physical family stock", () => {
+  const trueValueSeed = {
+    id: "true-value-seed",
+    sku: "BUS252246TRV",
+    supplier: "True Value",
+    barcode: "045242358823",
+    mfrPartNumber: "48-22-7400",
+    warehouseStock: [],
+  };
+  const physicalSibling = {
+    id: "physical-sibling",
+    sku: "48-22-7400",
+    supplier: "Do It Best",
+    barcode: "045242358823",
+    mfrPartNumber: "48-22-7400",
+    warehouseStock: [{ warehouseId: "si2", warehouseName: "Staten Island 2", qty: 3, reserved: 0 }],
+  };
+  const importedLine = { title: "Milwaukee Adjustable Wrench Set" };
+  const discoveredLine = orderLineWithDiscoveredProductIdentity(importedLine, trueValueSeed);
+
+  assert.equal(discoveredLine.upc, "045242358823");
+  assert.equal(discoveredLine.mfrPartNumber, "48-22-7400");
+  const selected = selectImportedOrderProduct({}, [trueValueSeed, physicalSibling], "BUS252246TRV", discoveredLine);
+  assert.equal(selected.product.id, "physical-sibling");
+  assert.equal(selected.match.mode, "upc");
 });
 
 test("supplier priority is used when no MPN match has physical stock", () => {
