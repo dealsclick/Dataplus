@@ -61989,7 +61989,9 @@ async function handleApi(req, res) {
     }
     const remoteStatus = String(studio.room?.status || "").toUpperCase();
     const remoteLive = ["LIVE", "ONGOING", "STARTED"].includes(remoteStatus);
-    const trackedRoom = Boolean(studio.room?.liveId) && Boolean(target.tiktokStudio?.liveId) && String(target.tiktokStudio.liveId) === String(studio.room.liveId);
+    const exactSavedRoom = Boolean(studio.room?.liveId) && Boolean(target.tiktokStudio?.liveId) && String(target.tiktokStudio.liveId) === String(studio.room.liveId);
+    const trackedRoom = exactSavedRoom && (Boolean(target.tiktokStudio?.trackingStartedAt) || String(target.status || "") === "live");
+    const staleUntrustedRoom = exactSavedRoom && !trackedRoom && !remoteLive;
     const remoteEnded = trackedRoom && ["ENDED", "FINISHED", "CLOSED", "COMPLETED"].includes(remoteStatus);
     const endingGraceMs = 5 * 60 * 1000;
     const existingEndedAt = Date.parse(String(target.tiktokStudio?.endedDetectedAt || ""));
@@ -62008,7 +62010,8 @@ async function handleApi(req, res) {
         orderSync = { error: error.message || "TikTok order synchronization could not be queued." };
       }
     }
-    const nextStudio = studio.room ? {
+    const shouldTrackRoom = Boolean(studio.room) && (remoteLive || trackedRoom);
+    const nextStudio = shouldTrackRoom ? {
       liveId: String(studio.room.liveId || ""),
       title: String(studio.room.title || ""),
       status: remoteStatus || "UNKNOWN",
@@ -62016,6 +62019,7 @@ async function handleApi(req, res) {
       endTime: studio.room.endTime || "",
       creatorId: target.tiktokCreatorId,
       creatorName: studio.creator?.username || target.tiktokCreatorName || "",
+      trackingStartedAt: target.tiktokStudio?.trackingStartedAt || studio.fetchedAt,
       lastSeenAt: studio.fetchedAt,
       endedDetectedAt: target.tiktokStudio?.endedDetectedAt || (shouldBeginFinalization ? studio.fetchedAt : ""),
       finalizeAfter: target.tiktokStudio?.finalizeAfter || (shouldBeginFinalization ? new Date(Date.now() + endingGraceMs).toISOString() : ""),
@@ -62023,14 +62027,14 @@ async function handleApi(req, res) {
       orderSyncJobId: target.tiktokStudio?.orderSyncJobId || orderSync?.job?.id || "",
       orderSyncJobNumber: target.tiktokStudio?.orderSyncJobNumber || orderSync?.job?.jobNumber || "",
       orderSyncError: orderSync?.error || target.tiktokStudio?.orderSyncError || ""
-    } : target.tiktokStudio || null;
-    const meaningfulChange = Boolean(nextStudio) && (
+    } : staleUntrustedRoom ? null : target.tiktokStudio || null;
+    const meaningfulChange = staleUntrustedRoom || (Boolean(nextStudio) && (
       String(target.tiktokStudio?.liveId || "") !== String(nextStudio.liveId || "")
       || String(target.tiktokStudio?.status || "") !== String(nextStudio.status || "")
       || (remoteLive && String(target.status || "") !== "live")
       || shouldBeginFinalization
       || shouldFinalize
-    );
+    ));
     let session = target;
     let finalReconciled = false;
     if (meaningfulChange) {
@@ -62071,7 +62075,7 @@ async function handleApi(req, res) {
       finalReconciled = shouldFinalize;
     }
     const sessionOrderIds = new Set((session.items || []).flatMap((item) => item.linkedOrderIds || []).map(String));
-    const roomId = String(studio.room?.liveId || session.tiktokStudio?.liveId || "");
+    const roomId = String(session.tiktokStudio?.liveId || "");
     const feedStart = new Date(session.startedAt || session.scheduledStartAt || session.createdAt || Date.now());
     const recentLiveOrders = await postgres.listOrders({ channel: "tiktok_live", dateFrom: new Date(feedStart.getTime() - 86_400_000).toISOString().slice(0, 10), includeOpenWork: true, limit: 5000 });
     const relatedOrders = recentLiveOrders.filter((order) => {
@@ -62079,7 +62083,11 @@ async function handleApi(req, res) {
       const contentIds = [...(order.tiktokLive?.contentIds || []), ...(order.external?.tiktokLive?.contentIds || []), ...(order.items || []).map((item) => item.tiktokLiveContentId)].map(String);
       return Boolean(roomId && contentIds.includes(roomId));
     });
-    const orderFeed = relatedOrders.map((order) => ({
+    const orderFeedTotal = relatedOrders.length;
+    const orderFeed = relatedOrders
+      .sort((left, right) => Date.parse(String(right.createdAt || right.orderDate || "")) - Date.parse(String(left.createdAt || left.orderDate || "")))
+      .slice(0, 100)
+      .map((order) => ({
       id: order.id,
       orderNumber: order.orderNumber || order.displayOrderNumber,
       marketplaceOrderId: order.marketplaceOrderId || order.externalOrderId || order.external?.orderId || "",
@@ -62087,11 +62095,13 @@ async function handleApi(req, res) {
       createdAt: order.createdAt || order.orderDate || "",
       shippedAt: order.shippedAt || "",
       items: (order.items || []).map((item) => ({ sku: item.sku || item.catalogSku || "", title: item.title || "", quantity: Number(item.quantity || item.qty || 0) }))
-    }));
+      }));
+    const responseTrackedRoom = Boolean(studio.room?.liveId) && String(session.tiktokStudio?.liveId || "") === String(studio.room.liveId);
     return sendJson(res, 200, {
-      studio,
+      studio: { ...studio, tracked: responseTrackedRoom },
       session,
       orderFeed,
+      orderFeedTotal,
       finalReconciled,
       finalization: nextStudio?.finalizationStatus ? { status: nextStudio.finalizationStatus, finalizeAfter: nextStudio.finalizeAfter || "", orderSyncJobId: nextStudio.orderSyncJobId || "", error: nextStudio.orderSyncError || "" } : null,
       message: finalReconciled ? "TikTok ended the tracked LIVE room. DataPlus reconciled sales, completed the session, and released unused inventory." : shouldBeginFinalization ? "TikTok ended the LIVE room. A fresh order sync is running before DataPlus releases unused inventory." : studio.message
@@ -62574,6 +62584,9 @@ async function handleApi(req, res) {
     if (!target) return notFound(res);
     if (normalizeLiveInventoryChannel(target.channel) !== "tiktok_live") return sendJson(res, 409, { error: "DataPlus Studio is available for TikTok Live sessions." });
     if (liveSessionLedger.sessionIsTerminal(target)) return sendJson(res, 409, { error: "This live session is already closed." });
+    if (!String(target.tiktokStudio?.liveId || "").trim() || (!target.tiktokStudio?.trackingStartedAt && String(target.status || "") !== "live")) {
+      return sendJson(res, 409, { error: "DataPlus has not tracked an active TikTok LIVE room for this session. Start the broadcast and open Studio before running final reconciliation." });
+    }
     let queued = null;
     try {
       queued = await getTikTokMarketplace().queue("orders", { accountId: target.channelAccountId, lookbackDays: 2, reconcileExisting: true, actor: `user:studio-finalize:${target.sessionNumber || target.id}` });
@@ -62602,6 +62615,9 @@ async function handleApi(req, res) {
     if (!target) return notFound(res);
     if (normalizeLiveInventoryChannel(target.channel) !== "tiktok_live") return sendJson(res, 409, { error: "DataPlus Studio is available for TikTok Live sessions." });
     const liveId = String(body.liveId || target.tiktokStudio?.liveId || "").trim();
+    if (!liveId || liveId !== String(target.tiktokStudio?.liveId || "").trim()) {
+      return sendJson(res, 409, { error: "This TikTok LIVE room is not the active room tracked for the session." });
+    }
     let result;
     try {
       result = await getTikTokMarketplace().studioProductAction({
