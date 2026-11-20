@@ -17,6 +17,10 @@ assert.match(marketplace, /\/analytics\/202609\/shop_lives\/performance/, 'Studi
 assert.match(marketplace, /sort_field: 'live_attributed_gmv'/, 'Studio should use a supported 202609 LIVE sort field');
 assert.match(marketplace, /requestedLiveId \? requestedRoom : activeRoom/, 'A tracked room must not fall back to another historical broadcast');
 assert.match(marketplace, /studioProductAction/, 'Studio should expose product controls');
+assert.match(marketplace, /creatorTrayAccessMessage/, 'Studio should distinguish token scopes from app-level endpoint approval');
+assert.match(marketplace, /reconnecting alone will not fix it/, 'Studio should explain an app-level TikTok permission denial');
+assert.match(route, /app_permission_required/, 'Studio should expose an app-permission-specific state');
+assert.match(route, /!studioTrayControlsReady/, 'Studio should disable product controls when TikTok denies tray access');
 assert.match(server, /parts\[3\] === "studio"/, 'Server should expose the session Studio route');
 assert.match(server, /remoteEnded[\s\S]*reconcileLiveSessions/, 'A tracked room ending should reconcile sales');
 assert.match(server, /endingGraceMs = 5 \* 60 \* 1000/, 'Studio should allow late TikTok orders to import before releasing inventory');
