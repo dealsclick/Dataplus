@@ -24691,12 +24691,11 @@ function getTikTokMarketplace() {
       return base ? `${base}/api/webhooks/tiktok` : '';
     },
     canManageCredentials: user => userCan(user, 'channels.settings', 'credentials'),
-    findActive: async (task, accountId = '') => {
-      const jobs = await postgres.readOperationJobs(500).catch(() => []);
-      return jobs.find(job => ['queued', 'running'].includes(String(job.status || '').toLowerCase())
-        && String(job.workerTask || job.raw?.workerTask || '') === String(task || '')
-        && String(job.workerPayload?.accountId || job.raw?.workerPayload?.accountId || '') === String(accountId || '')) || null;
-    },
+    findActive: (task, accountId = '', options = {}) => postgres.readActiveOperationJobByTask({
+      workerTask: task,
+      accountId,
+      historicalBackfill: typeof options.historicalBackfill === 'boolean' ? options.historicalBackfill : null
+    }).catch(() => null),
     createJob: async attrs => {
       const db = await readDbFast({ skipInventory: true, skipOrders: true, skipPurchaseOrders: true });
       const job = createImportJob(db, attrs);

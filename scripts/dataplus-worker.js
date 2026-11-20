@@ -2883,6 +2883,10 @@ async function main() {
     for (const job of recovered) {
       console.warn(`[${WORKER_ID}] requeued interrupted TikTok order job ${job.jobId} from ${job.previousWorkerId || "the previous worker"} (recovery ${job.recoveryCount}).`);
     }
+    const compacted = await postgres.compactQueuedTikTokOrderJobs();
+    for (const group of compacted.filter((entry) => entry.duplicateJobIds.length)) {
+      console.warn(`[${WORKER_ID}] consolidated ${group.duplicateJobIds.length + 1} TikTok order jobs into ${group.keeperJobId}; ${group.historicalBackfill ? "historical" : "current"} range ${group.startDate} through ${group.endDate}.`);
+    }
   }
   await writeHeartbeat("starting", null, true);
   console.log(`[${WORKER_ID}] started. Supported tasks: ${SUPPORTED_TASKS.join(", ")}`);

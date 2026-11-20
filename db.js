@@ -16567,6 +16567,33 @@ async function readOperationJobs(limit = 250) {
   return hydrateOperationJobArtifacts(client, jobs);
 }
 
+async function readActiveOperationJobByTask({ workerTask = "", accountId = "", historicalBackfill = null } = {}) {
+  const client = getPool();
+  const task = nullableString(workerTask);
+  if (!client || !task) return null;
+  await initRelationalSchema();
+  const result = await client.query(`
+    select
+      job_id, job_number, job_type, category, status, name, message, total_rows, processed_rows,
+      changed_rows, missing_rows, progress, eta_seconds, source, output_path,
+      error_path, created_at, started_at, ended_at, updated_at, raw
+    from operations_jobs
+    where lower(status) in ('queued', 'running')
+      and coalesce(raw ->> 'workerTask', '') = $1
+      and coalesce(raw -> 'workerPayload' ->> 'accountId', '') = $2
+      and (
+        $3::boolean is null
+        or (lower(coalesce(raw -> 'workerPayload' ->> 'historicalBackfill', 'false')) = 'true') = $3::boolean
+      )
+    order by
+      case when lower(status) = 'running' then 0 else 1 end,
+      coalesce(updated_at, created_at) desc,
+      job_id
+    limit 1
+  `, [task, nullableString(accountId) || "", typeof historicalBackfill === "boolean" ? historicalBackfill : null]);
+  return result.rows[0] ? operationJobFromRow(result.rows[0]) : null;
+}
+
 async function readExpiredOperationJobArtifactBatch(options = {}) {
   const client = getPool();
   if (!client) return [];
@@ -16874,6 +16901,99 @@ async function recoverInterruptedTikTokOrderJobs({ workerId = "" } = {}) {
     previousWorkerId: row.previous_worker_id || "",
     recoveryCount: Number(row.recovery_count || 0)
   }));
+}
+
+async function compactQueuedTikTokOrderJobs() {
+  const pool = getPool();
+  if (!pool) return [];
+  await initRelationalSchema();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("select pg_advisory_xact_lock(hashtext('dataplus-tiktok-order-queue-compaction'))");
+    const result = await client.query(`
+      select job_id, job_number, created_at, raw
+      from operations_jobs
+      where lower(status) = 'queued'
+        and coalesce(raw ->> 'workerTask', '') = 'tiktok-orders'
+      order by created_at desc, job_id
+      for update
+    `);
+    const groups = new Map();
+    for (const row of result.rows) {
+      const payload = row.raw?.workerPayload && typeof row.raw.workerPayload === "object" ? row.raw.workerPayload : {};
+      const historical = payload.historicalBackfill === true || String(payload.historicalBackfill || "").toLowerCase() === "true";
+      const key = `${String(payload.accountId || "").trim()}\u0000${historical ? "history" : "operational"}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push({ ...row, payload, historical });
+    }
+
+    const compacted = [];
+    for (const jobs of groups.values()) {
+      if (!jobs.length) continue;
+      const keeper = jobs[0];
+      const validStarts = jobs.map((job) => Date.parse(job.payload.startDate || "")).filter(Number.isFinite);
+      const validEnds = jobs.map((job) => Date.parse(job.payload.endDate || "")).filter(Number.isFinite);
+      const startDate = validStarts.length ? new Date(Math.min(...validStarts)).toISOString() : String(keeper.payload.startDate || "");
+      const endDate = validEnds.length ? new Date(Math.max(...validEnds)).toISOString() : String(keeper.payload.endDate || "");
+      const duplicateIds = jobs.slice(1).map((job) => job.job_id);
+      const message = duplicateIds.length
+        ? `TikTok order intake consolidated ${jobs.length} queued requests; current orders will be processed first.`
+        : "TikTok order intake is queued with current orders prioritized.";
+      await client.query(`
+        update operations_jobs
+        set
+          message = $2,
+          updated_at = now(),
+          raw = coalesce(raw, '{}'::jsonb) || jsonb_build_object(
+            'message', $2::text,
+            'queuePriority', greatest(
+              case when coalesce(raw ->> 'queuePriority', '') ~ '^-?[0-9]+$' then (raw ->> 'queuePriority')::int else 0 end,
+              $3::int
+            ),
+            'workerPayload', coalesce(raw -> 'workerPayload', '{}'::jsonb) || jsonb_build_object(
+              'startDate', $4::text,
+              'endDate', $5::text,
+              'reconcileExisting', true,
+              'queueCompactedAt', to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+            )
+          )
+        where job_id = $1
+      `, [keeper.job_id, message, keeper.historical ? 100 : 130, startDate, endDate]);
+      if (duplicateIds.length) {
+        await client.query(`
+          update operations_jobs
+          set
+            status = 'stopped',
+            message = $2,
+            ended_at = now(),
+            updated_at = now(),
+            raw = coalesce(raw, '{}'::jsonb) || jsonb_build_object(
+              'status', 'stopped',
+              'phase', 'deduplicated',
+              'message', $2::text,
+              'finishedAt', to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+              'deduplicatedIntoJobId', $3::text
+            )
+          where job_id = any($1::text[])
+        `, [duplicateIds, `Consolidated into TikTok order job ${keeper.job_number || keeper.job_id}.`, keeper.job_id]);
+      }
+      compacted.push({
+        keeperJobId: keeper.job_id,
+        duplicateJobIds: duplicateIds,
+        historicalBackfill: keeper.historical,
+        startDate,
+        endDate
+      });
+    }
+    await client.query("commit");
+    return compacted;
+  } catch (error) {
+    await client.query("rollback").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 const BACKUP_CORE_TABLES = [
@@ -22553,10 +22673,12 @@ module.exports = {
   readStateArrayItem,
   readStateArrayItems,
   mutateStateArrayItem,
+  readActiveOperationJobByTask,
   claimFulfillmentPrintJob,
   replaceStateArrayItem,
   claimQueuedOperationJob,
   recoverInterruptedTikTokOrderJobs,
+  compactQueuedTikTokOrderJobs,
   createPostgresBackup,
   readChannelApiLogs,
   pruneChannelApiLogs,

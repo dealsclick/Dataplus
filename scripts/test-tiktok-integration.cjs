@@ -53,6 +53,8 @@ async function main() {
   });
   const marketplaceSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'tiktok-marketplace.js'), 'utf8');
   assert.match(marketplaceSource, /sort_field: 'update_time', sort_order: 'DESC'/, 'TikTok order intake should prioritize current updates');
+  assert.match(marketplaceSource, /if \(payload\.historicalBackfill !== true\) windows\.reverse\(\)/, 'Operational TikTok imports should process the newest date window first');
+  assert.match(marketplaceSource, /queuePriority: operation === 'orders'.*130/, 'Operational TikTok imports should outrank reconciliation work');
 
   const signature = tiktokSignature('/order/202309/orders/search', {
     timestamp: '1700000000',
@@ -191,6 +193,12 @@ async function main() {
   assert.equal(liveSessionsSource.includes('Streamer showcase'), true, 'TikTok Live Session creation must select the official streamer showcase.');
   assert.equal(liveSessionsSource.includes('tiktokCreatorId'), true, 'TikTok Live Sessions must persist the selected official account.');
   const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const activeJobDatabaseSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
+  const activeJobWorkerSource = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'dataplus-worker.js'), 'utf8');
+  assert.match(serverSource, /readActiveOperationJobByTask/, 'TikTok queue deduplication must query every active job instead of a recent page');
+  assert.match(activeJobDatabaseSource, /async function compactQueuedTikTokOrderJobs/, 'The database layer must consolidate duplicate queued TikTok order imports');
+  assert.match(activeJobDatabaseSource, /historicalBackfill = null/, 'Historical TikTok backfills must not block live operational imports');
+  assert.match(activeJobWorkerSource, /compactQueuedTikTokOrderJobs/, 'The TikTok worker must compact recovered jobs before claiming work');
   assert.match(serverSource, /!historicalBackfill && \(!existing \|\| titleIdentityNeedsRepair\)\) await ensureProductsForImportedOrders/, 'Existing TikTok refreshes must preserve catalog mapping except for the explicit title-identity repair path');
   assert.equal(serverSource.includes('parts[3] === "tiktok-live" && parts[4] === "sync"'), true, 'The server must expose a TikTok Live Session sync route.');
   assert.equal(tiktokChannelSource.includes('Shop code'), true, 'TikTok settings must display the selected shop code.');
