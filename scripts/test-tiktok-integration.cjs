@@ -52,7 +52,9 @@ async function main() {
     source: 'main_category'
   });
   const marketplaceSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'tiktok-marketplace.js'), 'utf8');
+  const clientSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'tiktok-client.js'), 'utf8');
   assert.match(marketplaceSource, /sort_field: 'update_time', sort_order: 'DESC'/, 'TikTok order intake should prioritize current updates');
+  assert.match(clientSource, /options\.retryable !== false/, 'TikTok callers must be able to disable retries for optional enrichment reads');
   assert.match(marketplaceSource, /if \(payload\.historicalBackfill !== true\) windows\.reverse\(\)/, 'Operational TikTok imports should process the newest date window first');
   assert.match(marketplaceSource, /queuePriority: operation === 'orders'.*130/, 'Operational TikTok imports should outrank reconciliation work');
 
@@ -224,6 +226,7 @@ async function main() {
   assert.equal(tiktokMarketplaceSource.includes("const canAdvance = failed === 0"), true, 'TikTok order checkpoints must not advance past failed order rows.');
   assert.equal(tiktokMarketplaceSource.includes("'/order/202507/orders'"), true, 'TikTok order imports must hydrate current full order details.');
   assert.equal(tiktokMarketplaceSource.includes('/fulfillment/202309/packages/'), true, 'TikTok combined orders must hydrate package membership from Get Package Detail.');
+  assert.match(tiktokMarketplaceSource, /retryable: false,\s+timeoutMs: 10_000/, 'Optional combined-package evidence must not stall order intake behind upstream retries');
   assert.equal(tiktokMarketplaceSource.includes("'/fulfillment/202309/combinable_packages/search'"), true, 'TikTok label creation must discover the platform-approved combined order group.');
   assert.equal(tiktokMarketplaceSource.includes("shipType === '3'"), true, 'TikTok label preview must validate combined multi-order packages.');
   assert.equal(tiktokMarketplaceSource.includes('order_list_ids'), true, 'TikTok combined label creation must submit every member order ID.');
