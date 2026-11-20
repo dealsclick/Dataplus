@@ -1099,6 +1099,7 @@ export function FulfillmentPage() {
   const [purchasedChannelSyncFilter, setPurchasedChannelSyncFilter] = useState("all")
   const [printBatchPickerOpen, setPrintBatchPickerOpen] = useState(false)
   const [printBatchPickerLoading, setPrintBatchPickerLoading] = useState(false)
+  const [printBatchPickerData, setPrintBatchPickerData] = useState<{ batches: Array<Record<string, any>>; printQueue: Array<Record<string, any>> } | null>(null)
   const [printBatchSearch, setPrintBatchSearch] = useState("")
   const doNotShipFilter = "all"
   const [consolidationOrder, setConsolidationOrder] = useState<Record<string, any> | null>(null)
@@ -1186,6 +1187,8 @@ export function FulfillmentPage() {
   const allBatches = Array.isArray(data.batches) ? data.batches as Array<Record<string, any>> : []
   const batches = allBatches.filter((batch) => String(batch.phase || "rates") === "purchase" || Number(batch.counts?.purchased || 0) > 0)
   const printQueue = Array.isArray(data.printQueue) ? data.printQueue as Array<Record<string, any>> : []
+  const batchPickerBatches = printBatchPickerData?.batches || allBatches
+  const batchPickerPrintQueue = printBatchPickerData?.printQueue || printQueue
   const isPrintedJob = (row: Record<string, any>) => row.status === "printed" || row.deliveryStatus === "printed" || Boolean(row.printedAt)
   const unprintedPrintQueue = printQueue.filter((row) => row.kind !== "test_page" && !isPrintedJob(row))
   const printStations = Array.isArray(data.printStations) ? data.printStations as Array<Record<string, any>> : []
@@ -1248,8 +1251,8 @@ export function FulfillmentPage() {
       related.push(shipment)
       shipmentsByPrintJob.set(printJobId, related)
     }
-    const batchesById = new Map(allBatches.map((batch) => [String(batch.id || ""), batch]))
-    const printEntries: Array<Record<string, any> & { searchText: string; pickerStatus: string; printable: boolean }> = printQueue
+    const batchesById = new Map(batchPickerBatches.map((batch) => [String(batch.id || ""), batch]))
+    const printEntries: Array<Record<string, any> & { searchText: string; pickerStatus: string; printable: boolean }> = batchPickerPrintQueue
       .filter((job) => job.kind !== "test_page")
       .map((job) => {
         const relatedShipments = shipmentsByPrintJob.get(String(job.id || "")) || []
@@ -1278,7 +1281,7 @@ export function FulfillmentPage() {
         return { ...job, ...orderTypeIndicators, warehouseStatus: String(batch?.warehouseStatus || "open"), batchRecord: batch, searchText, pickerStatus, printable } as Record<string, any> & { searchText: string; pickerStatus: string; printable: boolean }
       })
     const queuedBatchIds = new Set(printEntries.map((entry) => String(entry.batchId || "")).filter(Boolean))
-    const pendingEntries: Array<Record<string, any> & { searchText: string; pickerStatus: string; printable: boolean }> = allBatches.filter((batch) => !queuedBatchIds.has(String(batch.id || ""))).map((batch) => {
+    const pendingEntries: Array<Record<string, any> & { searchText: string; pickerStatus: string; printable: boolean }> = batchPickerBatches.filter((batch) => !queuedBatchIds.has(String(batch.id || ""))).map((batch) => {
       const rows = Array.isArray(batch.rows) ? batch.rows as Array<Record<string, any>> : []
       const customers = [...new Set(rows.map((row) => String(row.customer || row.customerName || row.destination?.name || "").trim()).filter(Boolean))]
       const skus = [...new Set(rows.flatMap((row) => (Array.isArray(row.skus) ? row.skus : [row.sku, row.catalogSku, row.parentSku, row.selectedSku]).map((value) => String(value || "").trim()).filter(Boolean)))]
@@ -1299,7 +1302,7 @@ export function FulfillmentPage() {
     })
     return [...printEntries, ...pendingEntries]
       .sort((left, right) => new Date(String(right.createdAt || right.updatedAt || 0)).getTime() - new Date(String(left.createdAt || left.updatedAt || 0)).getTime())
-  }, [allBatches, printQueue, shipments])
+  }, [batchPickerBatches, batchPickerPrintQueue, shipments])
   const filteredBatchPickerEntries = batchPickerEntries.filter((job) => job.searchText.includes(printBatchSearch.trim().toLowerCase()))
   const shippedQueue = activeShipments.filter((row) => ["in_transit", "delivered"].includes(String(row.trackingStatus || "").toLowerCase()))
   const displayedShippedQueue = shippedQueue.filter((row) => matchesFulfillmentSalesType(row, salesTypeFilter) && matchesFulfillmentDeadlineFilter(row, deadlineFilter) && matchesFulfillmentSearch(row, query))
@@ -1407,22 +1410,9 @@ export function FulfillmentPage() {
     setPrintBatchPickerLoading(true)
     try {
       const result = await api<Record<string, any>>("/api/fulfillment/shipping-batches?page=1&pageSize=100")
-      setData((current) => {
-        const mergeById = (preferred: unknown, existing: unknown, idField: string) => {
-          const seen = new Set<string>()
-          return [...(Array.isArray(preferred) ? preferred : []), ...(Array.isArray(existing) ? existing : [])]
-            .filter((record: Record<string, any>) => {
-              const id = String(record?.[idField] || record?.id || "").trim()
-              if (!id || seen.has(id)) return false
-              seen.add(id)
-              return true
-            })
-        }
-        return {
-          ...current,
-          batches: mergeById(result.batches, current.batches, "id"),
-          printQueue: mergeById(result.printQueue, current.printQueue, "id"),
-        }
+      setPrintBatchPickerData({
+        batches: Array.isArray(result.batches) ? result.batches : [],
+        printQueue: Array.isArray(result.printQueue) ? result.printQueue : [],
       })
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to refresh shipping batches.")

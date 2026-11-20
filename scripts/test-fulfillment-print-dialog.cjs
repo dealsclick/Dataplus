@@ -45,5 +45,12 @@ assert.match(printHandler, /frame\.remove\(\)/, "the temporary print frame must 
 assert.match(printHandler, /\/printed`/, "browser printing must retain durable print and channel activity recording");
 assert.match(app, /refreshPrintBatchPicker[\s\S]*\/api\/fulfillment\/shipping-batches\?page=1&pageSize=100/, "the print-batch picker must refresh from live batch storage when opened");
 assert.match(app, /if \(open\) void refreshPrintBatchPicker\(\)/, "opening the print-batch picker must refresh recent batches instead of relying on cached fulfillment data");
+const pickerRefreshStart = app.indexOf("const refreshPrintBatchPicker = async () =>");
+const pickerRefreshEnd = app.indexOf("const loadConsolidationCartonization", pickerRefreshStart);
+assert.ok(pickerRefreshStart >= 0 && pickerRefreshEnd > pickerRefreshStart, "the live print-batch refresh must remain discoverable");
+const pickerRefresh = app.slice(pickerRefreshStart, pickerRefreshEnd);
+assert.match(pickerRefresh, /setPrintBatchPickerData\(/, "live batch results must be stored separately from the fulfillment page snapshot");
+assert.doesNotMatch(pickerRefresh, /setData\(/, "a background fulfillment refresh must not overwrite the print picker's live batch results");
+assert.match(app, /const batchPickerBatches = printBatchPickerData\?\.batches \|\| allBatches/, "the batch picker must prefer its authoritative live response");
 
 console.log("PASS fulfillment label dialog stays compact and lazy-loads packet previews");
