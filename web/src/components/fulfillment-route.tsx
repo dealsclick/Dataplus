@@ -2841,9 +2841,17 @@ export function FulfillmentPage() {
         const suggestedCluster = !shipmentGroupId && packageRows.some((row) => Boolean(fulfillmentSuggestedClusterKey(row)))
         if (suggestedCluster) {
           const owner = fulfillmentPackageOwnerRows(packageRows)[0] || packageRows[0]
+          const ownerOrderId = String(owner.orderId || owner.orderNumber || "").trim()
+          const knownClusterOrderIds = packageRows
+            .flatMap((row) => fulfillmentSuggestedClusterOrderIds(row))
+            .map((orderId) => String(orderId || "").trim())
+            .filter((orderId) => orderId && orderId !== ownerOrderId)
           const candidateResult = await api<{ eligible?: boolean; reason?: string; candidates?: Array<Record<string, any>> }>(`/api/orders/${encodeURIComponent(String(owner.orderId || ""))}/shipment-group-candidates`)
           if (candidateResult.eligible === false) throw new Error(candidateResult.reason || `${String(owner.orderNumber || owner.orderId)} is no longer eligible for a combined shipment.`)
-          const candidateOrderIds = [...new Set((candidateResult.candidates || []).map((candidate) => String(candidate.id || candidate.orderId || "").trim()).filter(Boolean))]
+          const candidateOrderIds = [...new Set([
+            ...knownClusterOrderIds,
+            ...(candidateResult.candidates || []).map((candidate) => String(candidate.id || candidate.orderId || "").trim()),
+          ].filter(Boolean))]
           if (!candidateOrderIds.length) throw new Error(`${String(owner.orderNumber || owner.orderId)} no longer has matching orders to combine.`)
           const result = await api<{ groupId?: string; primaryOrderId?: string; orders?: Array<Record<string, any>>; projectionUpdated?: boolean }>(`/api/orders/${encodeURIComponent(String(owner.orderId || ""))}/shipment-group`, {
             method: "POST",

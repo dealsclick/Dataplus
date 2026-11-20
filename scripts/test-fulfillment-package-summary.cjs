@@ -72,6 +72,8 @@ test("eligible shipment candidates render as one suggested cluster until dimensi
   assert.match(appSource, /"Suggested combination"/);
   assert.match(appSource, /Final combined package required/);
   assert.match(appSource, /shipment-group-candidates/);
+  assert.match(appSource, /const knownClusterOrderIds = packageRows[\s\S]{0,300}fulfillmentSuggestedClusterOrderIds\(row\)/);
+  assert.match(appSource, /const candidateOrderIds = \[\.\.\.new Set\(\[[\s\S]{0,180}\.\.\.knownClusterOrderIds[\s\S]{0,180}candidateResult\.candidates/);
   assert.match(appSource, /body: JSON\.stringify\(\{ orderIds: candidateOrderIds, \.\.\.packageValues, user: "Luis" \}\)/);
   assert.match(appSource, /!key\.startsWith\("suggested:"\)/);
 });
