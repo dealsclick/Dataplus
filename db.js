@@ -17010,7 +17010,7 @@ async function compactQueuedTikTokOrderJobs() {
         end
       )
       where lower(status) = 'stopping'
-        and coalesce(raw ->> 'workerTask', '') in ('tiktok-orders', 'tiktok-returns')
+        and coalesce(raw ->> 'workerTask', '') in ('tiktok-orders', 'tiktok-returns', 'tiktok-webhook')
     `);
     const result = await client.query(`
       select job_id, job_number, created_at, raw
@@ -17019,7 +17019,7 @@ async function compactQueuedTikTokOrderJobs() {
         and coalesce(raw ->> 'workerTask', '') = any($1::text[])
       order by created_at desc, job_id
       for update
-    `, [['tiktok-orders', 'tiktok-returns']]);
+    `, [['tiktok-orders', 'tiktok-returns', 'tiktok-webhook']]);
     const groups = new Map();
     for (const row of result.rows) {
       const payload = row.raw?.workerPayload && typeof row.raw.workerPayload === "object" ? row.raw.workerPayload : {};
@@ -17039,10 +17039,16 @@ async function compactQueuedTikTokOrderJobs() {
       const startDate = validStarts.length ? new Date(Math.min(...validStarts)).toISOString() : String(keeper.payload.startDate || "");
       const endDate = validEnds.length ? new Date(Math.max(...validEnds)).toISOString() : String(keeper.payload.endDate || "");
       const duplicateIds = jobs.slice(1).map((job) => job.job_id);
-      const taskLabel = keeper.workerTask === 'tiktok-returns' ? 'return reconciliation' : 'order intake';
+      const taskLabel = keeper.workerTask === 'tiktok-webhook'
+        ? 'webhook reconciliation'
+        : keeper.workerTask === 'tiktok-returns' ? 'return reconciliation' : 'order intake';
       const message = duplicateIds.length
         ? `TikTok ${taskLabel} consolidated ${jobs.length} queued requests; current work will be processed first.`
         : `TikTok ${taskLabel} is queued with current work prioritized.`;
+      const queuePriority = keeper.workerTask === 'tiktok-webhook' ? 140 : keeper.historical ? 100 : 130;
+      const mergedPayload = keeper.workerTask === 'tiktok-webhook'
+        ? { eventIds: [], reconcileExisting: true, queueCompactedAt: new Date().toISOString() }
+        : { startDate, endDate, reconcileExisting: true, queueCompactedAt: new Date().toISOString() };
       await client.query(`
         update operations_jobs
         set
@@ -17052,17 +17058,12 @@ async function compactQueuedTikTokOrderJobs() {
             'message', $2::text,
             'queuePriority', greatest(
               case when coalesce(raw ->> 'queuePriority', '') ~ '^-?[0-9]+$' then (raw ->> 'queuePriority')::int else 0 end,
-              $3::int
+            $3::int
             ),
-            'workerPayload', coalesce(raw -> 'workerPayload', '{}'::jsonb) || jsonb_build_object(
-              'startDate', $4::text,
-              'endDate', $5::text,
-              'reconcileExisting', true,
-              'queueCompactedAt', to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-            )
+            'workerPayload', coalesce(raw -> 'workerPayload', '{}'::jsonb) || $4::jsonb
           )
         where job_id = $1
-      `, [keeper.job_id, message, keeper.historical ? 100 : 130, startDate, endDate]);
+      `, [keeper.job_id, message, queuePriority, JSON.stringify(mergedPayload)]);
       if (duplicateIds.length) {
         await client.query(`
           update operations_jobs
@@ -17091,14 +17092,14 @@ async function compactQueuedTikTokOrderJobs() {
       });
     }
     await client.query(`
-      create unique index if not exists operations_jobs_tiktok_active_singleton_idx
+      create unique index if not exists operations_jobs_tiktok_active_singleton_v2_idx
       on operations_jobs (
         (coalesce(raw ->> 'workerTask', '')),
         (coalesce(raw -> 'workerPayload' ->> 'accountId', '')),
         ((lower(coalesce(raw -> 'workerPayload' ->> 'historicalBackfill', 'false')) = 'true'))
       )
       where lower(status) in ('queued', 'running', 'stopping')
-        and coalesce(raw ->> 'workerTask', '') in ('tiktok-orders', 'tiktok-returns')
+        and coalesce(raw ->> 'workerTask', '') in ('tiktok-orders', 'tiktok-returns', 'tiktok-webhook')
     `);
     await client.query("commit");
     return compacted;

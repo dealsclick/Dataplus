@@ -203,8 +203,8 @@ async function main() {
   const activeJobWorkerSource = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'dataplus-worker.js'), 'utf8');
   assert.match(serverSource, /readActiveOperationJobByTask/, 'TikTok queue deduplication must query every active job instead of a recent page');
   assert.match(activeJobDatabaseSource, /async function compactQueuedTikTokOrderJobs/, 'The database layer must consolidate duplicate queued TikTok order imports');
-  assert.match(activeJobDatabaseSource, /tiktok-orders', 'tiktok-returns/, 'TikTok queue compaction must cover both orders and returns');
-  assert.match(activeJobDatabaseSource, /operations_jobs_tiktok_active_singleton_idx/, 'PostgreSQL must enforce one active TikTok operational sync per account and task');
+  assert.match(activeJobDatabaseSource, /tiktok-orders', 'tiktok-returns', 'tiktok-webhook/, 'TikTok queue compaction must cover orders, returns, and webhook reconciliation');
+  assert.match(activeJobDatabaseSource, /operations_jobs_tiktok_active_singleton_v2_idx/, 'PostgreSQL must enforce one active TikTok operational sync per account and task');
   assert.match(activeJobDatabaseSource, /async function recoverStalledTikTokOperationJobs/, 'Stalled TikTok intake must request an automatic retry');
   assert.match(activeJobDatabaseSource, /tiktok-order-identity-repair/, 'TikTok identity repair must retain restart and stall recovery safeguards.');
   assert.match(activeJobDatabaseSource, /channelAccountId/, 'TikTok repair queries must support seller-account isolation.');
@@ -224,6 +224,8 @@ async function main() {
   assert.equal(tiktokChannelSource.includes('Shop setup submitted'), true, 'TikTok setup must display the submitted steps and job evidence.');
   assert.equal(tiktokChannelSource.includes('Setup running'), true, 'TikTok setup must make active setup work visible and prevent an ambiguous duplicate submission.');
   const tiktokMarketplaceSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'tiktok-marketplace.js'), 'utf8');
+  assert.match(tiktokMarketplaceSource, /data->>'state' = 'pending'[\s\S]*limit 500/, 'Webhook reconciliation must read pending events directly in bounded database batches.');
+  assert.match(tiktokMarketplaceSource, /queue\('webhook', \{ accountId, actor:/, 'Webhook receipt must queue one account-level catch-up job instead of one job per event.');
   assert.equal(tiktokMarketplaceSource.includes('launchOverrides:'), true, 'TikTok launch jobs must retain live-session merchant SKU and quantity overrides.');
   assert.equal(tiktokMarketplaceSource.includes("'/product/202309/images/upload'"), true, 'TikTok live-session photo overrides must upload to the TikTok product image API.');
   assert.equal(tiktokMarketplaceSource.includes('title: launchTitle'), true, 'TikTok live-session launches must use the reviewed session title.');
