@@ -11,6 +11,14 @@ CONTAINER="${DATAPLUS_POSTGRES_CONTAINER:-dataplus-postgres}"
 DATABASE="${DATAPLUS_POSTGRES_DATABASE:-dataplus}"
 USER="${DATAPLUS_POSTGRES_USER:-postgres}"
 OUT="$BACKUP_DIR/dataplus-postgres-$STAMP.dump"
+MAINTENANCE_LOCK_FILE="${DATAPLUS_MAINTENANCE_LOCK_FILE:-/var/lock/dataplus-maintenance.lock}"
+MAINTENANCE_LOCK_TIMEOUT_SECONDS="${DATAPLUS_BACKUP_LOCK_TIMEOUT_SECONDS:-1800}"
+
+exec 9>"$MAINTENANCE_LOCK_FILE"
+if ! flock -w "$MAINTENANCE_LOCK_TIMEOUT_SECONDS" 9; then
+  echo "A DataPlus deployment or another database backup still owns $MAINTENANCE_LOCK_FILE." >&2
+  exit 1
+fi
 
 mkdir -p "$BACKUP_DIR"
 cd "$APP_DIR"

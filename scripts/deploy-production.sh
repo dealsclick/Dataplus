@@ -3,6 +3,13 @@ set -euo pipefail
 
 cd "${DATAPLUS_ROOT:-/root/dataplus}"
 mkdir -p generated
+MAINTENANCE_LOCK_FILE="${DATAPLUS_MAINTENANCE_LOCK_FILE:-/var/lock/dataplus-maintenance.lock}"
+MAINTENANCE_LOCK_TIMEOUT_SECONDS="${DATAPLUS_MAINTENANCE_LOCK_TIMEOUT_SECONDS:-1800}"
+exec 9>"$MAINTENANCE_LOCK_FILE"
+if ! flock -w "$MAINTENANCE_LOCK_TIMEOUT_SECONDS" 9; then
+  echo "Another DataPlus deployment or database backup still owns $MAINTENANCE_LOCK_FILE." >&2
+  exit 1
+fi
 TARGET_REVISION="${DATAPLUS_DEPLOY_REVISION:-}"
 if [[ -n "$TARGET_REVISION" ]]; then
   [[ "$TARGET_REVISION" =~ ^[0-9a-f]{40}$ ]]
@@ -41,6 +48,25 @@ run_with_timeout() {
   local timeout_seconds="$1"
   shift
   timeout --signal=TERM --kill-after=15s "${timeout_seconds}s" "$@"
+}
+
+wait_for_active_postgres_dump() {
+  local timeout_seconds="${1:-1800}"
+  local deadline=$((SECONDS + timeout_seconds))
+  local active
+  while (( SECONDS < deadline )); do
+    active="$(run_with_timeout 10 docker exec dataplus-postgres psql -U postgres -d dataplus -Atqc \
+      "select count(*) from pg_stat_activity where pid <> pg_backend_pid() and state='active' and query ~* '^[[:space:]]*copy .* to stdout'" \
+      2>/dev/null || true)"
+    if [[ -z "$active" || "$active" == "0" ]]; then
+      echo "No active PostgreSQL dump is holding schema read locks."
+      return 0
+    fi
+    echo "Waiting for $active active PostgreSQL dump session(s) before restarting DataPlus..."
+    sleep 5
+  done
+  echo "PostgreSQL dump sessions did not finish within ${timeout_seconds}s." >&2
+  return 1
 }
 
 resume_label_purchases() {
@@ -144,6 +170,10 @@ cleanup_stale_deployment_helpers
 
 echo "Building DataPlus application images..."
 docker compose build
+
+# Older backup scripts did not use the shared maintenance lock. Keep this
+# compatibility check so the first deployment of the lock cannot overlap one.
+wait_for_active_postgres_dump "${DATAPLUS_POSTGRES_DUMP_WAIT_SECONDS:-1800}"
 
 if runtime_schema_is_ready; then
   echo "Runtime database schema marker is current."
