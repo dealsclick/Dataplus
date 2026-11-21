@@ -24699,11 +24699,24 @@ function getTikTokMarketplace() {
     createJob: async attrs => {
       const db = await readDbFast({ skipInventory: true, skipOrders: true, skipPurchaseOrders: true });
       const job = createImportJob(db, attrs);
-      await postgres.upsertOperationJob(job);
+      try {
+        await postgres.upsertOperationJob(job);
+      } catch (error) {
+        const task = sourceTextValue(attrs?.workerTask);
+        if (error?.code !== '23505' || !['tiktok-orders', 'tiktok-returns'].includes(task)) throw error;
+        const existing = await postgres.readActiveOperationJobByTask({
+          workerTask: task,
+          accountId: sourceTextValue(attrs?.workerPayload?.accountId),
+          historicalBackfill: attrs?.workerPayload?.historicalBackfill === true
+        });
+        if (!existing) throw error;
+        return { ...existing, reusedActiveJob: true };
+      }
       upsertImportJobStore(job);
       return job;
     },
     persistJob: persistWorkerImportJob,
+    notify: attrs => postgres.createSystemNotification(attrs),
     reconcileOutboundAudits: options => reconcileOutboundAuditsAfterImport([], {
       ...options,
       source: "TikTok Shop order import"
@@ -24783,6 +24796,7 @@ function getTikTokMarketplace() {
       if (db) applyOrderSkuAliases(db, incoming);
       const merged = { ...existing, ...preserveMarketplaceOrderOperations(incoming, existing) };
       merged.items = require('./lib/walmart-client').mergeOrderLines(incoming.items, existing?.items);
+      preserveSavedCatalogIdentityOnRefresh(merged);
       merged.sku = merged.items[0]?.sku || incoming.sku;
       if (!existing && postgres.isPostgresEnabled()) {
         const internalOrderNumber = await postgres.nextOrderNumberAtomic();
@@ -37121,6 +37135,21 @@ async function refreshFulfillmentConsoleSnapshot() {
   const startedAtVersion = fulfillmentConsoleSnapshotVersion;
   fulfillmentConsoleSnapshotPromise = (async () => {
     const snapshot = await buildFulfillmentConsoleSnapshot();
+    const [queueHealth, projectionChannels] = await Promise.all([
+      postgres.readCriticalOperationQueueHealth().catch(() => []),
+      postgres.readStateDocument('channels').catch(() => [])
+    ]);
+    const tiktokQueue = queueHealth.find((queue) => queue.task === 'tiktok-orders');
+    const projectionTikTokChannel = (Array.isArray(projectionChannels) ? projectionChannels : []).find((channel) => /tiktok/i.test(String(channel?.name || channel?.key || '')));
+    const projectionTikTokEnabled = projectionTikTokChannel?.settings?.channelEnabled === true && projectionTikTokChannel?.settings?.tiktokOrdersEnabled === true;
+    const latestSuccessAt = Date.parse(tiktokQueue?.latestSuccessAt || '');
+    const successLagMinutes = Number.isFinite(latestSuccessAt) ? Math.max(0, (Date.now() - latestSuccessAt) / 60000) : Infinity;
+    snapshot.tiktokProjectionProtection = {
+      preserve: projectionTikTokEnabled && (tiktokQueue?.stale === true || successLagMinutes > 20),
+      queueStale: tiktokQueue?.stale === true,
+      successLagMinutes: Number.isFinite(successLagMinutes) ? Math.round(successLagMinutes * 10) / 10 : null,
+      checkedAt: new Date().toISOString()
+    };
     fulfillmentConsoleSnapshotCache = snapshot;
     fulfillmentConsoleSnapshotDirty = fulfillmentConsoleSnapshotVersion !== startedAtVersion;
     try {
@@ -37273,7 +37302,8 @@ function fulfillmentConsoleProjectionPayload(snapshot = {}) {
       trackingRefresh: snapshot.trackingRefresh || null,
       settings: snapshot.settings || {},
       warehouses: Array.isArray(snapshot.warehouses) ? snapshot.warehouses : [],
-      reports: snapshot.reports || {}
+      reports: snapshot.reports || {},
+      tiktokProjectionProtection: snapshot.tiktokProjectionProtection || null
     },
     views: {
       ready: (ready.work || []).map((row) => ({ ...row, projectionDeadlineState: fulfillmentConsoleDeadlineState(row) })),
@@ -39892,6 +39922,20 @@ function orderLineTitleIdentityNeedsRepair(line = {}) {
   const currentSku = String(line.sku || "").trim();
   const savedCatalogSku = String(line.catalogIdentityMatch?.catalogSku || "").trim();
   return Boolean(savedCatalogSku && currentSku.toLowerCase() !== savedCatalogSku.toLowerCase());
+}
+
+function preserveSavedCatalogIdentityOnRefresh(order = {}) {
+  for (const line of orderLineItems(order)) {
+    const savedCatalogSku = String(line.catalogIdentityMatch?.catalogSku || '').trim();
+    const currentSku = String(line.sku || '').trim();
+    if (!savedCatalogSku || currentSku.toLowerCase() === savedCatalogSku.toLowerCase()) continue;
+    if (manufacturerPartNumberFromOrderTitle(line.title || line.name || line.productName || line.itemName)) continue;
+    line.originalSku = line.originalSku || currentSku;
+    line.marketplaceSku = line.marketplaceSku || line.channelSku || currentSku;
+    line.sku = savedCatalogSku;
+    line.skuMappingMode = line.skuMappingMode || line.catalogIdentityMatch?.mode || 'persisted-catalog-identity';
+  }
+  return order;
 }
 
 function supplierSourcingPriority(db = {}, value = {}) {
@@ -84904,6 +84948,7 @@ async function auditCriticalOperationQueues() {
       maxCandidates: SCHEDULED_ORDER_ROUTING_LIMIT
     });
     const recoveredJobs = await postgres.recoverStaleCriticalOperationJobs();
+    const stalledTikTokJobs = await postgres.recoverStalledTikTokOperationJobs();
     const queues = await postgres.readCriticalOperationQueueHealth();
     const criticalQueues = queues.filter((queue) => queue.stale);
     const checkedAt = new Date().toISOString();
@@ -84924,7 +84969,73 @@ async function auditCriticalOperationQueues() {
         raw: { checkedAt, queue }
       });
     }
-    return { queues, criticalQueues, recoveredJobs };
+    for (const recovered of stalledTikTokJobs) {
+      await postgres.createSystemNotification({
+        tenantId: LEGACY_TENANT,
+        companyId: LEGACY_COMPANY,
+        severity: "error",
+        category: "job",
+        title: "TikTok intake stalled and is retrying",
+        message: `${recovered.task} stopped reporting durable progress. DataPlus retained its account and date range and requested an automatic retry.`,
+        source: "critical-job-watchdog",
+        entityType: "job",
+        entityId: recovered.jobId,
+        actionUrl: "/jobs",
+        dedupeKey: `tiktok-job-stalled:${recovered.jobId}`,
+        raw: { checkedAt, recovered }
+      });
+    }
+    const tiktokOrderQueue = queues.find((queue) => queue.task === 'tiktok-orders');
+    const channelRecords = await postgres.readStateDocument('channels').catch(() => []);
+    const tiktokChannel = (Array.isArray(channelRecords) ? channelRecords : []).find((channel) => /tiktok/i.test(String(channel?.name || channel?.key || '')));
+    const tiktokOrdersEnabled = tiktokChannel?.settings?.channelEnabled === true && tiktokChannel?.settings?.tiktokOrdersEnabled === true;
+    const tiktokLastSuccess = Date.parse(tiktokOrderQueue?.latestSuccessAt || '');
+    const tiktokSuccessLagMinutes = Number.isFinite(tiktokLastSuccess) ? (Date.now() - tiktokLastSuccess) / 60000 : Infinity;
+    if (tiktokOrdersEnabled && tiktokSuccessLagMinutes > 20) {
+      const episode = Number.isFinite(tiktokLastSuccess) ? new Date(tiktokLastSuccess).toISOString().slice(0, 16) : 'never';
+      await postgres.createSystemNotification({
+        tenantId: LEGACY_TENANT,
+        companyId: LEGACY_COMPANY,
+        severity: "error",
+        category: "channel",
+        title: "TikTok order reconciliation is behind",
+        message: Number.isFinite(tiktokLastSuccess)
+          ? `The last successful TikTok order reconciliation was ${Math.round(tiktokSuccessLagMinutes)} minutes ago. DataPlus will keep retrying the retained checkpoint range.`
+          : "No successful TikTok order reconciliation is recorded. DataPlus will keep retrying the retained checkpoint range.",
+        source: "critical-job-watchdog",
+        entityType: "channel",
+        entityId: "tiktok-orders",
+        actionUrl: "/channels?channel=TikTok%20Shop",
+        dedupeKey: `tiktok-order-lag:${episode}`,
+        raw: { checkedAt, queue: tiktokOrderQueue || null, successLagMinutes: tiktokSuccessLagMinutes }
+      });
+    }
+    const pendingWebhook = await postgres.getPool().query(`
+      select min(updated_at) as oldest_at, count(*)::int as pending_count
+      from tiktok_documents
+      where doc_key like 'tiktok.webhook.event.%'
+        and data ->> 'state' = 'pending'
+    `);
+    const oldestWebhookAt = pendingWebhook.rows[0]?.oldest_at;
+    const webhookLagMinutes = oldestWebhookAt ? (Date.now() - new Date(oldestWebhookAt).getTime()) / 60000 : 0;
+    if (webhookLagMinutes > 5) {
+      const episode = new Date(oldestWebhookAt).toISOString().slice(0, 16);
+      await postgres.createSystemNotification({
+        tenantId: LEGACY_TENANT,
+        companyId: LEGACY_COMPANY,
+        severity: "error",
+        category: "channel",
+        title: "TikTok webhook events are waiting",
+        message: `${Number(pendingWebhook.rows[0]?.pending_count || 0)} TikTok event(s) are pending; the oldest has waited ${Math.round(webhookLagMinutes)} minutes. The urgent webhook worker will reconcile them.`,
+        source: "critical-job-watchdog",
+        entityType: "channel",
+        entityId: "tiktok-webhook",
+        actionUrl: "/jobs",
+        dedupeKey: `tiktok-webhook-lag:${episode}`,
+        raw: { checkedAt, pendingCount: Number(pendingWebhook.rows[0]?.pending_count || 0), oldestWebhookAt, webhookLagMinutes }
+      });
+    }
+    return { queues, criticalQueues, recoveredJobs: [...recoveredJobs, ...stalledTikTokJobs] };
   } catch (error) {
     console.error(`Critical queue watchdog failed: ${error.message}`);
     return { queues: [], criticalQueues: [], recoveredJobs: [], error: error.message || "Critical queue watchdog failed." };
@@ -85746,6 +85857,7 @@ module.exports = {
   importedOrderProductMatch,
   orderLineWithDiscoveredProductIdentity,
   orderLineTitleIdentityNeedsRepair,
+  preserveSavedCatalogIdentityOnRefresh,
   selectImportedOrderProduct,
   orderIdentityPriority,
   supplierSourcingPriority,

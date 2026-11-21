@@ -199,6 +199,9 @@ async function main() {
   const activeJobWorkerSource = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'dataplus-worker.js'), 'utf8');
   assert.match(serverSource, /readActiveOperationJobByTask/, 'TikTok queue deduplication must query every active job instead of a recent page');
   assert.match(activeJobDatabaseSource, /async function compactQueuedTikTokOrderJobs/, 'The database layer must consolidate duplicate queued TikTok order imports');
+  assert.match(activeJobDatabaseSource, /tiktok-orders', 'tiktok-returns/, 'TikTok queue compaction must cover both orders and returns');
+  assert.match(activeJobDatabaseSource, /operations_jobs_tiktok_active_singleton_idx/, 'PostgreSQL must enforce one active TikTok operational sync per account and task');
+  assert.match(activeJobDatabaseSource, /async function recoverStalledTikTokOperationJobs/, 'Stalled TikTok intake must request an automatic retry');
   assert.match(activeJobDatabaseSource, /historicalBackfill = null/, 'Historical TikTok backfills must not block live operational imports');
   assert.match(activeJobWorkerSource, /compactQueuedTikTokOrderJobs/, 'The TikTok worker must compact recovered jobs before claiming work');
   assert.match(serverSource, /!historicalBackfill && \(!existing \|\| titleIdentityNeedsRepair\)\) await ensureProductsForImportedOrders/, 'Existing TikTok refreshes must preserve catalog mapping except for the explicit title-identity repair path');
@@ -227,6 +230,8 @@ async function main() {
   assert.equal(tiktokMarketplaceSource.includes("'/order/202507/orders'"), true, 'TikTok order imports must hydrate current full order details.');
   assert.equal(tiktokMarketplaceSource.includes('/fulfillment/202309/packages/'), true, 'TikTok combined orders must hydrate package membership from Get Package Detail.');
   assert.match(tiktokMarketplaceSource, /retryable: false,\s+timeoutMs: 10_000/, 'Optional combined-package evidence must not stall order intake behind upstream retries');
+  assert.match(tiktokMarketplaceSource, /mapOrderWithLiveEvidence\(raw\)[\s\S]*deps\.saveOrder\(mapped[\s\S]*loadTikTokPackageGroups\(savedDetails/, 'Orders must be saved before optional package enrichment');
+  assert.match(tiktokMarketplaceSource, /tiktokOrderReconciliationMinutes, 10, 60, 10/, 'Operational TikTok order reconciliation must default to ten minutes');
   assert.equal(tiktokMarketplaceSource.includes("'/fulfillment/202309/combinable_packages/search'"), true, 'TikTok label creation must discover the platform-approved combined order group.');
   assert.equal(tiktokMarketplaceSource.includes("shipType === '3'"), true, 'TikTok label preview must validate combined multi-order packages.');
   assert.equal(tiktokMarketplaceSource.includes('order_list_ids'), true, 'TikTok combined label creation must submit every member order ID.');
@@ -242,13 +247,13 @@ async function main() {
   assert.equal(tiktokMarketplaceSource.includes("action === 'setup/initial'"), true, 'TikTok must expose the initial setup endpoint.');
   assert.equal(tiktokMarketplaceSource.includes("status: result.duplicate ? 'already_running' : 'queued'"), true, 'TikTok setup must report when an existing active job was retained instead of claiming a new run.');
   const workerSource = fs.readFileSync(path.join(__dirname, 'dataplus-worker.js'), 'utf8');
-  assert.equal(workerSource.includes('recoverInterruptedTikTokOrderJobs({ workerId: WORKER_ID })'), true, 'The replacement TikTok worker must requeue an orphaned order import after deployment.');
+  assert.equal(workerSource.includes('recoverInterruptedTikTokOrderJobs({ workerId: WORKER_ID, workerTasks })'), true, 'Replacement TikTok workers must requeue their orphaned intake jobs after deployment.');
   const supervisorSource = fs.readFileSync(path.join(__dirname, 'dataplus-worker-supervisor.js'), 'utf8');
   assert.equal(supervisorSource.includes('"product-dump-import", "ebay-order-import", "tiktok-orders"'), true, 'The worker supervisor must automatically retry interrupted TikTok order intake.');
   assert.equal(supervisorSource.includes('reason: stopping ? "deployment_shutdown"'), true, 'A normal deployment shutdown must be recorded as a resumable TikTok interruption.');
   const databaseSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
   assert.equal(databaseSource.includes('async function recoverInterruptedTikTokOrderJobs'), true, 'PostgreSQL must provide durable TikTok restart recovery.');
-  assert.equal(databaseSource.includes("coalesce(raw ->> 'workerTask', '') = 'tiktok-orders'"), true, 'Restart recovery must be limited to TikTok order intake jobs.');
+  assert.equal(databaseSource.includes("coalesce(raw ->> 'workerTask', '') = any($3::text[])"), true, 'Restart recovery must be limited to the TikTok tasks owned by the replacement worker.');
   const composeSource = fs.readFileSync(path.join(__dirname, '..', 'docker-compose.yml'), 'utf8');
   assert.match(composeSource, /worker:\s*[\s\S]*?restart: unless-stopped\s*stop_grace_period: 65s/, 'Worker containers need enough deployment grace to persist retry state.');
   const tiktokLabelDialogSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'tiktok-shipping-label-dialog.tsx'), 'utf8');

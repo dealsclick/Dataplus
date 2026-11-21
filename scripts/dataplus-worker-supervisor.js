@@ -27,7 +27,7 @@ function positiveNumber(value, fallback) {
 
 function laneDefaultBudgetMb(lane = "manual") {
   if (lane === "carrier") return 640;
-  if (["orders-shopify", "orders-ebay"].includes(lane)) return 480;
+  if (["orders-shopify", "orders-ebay", "orders-tiktok-returns", "orders-tiktok-webhook"].includes(lane)) return 480;
   if (["orders-temu", "orders-tiktok"].includes(lane)) return 1000;
   if (["background", "walmart"].includes(lane)) return 680;
   return 1100;
@@ -35,7 +35,7 @@ function laneDefaultBudgetMb(lane = "manual") {
 
 function laneHeavyBudgetMb(lane = "manual") {
   if (lane === "carrier") return 700;
-  if (lane === "orders-shopify") return 560;
+  if (["orders-shopify", "orders-tiktok-returns", "orders-tiktok-webhook"].includes(lane)) return 560;
   if (lane === "orders-ebay") return 600;
   if (["orders-temu", "orders-tiktok"].includes(lane)) return 1200;
   if (["background", "walmart"].includes(lane)) return 820;
@@ -44,7 +44,7 @@ function laneHeavyBudgetMb(lane = "manual") {
 
 function laneStartupBudgetMb(lane = "manual") {
   if (lane === "carrier") return 700;
-  if (["orders-shopify", "orders-ebay"].includes(lane)) return 680;
+  if (["orders-shopify", "orders-ebay", "orders-tiktok-returns", "orders-tiktok-webhook"].includes(lane)) return 680;
   if (["orders-temu", "orders-tiktok"].includes(lane)) return 1350;
   if (["background", "walmart"].includes(lane)) return 900;
   return 1400;

@@ -4728,24 +4728,69 @@ async function publishFulfillmentConsoleProjection(projection = {}) {
   await initRelationalSchema();
   const generatedAt = String(projection.generatedAt || new Date().toISOString());
   const revisionId = crypto.randomUUID();
-  const views = projection.views && typeof projection.views === "object" ? projection.views : {};
-  const rows = [];
-  for (const [viewKey, entries] of Object.entries(views)) {
-    if (!Array.isArray(entries)) continue;
-    entries.forEach((data, position) => {
-      rows.push({
-        revision_id: revisionId,
-        view_key: String(viewKey),
-        row_key: crypto.createHash("sha1").update(`${viewKey}:${String(data?.orderId || "")}:${String(data?.id || data?.routeId || "")}:${position}`).digest("hex"),
-        position,
-        order_id: data?.orderId == null ? null : String(data.orderId),
-        route_id: data?.id == null ? null : String(data.id),
-        data
-      });
-    });
-  }
   const client = await dbPool.connect();
   try {
+    const views = Object.fromEntries(Object.entries(projection.views && typeof projection.views === "object" ? projection.views : {})
+      .map(([key, entries]) => [key, Array.isArray(entries) ? [...entries] : entries]));
+    const metadata = projection.metadata && typeof projection.metadata === "object" ? { ...projection.metadata } : {};
+    const isTikTokRow = (data = {}) => /tiktok/i.test([
+      data.salesChannel,
+      data.channel,
+      data.channelName,
+      data.marketplace,
+      data.sourceChannel,
+      data.order?.salesChannel,
+      data.order?.channel,
+      data.route?.salesChannel
+    ].filter(Boolean).join(" "));
+    const projectionIdentity = (data = {}) => [data.orderId, data.id || data.routeId, data.marketplaceOrderId]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+      .join('\u0000');
+    let preservedTikTokRows = 0;
+    if (metadata.tiktokProjectionProtection?.preserve === true) {
+      const previous = await client.query(`
+        select rows.view_key, rows.data
+        from fulfillment_console_projection_meta meta
+        join fulfillment_console_projection_rows rows on rows.revision_id = meta.active_revision
+        where meta.id = 1
+          and rows.view_key = any($1::text[])
+        order by rows.view_key, rows.position
+      `, [['ready', 'all-shipments', 'purchased-labels', 'shipments', 'exceptions', 'do-not-ship']]);
+      const previousByView = new Map();
+      for (const row of previous.rows) {
+        if (!isTikTokRow(row.data)) continue;
+        if (!previousByView.has(row.view_key)) previousByView.set(row.view_key, []);
+        previousByView.get(row.view_key).push(row.data);
+      }
+      for (const [viewKey, oldRows] of previousByView) {
+        const nextRows = Array.isArray(views[viewKey]) ? views[viewKey] : [];
+        const nextTikTokIdentities = new Set(nextRows.filter(isTikTokRow).map(projectionIdentity).filter(Boolean));
+        const missingRows = oldRows.filter((row) => {
+          const identity = projectionIdentity(row);
+          return identity && !nextTikTokIdentities.has(identity);
+        });
+        if (!missingRows.length) continue;
+        views[viewKey] = [...nextRows, ...missingRows.map((row) => ({ ...row, projectionDataStale: true, projectionStaleReason: 'TikTok intake health check failed during this projection refresh.' }))];
+        preservedTikTokRows += missingRows.length;
+      }
+      metadata.tiktokProjectionProtection = { ...metadata.tiktokProjectionProtection, preservedTikTokRows };
+    }
+    const rows = [];
+    for (const [viewKey, entries] of Object.entries(views)) {
+      if (!Array.isArray(entries)) continue;
+      entries.forEach((data, position) => {
+        rows.push({
+          revision_id: revisionId,
+          view_key: String(viewKey),
+          row_key: crypto.createHash("sha1").update(`${viewKey}:${String(data?.orderId || "")}:${String(data?.id || data?.routeId || "")}:${position}`).digest("hex"),
+          position,
+          order_id: data?.orderId == null ? null : String(data.orderId),
+          route_id: data?.id == null ? null : String(data.id),
+          data
+        });
+      });
+    }
     await client.query("begin");
     for (let offset = 0; offset < rows.length; offset += 250) {
       await client.query(`
@@ -4771,10 +4816,10 @@ async function publishFulfillmentConsoleProjection(projection = {}) {
         generated_at = excluded.generated_at,
         data = excluded.data,
         updated_at = now()
-    `, [revisionId, generatedAt, JSON.stringify(projection.metadata || {})]);
+    `, [revisionId, generatedAt, JSON.stringify(metadata)]);
     await client.query("delete from fulfillment_console_projection_rows where revision_id <> $1", [revisionId]);
     await client.query("commit");
-    return { revisionId, generatedAt, rowCount: rows.length };
+    return { revisionId, generatedAt, rowCount: rows.length, preservedTikTokRows };
   } catch (error) {
     await client.query("rollback");
     throw error;
@@ -5578,6 +5623,35 @@ async function recoverStaleCriticalOperationJobs() {
     recovered.push(...result.rows.map((row) => ({ task, jobId: row.job_id, lane: policy.lane || "background", action: "reprioritized" })));
   }
   return recovered;
+}
+
+async function recoverStalledTikTokOperationJobs() {
+  const client = getPool();
+  if (!client) return [];
+  await initRelationalSchema();
+  const result = await client.query(`
+    update operations_jobs
+    set
+      status = 'stopping',
+      message = 'TikTok intake stopped reporting progress and will retry automatically with the same account and date range.',
+      updated_at = now(),
+      raw = coalesce(raw, '{}'::jsonb) || jsonb_build_object(
+        'status', 'stopping',
+        'phase', 'stall_recovery_requested',
+        'message', 'TikTok intake stopped reporting progress and will retry automatically with the same account and date range.',
+        'autoRecoveryRequested', true,
+        'autoRecoveryRequestedAt', to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+        'autoRecoveryReason', 'No durable job progress was recorded within the TikTok intake watchdog window.'
+      )
+    where lower(status) = 'running'
+      and coalesce(raw ->> 'workerTask', '') in ('tiktok-orders', 'tiktok-webhook')
+      and updated_at <= now() - case
+        when coalesce(raw ->> 'workerTask', '') = 'tiktok-webhook' then interval '2 minutes'
+        else interval '3 minutes'
+      end
+    returning job_id, raw ->> 'workerTask' as worker_task
+  `);
+  return result.rows.map((row) => ({ jobId: row.job_id, task: row.worker_task || '', action: 'retry_requested' }));
 }
 
 async function readStateArrayItem(docKey = "", entityId = "", identifierField = "id") {
@@ -16578,7 +16652,7 @@ async function readActiveOperationJobByTask({ workerTask = "", accountId = "", h
       changed_rows, missing_rows, progress, eta_seconds, source, output_path,
       error_path, created_at, started_at, ended_at, updated_at, raw
     from operations_jobs
-    where lower(status) in ('queued', 'running')
+    where lower(status) in ('queued', 'running', 'stopping')
       and coalesce(raw ->> 'workerTask', '') = $1
       and coalesce(raw -> 'workerPayload' ->> 'accountId', '') = $2
       and (
@@ -16834,12 +16908,14 @@ async function claimQueuedOperationJob({ workerId = "", tasks = [], lane = "all"
   };
 }
 
-async function recoverInterruptedTikTokOrderJobs({ workerId = "" } = {}) {
+async function recoverInterruptedTikTokOrderJobs({ workerId = "", workerTasks = ['tiktok-orders'] } = {}) {
   const client = getPool();
   if (!client) return [];
   await initRelationalSchema();
   const replacementWorkerId = nullableString(workerId) || "";
-  const message = "TikTok order intake was interrupted by a server update and will continue automatically.";
+  const tasks = [...new Set((Array.isArray(workerTasks) ? workerTasks : [workerTasks]).map(nullableString).filter((task) => ['tiktok-orders', 'tiktok-returns', 'tiktok-webhook'].includes(task)))];
+  if (!tasks.length) return [];
+  const message = "TikTok intake was interrupted by a server update and will continue automatically.";
   const result = await client.query(`
     with interrupted as (
       select
@@ -16848,7 +16924,7 @@ async function recoverInterruptedTikTokOrderJobs({ workerId = "" } = {}) {
         coalesce(nullif(raw -> 'workerPayload' ->> 'restartRecoveryCount', '')::int, 0) + 1 as recovery_count
       from operations_jobs
       where lower(status) = 'running'
-        and coalesce(raw ->> 'workerTask', '') = 'tiktok-orders'
+        and coalesce(raw ->> 'workerTask', '') = any($3::text[])
         and ($1::text = '' or coalesce(raw ->> 'workerId', '') <> $1::text)
       for update skip locked
     )
@@ -16895,7 +16971,7 @@ async function recoverInterruptedTikTokOrderJobs({ workerId = "" } = {}) {
     from interrupted
     where job.job_id = interrupted.job_id
     returning job.job_id, interrupted.previous_worker_id, interrupted.recovery_count
-  `, [replacementWorkerId, message]);
+  `, [replacementWorkerId, message, tasks]);
   return result.rows.map((row) => ({
     jobId: row.job_id,
     previousWorkerId: row.previous_worker_id || "",
@@ -16911,21 +16987,41 @@ async function compactQueuedTikTokOrderJobs() {
   try {
     await client.query("begin");
     await client.query("select pg_advisory_xact_lock(hashtext('dataplus-tiktok-order-queue-compaction'))");
+    await client.query("lock table operations_jobs in share row exclusive mode");
+    await client.query(`
+      update operations_jobs
+      set
+        status = case when lower(coalesce(raw ->> 'autoRecoveryRequested', 'false')) = 'true' then 'queued' else 'stopped' end,
+        ended_at = case when lower(coalesce(raw ->> 'autoRecoveryRequested', 'false')) = 'true' then null else now() end,
+        updated_at = now(),
+        raw = coalesce(raw, '{}'::jsonb) || jsonb_build_object(
+        'status', case when lower(coalesce(raw ->> 'autoRecoveryRequested', 'false')) = 'true' then 'queued' else 'stopped' end,
+        'phase', case when lower(coalesce(raw ->> 'autoRecoveryRequested', 'false')) = 'true' then 'retry_scheduled' else 'stopped' end,
+        'scheduledFor', to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+        'message', case
+          when lower(coalesce(raw ->> 'autoRecoveryRequested', 'false')) = 'true' then 'TikTok synchronization was retained for an automatic watchdog retry.'
+          else 'TikTok synchronization was stopped before the worker restart.'
+        end
+      )
+      where lower(status) = 'stopping'
+        and coalesce(raw ->> 'workerTask', '') in ('tiktok-orders', 'tiktok-returns')
+    `);
     const result = await client.query(`
       select job_id, job_number, created_at, raw
       from operations_jobs
       where lower(status) = 'queued'
-        and coalesce(raw ->> 'workerTask', '') = 'tiktok-orders'
+        and coalesce(raw ->> 'workerTask', '') = any($1::text[])
       order by created_at desc, job_id
       for update
-    `);
+    `, [['tiktok-orders', 'tiktok-returns']]);
     const groups = new Map();
     for (const row of result.rows) {
       const payload = row.raw?.workerPayload && typeof row.raw.workerPayload === "object" ? row.raw.workerPayload : {};
+      const workerTask = String(row.raw?.workerTask || "").trim();
       const historical = payload.historicalBackfill === true || String(payload.historicalBackfill || "").toLowerCase() === "true";
-      const key = `${String(payload.accountId || "").trim()}\u0000${historical ? "history" : "operational"}`;
+      const key = `${workerTask}\u0000${String(payload.accountId || "").trim()}\u0000${historical ? "history" : "operational"}`;
       if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push({ ...row, payload, historical });
+      groups.get(key).push({ ...row, payload, historical, workerTask });
     }
 
     const compacted = [];
@@ -16937,9 +17033,10 @@ async function compactQueuedTikTokOrderJobs() {
       const startDate = validStarts.length ? new Date(Math.min(...validStarts)).toISOString() : String(keeper.payload.startDate || "");
       const endDate = validEnds.length ? new Date(Math.max(...validEnds)).toISOString() : String(keeper.payload.endDate || "");
       const duplicateIds = jobs.slice(1).map((job) => job.job_id);
+      const taskLabel = keeper.workerTask === 'tiktok-returns' ? 'return reconciliation' : 'order intake';
       const message = duplicateIds.length
-        ? `TikTok order intake consolidated ${jobs.length} queued requests; current orders will be processed first.`
-        : "TikTok order intake is queued with current orders prioritized.";
+        ? `TikTok ${taskLabel} consolidated ${jobs.length} queued requests; current work will be processed first.`
+        : `TikTok ${taskLabel} is queued with current work prioritized.`;
       await client.query(`
         update operations_jobs
         set
@@ -16976,16 +17073,27 @@ async function compactQueuedTikTokOrderJobs() {
               'deduplicatedIntoJobId', $3::text
             )
           where job_id = any($1::text[])
-        `, [duplicateIds, `Consolidated into TikTok order job ${keeper.job_number || keeper.job_id}.`, keeper.job_id]);
+        `, [duplicateIds, `Consolidated into TikTok ${taskLabel} job ${keeper.job_number || keeper.job_id}.`, keeper.job_id]);
       }
       compacted.push({
         keeperJobId: keeper.job_id,
         duplicateJobIds: duplicateIds,
+        workerTask: keeper.workerTask,
         historicalBackfill: keeper.historical,
         startDate,
         endDate
       });
     }
+    await client.query(`
+      create unique index if not exists operations_jobs_tiktok_active_singleton_idx
+      on operations_jobs (
+        (coalesce(raw ->> 'workerTask', '')),
+        (coalesce(raw -> 'workerPayload' ->> 'accountId', '')),
+        ((lower(coalesce(raw -> 'workerPayload' ->> 'historicalBackfill', 'false')) = 'true'))
+      )
+      where lower(status) in ('queued', 'running', 'stopping')
+        and coalesce(raw ->> 'workerTask', '') in ('tiktok-orders', 'tiktok-returns')
+    `);
     await client.query("commit");
     return compacted;
   } catch (error) {
@@ -22670,6 +22778,7 @@ module.exports = {
   readOperationPerformanceSummary,
   readCriticalOperationQueueHealth,
   recoverStaleCriticalOperationJobs,
+  recoverStalledTikTokOperationJobs,
   readStateArrayItem,
   readStateArrayItems,
   mutateStateArrayItem,

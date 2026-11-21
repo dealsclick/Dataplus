@@ -217,6 +217,36 @@ services:
     mem_limit: 1536m
     cpus: 1.5
 
+  worker-orders-tiktok-webhook:
+    profiles: ["tiktok"]
+    extends:
+      service: worker
+    image: dataplus-worker
+    container_name: dataplus-worker-orders-tiktok-webhook
+    environment:
+      DATAPLUS_WORKER_LANE: orders-tiktok-webhook
+      NODE_OPTIONS: --max-old-space-size=384
+      DATAPLUS_WORKER_JOB_RSS_MB: 420
+      DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: 480
+      DATAPLUS_TIKTOK_WEBHOOK_ORDER_JOB_RSS_MB: 480
+    mem_limit: 640m
+    cpus: 0.5
+
+  worker-orders-tiktok-returns:
+    profiles: ["tiktok"]
+    extends:
+      service: worker
+    image: dataplus-worker
+    container_name: dataplus-worker-orders-tiktok-returns
+    environment:
+      DATAPLUS_WORKER_LANE: orders-tiktok-returns
+      NODE_OPTIONS: --max-old-space-size=384
+      DATAPLUS_WORKER_JOB_RSS_MB: 420
+      DATAPLUS_WORKER_HEAVY_JOB_RSS_MB: 480
+      DATAPLUS_TIKTOK_RETURNS_ORDER_JOB_RSS_MB: 480
+    mem_limit: 640m
+    cpus: 0.5
+
   worker-walmart:
     profiles: ["walmart"]
     extends:

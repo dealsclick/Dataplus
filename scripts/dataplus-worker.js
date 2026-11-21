@@ -2817,6 +2817,34 @@ async function tick() {
     console.error(`[${WORKER_ID}] failed ${job.id}:`, error.message || error);
     if (job.workerTask === "product-dump-import" && retryableProductDumpFailure(error)) {
       await requeueProductDumpAfterTransientFailure(job, error);
+    } else if (['tiktok-orders', 'tiktok-webhook'].includes(job.workerTask)) {
+      const latest = await postgres.readOperationJob(job.id).catch(() => null);
+      if (latest?.autoRecoveryRequested === true) {
+        const retryCount = Math.max(0, Number(latest.workerPayload?.automaticRetryCount || 0)) + 1;
+        const scheduledFor = new Date(Date.now() + Math.min(5, retryCount) * 30_000).toISOString();
+        await persistJob(latest, {
+          status: 'queued',
+          phase: 'retry_scheduled',
+          scheduledFor,
+          workerId: '',
+          workerLane: '',
+          workerLastSeenAt: '',
+          finishedAt: '',
+          autoRecoveryRequested: false,
+          workerPayload: { ...(latest.workerPayload || {}), automaticRetryCount: retryCount },
+          message: `TikTok intake watchdog retry ${retryCount} is scheduled for ${scheduledFor}. The original account and date range were retained.`,
+          errors: [String(error.message || error || 'TikTok intake stalled.')]
+        });
+      } else {
+        await persistJob(job, {
+          status: /canceled|cancelled|stopped/i.test(String(error.message || "")) ? "stopped" : "failed",
+          phase: "failed",
+          message: error.message || "Worker job failed.",
+          missingCount: 1,
+          errors: [error.message || "Worker job failed."],
+          finishedAt: new Date().toISOString()
+        });
+      }
     } else {
       await persistJob(job, {
         status: /canceled|cancelled|stopped/i.test(String(error.message || "")) ? "stopped" : "failed",
@@ -2878,14 +2906,21 @@ async function main() {
     console.warn(`[${WORKER_ID}] terminated ${recovery.terminated} stale supplier-index session(s): ${recovery.pids.join(", ")}`);
   }
   await postgres.initDatabase();
-  if (["all", "orders-tiktok"].includes(WORKER_LANE)) {
-    const recovered = await postgres.recoverInterruptedTikTokOrderJobs({ workerId: WORKER_ID });
+  if (["all", "orders-tiktok", "orders-tiktok-returns", "orders-tiktok-webhook"].includes(WORKER_LANE)) {
+    const workerTasks = WORKER_LANE === 'orders-tiktok-webhook'
+      ? ['tiktok-webhook']
+      : WORKER_LANE === 'orders-tiktok-returns'
+        ? ['tiktok-returns']
+        : ['tiktok-orders'];
+    const recovered = await postgres.recoverInterruptedTikTokOrderJobs({ workerId: WORKER_ID, workerTasks });
     for (const job of recovered) {
       console.warn(`[${WORKER_ID}] requeued interrupted TikTok order job ${job.jobId} from ${job.previousWorkerId || "the previous worker"} (recovery ${job.recoveryCount}).`);
     }
-    const compacted = await postgres.compactQueuedTikTokOrderJobs();
-    for (const group of compacted.filter((entry) => entry.duplicateJobIds.length)) {
-      console.warn(`[${WORKER_ID}] consolidated ${group.duplicateJobIds.length + 1} TikTok order jobs into ${group.keeperJobId}; ${group.historicalBackfill ? "historical" : "current"} range ${group.startDate} through ${group.endDate}.`);
+    if (["all", "orders-tiktok"].includes(WORKER_LANE)) {
+      const compacted = await postgres.compactQueuedTikTokOrderJobs();
+      for (const group of compacted.filter((entry) => entry.duplicateJobIds.length)) {
+        console.warn(`[${WORKER_ID}] consolidated ${group.duplicateJobIds.length + 1} TikTok sync jobs into ${group.keeperJobId}; ${group.historicalBackfill ? "historical" : "current"} range ${group.startDate} through ${group.endDate}.`);
+      }
     }
   }
   await writeHeartbeat("starting", null, true);

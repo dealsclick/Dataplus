@@ -9,6 +9,7 @@ const {
   importedOrderProductMatch,
   orderLineWithDiscoveredProductIdentity,
   orderLineTitleIdentityNeedsRepair,
+  preserveSavedCatalogIdentityOnRefresh,
   orderIdentityPriority,
   outboundInventoryAvailableQuantity,
   outboundInventoryProductForWarehouse,
@@ -190,6 +191,23 @@ test("TikTok refresh repairs a channel SKU that overwrote its saved MPN catalog 
       catalogSku: "BUS495-48-22-2921ESB",
     },
   }), false);
+});
+
+test("TikTok refresh preserves a resolved SKU when the refreshed title has no MPN", () => {
+  const order = {
+    items: [{
+      sku: "4",
+      title: "Random live product #1",
+      catalogIdentityMatch: {
+        mode: "manufacturer-part-number",
+        importedSku: "48-22-2921",
+        catalogSku: "BUS495-48-22-2921ESB",
+      },
+    }],
+  };
+  preserveSavedCatalogIdentityOnRefresh(order);
+  assert.equal(order.items[0].sku, "BUS495-48-22-2921ESB");
+  assert.equal(order.items[0].marketplaceSku, "4");
 });
 
 test("supplier priority is used when no MPN match has physical stock", () => {
