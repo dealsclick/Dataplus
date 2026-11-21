@@ -167,8 +167,8 @@ if [[ "$(docker inspect -f '{{.State.Running}}' dataplus-worker-background 2>/de
 fi
 
 echo "Stopping paused TikTok and retired Walmart worker lanes..."
-docker compose stop worker-orders-tiktok worker-walmart || true
-docker compose rm -f worker-orders-tiktok worker-walmart || true
+docker compose stop worker-orders-tiktok worker-orders-tiktok-returns worker-orders-tiktok-webhook worker-walmart || true
+docker compose rm -f worker-orders-tiktok worker-orders-tiktok-returns worker-orders-tiktok-webhook worker-walmart || true
 
 echo "Pausing new label purchases and draining active purchase jobs..."
 run_with_timeout "${DATAPLUS_LABEL_GATE_TIMEOUT_SECONDS:-360}" docker compose run --rm --no-deps \
@@ -182,7 +182,7 @@ run_with_timeout "${DATAPLUS_RELEASE_HISTORY_TIMEOUT_SECONDS:-120}" docker compo
 record_deployment_status deploying
 
 echo "Starting production services and waiting for health checks..."
-DEPLOY_SERVICES=(redis postgres dataplus worker worker-orders-shopify worker-routing worker-carrier worker-orders-ebay worker-orders-temu worker-orders-tiktok)
+DEPLOY_SERVICES=(redis postgres dataplus worker worker-orders-shopify worker-routing worker-carrier worker-orders-ebay worker-orders-temu worker-orders-tiktok worker-orders-tiktok-returns worker-orders-tiktok-webhook)
 if [[ "$PRESERVE_BACKGROUND_WORKER" != "true" ]]; then
   DEPLOY_SERVICES+=(worker-background)
 fi

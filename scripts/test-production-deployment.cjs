@@ -16,5 +16,8 @@ assert.match(deploy, /git bundle create .*"\$BACKUP_REF"/);
 assert.match(deploy, /git checkout --detach "\$TARGET_REVISION"/);
 assert.match(deploy, /\[\[ "\$\(git rev-parse HEAD\)" == "\$TARGET_REVISION" \]\]/);
 assert.match(deploy, /DEPLOY_SERVICES=\([^\n]*worker-orders-tiktok[^\n]*\)/, "Production deployment must restart the dedicated TikTok order worker.");
+assert.match(deploy, /DEPLOY_SERVICES=\([^\n]*worker-orders-tiktok-returns[^\n]*\)/, "Production deployment must restart the dedicated TikTok return worker.");
+assert.match(deploy, /DEPLOY_SERVICES=\([^\n]*worker-orders-tiktok-webhook[^\n]*\)/, "Production deployment must restart the dedicated TikTok webhook worker.");
+assert.match(deploy, /docker compose stop[^\n]*worker-orders-tiktok-returns[^\n]*worker-orders-tiktok-webhook/, "Production deployment must replace every dedicated TikTok worker lane.");
 
 console.log("Production deployment history safeguards are configured.");
