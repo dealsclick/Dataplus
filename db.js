@@ -5644,9 +5644,10 @@ async function recoverStalledTikTokOperationJobs() {
         'autoRecoveryReason', 'No durable job progress was recorded within the TikTok intake watchdog window.'
       )
     where lower(status) = 'running'
-      and coalesce(raw ->> 'workerTask', '') in ('tiktok-orders', 'tiktok-webhook')
+      and coalesce(raw ->> 'workerTask', '') in ('tiktok-orders', 'tiktok-order-identity-repair', 'tiktok-webhook')
       and updated_at <= now() - case
         when coalesce(raw ->> 'workerTask', '') = 'tiktok-webhook' then interval '2 minutes'
+        when coalesce(raw ->> 'workerTask', '') = 'tiktok-order-identity-repair' then interval '10 minutes'
         else interval '3 minutes'
       end
     returning job_id, raw ->> 'workerTask' as worker_task
@@ -11997,6 +11998,11 @@ async function listOrders(options = {}) {
     }
     where.push(`(${sourcePredicates.join(" or ")})`);
   }
+  const channelAccountId = nullableString(options.channelAccountId);
+  if (channelAccountId) {
+    params.push(channelAccountId);
+    where.push(`coalesce(raw->>'channelAccountId','') = $${params.length}`);
+  }
   const payments = filterOptionValues(options.payment);
   if (payments.length) {
     params.push(payments);
@@ -16913,7 +16919,7 @@ async function recoverInterruptedTikTokOrderJobs({ workerId = "", workerTasks = 
   if (!client) return [];
   await initRelationalSchema();
   const replacementWorkerId = nullableString(workerId) || "";
-  const tasks = [...new Set((Array.isArray(workerTasks) ? workerTasks : [workerTasks]).map(nullableString).filter((task) => ['tiktok-orders', 'tiktok-returns', 'tiktok-webhook'].includes(task)))];
+  const tasks = [...new Set((Array.isArray(workerTasks) ? workerTasks : [workerTasks]).map(nullableString).filter((task) => ['tiktok-orders', 'tiktok-order-identity-repair', 'tiktok-returns', 'tiktok-webhook'].includes(task)))];
   if (!tasks.length) return [];
   const message = "TikTok intake was interrupted by a server update and will continue automatically.";
   const result = await client.query(`

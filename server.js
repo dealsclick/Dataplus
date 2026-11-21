@@ -24717,6 +24717,8 @@ function getTikTokMarketplace() {
     },
     persistJob: persistWorkerImportJob,
     notify: attrs => postgres.createSystemNotification(attrs),
+    repairOrderIdentities: runTikTokOrderIdentityRepair,
+    readOrderHealth: readTikTokOrderHealth,
     reconcileOutboundAudits: options => reconcileOutboundAuditsAfterImport([], {
       ...options,
       source: "TikTok Shop order import"
@@ -24826,6 +24828,201 @@ function getTikTokMarketplace() {
 
 async function runTikTokWorkerJob(job) { return getTikTokMarketplace().run(job); }
 async function checkTikTokSchedule() { return getTikTokMarketplace().schedule(); }
+
+function importedOrderLineIdentitySnapshot(line = {}) {
+  return JSON.stringify({
+    sku: String(line.sku || ""),
+    originalSku: String(line.originalSku || ""),
+    marketplaceSku: String(line.marketplaceSku || ""),
+    mappedFromSku: String(line.mappedFromSku || ""),
+    skuMappingMode: String(line.skuMappingMode || ""),
+    productId: String(line.productId || ""),
+    catalogSku: String(line.catalogIdentityMatch?.catalogSku || ""),
+    importedSku: String(line.catalogIdentityMatch?.importedSku || ""),
+    matchMode: String(line.catalogIdentityMatch?.mode || ""),
+    familySkus: [...new Set((line.catalogFamilySkus || []).map(String).filter(Boolean))].sort()
+  });
+}
+
+async function runTikTokOrderIdentityRepair(options = {}) {
+  const pageSize = Math.max(25, Math.min(250, Number(options.pageSize || 100)));
+  const startDate = String(options.startDate || "").slice(0, 10);
+  const endDate = String(options.endDate || "").slice(0, 10);
+  const orderIds = [...new Set((options.orderIds || []).map(String).filter(Boolean))];
+  const db = normalizeDb(await readDbFast({ skipInventory: true, skipOrders: true, skipPurchaseOrders: true }));
+  const summary = {
+    scannedOrders: 0,
+    scannedLines: 0,
+    repairedOrders: 0,
+    repairedLines: 0,
+    unresolvedLines: 0,
+    routingCandidates: 0,
+    reportingOnlyOrders: 0,
+    unresolved: []
+  };
+  let page = 1;
+  let totalPages = 1;
+  do {
+    await options.check?.();
+    const result = await postgres.listOrders({
+      source: "TikTok Shop",
+      ...(options.accountId ? { channelAccountId: options.accountId } : {}),
+      ...(startDate ? { dateFrom: startDate } : {}),
+      ...(endDate ? { dateTo: endDate } : {}),
+      ...(orderIds.length ? { orderIds } : {}),
+      paginated: true,
+      page,
+      limit: pageSize,
+      sort: "created-asc"
+    });
+    const orders = Array.isArray(result?.orders) ? result.orders : [];
+    totalPages = Math.max(1, Number(result?.totalPages || 1));
+    if (!orders.length) break;
+    const before = new Map();
+    for (const order of orders) {
+      const lines = orderLineItems(order);
+      summary.scannedOrders += 1;
+      summary.scannedLines += lines.length;
+      before.set(order.id, lines.map(importedOrderLineIdentitySnapshot));
+    }
+    await ensureProductsForImportedOrders(db, orders, {
+      channel: "TikTok Shop",
+      jobId: options.jobId || "",
+      createMissingOrderSkus: false
+    });
+    const changedOrders = [];
+    const routingIds = [];
+    for (const order of orders) {
+      const lines = orderLineItems(order);
+      const previous = before.get(order.id) || [];
+      let repairedLines = 0;
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index];
+        if (previous[index] !== importedOrderLineIdentitySnapshot(line)) repairedLines += 1;
+        if (!String(line.productId || line.catalogIdentityMatch?.catalogSku || "").trim()) {
+          summary.unresolvedLines += 1;
+          if (summary.unresolved.length < 100) summary.unresolved.push({
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            marketplaceOrderId: order.marketplaceOrderId,
+            sku: line.sku || line.originalSku || line.channelSku || "",
+            title: line.title || line.name || "",
+            reason: "No catalog product matched the line UPC, manufacturer SKU, or supplier/channel SKU."
+          });
+        }
+      }
+      if (!repairedLines) continue;
+      summary.repairedOrders += 1;
+      summary.repairedLines += repairedLines;
+      order.sku = lines[0]?.sku || order.sku;
+      changedOrders.push(order);
+      if (orderIsReportingOnly(order)) summary.reportingOnlyOrders += 1;
+      else if (order.id) routingIds.push(order.id);
+    }
+    if (changedOrders.length) {
+      await postgres.upsertOrdersFromState(changedOrders, { replace: false, batchSize: pageSize });
+      for (const order of changedOrders) clearOrderApiCache(order.id);
+    }
+    if (routingIds.length) {
+      await queuePaidOrderRoutingCandidates(routingIds, {
+        immediate: true,
+        source: "tiktok-order-identity-repair",
+        sourceJobId: options.jobId || ""
+      });
+      summary.routingCandidates += routingIds.length;
+    }
+    await options.onProgress?.({ ...summary, page, totalPages });
+    page += 1;
+  } while (page <= totalPages);
+  return summary;
+}
+
+async function readTikTokOrderHealth({ accountId = "", accountName = "" } = {}) {
+  const [queues, workerStatus, webhookResult, identityResult, repairJobResult] = await Promise.all([
+    postgres.readCriticalOperationQueueHealth().catch(() => []),
+    readWorkerStatus(readSystemSettingsStore(dbCache.data?.systemSettings || {})).catch(() => ({ workers: [] })),
+    postgres.getPool().query(`
+      select min(updated_at) filter (where data->>'state'='pending') as oldest_pending_at,
+        count(*) filter (where data->>'state'='pending')::int as pending_count,
+        max(updated_at) as last_received_at
+      from tiktok_documents
+      where doc_key like 'tiktok.webhook.event.%'
+        and ($1='' or coalesce(data->>'accountId','')=$1)
+    `, [accountId]),
+    postgres.getPool().query(`
+      select count(*) over()::int as issue_count, orders.order_id, orders.order_number,
+        orders.marketplace_order_id, lines.line_id, lines.sku, lines.title,
+        coalesce(lines.raw->'catalogIdentityMatch'->>'catalogSku','') as catalog_sku
+      from order_records orders
+      join order_line_items lines on lines.order_id=orders.order_id
+      where lower(coalesce(nullif(orders.source,''),nullif(orders.channel_source,''),orders.raw->>'salesChannel',''))='tiktok shop'
+        and ($1='' or coalesce(orders.raw->>'channelAccountId','')=$1)
+        and (
+          (coalesce(lines.raw->'catalogIdentityMatch'->>'catalogSku','')<>'' and lower(lines.sku)<>lower(lines.raw->'catalogIdentityMatch'->>'catalogSku'))
+          or (
+            not exists (select 1 from products product where lower(product.sku)=lower(coalesce(nullif(lines.mapped_sku,''),lines.sku)))
+            and not exists (select 1 from product_aliases alias where alias.active=true and lower(alias.alias_sku)=lower(coalesce(nullif(lines.mapped_sku,''),lines.sku)))
+          )
+        )
+      order by orders.updated_at desc, lines.line_index
+      limit 25
+    `, [accountId]),
+    postgres.getPool().query(`
+      select job_id,job_number,status,created_at,started_at,updated_at,ended_at,message,
+        coalesce((raw->>'processedRows')::int,0) as processed_rows,
+        coalesce((raw->>'changed')::int,0) as changed_rows,
+        coalesce((raw->>'missingCount')::int,0) as missing_count
+      from operations_jobs
+      where raw->>'workerTask'='tiktok-order-identity-repair'
+        and ($1='' or coalesce(raw->'workerPayload'->>'accountId','')=$1)
+      order by coalesce(ended_at,updated_at,started_at,created_at) desc
+      limit 1
+    `, [accountId])
+  ]);
+  const orderQueue = queues.find((row) => row.task === "tiktok-orders") || {};
+  const webhookQueue = queues.find((row) => row.task === "tiktok-webhook") || {};
+  const workers = (workerStatus.workers || []).filter((worker) => ["orders-tiktok", "orders-tiktok-returns", "orders-tiktok-webhook"].includes(worker.lane));
+  const webhook = webhookResult.rows[0] || {};
+  const oldestPendingAt = webhook.oldest_pending_at?.toISOString?.() || webhook.oldest_pending_at || "";
+  const oldestPendingTime = Date.parse(oldestPendingAt);
+  const identityRows = identityResult.rows || [];
+  return {
+    checkedAt: new Date().toISOString(),
+    account: { id: accountId, name: accountName },
+    status: workers.some((worker) => worker.configured !== false && worker.online !== true)
+      || Number(orderQueue.queuedCount || 0) > 0
+      || Number(webhook.pending_count || 0) > 0
+      || Number(identityRows[0]?.issue_count || 0) > 0 ? "attention" : "healthy",
+    orders: {
+      lastSuccessfulImportAt: orderQueue.latestSuccessAt || "",
+      queued: Number(orderQueue.queuedCount || 0),
+      running: Number(orderQueue.runningCount || 0),
+      failedOrPausedLastHour: Number(orderQueue.failedOrPausedLastHour || 0)
+    },
+    webhooks: {
+      pending: Number(webhook.pending_count || 0),
+      oldestPendingAt,
+      oldestPendingAgeMinutes: Number.isFinite(oldestPendingTime) ? Math.max(0, Math.round((Date.now() - oldestPendingTime) / 6000) / 10) : 0,
+      lastReceivedAt: webhook.last_received_at?.toISOString?.() || webhook.last_received_at || "",
+      queued: Number(webhookQueue.queuedCount || 0),
+      running: Number(webhookQueue.runningCount || 0)
+    },
+    workers,
+    identity: {
+      unresolvedLines: Number(identityRows[0]?.issue_count || 0),
+      samples: identityRows.map((row) => ({
+        orderId: row.order_id,
+        orderNumber: row.order_number,
+        marketplaceOrderId: row.marketplace_order_id,
+        lineId: row.line_id,
+        sku: row.sku,
+        catalogSku: row.catalog_sku,
+        title: row.title
+      }))
+    },
+    latestRepair: repairJobResult.rows[0] || null
+  };
+}
 async function queueTikTokSettlementSyncJob(options = {}) {
   return getTikTokMarketplace().queue('settlements', {
     scheduled: options.scheduled === true,
@@ -40090,7 +40287,9 @@ async function ensureProductsForImportedOrders(db = {}, orders = [], options = {
   if (!postgres.isPostgresEnabled() || options.historicalBackfill === true) return { createdProducts: [], attentionSkus: [] };
   const channelName = String(options.channel || orders[0]?.source || orders[0]?.channel || "Marketplace").trim() || "Marketplace";
   const channel = orderChannelPolicy(db, { source: channelName, channel: channelName });
-  const createMissingOrderSkus = channel?.settings?.createMissingOrderSkusFromSource === true;
+  const createMissingOrderSkus = options.createMissingOrderSkus === false
+    ? false
+    : channel?.settings?.createMissingOrderSkusFromSource === true;
 
   const firstLineBySku = new Map();
   for (const order of Array.isArray(orders) ? orders : []) {
@@ -85819,6 +86018,7 @@ module.exports = {
   runShopifyReturnImportWorkerJob,
   runTemuReturnImportWorkerJob,
   runTemuOrderImportWorkerJob,
+  runTikTokOrderIdentityRepair,
   runEbayPriceInventorySyncWorkerJob,
   runEbayListingLaunchWorkerJob,
   runEbayTaxonomySyncWorkerJob,

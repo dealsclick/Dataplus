@@ -18,6 +18,7 @@ assert.equal(supportsTask('orders-shopify', 'shopify-order-import'), true);
 assert.equal(supportsTask('orders-ebay', 'ebay-return-import'), true);
 assert.equal(supportsTask('orders-temu', 'temu-order-status'), true);
 assert.equal(supportsTask('orders-tiktok', 'tiktok-orders'), true);
+assert.equal(supportsTask('orders-tiktok', 'tiktok-order-identity-repair'), true);
 assert.equal(supportsTask('orders-tiktok', 'tiktok-returns'), false);
 assert.equal(supportsTask('orders-tiktok-returns', 'tiktok-returns'), true);
 assert.equal(supportsTask('orders-tiktok-webhook', 'tiktok-webhook'), true);
@@ -41,6 +42,7 @@ assert.equal(CRITICAL_JOB_POLICIES['shopify-order-import'].lane, 'orders-shopify
 assert.equal(CRITICAL_JOB_POLICIES['ebay-order-import'].lane, 'orders-ebay');
 assert.equal(CRITICAL_JOB_POLICIES['temu-order-import'].lane, 'orders-temu');
 assert.equal(CRITICAL_JOB_POLICIES['tiktok-orders'].lane, 'orders-tiktok');
+assert.equal(CRITICAL_JOB_POLICIES['tiktok-order-identity-repair'].lane, 'orders-tiktok');
 assert.equal(CRITICAL_JOB_POLICIES['tiktok-webhook'].lane, 'orders-tiktok-webhook');
 assert.equal(CRITICAL_JOB_POLICIES['walmart-orders'].lane, 'walmart');
 assert.ok(Object.values(CRITICAL_JOB_POLICIES).every((policy) => policy.maxQueueAgeMinutes > 0 && policy.maxRunningAgeMinutes > 0 && policy.recoveryPriority > 0));

@@ -42,7 +42,7 @@ const WORKER_POST_JOB_DRAIN_TIMEOUT_MS = Math.max(1_000, Number(
   process.env.DATAPLUS_WORKER_POST_JOB_DRAIN_TIMEOUT_MS || 15_000
 ) || 15_000);
 const SUPPORTED_TASKS = [
-  "tiktok-orders", "tiktok-returns", "tiktok-settlements", "tiktok-products", "tiktok-messages", "tiktok-live",
+  "tiktok-orders", "tiktok-order-identity-repair", "tiktok-returns", "tiktok-settlements", "tiktok-products", "tiktok-messages", "tiktok-live",
   "tiktok-analytics", "tiktok-affiliate", "tiktok-promotions", "tiktok-engagement", "tiktok-commerce", "tiktok-launch", "tiktok-inventory", "tiktok-price", "tiktok-webhook", "tiktok-webhook-setup",
   "walmart-pricing", "walmart-bulk-launch", "walmart-launch-reconcile", "walmart-existing-launch", "walmart-reconcile", "walmart-match", "walmart-orders", "walmart-returns", "walmart-webhook", "walmart-taxonomy", "walmart-launch", "walmart-feed", "walmart-preview", "walmart-update", "walmart-retire", "walmart-inventory-sync", "walmart-settlements",
   "status-inventory",
@@ -2911,7 +2911,7 @@ async function main() {
       ? ['tiktok-webhook']
       : WORKER_LANE === 'orders-tiktok-returns'
         ? ['tiktok-returns']
-        : ['tiktok-orders'];
+        : ['tiktok-orders', 'tiktok-order-identity-repair'];
     const recovered = await postgres.recoverInterruptedTikTokOrderJobs({ workerId: WORKER_ID, workerTasks });
     for (const job of recovered) {
       console.warn(`[${WORKER_ID}] requeued interrupted TikTok order job ${job.jobId} from ${job.previousWorkerId || "the previous worker"} (recovery ${job.recoveryCount}).`);

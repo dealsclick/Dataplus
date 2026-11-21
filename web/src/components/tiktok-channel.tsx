@@ -80,6 +80,8 @@ export function TikTokChannel({
   const [liveLoading, setLiveLoading] = useState(false)
   const [workspace, setWorkspace] = useState<Json>({ commerce: [], affiliate: [], promotions: [], engagement: [], webhooks: {} })
   const [workspaceLoading, setWorkspaceLoading] = useState(false)
+  const [orderHealth, setOrderHealth] = useState<Json>({ workers: [], orders: {}, webhooks: {}, identity: { samples: [] } })
+  const [orderHealthLoading, setOrderHealthLoading] = useState(false)
   const [edits, setEdits] = useState<Json>({})
   const [tab, setTab] = useState("connection")
   const [busy, setBusy] = useState(false)
@@ -135,6 +137,18 @@ export function TikTokChannel({
       return next
     } finally {
       setWorkspaceLoading(false)
+    }
+  }
+
+  const refreshOrderHealth = async () => {
+    setOrderHealthLoading(true)
+    try {
+      const account = status.activeAccountId ? `?accountId=${encodeURIComponent(String(status.activeAccountId))}` : ""
+      const next = await request(`health/orders${account}`)
+      setOrderHealth(next)
+      return next
+    } finally {
+      setOrderHealthLoading(false)
     }
   }
 
@@ -372,7 +386,10 @@ export function TikTokChannel({
 
   const changeTab = (value: string) => {
     setTab(value)
-    if (value === "sync") void refreshRecentJobs().catch(() => {})
+    if (value === "sync") {
+      void refreshRecentJobs().catch(() => {})
+      void refreshOrderHealth().catch(() => {})
+    }
     if (value === "live" && !liveStatus.syncedAt && !liveLoading) void refreshLive().catch(() => {})
     if (["analytics", "webhooks", "fulfillment"].includes(value) && !workspaceLoading) void refreshWorkspace().catch(() => {})
   }
@@ -567,9 +584,25 @@ export function TikTokChannel({
           </TabsContent>
 
           <TabsContent value="sync" className="space-y-4">
+            <section className="overflow-hidden rounded-md border" aria-labelledby="tiktok-order-health-heading">
+              <div className="flex flex-wrap items-start justify-between gap-3 border-b bg-muted/20 px-4 py-3">
+                <div className="min-w-0"><p id="tiktok-order-health-heading" className="text-sm font-medium">TikTok order intake health</p><p className="mt-1 text-xs text-muted-foreground">{orderHealth.account?.name || activeShopName} · API imports, signed webhooks, worker lanes, and saved catalog identity.</p></div>
+                <div className="flex items-center gap-2"><Badge variant={orderHealth.status === "healthy" ? "default" : "secondary"}>{orderHealthLoading ? "Checking" : orderHealth.status === "healthy" ? "Healthy" : "Needs attention"}</Badge><Button size="sm" variant="outline" disabled={orderHealthLoading} onClick={() => void refreshOrderHealth().catch(reason => setError(reason instanceof Error ? reason.message : "TikTok order health could not load."))}>{orderHealthLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh</Button></div>
+              </div>
+              <div className="grid sm:grid-cols-2 xl:grid-cols-4">
+                <div className="border-b px-4 py-3 sm:border-r xl:border-b-0"><p className="text-xs text-muted-foreground">Last successful import</p><p className="mt-1 text-sm font-medium">{orderHealth.orders?.lastSuccessfulImportAt ? dateLabel(String(orderHealth.orders.lastSuccessfulImportAt)) : "No completed import"}</p><p className="mt-1 text-xs text-muted-foreground">{numberLabel(Number(orderHealth.orders?.queued || 0))} queued · {numberLabel(Number(orderHealth.orders?.running || 0))} running</p></div>
+                <div className="border-b px-4 py-3 xl:border-b-0 xl:border-r"><p className="text-xs text-muted-foreground">Webhook intake</p><p className="mt-1 text-sm font-medium">{numberLabel(Number(orderHealth.webhooks?.pending || 0))} pending</p><p className="mt-1 text-xs text-muted-foreground">{Number(orderHealth.webhooks?.oldestPendingAgeMinutes || 0) > 0 ? `Oldest waiting ${orderHealth.webhooks.oldestPendingAgeMinutes} min` : orderHealth.webhooks?.lastReceivedAt ? `Last received ${dateLabel(String(orderHealth.webhooks.lastReceivedAt))}` : "No webhook received"}</p></div>
+                <div className="border-b px-4 py-3 sm:border-r sm:border-b-0"><p className="text-xs text-muted-foreground">Identity review</p><p className="mt-1 text-sm font-medium">{numberLabel(Number(orderHealth.identity?.unresolvedLines || 0))} line(s)</p><p className="mt-1 text-xs text-muted-foreground">UPC first, manufacturer SKU second, supplier/channel SKU third.</p></div>
+                <div className="px-4 py-3"><p className="text-xs text-muted-foreground">Last repair</p><p className="mt-1 text-sm font-medium capitalize">{orderHealth.latestRepair?.status || "Not run"}</p><p className="mt-1 text-xs text-muted-foreground">{orderHealth.latestRepair?.updated_at ? dateLabel(String(orderHealth.latestRepair.updated_at)) : "Use the selected date range below."}</p></div>
+              </div>
+              <div className="border-t px-4 py-3">
+                <div className="flex flex-wrap gap-2">{(orderHealth.workers || []).map((worker: Json) => <Badge key={worker.lane} variant={worker.online ? "outline" : "destructive"}>{worker.name || worker.lane}: {worker.online ? "online" : "offline"}</Badge>)}{!(orderHealth.workers || []).length && <span className="text-xs text-muted-foreground">Worker status has not loaded.</span>}</div>
+                {(orderHealth.identity?.samples || []).length > 0 && <div className="mt-3 overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Current SKU</TableHead><TableHead>Saved catalog SKU</TableHead><TableHead>Title</TableHead></TableRow></TableHeader><TableBody>{orderHealth.identity.samples.slice(0, 5).map((row: Json) => <TableRow key={row.lineId}><TableCell><a className="font-medium underline" href={`/orders/${encodeURIComponent(String(row.orderNumber || row.orderId))}`}>{row.orderNumber || row.orderId}</a></TableCell><TableCell className="font-mono text-xs">{row.sku || "-"}</TableCell><TableCell className="font-mono text-xs">{row.catalogSku || "-"}</TableCell><TableCell className="max-w-80 truncate">{row.title || "-"}</TableCell></TableRow>)}</TableBody></Table></div>}
+              </div>
+            </section>
             <div className="grid gap-3 sm:grid-cols-2"><label className="grid gap-1.5 text-sm">From<Input type="date" value={dateRange.startDate} max={dateRange.endDate} onChange={event => setDateRange(current => ({ ...current, startDate: event.target.value }))} /></label><label className="grid gap-1.5 text-sm">Through<Input type="date" value={dateRange.endDate} min={dateRange.startDate} onChange={event => setDateRange(current => ({ ...current, endDate: event.target.value }))} /></label></div>
             <label className="flex max-w-2xl items-center justify-between gap-4 rounded-md border p-3"><span className="min-w-0"><span className="block text-sm font-medium">Historical order backfill</span><span className="block text-xs text-muted-foreground">New orders in this manual range are saved for reporting only. They will not route fulfillment, reserve inventory, create purchase demand, or buy labels.</span></span><Switch checked={historicalBackfill} onCheckedChange={setHistoricalBackfill} /></label>
-            <div className="flex flex-wrap gap-2"><Button disabled={busy || !verified || rules.tiktokOrdersEnabled !== true} onClick={() => void run(() => queue("orders"))}><Play className="size-4" /> Import orders</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokReturnsEnabled !== true} onClick={() => void run(() => queue("returns"))}>Import returns</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokSettlementImportEnabled !== true} onClick={() => void run(() => queue("settlements"))}>Import statements</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokCatalogEnabled !== true} onClick={() => void run(() => queue("products"))}>Reconcile products</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokMessagesEnabled !== true} onClick={() => void run(() => queue("messages"))}>Sync conversations</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokCatalogEnabled !== true} onClick={() => void run(() => queue("commerce"))}>Sync commerce setup</Button></div>
+            <div className="flex flex-wrap gap-2"><Button disabled={busy || !verified || rules.tiktokOrdersEnabled !== true} onClick={() => void run(() => queue("orders"))}><Play className="size-4" /> Import orders</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokOrdersEnabled !== true} onClick={() => void run(async () => { const result = await queue("order-identity-repair"); await Promise.all([refreshRecentJobs(), refreshOrderHealth()]); return result })}><ListChecks className="size-4" /> Repair saved order SKUs</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokReturnsEnabled !== true} onClick={() => void run(() => queue("returns"))}>Import returns</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokSettlementImportEnabled !== true} onClick={() => void run(() => queue("settlements"))}>Import statements</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokCatalogEnabled !== true} onClick={() => void run(() => queue("products"))}>Reconcile products</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokMessagesEnabled !== true} onClick={() => void run(() => queue("messages"))}>Sync conversations</Button><Button variant="outline" disabled={busy || !verified || rules.tiktokCatalogEnabled !== true} onClick={() => void run(() => queue("commerce"))}>Sync commerce setup</Button></div>
             <p className="text-xs text-muted-foreground">Scheduled order sync remains operational. Historical imports skip existing orders and are marked as non-operational.</p>
             <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>Job</TableHead><TableHead>Shop</TableHead><TableHead>Operation</TableHead><TableHead>Status</TableHead><TableHead>Updated</TableHead></TableRow></TableHeader><TableBody>{(status.recentJobs || []).map((row: Json) => <TableRow key={row.id}><TableCell><a className="underline" href="/jobs">#{row.jobNumber || row.id}</a></TableCell><TableCell>{row.accountName || "Legacy account"}</TableCell><TableCell>{row.operation}</TableCell><TableCell><Badge variant={row.status === "success" ? "default" : row.status === "failed" ? "destructive" : "outline"}>{row.status}</Badge></TableCell><TableCell className="whitespace-nowrap text-muted-foreground">{row.at ? new Date(row.at).toLocaleString() : "-"}</TableCell></TableRow>)}{!status.recentJobs?.length && <TableRow><TableCell colSpan={5} className="py-8 text-center text-muted-foreground">No TikTok jobs yet.</TableCell></TableRow>}</TableBody></Table></div>
           </TabsContent>

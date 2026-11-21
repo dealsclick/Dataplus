@@ -57,6 +57,8 @@ async function main() {
   assert.match(clientSource, /options\.retryable !== false/, 'TikTok callers must be able to disable retries for optional enrichment reads');
   assert.match(marketplaceSource, /if \(payload\.historicalBackfill !== true\) windows\.reverse\(\)/, 'Operational TikTok imports should process the newest date window first');
   assert.match(marketplaceSource, /queuePriority: operation === 'orders'.*130/, 'Operational TikTok imports should outrank reconciliation work');
+  assert.match(marketplaceSource, /order-identity-repair/, 'TikTok must expose a bounded repair job for saved order identities');
+  assert.match(marketplaceSource, /repairOrderIdentities/, 'TikTok identity repair must delegate to the shared catalog matcher');
 
   const signature = tiktokSignature('/order/202309/orders/search', {
     timestamp: '1700000000',
@@ -190,6 +192,8 @@ async function main() {
   assert.equal(tiktokChannelSource.includes('/auth/tiktok/creator/start'), true, 'TikTok settings must start the creator authorization flow.');
   assert.equal(tiktokChannelSource.includes('updateFeature'), true, 'TikTok feature switches must persist immediately instead of relying on an easy-to-miss draft banner.');
   assert.equal(tiktokChannelSource.includes('status/jobs'), true, 'TikTok job history must load separately from the connection status.');
+  assert.equal(tiktokChannelSource.includes('TikTok order intake health'), true, 'TikTok settings must show order, webhook, worker, and identity health.');
+  assert.equal(tiktokChannelSource.includes('Repair saved order SKUs'), true, 'TikTok settings must expose a reviewed historical identity repair action.');
   const liveSessionsSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'live-sessions-route.tsx'), 'utf8');
   assert.equal(liveSessionsSource.includes('Sync products to TikTok LIVE'), true, 'TikTok Live Sessions must expose creator product sync.');
   assert.equal(liveSessionsSource.includes('Streamer showcase'), true, 'TikTok Live Session creation must select the official streamer showcase.');
@@ -202,9 +206,13 @@ async function main() {
   assert.match(activeJobDatabaseSource, /tiktok-orders', 'tiktok-returns/, 'TikTok queue compaction must cover both orders and returns');
   assert.match(activeJobDatabaseSource, /operations_jobs_tiktok_active_singleton_idx/, 'PostgreSQL must enforce one active TikTok operational sync per account and task');
   assert.match(activeJobDatabaseSource, /async function recoverStalledTikTokOperationJobs/, 'Stalled TikTok intake must request an automatic retry');
+  assert.match(activeJobDatabaseSource, /tiktok-order-identity-repair/, 'TikTok identity repair must retain restart and stall recovery safeguards.');
+  assert.match(activeJobDatabaseSource, /channelAccountId/, 'TikTok repair queries must support seller-account isolation.');
   assert.match(activeJobDatabaseSource, /historicalBackfill = null/, 'Historical TikTok backfills must not block live operational imports');
   assert.match(activeJobWorkerSource, /compactQueuedTikTokOrderJobs/, 'The TikTok worker must compact recovered jobs before claiming work');
   assert.match(serverSource, /!historicalBackfill && \(!existing \|\| titleIdentityNeedsRepair\)\) await ensureProductsForImportedOrders/, 'Existing TikTok refreshes must preserve catalog mapping except for the explicit title-identity repair path');
+  assert.match(serverSource, /createMissingOrderSkus: false/, 'Historical TikTok identity repair must not create draft catalog SKUs.');
+  assert.match(serverSource, /orderIsReportingOnly\(order\)/, 'Historical reporting orders must not be queued for operational routing by identity repair.');
   assert.equal(serverSource.includes('parts[3] === "tiktok-live" && parts[4] === "sync"'), true, 'The server must expose a TikTok Live Session sync route.');
   assert.equal(tiktokChannelSource.includes('Shop code'), true, 'TikTok settings must display the selected shop code.');
   assert.equal(tiktokChannelSource.includes('Shared TikTok app credentials'), true, 'TikTok settings must distinguish app credentials from seller accounts.');
