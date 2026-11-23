@@ -72170,7 +72170,10 @@ async function handleApi(req, res) {
       return sendJson(res, 409, { error: "Outbound handoff audits are available only for LINQ while fulfillment isolation is completed." });
     }
     if (req.method === "GET") {
-      const audits = await outboundAuditStore.list(scope, { limit: url.searchParams.get("limit") });
+      const audits = await outboundAuditStore.list(scope, {
+        limit: url.searchParams.get("limit"),
+        query: url.searchParams.get("q"),
+      });
       return sendJson(res, 200, { audits });
     }
     if (req.method === "POST") {

@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { AlertTriangle, Camera, CheckCircle2, ClipboardCheck, ExternalLink, FileDown, Flashlight, Image as ImageIcon, Keyboard, Loader2, PackageCheck, Printer, RefreshCw, RotateCcw, ScanBarcode, Search, Trash2, Truck, Undo2, UploadCloud, X } from "lucide-react"
+import { AlertTriangle, Camera, CheckCircle2, ChevronDown, ClipboardCheck, ExternalLink, FileDown, Flashlight, Image as ImageIcon, Keyboard, Loader2, PackageCheck, Printer, RefreshCw, RotateCcw, ScanBarcode, Search, Trash2, Truck, Undo2, UploadCloud, X } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Textarea } from "@/components/ui/textarea"
@@ -39,6 +41,7 @@ type AuditSession = {
   startedByName: string
   startedAt: string
   closedAt: string
+  searchMatch?: { trackingNumber?: string; orderNumber?: string } | null
 }
 type AuditScan = {
   id: string
@@ -503,6 +506,10 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
 export function OutboundAuditWorkspace({ warehouses = [] }: { warehouses?: Row[] }) {
   const availableWarehouses = useMemo(() => physicalWarehouses(warehouses), [warehouses])
   const [audits, setAudits] = useState<AuditSession[]>([])
+  const [auditMatches, setAuditMatches] = useState<AuditSession[]>([])
+  const [auditPickerOpen, setAuditPickerOpen] = useState(false)
+  const [auditQuery, setAuditQuery] = useState("")
+  const [auditSearching, setAuditSearching] = useState(false)
   const [selectedId, setSelectedId] = useState("")
   const [detail, setDetail] = useState<AuditDetail | null>(null)
   const [loading, setLoading] = useState(true)
@@ -598,6 +605,27 @@ export function OutboundAuditWorkspace({ warehouses = [] }: { warehouses?: Row[]
   useEffect(() => { void loadAudits() }, [loadAudits])
   useEffect(() => { void loadDetail(selectedId) }, [loadDetail, selectedId])
   useEffect(() => { void retryPendingEvidence() }, [retryPendingEvidence])
+  useEffect(() => {
+    const query = auditQuery.trim()
+    if (query.length < 2) {
+      setAuditMatches([])
+      setAuditSearching(false)
+      return
+    }
+    const controller = new AbortController()
+    const timer = window.setTimeout(async () => {
+      setAuditSearching(true)
+      try {
+        const response = await api<{ audits?: AuditSession[] }>(`/api/fulfillment/outbound-audits?${new URLSearchParams({ limit: "50", q: query })}`, { signal: controller.signal })
+        setAuditMatches(response.audits || [])
+      } catch (error) {
+        if (!controller.signal.aborted) toast.error(error instanceof Error ? error.message : "Unable to search outbound audits.")
+      } finally {
+        if (!controller.signal.aborted) setAuditSearching(false)
+      }
+    }, 250)
+    return () => { window.clearTimeout(timer); controller.abort() }
+  }, [auditQuery])
   useEffect(() => {
     setCloseDraft(current => ({ ...current, completionOverrideReason: "" }))
     setPackageSearch("")
@@ -726,8 +754,12 @@ export function OutboundAuditWorkspace({ warehouses = [] }: { warehouses?: Row[]
     })
   }, [detail?.scans, packageSearch, carrierFilter, channelFilter, scannerFilter])
   const filtersActive = Boolean(packageSearch.trim() || carrierFilter !== "all" || channelFilter !== "all" || scannerFilter !== "all")
-  return <div className="grid gap-4 xl:grid-cols-[18rem_minmax(0,1fr)]">
-    <Card className="h-fit"><CardHeader className="flex-row items-start justify-between gap-3"><div><CardTitle>Outbound audits</CardTitle><CardDescription>One open audit per warehouse each day</CardDescription></div><Button size="icon" variant="outline" title="Refresh audits" onClick={() => void loadAudits()} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button></CardHeader><CardContent className="grid gap-2"><Button onClick={() => setStartOpen(true)}><ClipboardCheck className="size-4" /> Use today&apos;s audit</Button><div className="grid max-h-[28rem] gap-2 overflow-y-auto">{audits.map((audit) => <button type="button" key={audit.id} onClick={() => setSelectedId(audit.id)} className={`rounded-md border p-3 text-left transition-colors ${selectedId === audit.id ? "border-primary bg-primary/5" : "hover:bg-muted/40"}`}><div className="flex items-center justify-between gap-2"><span className="font-semibold">{audit.auditNumber}</span><Badge variant={audit.status === "open" ? "warning" : "success"}>{audit.status}</Badge></div><p className="mt-1 truncate text-xs text-muted-foreground">{audit.warehouseName} · {audit.carrier || "Any carrier"}</p><p className="mt-1 text-xs">{numberLabel(audit.packageCount)} packages · {numberLabel(audit.unmatchedCount)} unmatched</p></button>)}{!audits.length && !loading ? <p className="rounded-md border border-dashed p-4 text-center text-sm text-muted-foreground">No outbound audits yet.</p> : null}</div></CardContent></Card>
+  const auditOptions = auditQuery.trim().length >= 2 ? auditMatches : audits
+  return <div className="grid min-w-0 gap-4">
+    <div className="flex flex-col gap-3 rounded-md border bg-card p-3 lg:flex-row lg:items-end lg:justify-between">
+      <div className="min-w-0 flex-1"><Label className="mb-2 block">Outbound audit</Label><Popover open={auditPickerOpen} onOpenChange={(open) => { setAuditPickerOpen(open); if (!open) { setAuditQuery(""); setAuditMatches([]) } }}><PopoverTrigger asChild><Button type="button" variant="outline" role="combobox" aria-expanded={auditPickerOpen} className="h-auto min-h-10 w-full max-w-3xl justify-between gap-3 px-3 py-2 text-left font-normal"><span className="min-w-0 flex-1"><span className="block truncate font-semibold">{session?.auditNumber || (loading ? "Loading outbound audits..." : "Select an outbound audit")}</span>{session ? <span className="block truncate text-xs text-muted-foreground">{session.warehouseName} · {session.carrier || "Any carrier"} · {numberLabel(session.packageCount)} packages</span> : <span className="block truncate text-xs text-muted-foreground">Search audit ID, tracking number, or order number</span>}</span><ChevronDown className="size-4 shrink-0 text-muted-foreground" /></Button></PopoverTrigger><PopoverContent align="start" className="w-[min(52rem,calc(100vw-2rem))] p-0"><Command shouldFilter={false}><CommandInput value={auditQuery} onValueChange={setAuditQuery} placeholder="Search all audits, tracking numbers, or order numbers..." /><CommandList className="max-h-[min(70vh,32rem)]">{auditSearching ? <div className="flex items-center gap-2 px-3 py-4 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Searching all outbound audits...</div> : <CommandEmpty>{auditQuery.trim().length < 2 ? "No recent outbound audits." : "No audit, tracking number, or order number matched."}</CommandEmpty>}<CommandGroup heading={auditQuery.trim().length >= 2 ? "Search results" : "Recent audits"}>{auditOptions.map((audit) => <CommandItem key={audit.id} value={audit.id} onSelect={() => { setSelectedId(audit.id); setAuditPickerOpen(false); setAuditQuery(""); setAuditMatches([]) }} className="items-start gap-3 py-3"><CheckCircle2 className={`mt-0.5 size-4 shrink-0 ${selectedId === audit.id ? "text-primary" : "text-transparent"}`} /><span className="min-w-0 flex-1"><span className="flex flex-wrap items-center gap-2"><span className="font-semibold">{audit.auditNumber}</span><Badge variant={audit.status === "open" ? "warning" : "success"}>{audit.status}</Badge></span><span className="mt-0.5 block truncate text-xs text-muted-foreground">{audit.warehouseName} · {audit.carrier || "Any carrier"} · {dateLabel(audit.startedAt)} · {numberLabel(audit.packageCount)} packages</span>{audit.searchMatch?.trackingNumber || audit.searchMatch?.orderNumber ? <span className="mt-1 block truncate text-xs font-medium text-primary">{audit.searchMatch.trackingNumber ? `Tracking ${audit.searchMatch.trackingNumber}` : ""}{audit.searchMatch.trackingNumber && audit.searchMatch.orderNumber ? " · " : ""}{audit.searchMatch.orderNumber ? `Order ${audit.searchMatch.orderNumber}` : ""}</span> : null}</span></CommandItem>)}</CommandGroup></CommandList></Command></PopoverContent></Popover><p className="mt-1.5 text-xs text-muted-foreground">Searches every outbound audit by audit ID, warehouse, user, tracking number, DataPlus order, or channel order.</p></div>
+      <div className="flex shrink-0 flex-wrap gap-2"><Button variant="outline" size="icon" title="Refresh audits" onClick={() => void loadAudits(selectedId)} disabled={loading}>{loading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}</Button><Button onClick={() => setStartOpen(true)}><ClipboardCheck className="size-4" /> Use today&apos;s audit</Button></div>
+    </div>
     <Card className="min-w-0"><CardHeader className="border-b"><div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"><div><div className="flex flex-wrap items-center gap-2"><CardTitle>{session?.auditNumber || "Outbound handoff audit"}</CardTitle>{session ? <Badge variant={open ? "warning" : "success"}>{session.status}</Badge> : null}</div><CardDescription>{session ? `${session.warehouseName} · ${session.carrier || "Any carrier"} · Started ${dateLabel(session.startedAt)}` : "Start an audit and scan every physical package before carrier handoff."}</CardDescription></div>{session ? <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" asChild><a href={`/api/fulfillment/outbound-audits/${encodeURIComponent(session.id)}/export.csv`}><FileDown className="size-4" /> CSV</a></Button><Button size="sm" variant="outline" asChild><a href={`/api/fulfillment/outbound-audits/${encodeURIComponent(session.id)}/print`} target="_blank" rel="noreferrer"><Printer className="size-4" /> Print record</a></Button>{open ? <Button size="sm" onClick={() => { setScannerInitialScan(null); setScannerOpen(true) }}><Camera className="size-4" /> Scan packages</Button> : null}</div> : null}</div></CardHeader>
       <CardContent className="grid gap-4 p-4">{session ? <>
         <div className="grid overflow-hidden rounded-md border grid-cols-2 lg:grid-cols-3">{[["Scanned", session.packageCount], ["Matched", session.matchedCount], ["No order match", session.unmatchedCount], ["Photos saved", session.evidenceCompleteCount], ["Without photo", session.evidenceMissingCount], ["Multiple orders", session.multipleMatchCount]].map(([label, count], index) => <div key={String(label)} className={`border-b p-3 ${index % 2 === 0 ? "border-r lg:border-r" : ""} ${index % 3 !== 2 ? "lg:border-r" : "lg:border-r-0"} ${index >= 4 ? "border-b-0" : ""} ${index >= 3 ? "lg:border-b-0" : ""}`}><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1 text-xl font-semibold tabular-nums">{numberLabel(Number(count))}</p></div>)}</div>

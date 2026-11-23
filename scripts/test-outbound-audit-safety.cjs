@@ -164,6 +164,10 @@ assert.match(warehouseRouteSource, /<OutboundAuditWorkspace warehouses=\{warehou
 assert.match(workspaceSource, /Undo last item/);
 assert.match(workspaceSource, /Remove \$\{item\.sku\} scan/);
 assert.match(workspaceSource, /removeOptionalItem/);
+assert.match(workspaceSource, /Search all audits, tracking numbers, or order numbers/);
+assert.match(workspaceSource, /Searches every outbound audit by audit ID, warehouse, user, tracking number, DataPlus order, or channel order/);
+assert.match(workspaceSource, /grid min-w-0 gap-4/);
+assert.doesNotMatch(workspaceSource, /xl:grid-cols-\[18rem_minmax\(0,1fr\)\]/);
 
 const outboundStoreSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'outbound-audit-store.js'), 'utf8');
 assert.match(outboundStoreSource, /timezone\('America\/New_York', started_at\)::date = timezone\('America\/New_York', now\(\)\)::date/);
@@ -176,6 +180,10 @@ assert.match(outboundStoreSource, /scan\.match_status = 'unmatched'/);
 assert.doesNotMatch(outboundStoreSource, /scan\.match_status = 'unmatched'[\s\S]{0,240}session\.status = 'open'/);
 assert.match(outboundStoreSource, /removedItem\.verificationOnly !== true/);
 assert.match(outboundStoreSource, /Inventory-assigned Live item scans require an audited stock reversal/);
+assert.match(outboundStoreSource, /jsonb_array_elements\(coalesce\(scan\.order_matches/);
+assert.match(outboundStoreSource, /scan\.tracking_number ilike/);
+assert.match(outboundStoreSource, /matched_order_number/);
+assert.match(serverSource, /query: url\.searchParams\.get\("q"\)/);
 
 const warehouseMobileSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'src', 'components', 'warehouse-mobile.tsx'), 'utf8');
 assert.match(warehouseMobileSource, /id: "outbound"/);
