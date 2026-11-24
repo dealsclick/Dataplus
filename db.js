@@ -3078,11 +3078,14 @@ function warehouseAuditLineMatchesExpectedCatalogIdentity(line = {}, expected = 
   const expectedIndex = Number(expected.lineIndex);
   if (Number.isInteger(assignedIndex) && assignedIndex >= 0 && assignedIndex === expectedIndex) return true;
   const lineIdentifiers = new Set(warehouseAuditCatalogIdentityValues(line, [
-    "sku", "selectedSupplierSku", "selectedVendorSku", "vendorSku", "selectedManufacturerSku",
-    "manufacturerSku", "mfrPartNumber", "selectedSupplierUpc", "barcode", "upc", "gtin"
+    "sku", "productId", "receivingCatalogSku", "receivingOriginalSku", "createdProductSku", "createdSku", "manualSku",
+    "selectedSupplierSku", "supplierSku", "selectedVendorSku", "vendorSku", "sourceSku", "internalSku",
+    "selectedManufacturerSku", "manufacturerSku", "mfrPartNumber", "manufacturerPartNumber", "mpn",
+    "selectedSupplierUpc", "catalogBarcode", "barcode", "upc", "gtin", "aliases"
   ]));
   return warehouseAuditCatalogIdentityValues(expected, [
-    "sku", "supplierSku", "vendorItemNumber", "manufacturerSku", "upc", "barcode", "catalogBarcode"
+    "sku", "productId", "supplierSku", "vendorItemNumber", "vendorSku", "sourceSku", "manufacturerSku",
+    "mfrPartNumber", "manufacturerPartNumber", "mpn", "upc", "barcode", "catalogBarcode", "catalogAliases"
   ]).some((identifier) => lineIdentifiers.has(identifier));
 }
 
@@ -3111,8 +3114,8 @@ function reconcileWarehouseAuditPurchaseOrderCatalog(audit = {}, purchaseOrderLi
       description: nullableString(match.title) || nullableString(expected.description) || currentSku,
       vendorItemNumber: nullableString(match.sourceItemNumber || match.vendorSku) || nullableString(expected.vendorItemNumber),
       manufacturerSku: nullableString(match.manufacturerSku || match.mfrPartNumber) || nullableString(expected.manufacturerSku),
-      upc: nullableString(match.upc || match.barcode) || nullableString(expected.upc),
-      catalogBarcode: nullableString(match.barcode || match.upc) || nullableString(expected.catalogBarcode),
+      upc: nullableString(match.upc || match.barcode || match.catalogBarcode) || nullableString(expected.upc),
+      catalogBarcode: nullableString(match.catalogBarcode || match.barcode || match.upc) || nullableString(expected.catalogBarcode),
       supplierSku: nullableString(match.sourceSku || match.supplierSku || match.sourceItemNumber) || nullableString(expected.supplierSku) || currentSku,
       unitCost: rawUnitCost === null || rawUnitCost === undefined || rawUnitCost === "" || !Number.isFinite(Number(rawUnitCost))
         ? expected.unitCost ?? null
@@ -3134,7 +3137,8 @@ function reconcileWarehouseAuditPurchaseOrderCatalog(audit = {}, purchaseOrderLi
       });
     const identityMatches = hasStableAssignment ? stableMatches : expectedSnapshots
       .map((expected, index) => ({ expected, index }))
-      .filter(({ expected }) => warehouseAuditLineMatchesExpectedCatalogIdentity(line, expected));
+      .filter(({ expected, index }) => warehouseAuditLineMatchesExpectedCatalogIdentity(line, expected)
+        || warehouseAuditLineMatchesExpectedCatalogIdentity(line, reconciledExpected[index] || expected));
     if (identityMatches.length !== 1) return line;
     const { expected, index } = identityMatches[0];
     const current = currentByExpectedIndex.get(index);
@@ -3152,7 +3156,7 @@ function reconcileWarehouseAuditPurchaseOrderCatalog(audit = {}, purchaseOrderLi
         productId: nullableString(current.productId) || currentSku,
         sku: currentSku,
         title: nullableString(current.title) || nullableString(updatedExpected.title) || nullableString(line.title) || currentSku,
-        catalogBarcode: nullableString(current.barcode || current.upc) || nullableString(updatedExpected.catalogBarcode)
+        catalogBarcode: nullableString(current.catalogBarcode || current.barcode || current.upc) || nullableString(updatedExpected.catalogBarcode)
       } : {}),
       receivingCatalogSku: currentSku,
       receivingPurchaseOrderLineId: nullableString(updatedExpected.id || updatedExpected.lineId),
@@ -3167,7 +3171,75 @@ function reconcileWarehouseAuditPurchaseOrderCatalog(audit = {}, purchaseOrderLi
     };
   });
 
-  return { ...audit, purchaseOrderExpectedLines: reconciledExpected, lines: reconciledLines };
+  const retainedUnknownBarcodes = [];
+  const reconciledUnknownLines = [];
+  for (const unknown of Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes : []) {
+    const sourceMatch = unknown?.sourceMatch && typeof unknown.sourceMatch === "object" ? unknown.sourceMatch : {};
+    const evidence = {
+      ...sourceMatch,
+      ...unknown,
+      sku: unknown.createdProductSku || unknown.createdSku || unknown.manualSku || sourceMatch.sku || sourceMatch.internalSku || "",
+      supplierSku: sourceMatch.sourceSku || sourceMatch.supplierSku || "",
+      vendorSku: sourceMatch.vendorSku || "",
+      manufacturerSku: sourceMatch.manufacturerSku || sourceMatch.mfrPartNumber || sourceMatch.manufacturerPartNumber || sourceMatch.mpn || "",
+      aliases: [sourceMatch.id, sourceMatch.internalSku, sourceMatch.sourceSku]
+    };
+    const identityMatches = expectedSnapshots
+      .map((expected, index) => ({ expected, index }))
+      .filter(({ expected, index }) => warehouseAuditLineMatchesExpectedCatalogIdentity(evidence, expected)
+        || warehouseAuditLineMatchesExpectedCatalogIdentity(evidence, reconciledExpected[index] || expected));
+    if (identityMatches.length !== 1 || !(Number(unknown.count || 0) > 0)) {
+      retainedUnknownBarcodes.push(unknown);
+      continue;
+    }
+    const { expected, index } = identityMatches[0];
+    const current = currentByExpectedIndex.get(index);
+    const currentSku = nullableString(current?.sku);
+    const updatedExpected = reconciledExpected[index] || expected;
+    if (!current || !currentSku) {
+      retainedUnknownBarcodes.push(unknown);
+      continue;
+    }
+    const barcode = nullableString(unknown.barcode || sourceMatch.barcode || sourceMatch.upc || updatedExpected.upc || updatedExpected.catalogBarcode);
+    const locationBin = String(unknown.locationBin || "").trim();
+    const identity = warehouseAuditCatalogIdentityKey(updatedExpected.id || updatedExpected.lineId || updatedExpected.lineIndex || currentSku);
+    const barcodeIdentity = warehouseAuditCatalogIdentityKey(barcode || currentSku);
+    const locationIdentity = warehouseAuditCatalogIdentityKey(locationBin || "unassigned");
+    reconciledUnknownLines.push({
+      ...unknown,
+      id: nullableString(unknown.id) || `${nullableString(audit.id) || "audit"}:po-reconciled:${identity}:${barcodeIdentity}:${locationIdentity}`,
+      productId: nullableString(current.productId) || currentSku,
+      sku: currentSku,
+      title: nullableString(current.title) || nullableString(updatedExpected.title) || nullableString(sourceMatch.title) || currentSku,
+      barcode,
+      catalogBarcode: nullableString(current.catalogBarcode || current.barcode || current.upc) || nullableString(updatedExpected.catalogBarcode) || barcode,
+      locationBin,
+      expectedQty: Number(updatedExpected.expectedQty ?? updatedExpected.quantity ?? 0),
+      countedQty: Number(unknown.count || 0),
+      firstScannedAt: nullableString(unknown.firstScannedAt || unknown.scannedAt),
+      lastScannedAt: nullableString(unknown.lastScannedAt || unknown.scannedAt),
+      receivingCatalogSku: currentSku,
+      receivingPurchaseOrderLineId: nullableString(updatedExpected.id || updatedExpected.lineId),
+      receivingPurchaseOrderLineIndex: Number(updatedExpected.lineIndex),
+      selectedSupplierSku: nullableString(updatedExpected.supplierSku) || currentSku,
+      selectedVendorSku: nullableString(updatedExpected.vendorItemNumber),
+      selectedManufacturerSku: nullableString(updatedExpected.manufacturerSku),
+      selectedSupplierUpc: nullableString(updatedExpected.upc || updatedExpected.catalogBarcode) || barcode,
+      selectedSupplierCost: updatedExpected.unitCost ?? null,
+      supplierName: nullableString(updatedExpected.supplierName) || nullableString(audit.supplierName),
+      reviewStatus: nullableString(unknown.reviewStatus) || "unreviewed",
+      source: "warehouse-audit-reconciled-historical-scan",
+      historicalUnknownBarcodeReconciled: true,
+      catalogIdentitySyncedFromPurchaseOrder: true
+    });
+  }
+
+  return {
+    ...audit,
+    purchaseOrderExpectedLines: reconciledExpected,
+    lines: [...reconciledLines, ...reconciledUnknownLines],
+    unknownBarcodes: retainedUnknownBarcodes
+  };
 }
 
 async function listWarehouseAuditsPage(options = {}) {
@@ -3309,11 +3381,44 @@ async function readWarehouseAudit(auditId = "") {
       : Promise.resolve({ rows: [] })
   ]);
   const lines = linesResult.rows.map(warehouseAuditLineWithMedia);
+  const purchaseOrderLines = purchaseOrderLinesResult.rows.map(purchaseOrderLineRowToState);
+  const purchaseOrderProductKeys = [...new Set(purchaseOrderLines.flatMap((line) => [
+    nullableString(line.productId),
+    nullableString(line.sku)
+  ]).filter(Boolean))];
+  const purchaseOrderProducts = purchaseOrderProductKeys.length
+    ? await readProductsByKeys(purchaseOrderProductKeys, { includeMarketplaceIds: false }).catch(() => [])
+    : [];
+  const purchaseOrderProductsByKey = new Map();
+  for (const product of purchaseOrderProducts) {
+    for (const key of [product?.id, product?.sku, ...(Array.isArray(product?.aliases) ? product.aliases.flatMap((alias) => [alias?.aliasSku, alias?.sku]) : [])]) {
+      const normalizedKey = String(key || "").trim().toLowerCase();
+      if (normalizedKey) purchaseOrderProductsByKey.set(normalizedKey, product);
+    }
+  }
+  const enrichedPurchaseOrderLines = purchaseOrderLines.map((line) => {
+    const product = purchaseOrderProductsByKey.get(String(line.productId || "").trim().toLowerCase())
+      || purchaseOrderProductsByKey.get(String(line.sku || "").trim().toLowerCase())
+      || null;
+    const catalogBarcode = nullableString(product?.barcode || product?.upc || product?.gtin);
+    const catalogAliases = Array.isArray(product?.aliases)
+      ? product.aliases.flatMap((alias) => [alias?.aliasSku, alias?.sku]).map(nullableString).filter(Boolean)
+      : [];
+    return {
+      ...line,
+      productId: nullableString(line.productId) || nullableString(product?.id) || nullableString(line.sku),
+      barcode: nullableString(line.barcode || line.upc) || catalogBarcode,
+      upc: nullableString(line.upc || line.barcode) || catalogBarcode,
+      manufacturerSku: nullableString(line.manufacturerSku || line.mfrPartNumber) || nullableString(product?.mfrPartNumber || product?.manufacturerPartNumber || product?.mpn),
+      catalogBarcode,
+      catalogAliases
+    };
+  });
   return reconcileWarehouseAuditPurchaseOrderCatalog({
     ...auditPayload,
     id: auditPayload.id || row.audit_id,
     lines
-  }, purchaseOrderLinesResult.rows.map(purchaseOrderLineRowToState));
+  }, enrichedPurchaseOrderLines);
 }
 
 async function replaceWarehouseAudits(audits = [], options = {}) {

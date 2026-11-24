@@ -72,7 +72,7 @@ const substitution = reconcileWarehouseAuditPurchaseOrderCatalog({
     receivingSubstitution: true,
     receivingPurchaseOrderLineId: "po-line-1"
   }]
-}, purchaseOrderLines);
+}, [{ ...purchaseOrderLines[0], upc: "", catalogBarcode: "045242123456" }]);
 assert.equal(substitution.lines[0].sku, "BUS-ACTUAL-SUBSTITUTE");
 assert.equal(substitution.lines[0].receivingCatalogSku, "BUS48228441CEI");
 
@@ -84,5 +84,62 @@ const ambiguous = reconcileWarehouseAuditPurchaseOrderCatalog({
   ]
 }, [purchaseOrderLines[0], { ...purchaseOrderLines[0], id: "po-line-2", sku: "BUS-SECOND" }]);
 assert.equal(ambiguous.lines[0].sku, "DPS-OLD");
+
+const currentCatalogIdentity = reconcileWarehouseAuditPurchaseOrderCatalog({
+  ...audit,
+  purchaseOrderExpectedLines: [{
+    ...audit.purchaseOrderExpectedLines[0],
+    sku: "",
+    upc: "",
+    vendorItemNumber: "old-import-reference",
+    manufacturerSku: "old-import-reference",
+    supplierSku: "old-import-reference"
+  }],
+  lines: [{
+    ...audit.lines[0],
+    sku: "BUS-OLD-SUPPLIER",
+    selectedSupplierSku: "BUS-OLD-SUPPLIER",
+    selectedVendorSku: "",
+    barcode: "045242123456"
+  }]
+}, [{ ...purchaseOrderLines[0], upc: "", catalogBarcode: "045242123456" }]);
+assert.equal(currentCatalogIdentity.lines[0].sku, "BUS48228441CEI");
+assert.equal(currentCatalogIdentity.lines[0].countedQty, 20);
+
+const historicalUnknown = reconcileWarehouseAuditPurchaseOrderCatalog({
+  ...audit,
+  purchaseOrderExpectedLines: [{
+    ...audit.purchaseOrderExpectedLines[0],
+    sku: "",
+    upc: "",
+    vendorItemNumber: "old-import-reference",
+    manufacturerSku: "old-import-reference",
+    supplierSku: "old-import-reference"
+  }],
+  lines: [],
+  unknownBarcodes: [{
+    barcode: "045242123456",
+    count: 20,
+    locationBin: "SI2-COUNT",
+    scannedAt: "2026-11-23T14:00:00.000Z",
+    lastScannedBy: "Warehouse user",
+    receivingContributors: [{ user: "Warehouse user", quantity: 20 }]
+  }]
+}, [{ ...purchaseOrderLines[0], upc: "", catalogBarcode: "045242123456" }]);
+assert.equal(historicalUnknown.unknownBarcodes.length, 0);
+assert.equal(historicalUnknown.lines.length, 1);
+assert.equal(historicalUnknown.lines[0].sku, "BUS48228441CEI");
+assert.equal(historicalUnknown.lines[0].countedQty, 20);
+assert.equal(historicalUnknown.lines[0].receivingPurchaseOrderLineId, "po-line-1");
+assert.equal(historicalUnknown.lines[0].historicalUnknownBarcodeReconciled, true);
+assert.deepEqual(historicalUnknown.lines[0].receivingContributors, [{ user: "Warehouse user", quantity: 20 }]);
+
+const unmatchedHistoricalUnknown = reconcileWarehouseAuditPurchaseOrderCatalog({
+  ...audit,
+  lines: [],
+  unknownBarcodes: [{ barcode: "999999999999", count: 3 }]
+}, purchaseOrderLines);
+assert.equal(unmatchedHistoricalUnknown.lines.length, 0);
+assert.equal(unmatchedHistoricalUnknown.unknownBarcodes.length, 1);
 
 console.log("PO audit catalog identity synchronization tests passed");

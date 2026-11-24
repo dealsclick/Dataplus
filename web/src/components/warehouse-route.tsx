@@ -1233,16 +1233,25 @@ function receivingIdentifierKeys(value: unknown) {
 
 function receivingLineMatch(auditLine: Record<string, unknown>, poLine: Record<string, unknown>) {
   const assignedLineId = String(auditLine.receivingPurchaseOrderLineId || "").trim();
-  if (assignedLineId && assignedLineId === String(poLine.id || "").trim()) return "substitution";
+  if (assignedLineId && assignedLineId === String(poLine.id || "").trim()) return auditLine.receivingSubstitution === true ? "substitution" : "sku";
   const assignedLineIndex = Number(auditLine.receivingPurchaseOrderLineIndex);
-  if (auditLine.receivingSubstitution === true && Number.isInteger(assignedLineIndex) && assignedLineIndex === Number(poLine.lineIndex)) return "substitution";
-  const skuKeys = new Set([auditLine.sku, auditLine.selectedSupplierSku].flatMap(receivingIdentifierKeys));
-  if (receivingIdentifierKeys(poLine.sku).some((key) => skuKeys.has(key))) return "sku";
-  const vendorKeys = new Set([auditLine.selectedVendorSku, auditLine.vendorSku].flatMap(receivingIdentifierKeys));
-  const poVendorKeys = receivingIdentifierKeys(poLine.vendorItemNumber);
+  if (Number.isInteger(assignedLineIndex) && assignedLineIndex >= 0 && assignedLineIndex === Number(poLine.lineIndex)) return auditLine.receivingSubstitution === true ? "substitution" : "sku";
+  const sourceMatch = auditLine.sourceMatch && typeof auditLine.sourceMatch === "object" ? auditLine.sourceMatch as Record<string, unknown> : {};
+  const skuKeys = new Set([
+    auditLine.sku, auditLine.productId, auditLine.receivingCatalogSku, auditLine.receivingOriginalSku,
+    auditLine.createdProductSku, auditLine.createdSku, auditLine.manualSku, auditLine.selectedSupplierSku,
+    sourceMatch.sku, sourceMatch.id, sourceMatch.internalSku, sourceMatch.sourceSku,
+  ].flatMap(receivingIdentifierKeys));
+  if ([poLine.sku, poLine.productId, poLine.supplierSku, ...(Array.isArray(poLine.catalogAliases) ? poLine.catalogAliases : [])]
+    .flatMap(receivingIdentifierKeys).some((key) => skuKeys.has(key))) return "sku";
+  const vendorKeys = new Set([
+    auditLine.selectedVendorSku, auditLine.vendorSku, auditLine.selectedManufacturerSku, auditLine.manufacturerSku,
+    auditLine.mfrPartNumber, sourceMatch.vendorSku, sourceMatch.mfrPartNumber, sourceMatch.manufacturerSku,
+  ].flatMap(receivingIdentifierKeys));
+  const poVendorKeys = [poLine.vendorItemNumber, poLine.vendorSku, poLine.manufacturerSku, poLine.mfrPartNumber].flatMap(receivingIdentifierKeys);
   if (vendorKeys.size && poVendorKeys.some((key) => vendorKeys.has(key))) return "vendor_sku";
-  const upcKeys = new Set([auditLine.selectedSupplierUpc, auditLine.barcode, auditLine.upc].flatMap(receivingIdentifierKeys));
-  return receivingIdentifierKeys(poLine.upc).some((key) => upcKeys.has(key)) ? "upc" : "";
+  const upcKeys = new Set([auditLine.selectedSupplierUpc, auditLine.catalogBarcode, auditLine.barcode, auditLine.upc, sourceMatch.barcode, sourceMatch.upc].flatMap(receivingIdentifierKeys));
+  return [poLine.upc, poLine.barcode, poLine.catalogBarcode].flatMap(receivingIdentifierKeys).some((key) => upcKeys.has(key)) ? "upc" : "";
 }
 
 function receivingContributorAllocator(line: Record<string, unknown>, fallbackUser: string) {
@@ -2833,7 +2842,7 @@ function WarehouseAuditPanel({
     };
     return { ...row, receivingPoLine: poLine, receivingPoLines: poLines, receivingMatchBasis: receivingLineMatch(row, poLines[0]) };
   });
-  const expectedOnlyItems: Array<Record<string, unknown>> = receivingExpectedLines.filter((line) => !matchedReceivingIds.has(String(line.id))).map((line) => ({ ...line, auditItemKind: "po_expected", receivingPoLine: line, receivingMatchBasis: "", barcode: line.upc, selectedVendorSku: line.vendorItemNumber, selectedManufacturerSku: line.manufacturerSku, title: line.description || line.title, countedQty: 0 }));
+  const expectedOnlyItems: Array<Record<string, unknown>> = receivingExpectedLines.filter((line) => !matchedReceivingIds.has(String(line.id))).map((line) => ({ ...line, auditItemKind: "po_expected", receivingPoLine: line, receivingMatchBasis: "", barcode: line.upc || line.catalogBarcode, selectedVendorSku: line.vendorItemNumber, selectedManufacturerSku: line.manufacturerSku, title: line.description || line.title, countedQty: 0 }));
   const allSortedItems = sortWarehouseAuditRows([...receivingAuditItems, ...expectedOnlyItems], itemSort, true);
   const normalizedItemQuery = itemQuery.trim().toLowerCase();
   const receivingStatusCounts = allSortedItems.reduce<Record<Exclude<WarehouseReceivingStatusFilter, "all">, number>>((counts, line) => {
