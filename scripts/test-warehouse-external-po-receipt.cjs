@@ -82,6 +82,9 @@ assert.match(warehouseUi, /The receipt can still be posted and will be validated
 assert.doesNotMatch(warehouseUi, /isLinkedPurchaseOrderReceipt && \(actionPreviewLoading \|\| Boolean\(actionPreviewError\)\)/, 'linked PO receiving is not disabled by an optional preview failure');
 assert.match(warehouseUi, /Post receipt & allocate remaining/, 'linked PO audits offer an explicit receive-and-allocate outcome');
 assert.match(warehouseUi, /allocateOpenOrders: dispositionType === "fulfill_orders"/, 'linked PO audits send the selected allocation outcome to the receipt API');
+assert.match(warehouseUi, /setActionPreview\(preview\);\s*setDispositionType\("stock_here"\)/, 'linked PO receipt previews default to warehouse stock instead of forcing additional order allocation');
+assert.match(warehouseUi, /dispositionType === "fulfill_orders" && compatibleOrders\.length > 0/, 'additional matching orders are expanded only after allocation is explicitly selected');
+assert.match(warehouseUi, /max-h-40 overflow-y-auto overscroll-contain/, 'mobile receipt order previews use a bounded native scroller');
 assert.match(warehouseUi, /closeRemaining: closeShortPurchaseOrder/, 'linked PO receiving can explicitly close a supplier short shipment');
 assert.match(warehouseUi, /Orders this receipt can move forward/, 'PO receiving shows pending, allocated, and label-purchased orders that can move forward');
 assert.match(warehouseUi, /Recent PO receiving/, 'mobile receiving shows recent and resumable PO sessions');
@@ -117,5 +120,6 @@ assert.match(purchaseOrderUi, /statusChangeAction === "reopen" && !statusChangeN
 assert.match(purchaseOrderUi, /PO received by[\s\S]*purchaseOrderLineReceiverNames/, 'the PO detail shows overall and per-line receiver attribution');
 assert.match(purchaseOrderUi, /Allocate remaining received stock to additional open orders/, 'direct PO receiving exposes the open-order allocation option');
 assert.match(purchaseOrderUi, /allocateOpenOrders: receiptMode === "final" && allocateReceivedInventory/, 'draft receipts remain allocation-free and final receipts honor the operator choice');
+assert.match(purchaseOrderUi, /Additional matching orders are allocated only when the option below is selected/, 'direct PO receiving explains that additional allocation is optional');
 
 console.log('Inbound receiving supports linked and external POs, additive inventory, scanner reuse, packing-slip evidence, OCR comparison, and idempotent PO posting.');
