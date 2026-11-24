@@ -69,6 +69,11 @@ const audit = {
   assert.equal(alreadyCorrect.product.sku, 'BUS142523TRV');
   assert.equal(alreadyCorrect.purchaseOrderExpectedLine.sku, 'BUS142523TRV', 'the expected PO line is retained when catalog resolution already chose the correct product');
 
+  const unresolvedLine = { id: 'po-line-unresolved', lineIndex: 2, sku: '', upc: '045242545452', vendorItemNumber: '48-22-8441', manufacturerSku: '48-22-8441' };
+  const unresolved = await context.resolveWarehouseAuditBarcode({ ...audit, purchaseOrderExpectedLines: [...audit.purchaseOrderExpectedLines, unresolvedLine] }, '045242545452');
+  assert.equal(unresolved.product, null, 'a cross-supplier catalog product is not accepted for an unresolved PO line');
+  assert.equal(unresolved.purchaseOrderExpectedLine.id, 'po-line-unresolved', 'the unresolved PO line remains the receiving identity');
+
   const inherited = context.purchaseOrderAuditSupplierSelection(audit, audit.purchaseOrderExpectedLines[0], products.get('BUS142523TRV'), {}, {}, { now: '2026-11-16T12:00:00.000Z', actor: 'Luis' });
   assert.equal(inherited.selectedSupplierName, 'True Value');
   assert.equal(inherited.selectedSupplierId, 'true-value-id');

@@ -4,17 +4,23 @@ const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
 
-async function run(route, { product = null, closed = false, unknowns = [], lines = [], originalBin, omitSku = false } = {}) {
+async function run(route, { product = null, closed = false, unknowns = [], lines = [], expectedLines = [], originalBin, omitSku = false } = {}) {
   const marker = `parts[1] === "warehouse-audits" && parts[2] && parts[3] === "${route}"`;
   const location = source.indexOf(marker);
   assert.ok(location > 0);
   const start = source.lastIndexOf('  if (', location);
   const end = source.indexOf('\n  if (', location);
-  const audit = { id: 'audit', auditNumber: 'AUDIT-TEST', status: closed ? 'completed' : 'in_progress', warehouseId: 'physical', lines, unknownBarcodes: unknowns };
+  const audit = {
+    id: 'audit', auditNumber: 'AUDIT-TEST', status: closed ? 'completed' : 'in_progress', warehouseId: 'physical',
+    reason: expectedLines.length ? 'purchase_order_receipt' : 'cycle_count', linkedPurchaseOrderId: expectedLines.length ? 'po-1' : '',
+    lines, unknownBarcodes: unknowns, purchaseOrderExpectedLines: expectedLines
+  };
   let warehouseReads = 0;
   let written;
   let created;
   let atomicLineWrites = 0;
+  let atomicInput;
+  let unknownWrites = 0;
   let savedMediaCount = 0;
   const photoDataUrls = ['photo-1', 'photo-2'].map(value => `data:image/jpeg;base64,${Buffer.from(value).toString('base64')}`);
   const body = { barcode: 'X0039W0Z71', locationBin: 'A-01', quantity: 2, qty: 2, sku: 'TEST-SKU', title: 'Test item', uom: 'CS', casePack: 12, user: 'Test counter', clientActionId: 'quick-action-1', photoDataUrl: photoDataUrls[0], photoDataUrls };
@@ -24,7 +30,13 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
     req: { method: 'POST' }, res: {}, parts: ['api', 'warehouse-audits', 'audit', route],
     parseBody: async () => body,
     readDbFast: () => { throw Error('Scanner must not load global inventory summaries'); },
+    warehouseReceivingActor: () => 'Test counter',
+    resolveWarehouseAuditBarcode: async () => ({ product, sourceItem: null, purchaseOrderExpectedLine: expectedLines[0] || null }),
+    purchaseOrderAuditExpectedLine: () => expectedLines[0] || null,
     resolveScannedCatalogBarcode: async () => ({ product, sourceItem: null }),
+    purchaseOrderAuditSupplierSelection: () => ({}),
+    syncPurchaseOrderReceivingProgress: async () => null,
+    withRecentOpenPurchaseOrderMatches: async next => next,
     validateWarehouseBin: (_warehouse, bin) => ({ value: bin }),
     auditProductImageUrl: () => '', auditExpectedQuantity: () => 3,
     UOM_DEFINITIONS: { EA: 'Each', CS: 'Case' },
@@ -47,14 +59,20 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
       saveWarehouseAuditMetadata: async next => { written = { auditMetadata: { ...next, lines: undefined } }; return true; },
       applyWarehouseAuditScan: async (_auditId, input) => {
         atomicLineWrites++;
+        atomicInput = input;
         const current = lines.find(line => String(line.productId || line.sku) === String(input.productId || input.sku) && String(line.locationBin || '').toLowerCase() === String(input.locationBin || '').toLowerCase());
-        return { ...current, ...input.line, id: current?.id || input.line.id, countedQty: Number(current?.countedQty || 0) + Number(input.quantity || 0) };
+        const saved = { ...current, ...input.line, id: current?.id || input.line.id, countedQty: Number(current?.countedQty || 0) + Number(input.quantity || 0) };
+        if (current) Object.assign(current, saved);
+        else lines.push(saved);
+        return saved;
       },
       recordWarehouseAuditUnknownScan: async (_auditId, input) => {
+        unknownWrites++;
         const next = unknowns.map(entry => ({ ...entry }));
         const current = next.find(entry => entry.barcode === input.barcode && String(entry.locationBin || '').toLowerCase() === String(input.locationBin || '').toLowerCase());
         if (current) current.count = Number(current.count || 0) + Number(input.quantity || 0);
         else next.push({ barcode: input.barcode, count: input.quantity, locationBin: input.locationBin, scannedAt: input.scannedAt, sourceMatch: input.sourceMatch });
+        unknowns.splice(0, unknowns.length, ...next);
         written = { unknownBarcodes: next };
         return { unknownBarcodes: next };
       },
@@ -74,7 +92,7 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
     },
   };
   const result = await vm.runInNewContext(`(async () => { ${source.slice(start, end)} })()`, context);
-  return { result, audit, warehouseReads, written, created, atomicLineWrites, savedMediaCount };
+  return { result, audit, warehouseReads, written, created, atomicLineWrites, atomicInput, unknownWrites, savedMediaCount };
 }
 
 (async () => {
@@ -87,6 +105,27 @@ async function run(route, { product = null, closed = false, unknowns = [], lines
   assert.equal(unknown.warehouseReads, 1);
   assert.equal(unknown.written.unknownBarcodes[0].count, 2);
   assert.equal(unknown.audit.unknownBarcodes[0].locationBin, 'A-01');
+  const unresolvedPoLine = {
+    id: 'po-line-1', lineIndex: 0, sku: '', title: 'PO item waiting for a catalog link', upc: 'X0039W0Z71',
+    vendorItemNumber: '48-22-8441', manufacturerSku: '48-22-8441', expectedQty: 2
+  };
+  const expectedLookup = await run('lookup', { expectedLines: [unresolvedPoLine] });
+  assert.equal(expectedLookup.result.status, 200);
+  assert.equal(expectedLookup.result.data.matched, true);
+  assert.equal(expectedLookup.result.data.purchaseOrderLineMatched, true);
+  assert.equal(expectedLookup.result.data.catalogResolved, false);
+  assert.equal(expectedLookup.result.data.product.sku, '48-22-8441');
+  const expectedScan = await run('scan', { expectedLines: [unresolvedPoLine] });
+  assert.equal(expectedScan.result.status, 200);
+  assert.equal(expectedScan.result.data.matched, true);
+  assert.equal(expectedScan.result.data.purchaseOrderLineMatched, true);
+  assert.equal(expectedScan.result.data.catalogResolved, false);
+  assert.equal(expectedScan.atomicInput.line.receivingPurchaseOrderLineId, 'po-line-1');
+  assert.equal(expectedScan.atomicInput.line.receivingPurchaseOrderLineIndex, 0);
+  assert.equal(expectedScan.atomicInput.line.pendingCatalogResolution, true);
+  assert.equal(expectedScan.atomicInput.line.countedQty, undefined);
+  assert.equal(expectedScan.audit.lines[0].countedQty, 2);
+  assert.equal(expectedScan.unknownWrites, 0);
   const lookup = await run('lookup', { product: { id: 'product', sku: 'EXISTING', title: 'Existing product', uom: 'CS', uomQty: 24 } });
   assert.equal(lookup.result.status, 200);
   assert.equal(lookup.result.data.product.uom, 'CS');

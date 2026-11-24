@@ -34516,10 +34516,13 @@ async function resolveWarehouseAuditBarcode(audit = {}, barcode = "") {
   const scannedIdentifiers = new Set(externalOperationalPoIdentifierKeys(barcode));
   const expectedLine = (audit.purchaseOrderExpectedLines || []).find((line) => [line.sku, line.upc, line.barcode, line.vendorItemNumber, line.manufacturerSku]
     .some((value) => externalOperationalPoIdentifierKeys(value).some((identifier) => scannedIdentifiers.has(identifier))));
-  if (!expectedLine?.sku) return lookup;
+  if (!expectedLine) return lookup;
+  if (!expectedLine.sku) return { ...lookup, product: null, purchaseOrderExpectedLine: expectedLine };
   if (String(lookup.product?.sku || "").toLowerCase() === String(expectedLine.sku).toLowerCase()) return { ...lookup, purchaseOrderExpectedLine: expectedLine };
   const expectedProduct = await postgres.readProductByKey(expectedLine.sku).catch(() => null);
-  return expectedProduct ? { ...lookup, product: expectedProduct, purchaseOrderExpectedLine: expectedLine } : lookup;
+  return expectedProduct
+    ? { ...lookup, product: expectedProduct, purchaseOrderExpectedLine: expectedLine }
+    : { ...lookup, product: null, purchaseOrderExpectedLine: expectedLine };
 }
 
 async function matchExternalOperationalPoItems(vendor, items = [], selectedMatches = [], options = {}) {
@@ -64134,23 +64137,36 @@ async function handleApi(req, res) {
     if (!barcode) return sendJson(res, 400, { error: "Scan a UPC or SKU first." });
     const lookup = await resolveWarehouseAuditBarcode(audit, barcode);
     const product = lookup.product || null;
-    const uomInfo = product ? productUomInfo({
-      ...product,
-      uom: product.uom || lookup.sourceItem?.uom,
-      uomQty: product.uomQty || product.uom_qty || lookup.sourceItem?.uomQty || lookup.sourceItem?.uom_qty,
+    const purchaseOrderExpectedLine = lookup.purchaseOrderExpectedLine || null;
+    const displayProduct = product || (purchaseOrderExpectedLine ? {
+      sku: purchaseOrderExpectedLine.sku || purchaseOrderExpectedLine.vendorItemNumber || purchaseOrderExpectedLine.manufacturerSku || barcode,
+      title: purchaseOrderExpectedLine.title || purchaseOrderExpectedLine.description || purchaseOrderExpectedLine.sku || barcode,
+      uom: purchaseOrderExpectedLine.uom || "EA",
+      uomQty: purchaseOrderExpectedLine.uomQty || purchaseOrderExpectedLine.casePack || purchaseOrderExpectedLine.inventoryMultiplier || 1
+    } : null);
+    const uomInfo = displayProduct ? productUomInfo({
+      ...displayProduct,
+      uom: displayProduct.uom || lookup.sourceItem?.uom,
+      uomQty: displayProduct.uomQty || displayProduct.uom_qty || lookup.sourceItem?.uomQty || lookup.sourceItem?.uom_qty,
     }) : null;
     return sendJson(res, 200, {
-      matched: Boolean(product),
-      product: product ? {
-        sku: product.sku,
-        title: product.marketplaceTitle || product.title || product.sku,
-        image: auditProductImageUrl(product, lookup.sourceItem || {}),
+      matched: Boolean(displayProduct),
+      purchaseOrderLineMatched: Boolean(purchaseOrderExpectedLine),
+      catalogResolved: Boolean(product),
+      product: displayProduct ? {
+        sku: displayProduct.sku,
+        title: displayProduct.marketplaceTitle || displayProduct.title || displayProduct.sku,
+        image: auditProductImageUrl(product || {}, lookup.sourceItem || {}),
         uom: uomInfo.code,
         uomName: uomInfo.name,
         casePack: uomInfo.qty,
         uomDisplay: uomInfo.display,
       } : null,
-      message: product ? `${product.sku} found in the catalog.` : `No catalog item was found for ${barcode}.`
+      message: product
+        ? `${product.sku} found in the catalog.`
+        : purchaseOrderExpectedLine
+          ? `${displayProduct.sku} matched this PO line. The count will stay attached while its catalog SKU is resolved.`
+          : `No catalog item was found for ${barcode}.`
     });
   }
 
@@ -64254,6 +64270,73 @@ async function handleApi(req, res) {
         product: { ...product, uom: scannedUomInfo.code, uomName: scannedUomInfo.name, uomQty: scannedUomInfo.qty, casePack: scannedUomInfo.qty, uomDisplay: scannedUomInfo.display },
         matched: true,
         message: `${product.sku} counted: ${quantity}.`
+      });
+    }
+    const purchaseOrderExpectedLine = lookup.purchaseOrderExpectedLine || null;
+    if (purchaseOrderExpectedLine) {
+      const expectedLineIdentity = String(purchaseOrderExpectedLine.id || purchaseOrderExpectedLine.lineId || purchaseOrderExpectedLine.lineIndex || barcode).trim();
+      const placeholderProductId = `purchase-order-line:${String(audit.linkedPurchaseOrderId || audit.id || "audit")}:${expectedLineIdentity}`;
+      const expectedSku = String(purchaseOrderExpectedLine.sku || "").trim();
+      const currentLine = (audit.lines || []).find((entry) => (
+        String(entry.receivingPurchaseOrderLineId || "") === String(purchaseOrderExpectedLine.id || purchaseOrderExpectedLine.lineId || "")
+        || Number(entry.receivingPurchaseOrderLineIndex) === Number(purchaseOrderExpectedLine.lineIndex)
+      ) && String(entry.locationBin || "").trim().toLowerCase() === resolvedLocationBin.toLowerCase());
+      const expectedUomInfo = productUomInfo({
+        uom: purchaseOrderExpectedLine.uom || lookup.sourceItem?.uom || "EA",
+        uomQty: purchaseOrderExpectedLine.uomQty || purchaseOrderExpectedLine.casePack || purchaseOrderExpectedLine.inventoryMultiplier
+          || lookup.sourceItem?.uomQty || lookup.sourceItem?.uom_qty || 1
+      });
+      const lineTemplate = {
+        ...(currentLine || {}),
+        id: currentLine?.id || crypto.randomUUID(),
+        productId: currentLine?.productId || placeholderProductId,
+        sku: expectedSku,
+        title: String(purchaseOrderExpectedLine.title || purchaseOrderExpectedLine.description || expectedSku || barcode),
+        image: currentLine?.image || auditProductImageUrl({}, lookup.sourceItem || {}),
+        barcode,
+        catalogBarcode: String(purchaseOrderExpectedLine.catalogBarcode || purchaseOrderExpectedLine.upc || "").trim(),
+        uom: expectedUomInfo.code,
+        uomName: expectedUomInfo.name,
+        uomQty: expectedUomInfo.qty,
+        casePack: expectedUomInfo.qty,
+        locationBin: resolvedLocationBin,
+        expectedQty: Number(purchaseOrderExpectedLine.expectedQty || 0),
+        ...purchaseOrderAuditSupplierSelection(audit, purchaseOrderExpectedLine, {}, lookup.sourceItem || {}, currentLine || {}, { now, actor: receivingActor }),
+        receivingPurchaseOrderLineId: String(purchaseOrderExpectedLine.id || purchaseOrderExpectedLine.lineId || ""),
+        receivingPurchaseOrderLineIndex: Number(purchaseOrderExpectedLine.lineIndex),
+        receivingCatalogSku: expectedSku,
+        pendingCatalogResolution: true,
+        firstScannedAt: currentLine?.firstScannedAt || now,
+        lastScannedAt: now,
+        reviewStatus: "needs_catalog_link",
+        source: "warehouse-audit-po-expected-scan"
+      };
+      const savedLine = await postgres.applyWarehouseAuditScan(audit.id, {
+        productId: lineTemplate.productId,
+        sku: lineTemplate.sku,
+        locationBin: resolvedLocationBin,
+        quantity,
+        user: receivingActor,
+        updatedAt: now,
+        line: lineTemplate
+      });
+      if (!savedLine) return sendJson(res, 500, { error: "The PO-line scan could not be saved." });
+      const savedAudit = await postgres.readWarehouseAudit(audit.id) || audit;
+      await syncPurchaseOrderReceivingProgress(savedAudit);
+      return sendJson(res, 200, {
+        audit: await withRecentOpenPurchaseOrderMatches(savedAudit),
+        matched: true,
+        purchaseOrderLineMatched: true,
+        catalogResolved: false,
+        product: {
+          sku: expectedSku || purchaseOrderExpectedLine.vendorItemNumber || purchaseOrderExpectedLine.manufacturerSku || barcode,
+          title: lineTemplate.title,
+          uom: expectedUomInfo.code,
+          uomName: expectedUomInfo.name,
+          casePack: expectedUomInfo.qty,
+          uomQty: expectedUomInfo.qty
+        },
+        message: `${expectedSku || purchaseOrderExpectedLine.vendorItemNumber || purchaseOrderExpectedLine.manufacturerSku || barcode} counted against this PO: ${quantity}. Link its catalog SKU before posting.`
       });
     }
     const unknownResult = await postgres.recordWarehouseAuditUnknownScan(audit.id, {

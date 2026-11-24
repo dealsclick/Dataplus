@@ -3156,7 +3156,9 @@ function reconcileWarehouseAuditPurchaseOrderCatalog(audit = {}, purchaseOrderLi
         productId: nullableString(current.productId) || currentSku,
         sku: currentSku,
         title: nullableString(current.title) || nullableString(updatedExpected.title) || nullableString(line.title) || currentSku,
-        catalogBarcode: nullableString(current.catalogBarcode || current.barcode || current.upc) || nullableString(updatedExpected.catalogBarcode)
+        catalogBarcode: nullableString(current.catalogBarcode || current.barcode || current.upc) || nullableString(updatedExpected.catalogBarcode),
+        pendingCatalogResolution: false,
+        reviewStatus: String(line.reviewStatus || "").toLowerCase() === "needs_catalog_link" ? "unreviewed" : line.reviewStatus
       } : {}),
       receivingCatalogSku: currentSku,
       receivingPurchaseOrderLineId: nullableString(updatedExpected.id || updatedExpected.lineId),

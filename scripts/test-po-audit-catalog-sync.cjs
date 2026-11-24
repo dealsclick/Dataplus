@@ -100,11 +100,15 @@ const currentCatalogIdentity = reconcileWarehouseAuditPurchaseOrderCatalog({
     sku: "BUS-OLD-SUPPLIER",
     selectedSupplierSku: "BUS-OLD-SUPPLIER",
     selectedVendorSku: "",
-    barcode: "045242123456"
+    barcode: "045242123456",
+    pendingCatalogResolution: true,
+    reviewStatus: "needs_catalog_link"
   }]
 }, [{ ...purchaseOrderLines[0], upc: "", catalogBarcode: "045242123456" }]);
 assert.equal(currentCatalogIdentity.lines[0].sku, "BUS48228441CEI");
 assert.equal(currentCatalogIdentity.lines[0].countedQty, 20);
+assert.equal(currentCatalogIdentity.lines[0].pendingCatalogResolution, false);
+assert.equal(currentCatalogIdentity.lines[0].reviewStatus, "unreviewed");
 
 const historicalUnknown = reconcileWarehouseAuditPurchaseOrderCatalog({
   ...audit,

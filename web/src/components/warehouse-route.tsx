@@ -1498,6 +1498,8 @@ function WarehouseAuditPanel({
     barcode: string;
     matched: boolean;
     message: string;
+    purchaseOrderLineMatched?: boolean;
+    catalogResolved?: boolean;
     sku?: string;
     title?: string;
     uom?: string;
@@ -1799,6 +1801,8 @@ function WarehouseAuditPanel({
             setCameraLookupBusy(true);
             void api<{
               matched?: boolean;
+              purchaseOrderLineMatched?: boolean;
+              catalogResolved?: boolean;
               message?: string;
               product?: { sku?: string; title?: string; uom?: string; uomName?: string; casePack?: number } | null;
             }>(
@@ -1815,7 +1819,7 @@ function WarehouseAuditPanel({
                 });
               }
               if (matched) {
-                setLastScan({ barcode: value, matched: true, message: lookup.message || "Catalog item found.", sku: product?.sku, title: product?.title, uom: product?.uom, uomName: product?.uomName, casePack: Number(product?.casePack || 1) });
+                setLastScan({ barcode: value, matched: true, purchaseOrderLineMatched: lookup.purchaseOrderLineMatched === true, catalogResolved: lookup.catalogResolved !== false, message: lookup.message || "Catalog item found.", sku: product?.sku, title: product?.title, uom: product?.uom, uomName: product?.uomName, casePack: Number(product?.casePack || 1) });
                 setCameraScanQuantity("1");
                 setCameraMessage(`${product?.sku || value} matched. Enter the quantity you counted, then tap Next.`);
                 scannerFeedback("success");
@@ -1824,6 +1828,8 @@ function WarehouseAuditPanel({
               setLastScan({
                 barcode: value,
                 matched,
+                purchaseOrderLineMatched: lookup.purchaseOrderLineMatched === true,
+                catalogResolved: lookup.catalogResolved === true,
                 message: lookup.message || (matched ? "Catalog item found." : "No catalog item found."),
                 sku: product?.sku,
                 title: product?.title,
@@ -2049,6 +2055,8 @@ function WarehouseAuditPanel({
       const result = await api<{
         audit?: Record<string, unknown>;
         matched?: boolean;
+        purchaseOrderLineMatched?: boolean;
+        catalogResolved?: boolean;
         message?: string;
         product?: { sku?: string; title?: string; marketplaceTitle?: string; uom?: string; uomName?: string; casePack?: number; uomQty?: number } | null;
       }>(
@@ -2064,6 +2072,8 @@ function WarehouseAuditPanel({
       setLastScan({
         barcode: String(value),
         matched,
+        purchaseOrderLineMatched: result.purchaseOrderLineMatched === true,
+        catalogResolved: result.catalogResolved !== false,
         message,
         sku: matchedProduct?.sku,
         title: matchedProduct?.marketplaceTitle || matchedProduct?.title,
@@ -3264,7 +3274,7 @@ function WarehouseAuditPanel({
                   {cameraStreamState !== "ready" && !lastScan && <div className="absolute inset-0 grid place-items-center bg-black/85 p-5 text-center text-white"><div className="max-w-xs"><p className="font-medium">{cameraStreamState === "opening" ? "Starting camera..." : cameraStreamState === "permission" ? "Camera permission is needed" : "Camera could not start"}</p><p className="mt-2 text-sm text-white/75">{cameraStreamState === "permission" ? "Allow Camera for dataplusapp.duckdns.org in Safari. Safari remembers this choice until it is changed in website settings." : "Make sure no other app is using the camera, then try again."}</p>{cameraStreamState !== "opening" && <Button className="mt-4" variant="secondary" onClick={() => { setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); }}>Try camera again</Button>}</div></div>}
                   {cameraStreamState === "ready" && <div className="pointer-events-none absolute inset-x-[7%] top-1/2 -translate-y-1/2" aria-hidden="true"><div className="h-28 rounded-md border-2 border-emerald-400/90 shadow-[0_0_18px_rgba(74,222,128,.55)]"><div className="mt-14 h-0.5 bg-emerald-400" /></div><p className="mx-auto mt-3 w-fit rounded-full bg-black/75 px-3 py-1.5 text-xs font-medium text-white">{cameraMode === "bin" ? "Align one bin label inside the frame" : `Align one barcode inside the frame · ${scannerEngine === "native" ? "Fast scan" : "Compatible scan"}`}</p></div>}
                   {!lastScan && cameraLookupBusy && <div className="absolute inset-0 grid place-items-center bg-black/40"><div className="flex max-w-[90%] items-center gap-2 rounded-md bg-background px-4 py-3 text-foreground shadow-xl" role="status" aria-live="assertive"><Loader2 className="size-5 shrink-0 animate-spin" /><span className="truncate">{cameraMode === "bin" ? "Checking bin" : "Searching for product"}{barcode ? ` ${barcode}` : ""}...</span></div></div>}
-                  {lastScan && <div data-testid="camera-notifications" className={`absolute inset-x-3 top-3 max-h-[46%] overflow-y-auto rounded-md border p-3 text-white shadow-xl ${lastScan.matched ? "border-emerald-300 bg-emerald-700" : "border-amber-300 bg-amber-700"}`} aria-live="polite"><div className="flex items-start gap-3">{lastScan.matched ? <CheckCircle2 className="mt-0.5 size-5 shrink-0" /> : <AlertTriangle className="mt-0.5 size-5 shrink-0" />}<div className="min-w-0 flex-1"><p className="font-semibold">{lastScan.matched ? "Catalog item matched" : "Product not found"}</p><p className="mt-1 break-all font-mono text-xs text-white/80">{lastScan.sku || lastScan.barcode}</p>{lastScan.title && <p className="mt-1 truncate text-sm">{lastScan.title}</p>}{lastScan.matched && <div className="mt-2 flex flex-wrap gap-2 text-xs font-medium"><span className="rounded bg-black/20 px-2 py-1">UOM {lastScan.uomName || "Each"} ({lastScan.uom || "EA"})</span><span className="rounded bg-black/20 px-2 py-1">Case pack {Math.max(1, Number(lastScan.casePack || 1))}</span></div>}<p className="mt-1 text-sm">{busy || quickCreateBusy ? "Saving..." : cameraMessage}</p><div className="mt-3 flex items-center gap-3"><Label htmlFor="camera-scan-quantity" className="shrink-0 text-sm font-medium text-white">Counted quantity</Label><Input id="camera-scan-quantity" className="h-10 max-w-32 bg-background text-base text-foreground" type="number" min="1" max="100000" inputMode="numeric" autoFocus value={cameraScanQuantity} onChange={(event) => setCameraScanQuantity(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && lastScan.matched) { event.preventDefault(); void confirmCameraScan(); } }} /></div>{!lastScan.matched ? <p className="mt-2 text-xs text-white/80">Skip it, open Quick create to take product photos, or use the full workflow.</p> : null}</div></div></div>}
+                  {lastScan && <div data-testid="camera-notifications" className={`absolute inset-x-3 top-3 max-h-[46%] overflow-y-auto rounded-md border p-3 text-white shadow-xl ${lastScan.matched ? "border-emerald-300 bg-emerald-700" : "border-amber-300 bg-amber-700"}`} aria-live="polite"><div className="flex items-start gap-3">{lastScan.matched ? <CheckCircle2 className="mt-0.5 size-5 shrink-0" /> : <AlertTriangle className="mt-0.5 size-5 shrink-0" />}<div className="min-w-0 flex-1"><p className="font-semibold">{lastScan.matched ? lastScan.purchaseOrderLineMatched && lastScan.catalogResolved === false ? "PO item matched" : "Catalog item matched" : "Product not found"}</p><p className="mt-1 break-all font-mono text-xs text-white/80">{lastScan.sku || lastScan.barcode}</p>{lastScan.title && <p className="mt-1 truncate text-sm">{lastScan.title}</p>}{lastScan.matched && <div className="mt-2 flex flex-wrap gap-2 text-xs font-medium"><span className="rounded bg-black/20 px-2 py-1">UOM {lastScan.uomName || "Each"} ({lastScan.uom || "EA"})</span><span className="rounded bg-black/20 px-2 py-1">Case pack {Math.max(1, Number(lastScan.casePack || 1))}</span></div>}<p className="mt-1 text-sm">{busy || quickCreateBusy ? "Saving..." : cameraMessage}</p><div className="mt-3 flex items-center gap-3"><Label htmlFor="camera-scan-quantity" className="shrink-0 text-sm font-medium text-white">Counted quantity</Label><Input id="camera-scan-quantity" className="h-10 max-w-32 bg-background text-base text-foreground" type="number" min="1" max="100000" inputMode="numeric" autoFocus value={cameraScanQuantity} onChange={(event) => setCameraScanQuantity(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && lastScan.matched) { event.preventDefault(); void confirmCameraScan(); } }} /></div>{!lastScan.matched ? <p className="mt-2 text-xs text-white/80">Skip it, open Quick create to take product photos, or use the full workflow.</p> : null}</div></div></div>}
                 </div>
                 <DialogFooter className="warehouse-audit-camera-footer !m-0 shrink-0 !flex-col gap-2 rounded-none border-t bg-background px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 sm:!flex-row sm:items-center sm:justify-between">
                   <p className="w-full text-xs text-muted-foreground sm:min-w-0 sm:flex-1 sm:truncate">{cameraMessage || "Camera stays open between products for faster scanning."}</p>
@@ -3425,7 +3435,7 @@ function WarehouseAuditPanel({
               >
                 <span className="font-medium">
                   {lastScan.matched
-                    ? "Catalog item found."
+                    ? lastScan.purchaseOrderLineMatched && lastScan.catalogResolved === false ? "PO item found." : "Catalog item found."
                     : "Catalog item not found."}
                 </span>{" "}
                 {lastScan.message}{" "}
