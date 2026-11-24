@@ -13,6 +13,8 @@ const expected = [
   descriptor({ id: "line-b", lineIndex: 1, sku: "BUS142523TRV", upc: "045242749416", vendorItemNumber: "48-89-4670", manufacturerSku: "48-89-4670", title: "Shockwave Impact Duty Red Helix Drill Bit Set", expectedQty: 20 }),
 ];
 
+assert.doesNotThrow(() => descriptor({ sku: "SKU-WITHOUT-CATALOG-PRODUCT" }, null), "missing catalog products remain valid shipment evidence inputs");
+
 let result = matchExpectedLine(descriptor({ sku: "BUS210787TRV", countedQty: 20 }), expected);
 assert.equal(result.match?.basis, "sku_or_alias");
 assert.equal(result.match?.reviewRequired, false);
