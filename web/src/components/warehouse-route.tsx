@@ -3857,7 +3857,11 @@ function WarehouseAuditPanel({
                       </TableCell>
                     </TableRow>);
                     }
-                    const workingSku = String(line.receivingSubstitution === true ? line.sku : line.selectedSupplierSku || line.sku || "");
+                    const workingSku = String(line.receivingSubstitution === true
+                      ? line.sku
+                      : isLinkedPurchaseOrderReceipt
+                        ? line.receivingCatalogSku || line.sku || line.selectedSupplierSku || ""
+                        : line.selectedSupplierSku || line.sku || "");
                     const catalogSku = String(line.sku || "");
                     return (
                     <TableRow className={line.quickCreated ? "bg-amber-50/50 dark:bg-amber-400/5" : ""} key={`${String(line.productId || line.sku)}-${String(line.locationBin || "")}`}>

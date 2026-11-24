@@ -3058,6 +3058,118 @@ function normalizedWarehouseAuditLookupNumbers(value) {
   return match ? [`a-${match[1]}`, `audit-${match[1]}`] : [];
 }
 
+function warehouseAuditCatalogIdentityKey(value) {
+  const key = String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return /^\d+$/.test(key) ? key.replace(/^0+(?=\d)/, "") : key;
+}
+
+function warehouseAuditCatalogIdentityValues(record = {}, fields = []) {
+  return [...new Set(fields.flatMap((field) => {
+    const value = record?.[field];
+    return Array.isArray(value) ? value : [value];
+  }).map(warehouseAuditCatalogIdentityKey).filter(Boolean))];
+}
+
+function warehouseAuditLineMatchesExpectedCatalogIdentity(line = {}, expected = {}) {
+  const assignedId = nullableString(line.receivingPurchaseOrderLineId || line.purchaseOrderLineId);
+  const expectedId = nullableString(expected.id || expected.lineId);
+  if (assignedId && expectedId && assignedId === expectedId) return true;
+  const assignedIndex = Number(line.receivingPurchaseOrderLineIndex ?? line.purchaseOrderLineIndex);
+  const expectedIndex = Number(expected.lineIndex);
+  if (Number.isInteger(assignedIndex) && assignedIndex >= 0 && assignedIndex === expectedIndex) return true;
+  const lineIdentifiers = new Set(warehouseAuditCatalogIdentityValues(line, [
+    "sku", "selectedSupplierSku", "selectedVendorSku", "vendorSku", "selectedManufacturerSku",
+    "manufacturerSku", "mfrPartNumber", "selectedSupplierUpc", "barcode", "upc", "gtin"
+  ]));
+  return warehouseAuditCatalogIdentityValues(expected, [
+    "sku", "supplierSku", "vendorItemNumber", "manufacturerSku", "upc", "barcode", "catalogBarcode"
+  ]).some((identifier) => lineIdentifiers.has(identifier));
+}
+
+function reconcileWarehouseAuditPurchaseOrderCatalog(audit = {}, purchaseOrderLines = []) {
+  if (!audit || typeof audit !== "object" || !["purchase_order_receipt", "po_recount"].includes(String(audit.reason || ""))) return audit;
+  const currentLines = Array.isArray(purchaseOrderLines) ? purchaseOrderLines : [];
+  const expectedLines = Array.isArray(audit.purchaseOrderExpectedLines) ? audit.purchaseOrderExpectedLines : [];
+  if (!currentLines.length || !expectedLines.length) return audit;
+
+  const expectedSnapshots = expectedLines.map((expected) => ({ ...expected }));
+  const currentByExpectedIndex = new Map();
+  const reconciledExpected = expectedSnapshots.map((expected) => {
+    const expectedId = nullableString(expected.id || expected.lineId);
+    const expectedIndex = Number(expected.lineIndex);
+    const match = currentLines.find((line) => expectedId && nullableString(line.id || line.lineId) === expectedId)
+      || (Number.isInteger(expectedIndex) && expectedIndex >= 0 ? currentLines[expectedIndex] : null);
+    const currentSku = nullableString(match?.sku);
+    if (!match || !currentSku || String(match.resolutionStatus || "").toLowerCase() === "unresolved") return expected;
+    currentByExpectedIndex.set(expectedSnapshots.indexOf(expected), match);
+    const rawUnitCost = match.estimatedUnitCost ?? match.unitCost ?? match.cost;
+    return {
+      ...expected,
+      productId: nullableString(match.productId) || currentSku,
+      sku: currentSku,
+      title: nullableString(match.title) || nullableString(expected.title) || currentSku,
+      description: nullableString(match.title) || nullableString(expected.description) || currentSku,
+      vendorItemNumber: nullableString(match.sourceItemNumber || match.vendorSku) || nullableString(expected.vendorItemNumber),
+      manufacturerSku: nullableString(match.manufacturerSku || match.mfrPartNumber) || nullableString(expected.manufacturerSku),
+      upc: nullableString(match.upc || match.barcode) || nullableString(expected.upc),
+      catalogBarcode: nullableString(match.barcode || match.upc) || nullableString(expected.catalogBarcode),
+      supplierSku: nullableString(match.sourceSku || match.supplierSku || match.sourceItemNumber) || nullableString(expected.supplierSku) || currentSku,
+      unitCost: rawUnitCost === null || rawUnitCost === undefined || rawUnitCost === "" || !Number.isFinite(Number(rawUnitCost))
+        ? expected.unitCost ?? null
+        : Number(rawUnitCost),
+      catalogIdentitySyncedFromPurchaseOrder: true
+    };
+  });
+
+  const reconciledLines = (Array.isArray(audit.lines) ? audit.lines : []).map((line) => {
+    const assignedId = nullableString(line.receivingPurchaseOrderLineId || line.purchaseOrderLineId);
+    const assignedIndex = Number(line.receivingPurchaseOrderLineIndex ?? line.purchaseOrderLineIndex);
+    const hasStableAssignment = Boolean(assignedId) || (Number.isInteger(assignedIndex) && assignedIndex >= 0);
+    const stableMatches = expectedSnapshots
+      .map((expected, index) => ({ expected, index }))
+      .filter(({ expected }) => {
+        const expectedId = nullableString(expected.id || expected.lineId);
+        if (assignedId && expectedId) return assignedId === expectedId;
+        return Number.isInteger(assignedIndex) && assignedIndex >= 0 && assignedIndex === Number(expected.lineIndex);
+      });
+    const identityMatches = hasStableAssignment ? stableMatches : expectedSnapshots
+      .map((expected, index) => ({ expected, index }))
+      .filter(({ expected }) => warehouseAuditLineMatchesExpectedCatalogIdentity(line, expected));
+    if (identityMatches.length !== 1) return line;
+    const { expected, index } = identityMatches[0];
+    const current = currentByExpectedIndex.get(index);
+    const currentSku = nullableString(current?.sku);
+    if (!current || !currentSku) return line;
+    const updatedExpected = reconciledExpected[index] || expected;
+    const lineSku = nullableString(line.sku);
+    const substitution = line.receivingSubstitution === true;
+    return {
+      ...line,
+      ...(!substitution && lineSku && warehouseAuditCatalogIdentityKey(lineSku) !== warehouseAuditCatalogIdentityKey(currentSku)
+        ? { receivingOriginalSku: nullableString(line.receivingOriginalSku) || lineSku }
+        : {}),
+      ...(!substitution ? {
+        productId: nullableString(current.productId) || currentSku,
+        sku: currentSku,
+        title: nullableString(current.title) || nullableString(updatedExpected.title) || nullableString(line.title) || currentSku,
+        catalogBarcode: nullableString(current.barcode || current.upc) || nullableString(updatedExpected.catalogBarcode)
+      } : {}),
+      receivingCatalogSku: currentSku,
+      receivingPurchaseOrderLineId: nullableString(updatedExpected.id || updatedExpected.lineId),
+      receivingPurchaseOrderLineIndex: Number(updatedExpected.lineIndex),
+      selectedSupplierSku: nullableString(updatedExpected.supplierSku) || nullableString(line.selectedSupplierSku) || currentSku,
+      selectedVendorSku: nullableString(updatedExpected.vendorItemNumber) || nullableString(line.selectedVendorSku),
+      selectedManufacturerSku: nullableString(updatedExpected.manufacturerSku) || nullableString(line.selectedManufacturerSku),
+      selectedSupplierUpc: nullableString(updatedExpected.upc) || nullableString(line.selectedSupplierUpc),
+      selectedSupplierCost: updatedExpected.unitCost ?? line.selectedSupplierCost ?? null,
+      supplierName: nullableString(updatedExpected.supplierName) || nullableString(line.supplierName) || nullableString(audit.supplierName),
+      catalogIdentitySyncedFromPurchaseOrder: true
+    };
+  });
+
+  return { ...audit, purchaseOrderExpectedLines: reconciledExpected, lines: reconciledLines };
+}
+
 async function listWarehouseAuditsPage(options = {}) {
   const client = getPool();
   if (!client) return { audits: [], total: 0, page: 1, pageSize: 25, totalPages: 1 };
@@ -3173,23 +3285,35 @@ async function readWarehouseAudit(auditId = "") {
   `, [normalizedAuditId, normalizedAuditNumbers]);
   const row = auditResult.rows[0];
   if (!row) return null;
-  const linesResult = await client.query(`
-    select l.audit_id, l.line_id, l.line_payload,
-      coalesce((
-        select array_agg(m.media_key order by case when m.media_key = 'image' then 0 else 1 end, m.media_key)
-        from warehouse_audit_media m
-        where m.audit_id = l.audit_id and m.line_id = l.line_id
-      ), '{}'::text[]) as media_keys
-    from warehouse_audit_lines l
-    where l.audit_id = $1
-    order by l.position, l.line_id
-  `, [row.audit_id]);
+  const auditPayload = row.audit_payload && typeof row.audit_payload === "object" ? row.audit_payload : {};
+  const linkedPurchaseOrderId = nullableString(auditPayload.linkedPurchaseOrderId);
+  const [linesResult, purchaseOrderLinesResult] = await Promise.all([
+    client.query(`
+      select l.audit_id, l.line_id, l.line_payload,
+        coalesce((
+          select array_agg(m.media_key order by case when m.media_key = 'image' then 0 else 1 end, m.media_key)
+          from warehouse_audit_media m
+          where m.audit_id = l.audit_id and m.line_id = l.line_id
+        ), '{}'::text[]) as media_keys
+      from warehouse_audit_lines l
+      where l.audit_id = $1
+      order by l.position, l.line_id
+    `, [row.audit_id]),
+    linkedPurchaseOrderId
+      ? client.query(`
+          select *
+          from purchase_order_line_items
+          where po_id = $1
+          order by line_index
+        `, [linkedPurchaseOrderId])
+      : Promise.resolve({ rows: [] })
+  ]);
   const lines = linesResult.rows.map(warehouseAuditLineWithMedia);
-  return {
-    ...(row.audit_payload && typeof row.audit_payload === "object" ? row.audit_payload : {}),
-    id: row.audit_payload?.id || row.audit_id,
+  return reconcileWarehouseAuditPurchaseOrderCatalog({
+    ...auditPayload,
+    id: auditPayload.id || row.audit_id,
     lines
-  };
+  }, purchaseOrderLinesResult.rows.map(purchaseOrderLineRowToState));
 }
 
 async function replaceWarehouseAudits(audits = [], options = {}) {
@@ -22829,6 +22953,7 @@ module.exports = {
   quickSearchProducts,
   quickSearchOperations,
   normalizedWarehouseAuditLookupNumbers,
+  reconcileWarehouseAuditPurchaseOrderCatalog,
   readOrderByKey,
   readOrderFinancialSummary,
   readChannelOrderForReturn,

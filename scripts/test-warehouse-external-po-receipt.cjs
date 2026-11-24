@@ -18,6 +18,7 @@ assert.match(server, /purchase_order_receipt:\s*"PO receiving"/, 'server labels 
 assert.match(server, /purchaseOrderExpectedLines/, 'linked PO receipts save their open expected lines');
 assert.match(server, /supplierCode:[\s\S]*supplierSku:[\s\S]*unitCost:/, 'linked PO expected lines retain supplier identity, supplier SKU, and PO unit cost');
 assert.match(server, /purchaseOrderAuditSupplierSelection\(audit, purchaseOrderExpectedLine/, 'linked PO scans inherit their supplier selection from the purchase order');
+assert.match(server, /receivingPurchaseOrderLineId:\s*String\(purchaseOrderExpectedLine\.id/, 'ordinary PO scans retain their stable PO line identity');
 assert.match(server, /supplierInheritedFromPurchaseOrder:\s*true/, 'PO supplier inheritance is durable on each scanned line');
 assert.match(server, /existingAuditReceipt/, 'PO receipt posting is idempotent by source audit');
 assert.match(server, /sourceAuditId/, 'PO receipts retain their inbound audit identity');
@@ -95,6 +96,7 @@ assert.doesNotMatch(warehouseUi, /Live receiving activity/, 'desktop receiving d
 assert.match(warehouseUi, /refreshReceivingActivity[\s\S]*6_000/, 'desktop receiving refreshes shared scan activity without a page reload');
 assert.match(warehouseUi, /receiving-item-title[\s\S]*truncate/, 'receiving rows prioritize a one-line product title');
 assert.match(warehouseUi, /Inherited from PO/, 'linked PO receiving identifies the fixed supplier source');
+assert.match(warehouseUi, /line\.receivingCatalogSku \|\| line\.sku/, 'linked PO receiving displays the current canonical PO SKU');
 assert.match(warehouseUi, /!isLinkedPurchaseOrderReceipt && Number\(line\.supplierCount/, 'linked PO lines do not ask the receiver to choose another supplier');
 assert.match(poSupplierRepair, /saveWarehouseAuditLine/, 'historical PO audit supplier repair updates lines individually');
 assert.match(poSupplierRepair, /saveWarehouseAuditMetadata/, 'historical PO audit supplier repair updates audit metadata without replacing active lines');

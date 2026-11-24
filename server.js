@@ -64227,6 +64227,11 @@ async function handleApi(req, res) {
         hasPossibleMultipleSuppliers: Boolean(scanSupplierCoverage?.hasPossibleMultipleSuppliers || possibleSupplierCount >= 2),
         supplierCoverageMatchType: String(scanSupplierCoverage?.supplierCoverageMatchType || coverageProduct?.supplierCoverageMatchType || ""),
         ...purchaseOrderAuditSupplierSelection(audit, purchaseOrderExpectedLine, product, lookup.sourceItem || {}, currentLine || {}, { now, actor: receivingActor }),
+        ...(purchaseOrderExpectedLine ? {
+          receivingPurchaseOrderLineId: String(purchaseOrderExpectedLine.id || ""),
+          receivingPurchaseOrderLineIndex: Number(purchaseOrderExpectedLine.lineIndex),
+          receivingCatalogSku: String(purchaseOrderExpectedLine.sku || product.sku || "")
+        } : {}),
         firstScannedAt: currentLine?.firstScannedAt || now,
         lastScannedAt: now,
         reviewStatus: "unreviewed"
@@ -69311,6 +69316,14 @@ async function handleApi(req, res) {
       user: body.user || "Luis"
     });
     await postgres.savePurchaseOrder(po);
+    const activeReceivingAuditId = String(po.activeReceivingAudit?.auditId || "").trim();
+    if (activeReceivingAuditId) {
+      const activeAudit = await postgres.readWarehouseAudit(activeReceivingAuditId).catch(() => null);
+      if (activeAudit && String(activeAudit.linkedPurchaseOrderId || "") === String(po.id || "")) {
+        const synchronizedPo = await syncPurchaseOrderReceivingProgress(activeAudit).catch(() => null);
+        if (synchronizedPo?.activeReceivingAudit) po.activeReceivingAudit = synchronizedPo.activeReceivingAudit;
+      }
+    }
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
     return sendJson(res, 200, { purchaseOrder: po, line, productCreated: created, postedInventoryQty, message: `${created ? `${line.sku} was created` : `${line.sku} was linked`} to the PO line${heldPurchaseQty ? ` and ${postedInventoryQty} inventory unit${postedInventoryQty === 1 ? " was" : "s were"} released from SKU-resolution hold` : ""}.` });
