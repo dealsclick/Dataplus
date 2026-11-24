@@ -738,6 +738,43 @@ function WarehouseAuditDetailPage() {
 }
 
 type WarehouseAuditSort = "newest" | "oldest" | "identifier";
+type WarehouseReceivingStatusFilter = "all" | "complete" | "partial" | "awaiting_scan" | "extra";
+
+function warehouseReceivingStatus(line: Record<string, unknown>): Exclude<WarehouseReceivingStatusFilter, "all"> {
+  const poLine = line.receivingPoLine && typeof line.receivingPoLine === "object"
+    ? line.receivingPoLine as Record<string, unknown>
+    : null;
+  const expectedQty = Math.max(0, Number(poLine?.expectedQty ?? poLine?.quantity ?? line.expectedQty ?? 0));
+  const countedQty = Math.max(0, Number(line.countedQty ?? line.count ?? 0));
+  if (expectedQty <= 0) return countedQty > 0 ? "extra" : "awaiting_scan";
+  if (countedQty <= 0) return "awaiting_scan";
+  if (countedQty < expectedQty) return "partial";
+  return "complete";
+}
+
+function warehouseAuditItemSearchText(line: Record<string, unknown>) {
+  const poLine = line.receivingPoLine && typeof line.receivingPoLine === "object"
+    ? line.receivingPoLine as Record<string, unknown>
+    : {};
+  return [
+    line.sku,
+    line.productId,
+    line.title,
+    line.barcode,
+    line.upc,
+    line.catalogBarcode,
+    line.selectedSupplierSku,
+    line.selectedVendorSku,
+    line.selectedManufacturerSku,
+    poLine.sku,
+    poLine.title,
+    poLine.description,
+    poLine.upc,
+    poLine.vendorItemNumber,
+    poLine.manufacturerSku,
+  ].map((value) => String(value || "").toLowerCase()).join(" ");
+}
+
 function sortWarehouseAuditRows(rows: Array<Record<string, unknown>>, sort: WarehouseAuditSort, items = false) {
   const timestamp = (row: Record<string, unknown>) => {
     const value = Date.parse(String(items ? row.firstScannedAt || row.scannedAt || row.createdAt || "" : row.createdAt || ""));
@@ -752,7 +789,7 @@ function sortWarehouseAuditRows(rows: Array<Record<string, unknown>>, sort: Ware
   }).map(({ row }) => row);
 }
 function WarehouseAuditSortControl({ value, onChange, items = false }: { value: WarehouseAuditSort; onChange: (value: WarehouseAuditSort) => void; items?: boolean }) {
-  return <Select value={value} onValueChange={(next) => onChange(next as WarehouseAuditSort)}><SelectTrigger aria-label={items ? "Sort audit items" : "Sort audits"} className="w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="newest">Latest first</SelectItem><SelectItem value="oldest">Oldest first</SelectItem><SelectItem value="identifier">{items ? "SKU / UPC A–Z" : "Audit ID A–Z"}</SelectItem></SelectContent></Select>;
+  return <Select value={value} onValueChange={(next) => onChange(next as WarehouseAuditSort)}><SelectTrigger aria-label={items ? "Sort audit items" : "Sort audits"} className="w-full sm:w-40"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="newest">Latest first</SelectItem><SelectItem value="oldest">Oldest first</SelectItem><SelectItem value="identifier">{items ? "SKU / UPC A–Z" : "Audit ID A–Z"}</SelectItem></SelectContent></Select>;
 }
 
 const warehouseAuditTypeFilterOptions = [
@@ -1382,6 +1419,11 @@ function WarehouseAuditPanel({
   const [itemNote, setItemNote] = useState("");
   const [noteSaving, setNoteSaving] = useState(false);
   const [itemSort, setItemSort] = useState<WarehouseAuditSort>("newest");
+  const [itemQuery, setItemQuery] = useState("");
+  const [itemReceivingStatus, setItemReceivingStatus] = useState<WarehouseReceivingStatusFilter>("all");
+  const [upcLine, setUpcLine] = useState<Record<string, unknown> | null>(null);
+  const [newUpc, setNewUpc] = useState("");
+  const [upcSaving, setUpcSaving] = useState(false);
   const [auditToolsOpen, setAuditToolsOpen] = useState(false);
   const [shareAuditUrl, setShareAuditUrl] = useState("");
   const [desktopAuditTools, setDesktopAuditTools] = useState(() => window.matchMedia("(min-width: 768px)").matches);
@@ -2667,6 +2709,33 @@ function WarehouseAuditPanel({
       setCountEditBusy(false);
     }
   };
+  const openAddUpc = (line: Record<string, unknown>) => {
+    setUpcLine(line);
+    setNewUpc("");
+  };
+  const saveAddedUpc = async () => {
+    if (!resumedAudit || !upcLine || upcSaving) return;
+    const upc = newUpc.replace(/\D/g, "");
+    if (![8, 12, 13, 14].includes(upc.length)) {
+      toast.error("Enter a valid 8, 12, 13, or 14 digit UPC / GTIN.");
+      return;
+    }
+    setUpcSaving(true);
+    try {
+      const result = await api<{ audit?: Record<string, unknown>; message?: string }>(
+        `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/lines/${encodeURIComponent(auditLineKey(upcLine))}/upc`,
+        { method: "POST", body: JSON.stringify({ upc, user: operatorName }) },
+      );
+      applyAuditUpdate(result.audit || resumedAudit);
+      setUpcLine(null);
+      setNewUpc("");
+      toast.success(result.message || "UPC added to the catalog product.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to add the UPC.");
+    } finally {
+      setUpcSaving(false);
+    }
+  };
   const openSubstitutionMatch = (line: Record<string, unknown>) => {
     setSubstitutionLine(line);
     setSubstitutionExpectedLineId("");
@@ -2765,15 +2834,39 @@ function WarehouseAuditPanel({
     return { ...row, receivingPoLine: poLine, receivingPoLines: poLines, receivingMatchBasis: receivingLineMatch(row, poLines[0]) };
   });
   const expectedOnlyItems: Array<Record<string, unknown>> = receivingExpectedLines.filter((line) => !matchedReceivingIds.has(String(line.id))).map((line) => ({ ...line, auditItemKind: "po_expected", receivingPoLine: line, receivingMatchBasis: "", barcode: line.upc, selectedVendorSku: line.vendorItemNumber, selectedManufacturerSku: line.manufacturerSku, title: line.description || line.title, countedQty: 0 }));
-  const sortedItems = sortWarehouseAuditRows([...receivingAuditItems, ...expectedOnlyItems], itemSort, true);
+  const allSortedItems = sortWarehouseAuditRows([...receivingAuditItems, ...expectedOnlyItems], itemSort, true);
+  const normalizedItemQuery = itemQuery.trim().toLowerCase();
+  const receivingStatusCounts = allSortedItems.reduce<Record<Exclude<WarehouseReceivingStatusFilter, "all">, number>>((counts, line) => {
+    counts[warehouseReceivingStatus(line)] += 1;
+    return counts;
+  }, { complete: 0, partial: 0, awaiting_scan: 0, extra: 0 });
+  const sortedItems = allSortedItems.filter((line) =>
+    (itemReceivingStatus === "all" || warehouseReceivingStatus(line) === itemReceivingStatus)
+    && (!normalizedItemQuery || warehouseAuditItemSearchText(line).includes(normalizedItemQuery)),
+  );
   const receivingScannedUnits = baseAuditItems.reduce((sum, line) => sum + Number(line.countedQty ?? line.count ?? 0), 0);
   const receivingMatchedLines = receivingAuditItems.filter((line) => Boolean(line.receivingPoLine)).length;
   const receivingExtraLines = receivingAuditItems.filter((line) => !line.receivingPoLine && Number(line.countedQty ?? line.count ?? 0) > 0);
   const receivingExtraUnits = receivingExtraLines.reduce((sum, line) => sum + Number(line.countedQty ?? line.count ?? 0), 0);
   const isManualExternalReceipt = ["external_po_receipt", "receiving_inventory"].includes(String(current?.reason || ""));
-  const recentPoMatchedItems = sortedItems.filter((line) => Array.isArray(line.recentOpenPurchaseOrders) && line.recentOpenPurchaseOrders.length > 0);
+  const recentPoMatchedItems = allSortedItems.filter((line) => Array.isArray(line.recentOpenPurchaseOrders) && line.recentOpenPurchaseOrders.length > 0);
   const recentOpenPurchaseOrders = [...new Map(recentPoMatchedItems.flatMap((line) => line.recentOpenPurchaseOrders as Array<Record<string, unknown>>).map((purchaseOrder) => [String(purchaseOrder.purchaseOrderId || ""), purchaseOrder])).values()];
   const auditStatus = String(current?.status || "");
+  const auditItemActionMenu = (line: Record<string, unknown>, allowCountEdit = false) => {
+    if (line.auditItemKind === "unknown") return null;
+    const sku = String(line.sku || (line.receivingPoLine as Record<string, unknown> | undefined)?.sku || "").trim();
+    const catalogBarcode = String(line.catalogBarcode || "").trim();
+    if (!sku) return null;
+    return <DropdownMenu>
+      <DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-8" aria-label={`Actions for ${sku}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuLabel>{sku}</DropdownMenuLabel>
+        <DropdownMenuItem asChild><a href={`/products/${encodeURIComponent(sku)}`} target="_blank" rel="noreferrer"><ExternalLink className="size-4" />Open catalog product</a></DropdownMenuItem>
+        {allowCountEdit && auditStatus === "in_progress" ? <DropdownMenuItem onSelect={() => openCountEdit(line)}><Pencil className="size-4" />Edit counted quantity</DropdownMenuItem> : null}
+        {!catalogBarcode && auditStatus === "in_progress" ? <DropdownMenuItem onSelect={() => openAddUpc(line)}><ScanBarcode className="size-4" />Add UPC</DropdownMenuItem> : null}
+      </DropdownMenuContent>
+    </DropdownMenu>;
+  };
   const foundStockLines = lines.filter((line) => String(line.source || "").includes("found-stock") || Boolean(line.foundStock));
   const latestFoundStockImport = Array.isArray(current?.foundStockImports) ? current?.foundStockImports[0] as Record<string, unknown> : null;
   const latestFoundStockSummary = latestFoundStockImport?.summary && typeof latestFoundStockImport.summary === "object" ? latestFoundStockImport.summary as Record<string, unknown> : null;
@@ -3653,7 +3746,24 @@ function WarehouseAuditPanel({
                 </div>
               </div>
             )}
-            <div className="flex items-center justify-between gap-2"><p className="text-sm font-medium">Audit items</p><WarehouseAuditSortControl value={itemSort} onChange={setItemSort} items /></div>
+            <div className="grid gap-2 rounded-md border bg-muted/20 p-2 md:grid-cols-[minmax(15rem,1fr)_12rem_10rem_auto] md:items-center">
+              <div className="relative min-w-0">
+                <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input aria-label="Search audit items" className="pl-9" value={itemQuery} onChange={(event) => setItemQuery(event.target.value)} placeholder="Find SKU, UPC, MPN, vendor SKU, or title" />
+              </div>
+              <Select value={itemReceivingStatus} onValueChange={(value) => setItemReceivingStatus(value as WarehouseReceivingStatusFilter)}>
+                <SelectTrigger aria-label="Filter by receiving status"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All statuses ({allSortedItems.length})</SelectItem>
+                  <SelectItem value="complete">Complete ({receivingStatusCounts.complete})</SelectItem>
+                  <SelectItem value="partial">Partial ({receivingStatusCounts.partial})</SelectItem>
+                  <SelectItem value="awaiting_scan">Awaiting scan ({receivingStatusCounts.awaiting_scan})</SelectItem>
+                  <SelectItem value="extra">Extra item ({receivingStatusCounts.extra})</SelectItem>
+                </SelectContent>
+              </Select>
+              <WarehouseAuditSortControl value={itemSort} onChange={setItemSort} items />
+              {(itemQuery || itemReceivingStatus !== "all") ? <Button size="sm" variant="ghost" onClick={() => { setItemQuery(""); setItemReceivingStatus("all"); }}><X className="size-4" />Clear</Button> : <p className="text-right text-xs text-muted-foreground">{sortedItems.length} shown</p>}
+            </div>
             {isManualExternalReceipt && recentPoMatchedItems.length > 0 && <Alert className="border-blue-400 bg-blue-50/70 dark:border-blue-700 dark:bg-blue-950/30"><FileText className="size-4 text-blue-700 dark:text-blue-300" /><AlertTitle>{numberLabel(recentPoMatchedItems.length)} received item{recentPoMatchedItems.length === 1 ? "" : "s"} found on {numberLabel(recentOpenPurchaseOrders.length)} recent open PO{recentOpenPurchaseOrders.length === 1 ? "" : "s"}</AlertTitle><AlertDescription><div className="mt-2 flex flex-wrap gap-1.5">{recentOpenPurchaseOrders.map((purchaseOrder) => <a key={String(purchaseOrder.purchaseOrderId)} href={purchaseOrderUrl(purchaseOrder.purchaseOrderNumber, purchaseOrder.purchaseOrderId)} target="_blank" rel="noreferrer"><Badge variant="secondary" className="hover:bg-muted">{String(purchaseOrder.purchaseOrderNumber || "Open PO")}<ExternalLink className="ml-1 size-3" /></Badge></a>)}</div></AlertDescription></Alert>}
             <div className="overflow-x-auto rounded-md border">
               <Table className="warehouse-audit-table">
@@ -3685,13 +3795,21 @@ function WarehouseAuditPanel({
                     const recentPoMatches = Array.isArray(line.recentOpenPurchaseOrders) ? line.recentOpenPurchaseOrders as Array<Record<string, unknown>> : [];
                     const poMatchBadge = poLine ? <Badge className="border-yellow-400 bg-yellow-100 text-yellow-950 dark:border-yellow-600 dark:bg-yellow-400/20 dark:text-yellow-100" variant="outline" title={line.receivingMatchBasis === "substitution" ? "Supplier substitution assigned to this PO line" : line.receivingMatchBasis === "vendor_sku" ? "Matched by vendor SKU" : line.receivingMatchBasis === "upc" ? "Matched by UPC" : line.receivingMatchBasis === "sku" ? "Matched by catalog SKU" : "Expected from packing slip"}><CheckCircle2 className="mr-1 size-3" />{line.receivingMatchBasis === "substitution" ? "Substitution" : "Yes"}</Badge> : isManualExternalReceipt && recentPoMatches.length > 0 ? <Badge className="border-blue-400 bg-blue-50 text-blue-800 dark:border-blue-700 dark:bg-blue-950/40 dark:text-blue-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Found</Badge> : isLinkedPurchaseOrderReceipt && rowCountedQty > 0 ? <Badge className="border-amber-400 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline"><AlertTriangle className="mr-1 size-3" /> Extra item</Badge> : <span className="text-xs text-muted-foreground">No</span>;
                     const poReference = poLine ? <a className="font-mono text-xs font-medium text-primary hover:underline" href={purchaseOrderUrl(poNumber, current?.linkedPurchaseOrderId || poLine.purchaseOrderId)} target="_blank" rel="noreferrer">{poNumber || "Open PO"}</a> : recentPoMatches.length > 0 ? <div className="flex min-w-40 flex-wrap gap-1">{recentPoMatches.map((purchaseOrder) => <a key={String(purchaseOrder.purchaseOrderId)} href={purchaseOrderUrl(purchaseOrder.purchaseOrderNumber, purchaseOrder.purchaseOrderId)} target="_blank" rel="noreferrer" title={`${String(purchaseOrder.supplier || "Supplier")} · ${numberLabel(Number(purchaseOrder.remainingQty || 0))} open`}><Badge variant="secondary" className="hover:bg-muted">{String(purchaseOrder.purchaseOrderNumber || "Open PO")}<ExternalLink className="ml-1 size-3" /></Badge></a>)}</div> : <span className="text-xs text-muted-foreground">-</span>;
-                    const poStatusBadge = poLine ? rowCountedQty === expectedQty ? <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" />{line.receivingMatchBasis === "substitution" ? "Substitution matched" : "Matched"}</Badge> : <Badge variant="destructive">Variance {rowCountedQty - expectedQty > 0 ? "+" : ""}{numberLabel(rowCountedQty - expectedQty)}</Badge> : isLinkedPurchaseOrderReceipt && rowCountedQty > 0 ? <Badge className="border-amber-400 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Extra item</Badge> : null;
+                    const receivingStatus = warehouseReceivingStatus(line);
+                    const poStatusBadge = receivingStatus === "complete"
+                      ? <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" />Complete{poLine && rowCountedQty > expectedQty ? ` · +${numberLabel(rowCountedQty - expectedQty)} over` : ""}</Badge>
+                      : receivingStatus === "partial"
+                        ? <Badge className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline"><AlertTriangle className="mr-1 size-3" />Partial · {numberLabel(rowCountedQty)} / {numberLabel(expectedQty)}</Badge>
+                        : receivingStatus === "awaiting_scan"
+                          ? <Badge variant="outline">Awaiting scan</Badge>
+                          : <Badge className="border-amber-400 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Extra item</Badge>;
                     if (line.auditItemKind === "po_expected") {
+                      const expectedSku = String(line.sku || poLine?.sku || "").trim();
                       return (<TableRow className="bg-yellow-50/50 dark:bg-yellow-400/5" key={`po-expected-${String(line.id)}`}>
                         <TableCell className="warehouse-audit-product-image"><span className="grid size-8 place-items-center rounded-full border border-yellow-400 bg-yellow-100 text-yellow-800 dark:border-yellow-700 dark:bg-yellow-400/15 dark:text-yellow-200"><FileText className="size-4" /></span></TableCell>
                         <TableCell className="warehouse-audit-product-title max-w-80"><p data-testid="receiving-item-title" className="truncate font-medium" title={itemTitle}>{itemTitle}</p></TableCell>
                         <TableCell className="warehouse-audit-upc font-mono text-xs">{String(line.upc || "-")}</TableCell>
-                        <TableCell className="warehouse-audit-working-sku"><span className="text-xs text-muted-foreground">Expected only</span></TableCell>
+                        <TableCell className="warehouse-audit-working-sku">{expectedSku ? <div className="min-w-32"><a className="inline-flex min-h-8 items-center font-mono font-medium text-primary underline underline-offset-4" href={`/products/${encodeURIComponent(expectedSku)}`} target="_blank" rel="noreferrer">{expectedSku}</a><p className="text-xs text-muted-foreground">Awaiting scan</p></div> : <span className="text-xs text-muted-foreground">Awaiting scan</span>}</TableCell>
                         <TableCell><div className="min-w-32"><Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" />{String(current.supplierName || line.supplierName || "PO supplier")}</Badge><p className="mt-1 text-xs text-muted-foreground">Inherited from PO</p></div></TableCell>
                         <TableCell className="warehouse-audit-secondary font-mono text-xs">{String(line.vendorItemNumber || "-")}</TableCell>
                         <TableCell className="warehouse-audit-secondary font-mono text-xs">{String(line.manufacturerSku || "-")}</TableCell>
@@ -3701,7 +3819,7 @@ function WarehouseAuditPanel({
                         <TableCell>{poReference}</TableCell>
                         <TableCell className="text-right font-medium">{numberLabel(expectedQty)}</TableCell>
                         <TableCell>0</TableCell>
-                        <TableCell className="text-right"><Badge variant="outline">Not counted</Badge></TableCell>
+                        <TableCell className="text-right"><div className="flex items-center justify-end gap-1">{poStatusBadge}{auditItemActionMenu(line)}</div></TableCell>
                       </TableRow>);
                     }
                     if (line.auditItemKind === "unknown") {
@@ -3767,12 +3885,12 @@ function WarehouseAuditPanel({
                           {auditStatus === "in_progress" && <Button size="icon" variant="ghost" className="size-7" title="Edit audit item" onClick={() => openCountEdit(line)}><Pencil className="size-3.5" /></Button>}
                         </div>
                       </TableCell>
-                      <TableCell className="text-right"><div className="flex flex-wrap items-center justify-end gap-1">{itemNoteButton(line)}{isLinkedPurchaseOrderReceipt && !poLine && rowCountedQty > 0 && auditStatus === "in_progress" ? <Button size="sm" variant="outline" onClick={() => openSubstitutionMatch(line)}><Link2 className="size-4" /> Match to PO line</Button> : null}{line.quickCreated ? <Badge variant="warning">Needs product details</Badge> : null}{!isLinkedPurchaseOrderReceipt && Number(line.supplierCount || 0) >= 2 && !String(line.selectedSupplierName || "").trim() && <Badge className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Supplier needed</Badge>}{poStatusBadge || <Badge className="border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200" variant="outline"><CheckCircle2 className="mr-1 size-3" /> Counted</Badge>}</div></TableCell>
+                      <TableCell className="text-right"><div className="flex flex-wrap items-center justify-end gap-1">{itemNoteButton(line)}{isLinkedPurchaseOrderReceipt && !poLine && rowCountedQty > 0 && auditStatus === "in_progress" ? <Button size="sm" variant="outline" onClick={() => openSubstitutionMatch(line)}><Link2 className="size-4" /> Match to PO line</Button> : null}{line.quickCreated ? <Badge variant="warning">Needs product details</Badge> : null}{!isLinkedPurchaseOrderReceipt && Number(line.supplierCount || 0) >= 2 && !String(line.selectedSupplierName || "").trim() && <Badge className="border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200" variant="outline">Supplier needed</Badge>}{poStatusBadge}{auditItemActionMenu(line, true)}</div></TableCell>
                     </TableRow>
                     );
                   })}
 
-                  {!lines.length && !unknowns.length && (
+                  {!allSortedItems.length && (
                     <TableRow>
                       <TableCell
                         colSpan={14}
@@ -3781,6 +3899,9 @@ function WarehouseAuditPanel({
                         Scan the first UPC to begin counting.
                       </TableCell>
                     </TableRow>
+                  )}
+                  {allSortedItems.length > 0 && !sortedItems.length && (
+                    <TableRow><TableCell colSpan={14} className="h-24 text-center text-muted-foreground">No audit items match these filters. Search another SKU or clear the receiving status.</TableCell></TableRow>
                   )}
                 </TableBody>
               </Table>
@@ -3815,6 +3936,26 @@ function WarehouseAuditPanel({
             <BinLabelDialog key={String(current.warehouseId || current.warehouseName)} open={binLabelsOpen} onOpenChange={setBinLabelsOpen} warehouse={String(current.warehouseName || "Warehouse")} bins={(selectedAuditWarehouse?.bins || []).map(bin => ({ code: String(bin.code || ""), name: String(bin.name || bin.nickname || ""), active: bin.active }))} />
             <Dialog open={Boolean(itemImage)} onOpenChange={(open) => !open && setItemImage(null)}><DialogContent className="max-h-[92dvh] overflow-y-auto sm:max-w-3xl" data-no-image-preview><DialogHeader><DialogTitle>{itemImage?.title || "Item photo"}</DialogTitle></DialogHeader>{itemImage && <button type="button" className="w-full cursor-zoom-out" aria-label="Close enlarged photo" onClick={() => setItemImage(null)}><img src={itemImage.src} alt={itemImage.title} className="max-h-[72dvh] w-full object-contain" /></button>}</DialogContent></Dialog>
             <Dialog open={Boolean(noteItem)} onOpenChange={(open) => { if (!open && !noteSaving) setNoteItem(null); }}><DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-lg"><DialogHeader><DialogTitle>Item note</DialogTitle><DialogDescription>{String(noteItem?.sku || noteItem?.barcode || "Audit item")}{noteItem?.locationBin ? ` · ${String(noteItem.locationBin)}` : ""}</DialogDescription></DialogHeader><Field label="Note"><Textarea aria-label="Item note" autoFocus value={itemNote} onChange={(event) => setItemNote(event.target.value)} maxLength={4000} rows={5} readOnly={auditStatus !== "in_progress"} disabled={noteSaving} placeholder="Condition, damage, packaging, or anything the reviewer should know" /></Field>{Boolean(noteItem?.noteUpdatedBy) && <p className="text-xs text-muted-foreground">Last saved by {String(noteItem?.noteUpdatedBy)} · {dateLabel(String(noteItem?.noteUpdatedAt || ""))}</p>}<DialogFooter><Button variant="outline" disabled={noteSaving} onClick={() => setNoteItem(null)}>Close</Button>{auditStatus === "in_progress" && <Button disabled={noteSaving} onClick={() => void saveItemNote()}>{noteSaving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}Save note</Button>}</DialogFooter></DialogContent></Dialog>
+            <Dialog open={Boolean(upcLine)} onOpenChange={(open) => { if (!open && !upcSaving) { setUpcLine(null); setNewUpc(""); } }}>
+              <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-lg">
+                <DialogHeader>
+                  <DialogTitle>Add UPC</DialogTitle>
+                  <DialogDescription>Add the missing catalog barcode for {String(upcLine?.sku || (upcLine?.receivingPoLine as Record<string, unknown> | undefined)?.sku || "this SKU")}. Existing UPCs cannot be replaced from receiving.</DialogDescription>
+                </DialogHeader>
+                <div className="rounded-md border bg-muted/30 p-3 text-sm">
+                  <p className="font-mono font-medium">{String(upcLine?.sku || (upcLine?.receivingPoLine as Record<string, unknown> | undefined)?.sku || "Catalog SKU")}</p>
+                  <p className="mt-1 text-muted-foreground">{String(upcLine?.title || (upcLine?.receivingPoLine as Record<string, unknown> | undefined)?.title || "")}</p>
+                </div>
+                <Field label="UPC / GTIN">
+                  <Input autoFocus inputMode="numeric" autoComplete="off" maxLength={14} value={newUpc} onChange={(event) => setNewUpc(event.target.value.replace(/\D/g, ""))} placeholder="Scan or enter 8, 12, 13, or 14 digits" />
+                </Field>
+                <p className="text-xs text-muted-foreground">DataPlus checks for another catalog product using this barcode before saving it.</p>
+                <DialogFooter>
+                  <Button variant="outline" disabled={upcSaving} onClick={() => { setUpcLine(null); setNewUpc(""); }}>Cancel</Button>
+                  <Button disabled={upcSaving || ![8, 12, 13, 14].includes(newUpc.length)} onClick={() => void saveAddedUpc()}>{upcSaving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}Save UPC</Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
             <ProductDetailSheet sourceItem={quickPreviewItem} open={Boolean(quickPreviewItem)} onOpenChange={(open) => !open && setQuickPreviewItem(null)} />
             <Dialog open={Boolean(countEditLine)} onOpenChange={(open) => !open && setCountEditLine(null)}>
               <DialogContent className="sm:max-w-md">
