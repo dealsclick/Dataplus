@@ -90,16 +90,20 @@ assert.equal(identifierClone.mfrPartNumber, source.mfrPartNumber);
 const supplierClone = cloneCatalogProduct(source, {
   newSku: "CLONE-SUPPLIER",
   supplier: { id: "supplier-2", name: "Supplier B", code: "SUP-B" },
+  vendorSku: "SUPPLIER-B-100",
+  brand: "Canonical Brand",
 }, "Catalog User");
 assert.equal(supplierClone.supplierId, "supplier-2");
 assert.equal(supplierClone.supplier, "Supplier B");
 assert.equal(supplierClone.vendor, "Supplier B");
 assert.equal(supplierClone.supplierCode, "SUP-B");
-assert.equal(supplierClone.vendorSku, "");
+assert.equal(supplierClone.vendorSku, "SUPPLIER-B-100");
+assert.equal(supplierClone.sourceSku, "SUPPLIER-B-100");
+assert.equal(supplierClone.brand, "Canonical Brand");
 assert.equal(supplierClone.cost, 0);
 assert.equal(supplierClone.qty, 0);
 assert.deepEqual(supplierClone.vendorOffers, []);
-assert.match(supplierClone.catalogAttentionReason, /Add the vendor SKU/);
+assert.match(supplierClone.catalogAttentionReason, /Review supplier coverage/);
 
 const minimalClone = cloneCatalogProduct(source, {
   newSku: "CLONE-MINIMAL",
@@ -117,19 +121,33 @@ assert.throws(() => cloneCatalogProduct({}, { newSku: "CLONE" }), /source produc
 const serverSource = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
 const dbSource = fs.readFileSync(path.join(__dirname, "..", "db.js"), "utf8");
 const uiSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "components", "product-workspaces.tsx"), "utf8");
+const cloneUiSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "components", "product-clone-dialog.tsx"), "utf8");
+const purchasingUiSource = fs.readFileSync(path.join(__dirname, "..", "web", "src", "components", "purchasing-workspaces.tsx"), "utf8");
 assert.match(serverSource, /\/api\\\/inventory\\\/\[\^\/\]\+\\\/clone/);
 assert.match(serverSource, /userCan\(authUser, "catalog\.products", "create"\)/);
 assert.match(serverSource, /parts\[3\] === "clone-options"/);
 assert.match(serverSource, /Choose an active supplier for the duplicate SKU/);
+assert.match(serverSource, /Choose an existing canonical brand for the duplicate SKU/);
+assert.match(serverSource, /readStateFields\(\["vendors", "brands"\]/);
 assert.match(serverSource, /insertOnly: true, includeOffers: false, includeVendors: false/);
 assert.match(dbSource, /options\.includeOffers !== false/);
 assert.match(dbSource, /options\.includeVendors !== false/);
 assert.match(dbSource, /item\.supplierId \|\| item\.vendorId/);
 assert.match(dbSource, /inserted: insertedIds\.size/);
 assert.match(uiSource, /> Duplicate SKU</);
-assert.match(uiSource, /No supplier yet/);
-assert.match(uiSource, /supplierId: cloneDraft\.supplierId/);
-assert.match(uiSource, /Independent product, not a shadow/);
-assert.match(uiSource, /Always starts clean/);
+assert.match(uiSource, /<ProductCloneDialog/);
+assert.match(cloneUiSource, /No supplier yet/);
+assert.match(cloneUiSource, /supplierId: draft\.supplierId/);
+assert.match(cloneUiSource, /Search supplier name or code/);
+assert.match(cloneUiSource, /Search canonical brands/);
+assert.match(cloneUiSource, /Supplier SKU/);
+assert.match(cloneUiSource, /Independent product, not a shadow/);
+assert.match(cloneUiSource, /Always starts clean/);
+assert.match(purchasingUiSource, /Recently cloned SKU/);
+assert.match(purchasingUiSource, /> Clone SKU</);
+assert.match(purchasingUiSource, /Link selected SKU/);
+assert.match(purchasingUiSource, /setData\(\(current\) =>/);
+const resolverSave = purchasingUiSource.slice(purchasingUiSource.indexOf("const saveCatalogLine"), purchasingUiSource.indexOf("const openDropshipTracking"));
+assert.doesNotMatch(resolverSave, /await load\(\)/);
 
 console.log("Product clone: independent draft semantics, validated supplier selection, optional copy groups, API safeguards, and React controls passed.");

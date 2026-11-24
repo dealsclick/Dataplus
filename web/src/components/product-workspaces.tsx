@@ -103,6 +103,7 @@ import { loadAppReferences } from "../lib/app-state"
 import { catalogChannelState,ebayListingOperatorState,marketplaceListingUrl } from "../lib/catalog-channel-utils"
 import { api,dateLabel,moneyLabel,numberLabel } from "../lib/client-api"
 import { Detail,Field } from "./app-ui"
+import { ProductCloneDialog } from "./product-clone-dialog"
 import { shipmentDisplayValue,trackingUrlForShipment } from "./shipment-links"
 import { TemuProductWorkspace } from "./temu-product-workspace"
 
@@ -1586,10 +1587,6 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
   const [editorOpen, setEditorOpen] = useState(false)
   const [ebayEditorOpen, setEbayEditorOpen] = useState(false)
   const [cloneOpen, setCloneOpen] = useState(false)
-  const [cloneSaving, setCloneSaving] = useState(false)
-  const [cloneSuppliersLoading, setCloneSuppliersLoading] = useState(false)
-  const [cloneSuppliers, setCloneSuppliers] = useState<Array<Pick<Vendor, "id" | "name" | "code" | "status">>>([])
-  const [cloneDraft, setCloneDraft] = useState({ sku: "", title: "", supplierId: "", copyContent: true, copyMedia: true, copyShipping: true, copyIdentifiers: false })
   const [productTab, setProductTab] = useState("overview")
   const [saving, setSaving] = useState(false)
   const [channelStatusSaving, setChannelStatusSaving] = useState("")
@@ -1618,49 +1615,7 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
   const values = (rows: Array<[string, string]>) => <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{rows.map(([label, value]) => <Detail key={label} label={label} value={value || "-"} />)}</div>
   const mainCategory = String(product.mainCategory || product.category || "").trim()
   const vendorCategory = String(product.vendorCategory || product.sourceCategory || "").trim()
-  const selectedCloneSupplier = cloneSuppliers.find((supplier) => supplier.id === cloneDraft.supplierId)
   const openEditor = () => { setDraft({ shippingClassOverride: product.shippingClassOverride || "", shippingOverrideReason: product.shippingOverrideReason || "", shippingPackageOverride: product.shippingPackageOverride ?? product.packageDimensionsLocked === true, shipAlone: product.shipAlone === true, marketplaceTitle: product.marketplaceTitle || product.title || "", brand: product.brand || "", manufacturer: product.manufacturer || "", mfrPartNumber: product.mfrPartNumber || "", supplier: product.supplier || product.vendor || "", supplierCode: product.supplierCode || "", vendorSku: product.vendorSku || "", mainCategory: product.mainCategory || product.category || "", sourceCategory: product.sourceCategory || "", vendorCategory: product.vendorCategory || "", condition: product.condition || "New", status: product.status || "Active", barcode: product.barcode || "", externalId: product.externalId || "", unspsc: product.unspsc || "", uom: product.uom || "", uomQty: String(product.uomQty || 1), tags: (product.tags || []).join(", "), shortDescription: product.shortDescription || "", longDescription: product.longDescription || "", bulletPoints: (product.bulletPoints || []).join("\n"), seoKeywords: product.seoKeywords || "", wildcardSearch: product.wildcardSearch || "", defaultImage: catalogImageUrlValue(product.defaultImage) || imageUrls[0] || "", images: imageUrls.join("\n"), websitePrice: String(price), cost: String(product.cost ?? 0), fobPrice: String(product.fobPrice ?? 0), listPrice: String(product.listPrice ?? product.msrp ?? 0), qty: String(product.qty ?? product.stockQty ?? 0), reserved: String(product.reserved ?? 0), reorderPoint: String(product.reorderPoint || 0), minQuantity: String(product.minQuantity || ""), quantityIncrements: String(product.quantityIncrements || ""), leadTime: String(product.leadTime || product.leadtime || ""), itemLength: String(product.itemLength || 0), itemWidth: String(product.itemWidth || 0), itemHeight: String(product.itemHeight || 0), itemWeight: String(product.itemWeight || 0), packageLength: String(product.packageLength || 0), packageWidth: String(product.packageWidth || 0), packageHeight: String(product.packageHeight || 0), packageWeight: String(product.packageWeight || 0), dimensionalWeight: String(product.dimensionalWeight || 0), countryOfOrigin: product.countryOfOrigin || "", sdsUrl: product.sdsUrl || "", stockStatus: product.stockStatus || "", stockUpdatedAt: product.stockUpdatedAt || "", lastPricesUpdateAt: product.lastPricesUpdateAt || "", lastPricesUpdateBy: product.lastPricesUpdateBy || "", hazardous: Boolean(product.hazardous), active: product.active !== false, categoryVerified: Boolean(product.categoryVerified) }); setEditorOpen(true) }
-  const openClone = () => {
-    const sourceSku = String(product.sku || sku || "").trim()
-    setCloneDraft({
-      sku: sourceSku ? `${sourceSku}-COPY` : "",
-      title: String(product.title || product.marketplaceTitle || sourceSku),
-      supplierId: "",
-      copyContent: true,
-      copyMedia: true,
-      copyShipping: true,
-      copyIdentifiers: false,
-    })
-    setCloneSuppliers([])
-    setCloneSuppliersLoading(true)
-    setCloneOpen(true)
-    void api<{ suppliers?: Array<Pick<Vendor, "id" | "name" | "code" | "status">> }>(`/api/inventory/${encodeURIComponent(sourceSku)}/clone-options`)
-      .then((result) => setCloneSuppliers(result.suppliers || []))
-      .catch((error) => toast.error(error instanceof Error ? error.message : "Unable to load suppliers."))
-      .finally(() => setCloneSuppliersLoading(false))
-  }
-  const saveClone = async () => {
-    const newSku = cloneDraft.sku.trim()
-    const title = cloneDraft.title.trim()
-    if (!newSku) return toast.error("Enter the new SKU.")
-    if (!title) return toast.error("Enter a product title.")
-    if (cloneSaving) return
-    setCloneSaving(true)
-    try {
-      const result = await api<{ item: ProductItem; message?: string }>(`/api/inventory/${encodeURIComponent(product.sku || sku)}/clone`, {
-        method: "POST",
-        body: JSON.stringify({ newSku, title, supplierId: cloneDraft.supplierId, copyContent: cloneDraft.copyContent, copyMedia: cloneDraft.copyMedia, copyShipping: cloneDraft.copyShipping, copyIdentifiers: cloneDraft.copyIdentifiers })
-      })
-      setCloneOpen(false)
-      toast.success(result.message || `${newSku} was created as an inactive draft.`)
-      window.history.pushState({}, "", `/products/${encodeURIComponent(result.item.sku || newSku)}`)
-      window.dispatchEvent(new PopStateEvent("popstate"))
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Unable to duplicate this SKU.")
-    } finally {
-      setCloneSaving(false)
-    }
-  }
   const save = async () => {
     if (saving) return
     setSaving(true)
@@ -1817,7 +1772,7 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
   const readinessScore = Math.round((readinessChecks.filter(([, ready]) => ready).length / readinessChecks.length) * 100)
   return <div className="relative grid min-w-0 grid-cols-[minmax(0,1fr)] gap-5">
     <ProductReadinessPanel score={readinessScore} checks={readinessChecks} discontinued={Boolean(product.toBeDiscontinued)} />
-    <div className="flex flex-wrap items-center justify-between gap-3"><Button variant="outline" onClick={onBack}>Back to Products</Button><div className="flex flex-wrap gap-2"><Badge variant={product.active === false ? "outline" : "default"}>{product.active === false ? "Inactive" : "Active"}</Badge>{product.categoryVerified ? <Badge variant="outline">Category verified</Badge> : <Badge variant="outline">Category needs review</Badge>}{product.purchasingUomOverride?.locked ? <Badge variant="outline" className="border-blue-500/40 bg-blue-500/10 text-blue-800 dark:text-blue-200">Purchasing UOM locked: Each</Badge> : null}{product.toBeDiscontinued ? <Badge variant="destructive">Discontinued</Badge> : null}<Button size="sm" onClick={openEditor}><Pencil className="size-4" /> Edit product</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Catalog</DropdownMenuLabel><DropdownMenuItem onClick={openClone}><Copy className="size-4" /> Duplicate SKU</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Shopify</DropdownMenuLabel><DropdownMenuItem onClick={() => void pushShopify("/api/shopify/product-create", false, "Shopify launch review")}><ShoppingBag className="size-4" /> Review Shopify launch</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued || Boolean(product.shopifyId)} onClick={() => void pushShopify("/api/shopify/product-create", true, "Shopify product launch")}><ShoppingBag className="size-4" /> {product.shopifyId ? "Already in Shopify" : "Launch on Shopify"}</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void pushShopify("/api/shopify/variant-price-push", false, "Shopify price review")}><ShoppingBag className="size-4" /> Review Shopify price</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued || !product.shopifyId} onClick={() => void pushShopify("/api/shopify/variant-price-push", true, "Shopify price push")}><ShoppingBag className="size-4" /> Push Shopify price</DropdownMenuItem>{ebayEnabled && <><DropdownMenuSeparator /><DropdownMenuLabel>eBay</DropdownMenuLabel><DropdownMenuItem onClick={() => void pushEbay(true)}><ShoppingBag className="size-4" /> Review eBay launch</DropdownMenuItem><DropdownMenuItem disabled={ebayLaunchBlocked} onClick={() => void pushEbay(false)}><ShoppingBag className="size-4" /> Launch on eBay</DropdownMenuItem></>}<DropdownMenuSeparator /><DropdownMenuItem onClick={() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }}><History className="size-4" /> View channel jobs</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></div>
+    <div className="flex flex-wrap items-center justify-between gap-3"><Button variant="outline" onClick={onBack}>Back to Products</Button><div className="flex flex-wrap gap-2"><Badge variant={product.active === false ? "outline" : "default"}>{product.active === false ? "Inactive" : "Active"}</Badge>{product.categoryVerified ? <Badge variant="outline">Category verified</Badge> : <Badge variant="outline">Category needs review</Badge>}{product.purchasingUomOverride?.locked ? <Badge variant="outline" className="border-blue-500/40 bg-blue-500/10 text-blue-800 dark:text-blue-200">Purchasing UOM locked: Each</Badge> : null}{product.toBeDiscontinued ? <Badge variant="destructive">Discontinued</Badge> : null}<Button size="sm" onClick={openEditor}><Pencil className="size-4" /> Edit product</Button><DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuLabel>Catalog</DropdownMenuLabel><DropdownMenuItem onClick={() => setCloneOpen(true)}><Copy className="size-4" /> Duplicate SKU</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuLabel>Shopify</DropdownMenuLabel><DropdownMenuItem onClick={() => void pushShopify("/api/shopify/product-create", false, "Shopify launch review")}><ShoppingBag className="size-4" /> Review Shopify launch</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued || Boolean(product.shopifyId)} onClick={() => void pushShopify("/api/shopify/product-create", true, "Shopify product launch")}><ShoppingBag className="size-4" /> {product.shopifyId ? "Already in Shopify" : "Launch on Shopify"}</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onClick={() => void pushShopify("/api/shopify/variant-price-push", false, "Shopify price review")}><ShoppingBag className="size-4" /> Review Shopify price</DropdownMenuItem><DropdownMenuItem disabled={product.toBeDiscontinued || !product.shopifyId} onClick={() => void pushShopify("/api/shopify/variant-price-push", true, "Shopify price push")}><ShoppingBag className="size-4" /> Push Shopify price</DropdownMenuItem>{ebayEnabled && <><DropdownMenuSeparator /><DropdownMenuLabel>eBay</DropdownMenuLabel><DropdownMenuItem onClick={() => void pushEbay(true)}><ShoppingBag className="size-4" /> Review eBay launch</DropdownMenuItem><DropdownMenuItem disabled={ebayLaunchBlocked} onClick={() => void pushEbay(false)}><ShoppingBag className="size-4" /> Launch on eBay</DropdownMenuItem></>}<DropdownMenuSeparator /><DropdownMenuItem onClick={() => { window.history.pushState({}, "", "/jobs"); window.dispatchEvent(new PopStateEvent("popstate")) }}><History className="size-4" /> View channel jobs</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div></div>
     {product.catalogAttentionRequired ? <Alert className="border-amber-500/40 bg-amber-500/10"><AlertCircle className="size-4" /><AlertTitle>Created by DataPlus from an order import</AlertTitle><AlertDescription className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><span>{product.catalogAttentionReason || "This draft SKU still needs catalog review. Complete its identity, supplier, cost, content, and shipping data, or link the imported SKU as an alias of an existing product."}</span><Button size="sm" variant="outline" disabled={saving} onClick={() => void markImportReviewComplete()}>{saving ? <Loader2 className="size-4 animate-spin" /> : <ShieldCheck className="size-4" />} Mark reviewed</Button></AlertDescription></Alert> : null}
     <Card><CardContent className="grid gap-5 p-5 lg:grid-cols-[180px_minmax(0,1fr)]"><div className="grid aspect-square place-items-center overflow-hidden rounded-md border bg-muted/40">{product.defaultImage || imageUrls[0] ? <img src={product.defaultImage || imageUrls[0]} alt={product.title || sku} className="size-full object-contain p-3" /> : <Boxes className="size-10 text-muted-foreground" />}</div><div className="min-w-0"><p className="text-xs font-bold uppercase tracking-wide text-muted-foreground">{product.catalogAttentionRequired ? "System-created draft product" : "Approved catalog product"}</p><h1 className="mt-1 text-2xl font-semibold tracking-tight">{product.marketplaceTitle || product.title || "Untitled product"}</h1><div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-muted-foreground"><strong className="font-mono text-foreground">{product.sku || sku}</strong><span>{product.brand || "No brand"}</span><span>{product.supplier || product.vendor || "No supplier"}</span><span>{product.uomDisplay || "Each"}</span></div><ProductCategoryPopover category={mainCategory} sourceCategory={vendorCategory} />{product.tags?.length ? <div className="mt-3 flex flex-wrap gap-1">{product.tags.map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>)}</div> : null}</div></CardContent></Card>
     {(product.sellingUnits?.explicit || (product.systemVariants?.length || 0) > 1) && <section className="min-w-0 border-b pb-4">
@@ -1837,56 +1792,15 @@ function CompleteProductWorkspace({ product, sku, channels, onBack, onUpdated }:
       <TabsContent value="suppliers" className="mt-4 grid gap-4">{section("Supplier coverage", "Supplier source records ranked by product identity, not merely a catalog alternate count.", <ProductSupplierCoverage product={product} active={productTab === "suppliers"} />)}</TabsContent>
       <TabsContent value="source" className="mt-4 grid gap-4">{section("Source catalog & audit", "Raw supplier fields and import history remain available for review.", <><ProductChangesTable rows={product.recentChanges || []} /><div className="mt-4 overflow-hidden rounded-md border"><Table><TableHeader><TableRow><TableHead>Source field</TableHead><TableHead>Value</TableHead></TableRow></TableHeader><TableBody>{sourceRows.map(([key, value]) => <TableRow key={key}><TableCell className="w-64 font-medium">{key}</TableCell><TableCell className="max-w-xl whitespace-pre-wrap break-words">{typeof value === "object" ? JSON.stringify(value) : String(value ?? "-")}</TableCell></TableRow>)}{!sourceRows.length && <TableRow><TableCell colSpan={2} className="py-8 text-center text-muted-foreground">No raw source fields are stored for this product.</TableCell></TableRow>}</TableBody></Table></div></>)}</TabsContent>
     </Tabs><ProductEditorDialog open={editorOpen} onOpenChange={setEditorOpen} initialTab={productTab === "content" ? "content" : productTab === "pricing" || productTab === "inventory" ? "pricing" : productTab === "shipping" ? "shipping" : productTab === "source" ? "audit" : "basics"} draft={draft} setDraft={setDraft} saving={saving} onSave={save} />
-    <Dialog open={cloneOpen} onOpenChange={(open) => { if (!cloneSaving) setCloneOpen(open) }}>
-      <DialogContent className="flex max-h-[94dvh] flex-col overflow-hidden p-0 sm:max-w-3xl">
-        <DialogHeader className="border-b px-5 py-4 sm:px-6">
-          <DialogTitle>Duplicate SKU</DialogTitle>
-          <DialogDescription>Create an independent catalog product from {product.sku || sku}. The duplicate starts inactive and must be reviewed before it can be sold.</DialogDescription>
-        </DialogHeader>
-        <div className="grid min-h-0 flex-1 gap-5 overflow-y-auto px-5 py-5 sm:px-6">
-          <div className="flex min-w-0 items-center gap-3 rounded-md border bg-muted/20 p-3">
-            <div className="grid size-16 shrink-0 place-items-center overflow-hidden rounded-md border bg-background">{product.defaultImage || imageUrls[0] ? <img src={product.defaultImage || imageUrls[0]} alt="" className="size-full object-contain p-1" /> : <Boxes className="size-6 text-muted-foreground" />}</div>
-            <div className="min-w-0"><p className="truncate text-sm font-medium">{product.title || product.marketplaceTitle || "Untitled product"}</p><p className="mt-1 font-mono text-xs text-muted-foreground">Source SKU: {product.sku || sku}</p></div>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="New SKU"><Input autoFocus value={cloneDraft.sku} onChange={(event) => setCloneDraft((current) => ({ ...current, sku: event.target.value }))} placeholder={`${product.sku || sku}-COPY`} /></Field>
-            <Field label="Product title"><Input value={cloneDraft.title} onChange={(event) => setCloneDraft((current) => ({ ...current, title: event.target.value }))} /></Field>
-          </div>
-          <div className="grid gap-1.5">
-            <Label>Supplier</Label>
-            <Select disabled={cloneSuppliersLoading} value={cloneDraft.supplierId || "none"} onValueChange={(value) => setCloneDraft((current) => ({ ...current, supplierId: value === "none" ? "" : value }))}>
-              <SelectTrigger className="w-full"><SelectValue placeholder={cloneSuppliersLoading ? "Loading suppliers..." : "No supplier yet"} /></SelectTrigger>
-              <SelectContent className="max-h-72">
-                <SelectItem value="none">No supplier yet</SelectItem>
-                {cloneSuppliers.map((supplier) => <SelectItem key={supplier.id} value={supplier.id}>{supplier.name}{supplier.code ? ` (${supplier.code})` : ""}</SelectItem>)}
-              </SelectContent>
-            </Select>
-            <p className="text-xs leading-5 text-muted-foreground">{cloneSuppliersLoading ? "Loading active suppliers..." : selectedCloneSupplier ? `${selectedCloneSupplier.name} will be assigned as the primary supplier. Vendor SKU, cost, and availability still start blank.` : "You can assign the supplier now or leave it unassigned for catalog review."}</p>
-          </div>
-          <div className="grid gap-3">
-            <div><p className="text-sm font-medium">Choose what to copy</p><p className="text-xs text-muted-foreground">These choices copy reusable catalog details only. They never copy inventory or marketplace ownership.</p></div>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {[
-                { key: "copyContent", label: "Content and categories", description: "Descriptions, attributes, tags, and category placement." },
-                { key: "copyMedia", label: "Images and media", description: "Product images and saved media references." },
-                { key: "copyShipping", label: "Dimensions and compliance", description: "Measurements, shipping class, SDS, and hazard fields." },
-                { key: "copyIdentifiers", label: "UPC and manufacturer part number", description: "Off by default because duplicate identifiers can affect matching." },
-              ].map((option) => {
-                const key = option.key as "copyContent" | "copyMedia" | "copyShipping" | "copyIdentifiers"
-                return <label key={key} className="flex cursor-pointer items-start gap-3 rounded-md border p-3 hover:bg-muted/30"><Checkbox className="mt-0.5" checked={cloneDraft[key]} onCheckedChange={(checked) => setCloneDraft((current) => ({ ...current, [key]: checked === true }))} /><span><span className="block text-sm font-medium">{option.label}</span><span className="mt-0.5 block text-xs leading-5 text-muted-foreground">{option.description}</span></span></label>
-              })}
-            </div>
-          </div>
-          <Alert>
-            <Copy className="size-4" />
-            <AlertTitle>Independent product, not a shadow</AlertTitle>
-            <AlertDescription>The new SKU will not share inventory with {product.sku || sku}. Use Create shadow when two selling identities should draw from the same parent stock.</AlertDescription>
-          </Alert>
-          <div className="rounded-md border border-amber-500/35 bg-amber-500/10 p-3"><p className="text-sm font-medium text-amber-900 dark:text-amber-100">Always starts clean</p><p className="mt-1 text-xs leading-5 text-amber-800 dark:text-amber-200">Zero physical stock, zero reserved quantity, no cost or selling price, no supplier offers or availability, no aliases or shadows, and no Shopify, eBay, Temu, TikTok, Walmart, or Whatnot listing IDs.</p></div>
-        </div>
-        <DialogFooter className="border-t bg-background px-5 py-4 sm:px-6"><Button variant="outline" disabled={cloneSaving} onClick={() => setCloneOpen(false)}>Cancel</Button><Button disabled={cloneSaving || !cloneDraft.sku.trim() || !cloneDraft.title.trim()} onClick={() => void saveClone()}>{cloneSaving ? <Loader2 className="size-4 animate-spin" /> : <Copy className="size-4" />} Create duplicate</Button></DialogFooter>
-      </DialogContent>
-    </Dialog>
+    <ProductCloneDialog
+      open={cloneOpen}
+      onOpenChange={setCloneOpen}
+      source={{ sku: String(product.sku || sku), title: String(product.title || product.marketplaceTitle || ""), image: String(product.defaultImage || imageUrls[0] || ""), brand: String(product.brand || ""), supplierId: String((product as Record<string, unknown>).supplierId || "") }}
+      onCreated={(item) => {
+        window.history.pushState({}, "", `/products/${encodeURIComponent(item.sku || "")}`)
+        window.dispatchEvent(new PopStateEvent("popstate"))
+      }}
+    />
     <Dialog open={Boolean(relationshipMode)} onOpenChange={(open) => { if (!open) setRelationshipMode(null) }}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>

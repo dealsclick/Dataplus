@@ -50790,6 +50790,10 @@ function cloneCatalogProduct(source = {}, input = {}, actor = "DataPlus operator
         code: String(input.supplier.code || "").trim()
       }
     : null;
+  const selectedVendorSku = selectedSupplier ? String(input.vendorSku || "").trim() : "";
+  const selectedBrand = Object.prototype.hasOwnProperty.call(input, "brand")
+    ? String(input.brand || "").trim()
+    : String(source.brand || "").trim();
   const now = new Date().toISOString();
   const title = String(input.title || source.title || source.marketplaceTitle || sku).trim() || sku;
   const clone = {
@@ -50797,7 +50801,7 @@ function cloneCatalogProduct(source = {}, input = {}, actor = "DataPlus operator
     sku,
     title,
     marketplaceTitle: title,
-    brand: String(source.brand || ""),
+    brand: selectedBrand,
     manufacturer: String(source.manufacturer || ""),
     condition: String(source.condition || "New"),
     uom: String(source.uom || "EA"),
@@ -50823,8 +50827,8 @@ function cloneCatalogProduct(source = {}, input = {}, actor = "DataPlus operator
     vendor: selectedSupplier?.name || "",
     supplierId: selectedSupplier?.id || "",
     supplierCode: selectedSupplier?.code || "",
-    vendorSku: "",
-    sourceSku: "",
+    vendorSku: selectedVendorSku,
+    sourceSku: selectedVendorSku,
     externalId: "",
     warehouseStock: [],
     inventoryByLocation: {},
@@ -50846,7 +50850,7 @@ function cloneCatalogProduct(source = {}, input = {}, actor = "DataPlus operator
     catalogAttentionRequired: true,
     catalogAttentionStatus: "open",
     catalogAttentionReason: selectedSupplier
-      ? `Duplicated from ${sourceSku} for ${selectedSupplier.name}. Add the vendor SKU and review supplier coverage, pricing, inventory, and channel settings before activation.`
+      ? `Duplicated from ${sourceSku} for ${selectedSupplier.name}. ${selectedVendorSku ? "Review" : "Add the vendor SKU and review"} supplier coverage, pricing, inventory, and channel settings before activation.`
       : `Duplicated from ${sourceSku}. Review identity, supplier coverage, pricing, inventory, and channel settings before activation.`,
     createdAt: now,
     updatedAt: now,
@@ -50859,7 +50863,7 @@ function cloneCatalogProduct(source = {}, input = {}, actor = "DataPlus operator
     cloneSourceSku: sourceSku,
     clonedAt: now,
     clonedBy: String(actor || "DataPlus operator"),
-    cloneOptions: { copyContent, copyMedia, copyShipping, copyIdentifiers, supplierId: selectedSupplier?.id || "" }
+    cloneOptions: { copyContent, copyMedia, copyShipping, copyIdentifiers, supplierId: selectedSupplier?.id || "", vendorSku: selectedVendorSku, brand: selectedBrand }
   };
 
   if (copyContent) {
@@ -59559,7 +59563,7 @@ async function handleApi(req, res) {
     if (!userCan(authUser, "catalog.products", "create")) return sendJson(res, 403, { error: "Catalog product creation permission is required." });
     const source = await postgres.readProductByKey(decodeURIComponent(parts[2]));
     if (!source) return notFound(res);
-    const state = await postgres.readStateFields(["vendors"], { fallbackToLegacy: false });
+    const state = await postgres.readStateFields(["vendors", "brands"], { fallbackToLegacy: false });
     const suppliers = (state.vendors || [])
       .filter((vendor) => {
         const status = String(vendor.status || "active").trim().toLowerCase();
@@ -59573,7 +59577,12 @@ async function handleApi(req, res) {
       }))
       .filter((vendor) => vendor.id && vendor.name)
       .sort((left, right) => left.name.localeCompare(right.name));
-    return sendJson(res, 200, { suppliers });
+    const brands = (state.brands || [])
+      .filter((brand) => !["inactive", "retired", "disabled"].includes(String(brand.status || "active").trim().toLowerCase()))
+      .map((brand) => ({ id: String(brand.id || "").trim(), name: String(brand.name || "").trim(), status: String(brand.status || "active") }))
+      .filter((brand) => brand.name)
+      .sort((left, right) => left.name.localeCompare(right.name));
+    return sendJson(res, 200, { suppliers, brands });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "inventory" && parts[2] && parts[3] === "clone" && parts.length === 4 && postgres.isPostgresEnabled()) {
@@ -59593,9 +59602,9 @@ async function handleApi(req, res) {
     if (existing) return sendJson(res, 409, { error: `${newSku} already resolves to catalog SKU ${existing.sku || existing.id}. Choose a different SKU.` });
 
     const supplierId = String(body.supplierId || "").trim();
+    const state = await postgres.readStateFields(["vendors", "brands"], { fallbackToLegacy: false });
     let supplier = null;
     if (supplierId) {
-      const state = await postgres.readStateFields(["vendors"], { fallbackToLegacy: false });
       const vendor = (state.vendors || []).find((candidate) => String(candidate.id || "") === supplierId);
       const vendorStatus = String(vendor?.status || "active").trim().toLowerCase();
       if (!vendor || vendor.retirement || ["inactive", "retired", "disabled"].includes(vendorStatus)) {
@@ -59603,6 +59612,20 @@ async function handleApi(req, res) {
       }
       supplier = { id: String(vendor.id), name: String(vendor.name || "").trim(), code: String(vendor.code || "").trim() };
       if (!supplier.name) return sendJson(res, 400, { error: "The selected supplier is missing a name." });
+    }
+    const vendorSku = supplier ? String(body.vendorSku || "").trim() : "";
+    if (vendorSku.length > 160) return sendJson(res, 400, { error: "Supplier SKU must be 160 characters or fewer." });
+    let brand = String(source.brand || "").trim();
+    if (Object.prototype.hasOwnProperty.call(body, "brand")) {
+      const requestedBrand = String(body.brand || "").trim();
+      if (!requestedBrand) {
+        brand = "";
+      } else {
+        const canonicalBrand = (state.brands || []).find((candidate) => String(candidate.name || "").trim().toLowerCase() === requestedBrand.toLowerCase());
+        const preservesSourceBrand = requestedBrand.toLowerCase() === String(source.brand || "").trim().toLowerCase();
+        if (!canonicalBrand && !preservesSourceBrand) return sendJson(res, 400, { error: "Choose an existing canonical brand for the duplicate SKU." });
+        brand = String(canonicalBrand?.name || source.brand || requestedBrand).trim();
+      }
     }
 
     const actor = authUser?.name || authUser?.username || authUser?.id || "DataPlus operator";
@@ -59613,7 +59636,9 @@ async function handleApi(req, res) {
       copyMedia: body.copyMedia !== false,
       copyShipping: body.copyShipping !== false,
       copyIdentifiers: body.copyIdentifiers === true,
-      supplier
+      supplier,
+      vendorSku,
+      brand
     }, actor);
     const saved = await postgres.upsertProductsFromState([item], { insertOnly: true, includeOffers: false, includeVendors: false });
     if (Number(saved.inserted || 0) !== 1) return sendJson(res, 409, { error: `${newSku} was created by another request. Refresh the catalog before trying again.` });
@@ -59625,7 +59650,7 @@ async function handleApi(req, res) {
       path: url.pathname,
       entityType: "product",
       entityId: persisted?.id || item.id,
-      metadata: { sourceSku: source.sku || source.id, newSku, supplierId: supplier?.id || "" }
+      metadata: { sourceSku: source.sku || source.id, newSku, supplierId: supplier?.id || "", vendorSku, brand }
     });
     return sendJson(res, 201, {
       item: persisted || item,

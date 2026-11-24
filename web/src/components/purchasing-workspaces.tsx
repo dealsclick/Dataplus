@@ -103,6 +103,7 @@ import { api,dateLabel,moneyLabel,numberLabel } from "../lib/client-api"
 import { Detail,Field,PageHeader } from "./app-ui"
 import { channelOrderNumberFor,channelOrderUrlFor,detectedTrackingUpdate,detectTrackingCarrier,enabledCarrierNames,enabledCarrierServices,UniversalShippingLabelDialog,useFulfillmentCarriers } from "./order-workspaces"
 import { CatalogImage } from "./product-workspaces"
+import { ProductCloneDialog } from "./product-clone-dialog"
 import { shipmentTrackingCarriers,trackingUrlForShipment } from "./shipment-links"
 import type { QuoteTermDefinition } from "./quote-terms-settings"
 
@@ -2252,6 +2253,10 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
   const [catalogLineResults, setCatalogLineResults] = useState<QuickProductResult[]>([])
   const [catalogLineSearching, setCatalogLineSearching] = useState(false)
   const [catalogLineDraft, setCatalogLineDraft] = useState({ sku: "", title: "" })
+  const [catalogLineSelected, setCatalogLineSelected] = useState<QuickProductResult | null>(null)
+  const [catalogLineRecentClone, setCatalogLineRecentClone] = useState<QuickProductResult | null>(null)
+  const [catalogLineCloneSource, setCatalogLineCloneSource] = useState<QuickProductResult | null>(null)
+  const [catalogLineSaving, setCatalogLineSaving] = useState(false)
   const [documentOpen, setDocumentOpen] = useState(false)
   const [reminderOpen, setReminderOpen] = useState(false)
   const [reSourceOpen, setReSourceOpen] = useState(false)
@@ -2489,20 +2494,40 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
     setCatalogLineQuery(String(line.sourceItemNumber || line.vendorSku || line.mfrPartNumber || ""))
     setCatalogLineResults([])
     setCatalogLineDraft({ sku: suggestedSku, title: String(line.sourceDescription || line.title || "") })
+    setCatalogLineSelected(null)
+    setCatalogLineRecentClone(null)
+    setCatalogLineCloneSource(null)
+  }
+  const closeCatalogLine = () => {
+    setCatalogLine(null)
+    setCatalogLineSelected(null)
+    setCatalogLineRecentClone(null)
+    setCatalogLineCloneSource(null)
   }
   const saveCatalogLine = async (action: "link" | "create", selected?: QuickProductResult) => {
     if (!catalogLine) return
     const sku = String(selected?.sku || catalogLineDraft.sku || "").trim()
     if (!sku) return toast.error(action === "link" ? "Choose a catalog SKU." : "Enter the SKU to create.")
     if (action === "create" && !catalogLineDraft.title.trim()) return toast.error("Enter a product title.")
-    setSaving(true)
+    setCatalogLineSaving(true)
     try {
-      const result = await api<{ message?: string }>(`/api/purchase-orders/${encodeURIComponent(id)}/lines/catalog`, { method: "POST", body: JSON.stringify({ action, lineIndex: catalogLine.index, sku, title: catalogLineDraft.title.trim(), user: operatorName }) })
+      const result = await api<{ message?: string; purchaseOrder?: Record<string, unknown>; line?: Record<string, unknown> }>(`/api/purchase-orders/${encodeURIComponent(id)}/lines/catalog`, { method: "POST", body: JSON.stringify({ action, lineIndex: catalogLine.index, sku, title: catalogLineDraft.title.trim(), user: operatorName }) })
+      if (result.purchaseOrder || result.line) {
+        const resolvedIndex = catalogLine.index
+        setData((current) => {
+          const currentPo = (current.purchaseOrder || {}) as Record<string, unknown>
+          const incomingPo = (result.purchaseOrder || {}) as Record<string, unknown>
+          const currentItems = Array.isArray(currentPo.items) ? currentPo.items as Array<Record<string, unknown>> : []
+          const incomingItems = Array.isArray(incomingPo.items) ? incomingPo.items as Array<Record<string, unknown>> : []
+          const itemCount = Math.max(currentItems.length, incomingItems.length, resolvedIndex + 1)
+          const items = Array.from({ length: itemCount }, (_, index) => ({ ...(currentItems[index] || {}), ...(incomingItems[index] || {}), ...(index === resolvedIndex ? result.line || {} : {}) }))
+          return { ...current, purchaseOrder: { ...currentPo, ...incomingPo, items } }
+        })
+      }
       toast.success(result.message || "PO line linked to the catalog.")
-      setCatalogLine(null)
-      await load()
+      closeCatalogLine()
     } catch (error) { toast.error(error instanceof Error ? error.message : "Unable to resolve this PO line.") }
-    finally { setSaving(false) }
+    finally { setCatalogLineSaving(false) }
   }
   const openDropshipTracking = () => {
     const saved = (po.dropshipShipment || {}) as Record<string, unknown>
@@ -3235,20 +3260,36 @@ export function PurchaseOrderDetailPage({ mobileId = "", operatorName = "Buyer" 
       <TabsContent value="documents" className="mt-4 grid gap-2"><div className="flex justify-end"><Button size="sm" onClick={openDocument}>Link document</Button></div>{documents.map((document, index) => <Card key={String(document.id || index)}><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm"><div><p className="font-medium">{String(document.name || "Document")}</p><p className="text-muted-foreground">{String(document.type || "supplier document")}{document.note ? ` - ${String(document.note)}` : ""}</p></div><Button size="sm" variant="outline" asChild><a href={String(document.url || "#")} target="_blank" rel="noreferrer">Open</a></Button></CardContent></Card>)}{!documents.length && <Card><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm text-muted-foreground"><span>No supplier documents are linked.</span><Button size="sm" onClick={openDocument}>Link document</Button></CardContent></Card>}</TabsContent>
       <TabsContent value="history" className="mt-4 grid gap-2">{history.map((event, index) => <Card key={String(event.id || index)}><CardContent className="p-4 text-sm"><p className="font-medium">{String(event.title || event.type || "Activity")}</p><p className="text-muted-foreground">{String(event.message || "")}</p></CardContent></Card>)}{!history.length && <Card><CardContent className="p-4 text-sm text-muted-foreground">No PO activity has been recorded.</CardContent></Card>}</TabsContent>
     </Tabs>
-    <Dialog open={Boolean(catalogLine)} onOpenChange={(open) => { if (!open && !saving) setCatalogLine(null) }}>
+    <Dialog open={Boolean(catalogLine)} onOpenChange={(open) => { if (!open && !catalogLineSaving) closeCatalogLine() }}>
       <DialogContent className="flex max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-3xl flex-col overflow-hidden p-0">
         <DialogHeader className="border-b px-5 py-4 pr-14"><DialogTitle>Resolve external PO line</DialogTitle><DialogDescription>Keep the supplier's original line evidence while connecting it to the correct DataPlus catalog SKU.</DialogDescription></DialogHeader>
         {catalogLine ? <div className="grid min-h-0 gap-4 overflow-y-auto px-5 py-4">
           <div className="grid gap-3 rounded-md border bg-muted/20 p-3 sm:grid-cols-3"><Detail label="Supplier item" value={String(catalogLine.line.sourceItemNumber || catalogLine.line.vendorSku || "Not recorded")} /><Detail label="Description" value={String(catalogLine.line.sourceDescription || catalogLine.line.title || "Not recorded")} /><Detail label="Ordered" value={numberLabel(Number(catalogLine.line.qty || 0))} /></div>
           <div className="flex gap-2"><Button size="sm" variant={catalogLineMode === "link" ? "default" : "outline"} onClick={() => setCatalogLineMode("link")}>Link existing SKU</Button><Button size="sm" variant={catalogLineMode === "create" ? "default" : "outline"} onClick={() => setCatalogLineMode("create")}>Create missing SKU</Button></div>
           {catalogLineMode === "link" ? <div className="grid gap-3">
-            <Field label="Search catalog"><div className="relative"><Search className="absolute left-3 top-3 size-4 text-muted-foreground" /><Input autoFocus className="pl-9" value={catalogLineQuery} onChange={(event) => setCatalogLineQuery(event.target.value)} placeholder="Search SKU, UPC, manufacturer part, or title" /></div></Field>
-            {catalogLineSearching ? <p className="text-sm text-muted-foreground"><Loader2 className="mr-2 inline size-4 animate-spin" />Searching catalog...</p> : catalogLineQuery.trim().length >= 2 ? <div className="overflow-hidden rounded-md border">{catalogLineResults.map((product) => <button key={String(product.id || product.sku)} type="button" className="grid w-full gap-1 border-b px-4 py-3 text-left last:border-b-0 hover:bg-muted sm:grid-cols-[150px_minmax(0,1fr)_150px]" onClick={() => void saveCatalogLine("link", product)}><span className="font-mono text-xs font-medium">{String(product.sku || "")}</span><span className="truncate text-sm">{String(product.title || product.sku || "")}</span><span className="truncate text-xs text-muted-foreground">{String(product.vendorSku || product.brand || "")}</span></button>)}{!catalogLineResults.length ? <p className="p-4 text-sm text-muted-foreground">No catalog result found. Try another identifier or create the missing SKU.</p> : null}</div> : <p className="text-sm text-muted-foreground">Enter at least two characters to search.</p>}
+            {catalogLineRecentClone ? <div className="grid gap-3 rounded-md border border-emerald-500/40 bg-emerald-500/10 p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><div className="flex min-w-0 items-center gap-3">{catalogLineRecentClone.image ? <CatalogImage src={catalogLineRecentClone.image} alt={catalogLineRecentClone.title || catalogLineRecentClone.sku} className="size-12 shrink-0" imageClassName="p-1" /> : <div className="grid size-12 shrink-0 place-items-center rounded-md border bg-background"><Boxes className="size-5 text-muted-foreground" /></div>}<div className="min-w-0"><p className="text-xs font-medium uppercase text-emerald-700 dark:text-emerald-300">Recently cloned SKU</p><p className="truncate font-mono text-sm font-medium">{catalogLineRecentClone.sku}</p><p className="truncate text-xs text-muted-foreground">{catalogLineRecentClone.title}</p></div></div><Button size="sm" disabled={catalogLineSaving} onClick={() => { setCatalogLineSelected(catalogLineRecentClone); void saveCatalogLine("link", catalogLineRecentClone) }}>{catalogLineSaving && catalogLineSelected?.sku === catalogLineRecentClone.sku ? <Loader2 className="size-4 animate-spin" /> : <Link2 className="size-4" />} Link cloned SKU</Button></div> : null}
+            <Field label="Search catalog"><div className="relative"><Search className="absolute left-3 top-3 size-4 text-muted-foreground" /><Input autoFocus className="pl-9" value={catalogLineQuery} onChange={(event) => { setCatalogLineQuery(event.target.value); setCatalogLineSelected(null) }} placeholder="Search SKU, UPC, manufacturer part, or title" /></div></Field>
+            {catalogLineSearching ? <p className="text-sm text-muted-foreground"><Loader2 className="mr-2 inline size-4 animate-spin" />Searching catalog...</p> : catalogLineQuery.trim().length >= 2 ? <div className="overflow-hidden rounded-md border">{catalogLineResults.map((product) => { const selected = catalogLineSelected?.sku === product.sku; return <div key={String(product.id || product.sku)} className={cn("grid gap-3 border-b p-3 last:border-b-0 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center", selected ? "bg-blue-500/10 ring-1 ring-inset ring-blue-500/40" : "hover:bg-muted/50")}><button type="button" className="flex min-w-0 items-center gap-3 text-left" onClick={() => setCatalogLineSelected(product)}>{product.image ? <CatalogImage src={product.image} alt={product.title || product.sku} className="size-12 shrink-0" imageClassName="p-1" /> : <div className="grid size-12 shrink-0 place-items-center rounded-md border bg-muted/30"><Boxes className="size-5 text-muted-foreground" /></div>}<span className="min-w-0 flex-1"><span className="flex min-w-0 items-center gap-2"><span className="truncate font-mono text-xs font-medium">{product.sku}</span>{selected ? <Badge className="shrink-0 border-blue-500/40 bg-blue-500/15 text-blue-800 dark:text-blue-200" variant="outline"><CheckCircle2 className="size-3" /> Selected</Badge> : null}</span><span className="mt-1 block truncate text-sm">{product.title || product.sku}</span><span className="mt-1 block truncate text-xs text-muted-foreground">{[product.vendorSku ? `Supplier SKU ${product.vendorSku}` : "", product.brand || "", product.mfrPartNumber ? `MPN ${product.mfrPartNumber}` : ""].filter(Boolean).join(" · ") || "No supplier identifiers"}</span></span></button><div className="flex flex-wrap gap-2 sm:justify-end"><Button size="sm" variant={selected ? "default" : "outline"} disabled={catalogLineSaving} onClick={() => { setCatalogLineSelected(product); void saveCatalogLine("link", product) }}>{catalogLineSaving && selected ? <Loader2 className="size-4 animate-spin" /> : <Link2 className="size-4" />} Link SKU</Button><Button size="sm" variant="outline" disabled={catalogLineSaving} onClick={() => { setCatalogLineSelected(product); setCatalogLineCloneSource(product) }}><Copy className="size-4" /> Clone SKU</Button></div></div>})}{!catalogLineResults.length ? <p className="p-4 text-sm text-muted-foreground">No catalog result found. Try another identifier or create the missing SKU.</p> : null}</div> : <p className="text-sm text-muted-foreground">Enter at least two characters to search.</p>}
           </div> : <div className="grid gap-4"><Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Create a draft catalog product</AlertTitle><AlertDescription>This creates product identity only. It does not publish the item or add inventory until this PO is received.</AlertDescription></Alert><Field label="New DataPlus SKU"><Input autoFocus value={catalogLineDraft.sku} onChange={(event) => setCatalogLineDraft((current) => ({ ...current, sku: event.target.value }))} placeholder="Required SKU" /></Field><Field label="Product title"><Input value={catalogLineDraft.title} onChange={(event) => setCatalogLineDraft((current) => ({ ...current, title: event.target.value }))} placeholder="Required product title" /></Field></div>}
         </div> : null}
-        <DialogFooter className="mx-0 mb-0 shrink-0 rounded-none border-t px-5 py-4"><Button variant="outline" disabled={saving} onClick={() => setCatalogLine(null)}>Cancel</Button>{catalogLineMode === "create" ? <Button disabled={saving || !catalogLineDraft.sku.trim() || !catalogLineDraft.title.trim()} onClick={() => void saveCatalogLine("create")}>{saving ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} Create and link SKU</Button> : null}</DialogFooter>
+        <DialogFooter className="mx-0 mb-0 shrink-0 rounded-none border-t px-5 py-4 pb-[max(1rem,env(safe-area-inset-bottom))]"><Button variant="outline" disabled={catalogLineSaving} onClick={closeCatalogLine}>Cancel</Button>{catalogLineMode === "link" ? <Button disabled={catalogLineSaving || !catalogLineSelected} onClick={() => catalogLineSelected && void saveCatalogLine("link", catalogLineSelected)}>{catalogLineSaving ? <Loader2 className="size-4 animate-spin" /> : <Link2 className="size-4" />} Link selected SKU</Button> : <Button disabled={catalogLineSaving || !catalogLineDraft.sku.trim() || !catalogLineDraft.title.trim()} onClick={() => void saveCatalogLine("create")}>{catalogLineSaving ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} Create and link SKU</Button>}</DialogFooter>
       </DialogContent>
     </Dialog>
+    <ProductCloneDialog
+      open={Boolean(catalogLineCloneSource)}
+      onOpenChange={(open) => { if (!open) setCatalogLineCloneSource(null) }}
+      source={catalogLineCloneSource ? { sku: catalogLineCloneSource.sku, title: catalogLineCloneSource.title, image: catalogLineCloneSource.image, brand: catalogLineCloneSource.brand } : null}
+      defaultSku={catalogLineCloneSource ? (() => { const suggested = catalogLineDraft.sku.trim(); if (suggested && suggested.toLowerCase() !== catalogLineCloneSource.sku.toLowerCase()) return suggested; const supplierSuffix = String(po.supplierCode || po.supplier || "SUP").replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toUpperCase(); return `${catalogLineCloneSource.sku}-${supplierSuffix || "SUP"}` })() : ""}
+      defaultTitle={String(catalogLine?.line.sourceDescription || catalogLine?.line.title || catalogLineCloneSource?.title || "")}
+      defaultSupplierId={String(po.vendorId || "")}
+      defaultVendorSku={String(catalogLine?.line.sourceItemNumber || catalogLine?.line.vendorSku || "")}
+      onCreated={(item) => {
+        const cloned: QuickProductResult = { id: String(item.id || item.sku || ""), sku: String(item.sku || ""), title: String(item.title || item.marketplaceTitle || item.sku || ""), brand: String(item.brand || ""), supplier: String(item.supplier || item.vendor || ""), vendorSku: String(item.vendorSku || ""), mfrPartNumber: String(item.mfrPartNumber || ""), barcode: String(item.barcode || (item as Record<string, unknown>).upc || ""), image: String(item.defaultImage || "") }
+        setCatalogLineRecentClone(cloned)
+        setCatalogLineSelected(cloned)
+        setCatalogLineCloneSource(null)
+      }}
+    />
     <Dialog open={returnToDropshipsOpen} onOpenChange={(open) => { if (!saving) setReturnToDropshipsOpen(open) }}>
       <DialogContent className="w-[calc(100%-2rem)] max-w-lg">
         <DialogHeader><DialogTitle>Return this PO to Dropships?</DialogTitle><DialogDescription>The supplier acknowledgement and submission remain in the audit history. The PO moves back to the buyer Dropships queue so its vendor, price, quantity, or SKU can be corrected before resubmission.</DialogDescription></DialogHeader>
