@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { reconcileFulfillmentBatchPurchaseEvidence } = require("../server");
+const { reconcileFulfillmentBatchPurchaseEvidence, refreshFulfillmentPrintJobManifest } = require("../server");
 
 async function run() {
   const batch = {
@@ -46,6 +46,39 @@ async function run() {
   assert.deepEqual(state.printQueue[0].documentIds, ["document-1"]);
   assert.equal(state.printQueue[0].documentManifestFinalized, true);
 
+  const previewOnlyBatch = {
+    id: "batch-preview-only",
+    batchNumber: "BATCH-PREVIEW",
+    phase: "purchase",
+    status: "completed",
+    rows: [
+      { orderId: "order-preview-1", routeIds: ["route-preview-1"], status: "purchased", documentId: "document-preview-1" },
+      { orderId: "order-preview-2", routeIds: ["route-preview-2"], status: "purchased", documentId: "document-preview-2" }
+    ]
+  };
+  const previewOnlyJob = {
+    id: "print-preview-only",
+    batchId: previewOnlyBatch.id,
+    status: "ready",
+    routeIds: ["route-preview-1", "route-preview-2"],
+    documentIds: ["document-preview-1"],
+    documentManifestLocked: true,
+    documentManifestFinalized: true,
+    documentCount: 1,
+    orderCount: 1,
+    lastGeneratedAt: "2026-10-13T18:00:00.000Z"
+  };
+  const previewOnlyState = { batches: [previewOnlyBatch], printQueue: [previewOnlyJob] };
+  const packetJobCopy = { ...previewOnlyJob, documentIds: [...previewOnlyJob.documentIds] };
+  assert.equal(refreshFulfillmentPrintJobManifest(previewOnlyBatch, packetJobCopy).changed, true);
+  assert.deepEqual(packetJobCopy.documentIds, ["document-preview-1", "document-preview-2"], "a print-settings copy must use the complete durable manifest");
+  const previewRefresh = await reconcileFulfillmentBatchPurchaseEvidence(previewOnlyState, previewOnlyBatch, []);
+  assert.equal(previewRefresh.changed, 1, "a stale preview-only manifest must be repaired even when every row is already purchased");
+  assert.deepEqual(previewOnlyJob.documentIds, ["document-preview-1", "document-preview-2"]);
+  assert.equal(previewOnlyJob.documentCount, 2);
+  assert.equal(previewOnlyJob.orderCount, 2);
+  assert.equal(previewOnlyBatch.printPacketStatus, "completed");
+
   const exposedPacket = {
     id: "print-exposed",
     batchId: batch.id,
@@ -53,7 +86,9 @@ async function run() {
     routeIds: [],
     documentIds: ["document-original"],
     documentManifestLocked: true,
-    lastGeneratedAt: "2026-10-13T18:00:00.000Z"
+    lastGeneratedAt: "2026-10-13T18:00:00.000Z",
+    printedAt: "2026-10-13T18:01:00.000Z",
+    printCount: 1
   };
   state.printQueue.push(exposedPacket);
   batch.rows.push({

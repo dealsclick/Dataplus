@@ -89,8 +89,15 @@ async function run() {
   assemblingJob.lastGeneratedAt = "2026-10-15T18:00:00.000Z";
   assemblingBatch.rows.push({ orderId: "order-3", routeIds: ["route-3"], status: "purchased", documentId: "document-3" });
   await ensureFulfillmentBatchPrintJob(assemblingState, assemblingBatch, [], "request-1", "Test");
+  assert.equal(fulfillmentPrintJobHasOutput(assemblingJob, assemblingBatch), false, "opening a preview must not freeze an incomplete packet");
+  assert.deepEqual(assemblingJob.documentIds, ["document-1", "document-2", "document-3"], "a preview-only packet must include labels that finish later");
+
+  assemblingJob.printedAt = "2026-10-15T18:01:00.000Z";
+  assemblingJob.printCount = 1;
+  assemblingBatch.rows.push({ orderId: "order-4", routeIds: ["route-4"], status: "purchased", documentId: "document-4" });
+  await ensureFulfillmentBatchPrintJob(assemblingState, assemblingBatch, [], "request-1", "Test");
   assert.equal(fulfillmentPrintJobHasOutput(assemblingJob, assemblingBatch), true);
-  assert.deepEqual(assemblingJob.documentIds, ["document-1", "document-2"], "an exposed packet must remain immutable");
+  assert.deepEqual(assemblingJob.documentIds, ["document-1", "document-2", "document-3"], "a physically printed packet must remain immutable");
 
   const missingPacketBatch = {
     id: "missing-packet-batch",

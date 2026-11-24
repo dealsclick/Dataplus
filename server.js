@@ -35455,6 +35455,65 @@ async function readFulfillmentPrintPacketState(printJobId) {
   };
 }
 
+function refreshFulfillmentPrintJobManifest(batch = {}, printJob = {}) {
+  if (!batch?.id || !printJob?.id || String(printJob.batchId || "") !== String(batch.id || "")) {
+    return { changed: false, purchasedCount: 0, outstandingCount: 0 };
+  }
+  const before = JSON.stringify({
+    routeIds: printJob.routeIds || [],
+    documentIds: printJob.documentIds || [],
+    documentManifestLocked: printJob.documentManifestLocked,
+    documentManifestFinalized: printJob.documentManifestFinalized,
+    outstandingDocumentCount: printJob.outstandingDocumentCount,
+    pendingDocumentCount: printJob.pendingDocumentCount,
+    orderCount: printJob.orderCount,
+    documentCount: printJob.documentCount,
+    status: printJob.status,
+    printPacketStatus: batch.printPacketStatus
+  });
+  const manifestExposed = fulfillmentPrintJobHasOutput(printJob, batch);
+  const requested = new Set((printJob.routeIds || []).map(String).filter(Boolean));
+  const inScope = (row) => !requested.size || (row.routeIds || [row.routeId]).some((routeId) => requested.has(String(routeId)));
+  const scopedRows = (batch.rows || []).filter(inScope);
+  const allPurchased = scopedRows.filter((row) => row.status === "purchased" && row.documentId);
+  const currentManifest = new Set((printJob.documentIds || []).map(String).filter(Boolean));
+  const purchased = manifestExposed
+    ? allPurchased.filter((row) => currentManifest.has(String(row.documentId)))
+    : allPurchased;
+  const documentIds = [...new Set(purchased.map((row) => String(row.documentId || "")).filter(Boolean))];
+  const outstandingRows = scopedRows.filter((row) => ["queued", "rated", "processing", "label_pending"].includes(String(row.status || "").toLowerCase()));
+  if (!manifestExposed) {
+    printJob.documentIds = documentIds;
+    printJob.documentManifestLocked = true;
+    printJob.documentManifestFinalized = outstandingRows.length === 0;
+    printJob.status = documentIds.length ? "ready" : outstandingRows.length ? "waiting_for_labels" : "ready";
+    if (printJob.recoveryOnly !== true) batch.printPacketStatus = printJob.documentManifestFinalized === true ? "completed" : "incomplete";
+  }
+  printJob.outstandingDocumentCount = outstandingRows.length;
+  printJob.pendingDocumentCount = outstandingRows.filter((row) => String(row.status || "").toLowerCase() === "label_pending").length;
+  printJob.orderCount = documentIds.length;
+  printJob.documentCount = documentIds.length;
+  const after = JSON.stringify({
+    routeIds: printJob.routeIds || [],
+    documentIds: printJob.documentIds || [],
+    documentManifestLocked: printJob.documentManifestLocked,
+    documentManifestFinalized: printJob.documentManifestFinalized,
+    outstandingDocumentCount: printJob.outstandingDocumentCount,
+    pendingDocumentCount: printJob.pendingDocumentCount,
+    orderCount: printJob.orderCount,
+    documentCount: printJob.documentCount,
+    status: printJob.status,
+    printPacketStatus: batch.printPacketStatus
+  });
+  const changed = before !== after;
+  if (changed) {
+    const now = new Date().toISOString();
+    printJob.updatedAt = now;
+    batch.printPacketUpdatedAt = now;
+  }
+  return { changed, purchasedCount: documentIds.length, outstandingCount: outstandingRows.length };
+}
+
 async function reconcileFulfillmentBatchPurchaseEvidence(state, batch, prefetchedOrders = null) {
   if (!batch || !Array.isArray(batch.rows) || !batch.rows.length) return { changed: 0, orders: [] };
   const orderIds = [...new Set(batch.rows.map((row) => String(row.orderId || "").trim()).filter(Boolean))];
@@ -35511,30 +35570,14 @@ async function reconcileFulfillmentBatchPurchaseEvidence(state, batch, prefetche
     batch.status = fulfillmentBatchStatus(batch.rows, "purchase");
     batch.phase = "purchase";
     batch.updatedAt = new Date().toISOString();
-    for (const printJob of state.printQueue || []) {
-      if (String(printJob.batchId || "") !== String(batch.id || "")) continue;
-      const manifestExposed = fulfillmentPrintJobHasOutput(printJob, batch);
-      const requested = new Set((printJob.routeIds || []).map(String).filter(Boolean));
-      const manifestLocked = printJob.documentManifestLocked === true || Array.isArray(printJob.documentIds);
-      const manifest = new Set((printJob.documentIds || []).map(String).filter(Boolean));
-      const purchased = batch.rows.filter((row) => row.status === "purchased" && row.documentId
-        && (!requested.size || (row.routeIds || [row.routeId]).some((routeId) => requested.has(String(routeId))))
-        && (!manifestExposed || !manifestLocked || manifest.has(String(row.documentId))));
-      if (!manifestExposed) {
-        printJob.documentIds = purchased.map((row) => String(row.documentId)).filter(Boolean);
-        printJob.documentManifestLocked = true;
-        const outstandingRows = fulfillmentPrintJobOutstandingRows(batch, printJob);
-        printJob.documentManifestFinalized = outstandingRows.length === 0;
-        printJob.outstandingDocumentCount = outstandingRows.length;
-        printJob.pendingDocumentCount = outstandingRows.filter((row) => String(row.status || "").toLowerCase() === "label_pending").length;
-        printJob.status = printJob.documentIds.length ? "ready" : outstandingRows.length ? "waiting_for_labels" : "ready";
-      }
-      printJob.orderCount = purchased.length;
-      printJob.documentCount = purchased.length;
-      printJob.updatedAt = batch.updatedAt;
-    }
   }
-  return { changed, repaired: repairedOrders.size, orders };
+  let manifestChanged = false;
+  for (const printJob of state.printQueue || []) {
+    if (String(printJob.batchId || "") !== String(batch.id || "")) continue;
+    if (refreshFulfillmentPrintJobManifest(batch, printJob).changed) manifestChanged = true;
+  }
+  if (manifestChanged && !changed) batch.updatedAt = new Date().toISOString();
+  return { changed: changed || manifestChanged ? Math.max(1, changed) : 0, repaired: repairedOrders.size, orders };
 }
 
 function warehouseHasCompleteShipFromAddress(warehouse = {}) {
@@ -35705,6 +35748,8 @@ function fulfillmentPrintPacketCacheKey(state, printJob) {
     printJob.size || batch?.printSize || "4x6",
     printJob.includePackingSlips === true ? "slips" : "labels",
     printJob.packingSlipOrientation === "landscape" ? "landscape" : "portrait",
+    printJob.updatedAt || "",
+    (printJob.documentIds || []).map(String).filter(Boolean).join(","),
     batch?.updatedAt || "",
     documentFingerprint
   ].join("::");
@@ -35740,6 +35785,9 @@ async function buildFulfillmentPrintPacket(state, printJob, options = {}) {
   const batch = state.batches.find((row) => String(row.id) === String(printJob.batchId));
   if (!batch) throw Object.assign(new Error("The source label batch no longer exists."), { statusCode: 404 });
   const reconciliation = await reconcileFulfillmentBatchPurchaseEvidence(state, batch);
+  // Query-string print settings are applied to a shallow job copy. Refresh that
+  // copy too so the PDF uses the reconciled manifest from durable batch rows.
+  refreshFulfillmentPrintJobManifest(batch, printJob);
   if (reconciliation.changed) {
     if (options.targetedState === true) {
       await Promise.all([
@@ -38297,11 +38345,12 @@ async function ensureFulfillmentBatchPrintJob(state, batch, routeIds = [], print
 function fulfillmentPrintJobHasOutput(printJob = {}, batch = {}) {
   if (!printJob) return false;
   return Boolean(
-    printJob.lastGeneratedAt
-    || printJob.printedAt
+    printJob.printedAt
     || printJob.savedPdfAt
     || Number(printJob.printCount || 0) > 0
     || Number(printJob.savedPdfCount || 0) > 0
+    || ["printed", "saved_pdf"].includes(String(printJob.status || "").toLowerCase())
+    || String(printJob.deliveryStatus || "").toLowerCase() === "printed"
     || ["printed", "saved_pdf"].includes(String(printJob.lastOutputAction || "").toLowerCase())
     || String(batch.warehouseStatus || "").toLowerCase() === "closed"
   );
@@ -61325,6 +61374,8 @@ async function handleApi(req, res) {
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "fulfillment" && parts[2] === "print-queue" && parts[3] && parts[4] === "printed" && postgres.isPostgresEnabled()) {
     const { printJob, state } = await readFulfillmentPrintPacketState(parts[3]);
     if (!printJob) return notFound(res);
+    const batch = state.batches.find((row) => String(row.id || "") === String(printJob.batchId || ""));
+    if (batch) refreshFulfillmentPrintJobManifest(batch, printJob);
     printJob.status = "printed";
     printJob.deliveryStatus = "printed";
     printJob.leaseExpiresAt = "";
@@ -61348,8 +61399,9 @@ async function handleApi(req, res) {
     const { printJob, state } = await readFulfillmentPrintPacketState(parts[3]);
     if (!printJob) return notFound(res);
     const actor = authUser?.name || authUser?.username || "DataPlus";
-    recordPrintJobPdfSave(printJob, { savedBy: actor, saveId: crypto.randomUUID() });
     const batch = state.batches.find((row) => String(row.id || "") === String(printJob.batchId || ""));
+    if (batch) refreshFulfillmentPrintJobManifest(batch, printJob);
+    recordPrintJobPdfSave(printJob, { savedBy: actor, saveId: crypto.randomUUID() });
     if (batch) recordBatchLabelPdfSave(batch, printJob);
     await Promise.all([
       postgres.upsertStateEntityDocument("fulfillmentPrintQueue", printJob),
@@ -66201,7 +66253,8 @@ async function handleApi(req, res) {
     }
     catch (error) { return sendJson(res, error.statusCode || 500, { error: error.message || "Unable to generate the print packet." }); }
     printJob.lastGeneratedAt = new Date().toISOString();
-    printJob.documentManifestFinalized = true;
+    const batch = state.batches.find((row) => String(row.id || "") === String(printJob.batchId || ""));
+    printJob.documentManifestFinalized = batch ? fulfillmentPrintJobOutstandingRows(batch, printJob).length === 0 : true;
     await postgres.replaceStateArrayItem("fulfillmentPrintQueue", printJob);
     res.writeHead(200, { "Content-Type": "application/pdf", "Content-Length": packet.buffer.length, "Content-Disposition": `inline; filename="${safeImportFileName(printJob.printNumber || "shipping-labels", "shipping-labels")}.pdf"`, "Cache-Control": "private, no-store" });
     return res.end(packet.buffer);
@@ -86144,6 +86197,7 @@ module.exports = {
   activeFulfillmentLabelBatchAssignments,
   labelBatchAssignmentHidesPending,
   reconcileFulfillmentBatchPurchaseEvidence,
+  refreshFulfillmentPrintJobManifest,
   ensureFulfillmentBatchPrintJob,
   fulfillmentPrintJobHasOutput,
   fulfillmentPrintJobOutstandingRows,
