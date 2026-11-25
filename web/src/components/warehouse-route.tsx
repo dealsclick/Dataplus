@@ -3182,7 +3182,7 @@ function WarehouseAuditPanel({
                 <Button
                   size="sm"
                   variant={mobile ? "default" : "outline"}
-                  className={mobile ? "col-span-2 h-16 justify-start gap-3 px-4 text-left" : ""}
+                  className={mobile ? "col-span-2 h-11 gap-2 px-3" : ""}
                   disabled={busy || auditStatus !== "in_progress"}
                   onClick={() => {
                     setCameraMode("product");
@@ -3197,8 +3197,8 @@ function WarehouseAuditPanel({
                     setCameraOpen(true);
                   }}
                 >
-                  <ScanBarcode className={mobile ? "size-7 shrink-0" : "size-4"} />
-                  {mobile ? <span><span className="block text-base font-semibold">Scan</span><span className="block text-xs font-normal text-primary-foreground/80">Open the barcode scanner</span></span> : "Scan"}
+                  <ScanBarcode className={mobile ? "size-5 shrink-0" : "size-4"} />
+                  Scan
                 </Button>
                 {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setLastScan(null); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}><ScanBarcode className="size-4" /> Scan bin</Button>}
                 {["in_progress", "pending_review"].includes(auditStatus) && <Button size="sm" disabled={busy || !lines.length} onClick={() => void openInventoryAction(false)}><ArrowRight className="size-4" /> {isPurchaseOrderRecount ? "Finish PO recount" : isReceivingAudit ? "Finish receipt" : isLiveSellingAudit ? "Prepare live items" : isEbayOneTimeAudit ? "Create shadows" : "Finish count"}</Button>}
