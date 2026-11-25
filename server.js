@@ -15512,6 +15512,71 @@ function supplierPurchaseMultiple(route = {}, orderLine = {}) {
   return purchaseOrderIncrement(route, selectedOffer, orderLine);
 }
 
+function purchaseOrderSupplierOfferForVendor(line = {}, vendor = {}) {
+  const vendorId = String(vendor.id || "").trim().toLowerCase();
+  const vendorName = String(vendor.name || "").trim().toLowerCase();
+  return (Array.isArray(line.supplierOffers) ? line.supplierOffers : []).find((offer) => {
+    const offerVendorId = String(offer?.vendorId || "").trim().toLowerCase();
+    const offerVendorName = String(offer?.vendorName || offer?.supplier || offer?.vendor || "").trim().toLowerCase();
+    return Boolean((vendorId && offerVendorId === vendorId) || (vendorName && offerVendorName === vendorName));
+  }) || null;
+}
+
+function alignPurchaseOrderLinesToVendor(po = {}, vendor = {}, options = {}) {
+  const now = String(options.now || new Date().toISOString());
+  const changedLines = [];
+  const reviewLines = [];
+  for (const [lineIndex, line] of (Array.isArray(po.items) ? po.items : []).entries()) {
+    const previousVendorId = String(line.vendorId || "");
+    const previousSupplier = String(line.supplier || line.vendorName || "");
+    const previousVendorSku = String(line.vendorSku || "");
+    const offer = purchaseOrderSupplierOfferForVendor(line, vendor);
+    const alreadySelected = (previousVendorId && previousVendorId === String(vendor.id || ""))
+      || (!previousVendorId && previousSupplier.trim().toLowerCase() === String(vendor.name || "").trim().toLowerCase());
+    line.vendorId = String(vendor.id || "");
+    line.supplier = String(vendor.name || "");
+    line.vendorName = String(vendor.name || "");
+    if (offer) {
+      line.vendorSku = String(offer.vendorSku || offer.supplierSku || offer.sourceSku || "");
+      line.supplierMatchMethod = String(offer.matchMethod || offer.matchType || line.supplierMatchMethod || "supplier_coverage");
+    } else if (alreadySelected && previousVendorSku) {
+      line.vendorSku = previousVendorSku;
+    } else {
+      line.vendorSku = "";
+    }
+    if (line.vendorSku) {
+      line.supplierAssignmentReviewRequired = false;
+      line.supplierAssignmentReviewReason = "";
+    } else {
+      line.supplierAssignmentReviewRequired = true;
+      line.supplierAssignmentReviewReason = `${vendor.name || "The selected supplier"} has no supplier SKU linked to this PO line.`;
+      reviewLines.push({ lineIndex, sku: String(line.sku || ""), reason: line.supplierAssignmentReviewReason });
+    }
+    const changed = previousVendorId !== String(line.vendorId || "")
+      || previousSupplier !== String(line.supplier || "")
+      || previousVendorSku !== String(line.vendorSku || "");
+    if (!changed) continue;
+    line.supplierAssignedAt = now;
+    line.supplierAssignedBy = String(options.user || "Buyer");
+    line.supplierAssignmentHistory = [
+      ...(Array.isArray(line.supplierAssignmentHistory) ? line.supplierAssignmentHistory : []),
+      {
+        previousVendorId,
+        previousSupplier,
+        previousVendorSku,
+        vendorId: line.vendorId,
+        supplier: line.supplier,
+        vendorSku: line.vendorSku,
+        matchedOffer: Boolean(offer),
+        changedAt: now,
+        changedBy: line.supplierAssignedBy
+      }
+    ].slice(-25);
+    changedLines.push({ lineIndex, sku: String(line.sku || ""), matchedOffer: Boolean(offer) });
+  }
+  return { changedLines, reviewLines };
+}
+
 function supplierPurchaseQuantity(demandQty, purchaseMultiple = 1) {
   const demand = Math.max(0, Number(demandQty || 0));
   const multiple = Math.max(1, Math.floor(Number(purchaseMultiple || 1)));
@@ -15691,6 +15756,7 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
     if (!routesToAppend.length) continue;
     for (const route of routesToAppend) {
       const orderLine = route.order?.items?.[route.lineIndex] || {};
+      const selectedSupplierOffer = purchaseOrderSupplierOfferForVendor(route, group.vendor);
       const unitCost = Number(route.unitCost || orderLine.unitCost || orderLine.cost || 0);
       const customerDemandQty = Math.max(0, Number(route.qty || 0));
       const purchaseMultiple = supplierPurchaseMultiple(route, orderLine);
@@ -15717,9 +15783,10 @@ function createSupplierPurchaseOrdersFromOrders(db, orderIds, options = {}) {
         supplierPurchaseMultiple: uomSelection.supplierPurchaseMultiple,
         unitCost,
         estimatedUnitCost: unitCost,
-        supplier: route.vendorName || po.supplier || "",
-        vendorId: route.vendorId || po.vendorId || "",
-        vendorSku: route.vendorSku || "",
+        supplier: group.vendor?.name || po.supplier || "",
+        vendorName: group.vendor?.name || po.supplier || "",
+        vendorId: group.vendor?.id || po.vendorId || "",
+        vendorSku: selectedSupplierOffer?.vendorSku || selectedSupplierOffer?.supplierSku || selectedSupplierOffer?.sourceSku || route.vendorSku || "",
         manufacturer: route.manufacturer || orderLine.manufacturer || "",
         mfrPartNumber: route.mfrPartNumber || route.manufacturerPartNumber || orderLine.mfrPartNumber || orderLine.manufacturerPartNumber || orderLine.mpn || "",
         vendorPartNumber: route.vendorPartNumber || orderLine.vendorPartNumber || orderLine.vendorPart || orderLine.partNumber || "",
@@ -70124,6 +70191,8 @@ async function handleApi(req, res) {
     const purchasingUomProducts = new Map();
     const pendingLineCostChanges = [];
     const pendingOrderCostUpdates = new Map();
+    let selectedVendorForAlignment = null;
+    let supplierAlignment = null;
     if (body.vendorId !== undefined) {
       if (editableManualDraft && !String(body.vendorId || "").trim()) {
         po.vendorId = "";
@@ -70133,15 +70202,19 @@ async function handleApi(req, res) {
         if (!vendor) return sendJson(res, 400, { error: "Vendor not found." });
         if (["inactive", "retired"].includes(String(vendor.status || "active").toLowerCase())) return sendJson(res, 400, { error: `${vendor.name || "This supplier"} is not active.` });
         const previous = po.supplier || "Unassigned supplier";
-        amendmentNeeded = amendmentNeeded || committed && String(po.vendorId || "") !== String(vendor.id || "");
+        const vendorChanged = String(po.vendorId || "") !== String(vendor.id || "");
+        amendmentNeeded = amendmentNeeded || committed && vendorChanged;
         po.vendorId = vendor.id;
         po.supplier = vendor.name;
-        addPoTimeline(po, {
-          type: "edited",
-          title: "PO vendor changed",
-          message: `Vendor changed from ${previous} to ${vendor.name}.`,
-          user: actor
-        });
+        selectedVendorForAlignment = vendor;
+        if (vendorChanged || previous !== vendor.name) {
+          addPoTimeline(po, {
+            type: "edited",
+            title: "PO vendor changed",
+            message: `Vendor changed from ${previous} to ${vendor.name}.`,
+            user: actor
+          });
+        }
       }
     }
     if (body.warehouseId !== undefined) {
@@ -70305,6 +70378,17 @@ async function handleApi(req, res) {
         user: actor
       });
     }
+    if (selectedVendorForAlignment) {
+      supplierAlignment = alignPurchaseOrderLinesToVendor(po, selectedVendorForAlignment, { user: actor });
+      if (supplierAlignment.changedLines.length || supplierAlignment.reviewLines.length) {
+        addPoTimeline(po, {
+          type: "supplier_alignment",
+          title: "PO lines aligned to supplier",
+          message: `${supplierAlignment.changedLines.length} line${supplierAlignment.changedLines.length === 1 ? " was" : "s were"} aligned to ${selectedVendorForAlignment.name}.${supplierAlignment.reviewLines.length ? ` ${supplierAlignment.reviewLines.length} line${supplierAlignment.reviewLines.length === 1 ? " needs" : "s need"} a supplier SKU review.` : ""}`,
+          user: actor
+        });
+      }
+    }
     const amendmentReason = amendmentNeeded ? String(body.amendmentReason || "").trim() : "";
     if (amendmentNeeded && !amendmentReason) {
       return sendJson(res, 400, { error: "A reason is required when changing a PO already sent to a supplier." });
@@ -70348,7 +70432,7 @@ async function handleApi(req, res) {
     const completedAt = Date.now();
     res.setHeader("Server-Timing", `po;dur=${poReadAt - saveStartedAt}, references;dur=${referencesReadAt - poReadAt}, write;dur=${completedAt - referencesReadAt}, total;dur=${completedAt - saveStartedAt}`);
     res.setHeader("X-DataPlus-PO-Save-Ms", String(completedAt - saveStartedAt));
-    return sendJson(res, 200, { purchaseOrder: po });
+    return sendJson(res, 200, { purchaseOrder: po, supplierAlignment });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "financials" && postgres.isPostgresEnabled()) {
@@ -83620,18 +83704,31 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const po = (db.purchaseOrders || []).find((row) => row.id === parts[2]);
     if (!po) return notFound(res);
+    let supplierAlignment = null;
     if (body.vendorId !== undefined) {
       const vendor = findVendorById(db, body.vendorId);
       if (!vendor) return sendJson(res, 400, { error: "Vendor not found." });
       const previous = po.supplier || "Unassigned supplier";
+      const vendorChanged = String(po.vendorId || "") !== String(vendor.id || "");
       po.vendorId = vendor.id;
       po.supplier = vendor.name;
-      addPoTimeline(po, {
-        type: "edited",
-        title: "PO vendor changed",
-        message: `Vendor changed from ${previous} to ${vendor.name}.`,
-        user: body.user || "Luis"
-      });
+      supplierAlignment = alignPurchaseOrderLinesToVendor(po, vendor, { user: body.user || "Luis" });
+      if (vendorChanged || previous !== vendor.name) {
+        addPoTimeline(po, {
+          type: "edited",
+          title: "PO vendor changed",
+          message: `Vendor changed from ${previous} to ${vendor.name}.`,
+          user: body.user || "Luis"
+        });
+      }
+      if (supplierAlignment.changedLines.length || supplierAlignment.reviewLines.length) {
+        addPoTimeline(po, {
+          type: "supplier_alignment",
+          title: "PO lines aligned to supplier",
+          message: `${supplierAlignment.changedLines.length} line${supplierAlignment.changedLines.length === 1 ? " was" : "s were"} aligned to ${vendor.name}.${supplierAlignment.reviewLines.length ? ` ${supplierAlignment.reviewLines.length} line${supplierAlignment.reviewLines.length === 1 ? " needs" : "s need"} a supplier SKU review.` : ""}`,
+          user: body.user || "Luis"
+        });
+      }
     }
     if (body.warehouseId !== undefined) {
       const warehouse = (db.warehouses || []).find((row) => row.id === body.warehouseId);
@@ -83661,7 +83758,7 @@ async function handleApi(req, res) {
       });
     }
     await writeDb(db);
-    return sendJson(res, 200, { purchaseOrder: po, state: publicState(db) });
+    return sendJson(res, 200, { purchaseOrder: po, supplierAlignment, state: publicState(db) });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "inbound-tracking") {
@@ -86950,6 +87047,8 @@ module.exports = {
   shopifyStatusPayloadFromCreatedVariant,
   systemProductVariants,
     createSupplierPurchaseOrdersFromOrders,
+    purchaseOrderSupplierOfferForVendor,
+    alignPurchaseOrderLinesToVendor,
     repairStalePurchaseDemandLinks,
     reopenPurchaseRequirementsForPurchaseOrder,
     linkCustomerOrdersToPurchaseOrder,

@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 
 const {
   createSupplierPurchaseOrdersFromOrders,
+  alignPurchaseOrderLinesToVendor,
   linkCustomerOrdersToPurchaseOrder,
   repairStalePurchaseDemandLinks,
   reopenPurchaseRequirementsForPurchaseOrder
@@ -143,6 +144,70 @@ function baseDb() {
   assert.equal(line.uomQty, 3);
   assert.equal(line.purchaseMultiple, 1);
   assert.equal(line.purchaseUomLabel, "Pack of 3");
+}
+
+{
+  const db = baseDb();
+  const route = {
+    ...purchaseRoute("route-stale-name", "BUS250602TRV"),
+    vendorName: "Do It Best",
+    vendorSku: "251746",
+    unitCost: 9.34,
+    supplierOffers: [
+      { vendorId: "true-value", vendorName: "True Value", vendorSku: "250602", unitCost: 9.53 },
+      { vendorId: "do-it-best", vendorName: "Do It Best", vendorSku: "251746", unitCost: 9.34 }
+    ]
+  };
+  const order = orderFixture("order-stale-name", "90001", route.sku, { routes: [route] });
+  db.orders = [order];
+  const result = createSupplierPurchaseOrdersFromOrders(db, [order.id], { user: "Test buyer" });
+  const po = result.purchaseOrders[0];
+  assert.equal(po.supplier, "True Value", "the route vendor ID must remain authoritative for the PO");
+  assert.equal(po.items[0].supplier, "True Value", "a stale route vendor name must not leak into a True Value PO line");
+  assert.equal(po.items[0].vendorId, "true-value");
+  assert.equal(po.items[0].vendorSku, "250602", "the PO line should use the selected supplier's offer SKU");
+}
+
+{
+  const po = {
+    items: [
+      {
+        sku: "BUS250602TRV",
+        supplier: "Do It Best",
+        vendorId: "do-it-best",
+        vendorSku: "251746",
+        unitCost: 9.34,
+        supplierOffers: [{ vendorId: "true-value", vendorName: "True Value", vendorSku: "250602", unitCost: 9.53 }]
+      },
+      {
+        sku: "BUS-NO-TV-OFFER",
+        supplier: "Global",
+        vendorId: "global",
+        vendorSku: "GLOBAL-1",
+        unitCost: 4.25,
+        supplierOffers: [{ vendorId: "global", vendorName: "Global", vendorSku: "GLOBAL-1", unitCost: 4.25 }]
+      },
+      {
+        sku: "BUS-EXISTING-TV",
+        supplier: "True Value",
+        vendorId: "true-value",
+        vendorSku: "123456",
+        unitCost: 5.25,
+        supplierOffers: []
+      }
+    ]
+  };
+  const alignment = alignPurchaseOrderLinesToVendor(po, { id: "true-value", name: "True Value" }, { user: "Test buyer", now: "2026-11-25T12:00:00.000Z" });
+  assert.equal(po.items[0].supplier, "True Value");
+  assert.equal(po.items[0].vendorSku, "250602");
+  assert.equal(po.items[0].unitCost, 9.34, "supplier alignment must not rewrite reviewed PO accounting costs");
+  assert.equal(po.items[0].supplierAssignmentReviewRequired, false);
+  assert.equal(po.items[1].supplier, "True Value");
+  assert.equal(po.items[1].vendorSku, "", "a prior supplier SKU must not remain after choosing another supplier");
+  assert.equal(po.items[1].supplierAssignmentReviewRequired, true);
+  assert.equal(po.items[2].vendorSku, "123456", "saving an unchanged supplier must preserve an existing supplier SKU");
+  assert.equal(po.items[2].supplierAssignmentReviewRequired, false);
+  assert.equal(alignment.reviewLines.length, 1);
 }
 
 console.log("Purchase-order demand linking checks passed.");
