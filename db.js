@@ -3095,7 +3095,21 @@ function reconcileWarehouseAuditPurchaseOrderCatalog(audit = {}, purchaseOrderLi
   const expectedLines = Array.isArray(audit.purchaseOrderExpectedLines) ? audit.purchaseOrderExpectedLines : [];
   if (!currentLines.length || !expectedLines.length) return audit;
 
-  const expectedSnapshots = expectedLines.map((expected) => ({ ...expected }));
+  const expectedSnapshots = expectedLines.map((expected) => ({ ...expected })).filter((expected) => {
+    if (String(audit.reason || "") !== "purchase_order_receipt") return true;
+    const expectedId = nullableString(expected.id || expected.lineId);
+    const expectedIndex = Number(expected.lineIndex);
+    const match = currentLines.find((line) => expectedId && nullableString(line.id || line.lineId) === expectedId)
+      || (Number.isInteger(expectedIndex) && expectedIndex >= 0 ? currentLines[expectedIndex] : null);
+    if (!match) return true;
+    const openQuantity = Math.max(0,
+      Number(match.qty ?? match.quantity ?? expected.expectedQty ?? expected.quantity ?? 0)
+      - Number(match.receivedQty || 0)
+      - Number(match.reSourcedQty || 0)
+      - Number(match.canceledQty || 0)
+      - Number(match.shortClosedQty || 0));
+    return openQuantity > 0;
+  });
   const currentByExpectedIndex = new Map();
   const reconciledExpected = expectedSnapshots.map((expected) => {
     const expectedId = nullableString(expected.id || expected.lineId);

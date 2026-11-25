@@ -146,4 +146,16 @@ const unmatchedHistoricalUnknown = reconcileWarehouseAuditPurchaseOrderCatalog({
 assert.equal(unmatchedHistoricalUnknown.lines.length, 0);
 assert.equal(unmatchedHistoricalUnknown.unknownBarcodes.length, 1);
 
+const canceledExpectedLine = reconcileWarehouseAuditPurchaseOrderCatalog({
+  ...audit,
+  lines: [],
+  unknownBarcodes: []
+}, [{
+  ...purchaseOrderLines[0],
+  qty: 20,
+  receivedQty: 0,
+  canceledQty: 20
+}]);
+assert.equal(canceledExpectedLine.purchaseOrderExpectedLines.length, 0, "Canceled PO lines must disappear from an active receipt audit.");
+
 console.log("PO audit catalog identity synchronization tests passed");

@@ -10,8 +10,11 @@ const route = source.slice(source.lastIndexOf("  if (", at), source.indexOf("\n 
 async function run({ kind = "known", lineKey = "line", status = "in_progress", reason = "Scanned wrong item" } = {}) {
   const known = { id: "line", productId: "product", sku: "SKU-1", title: "Known item", countedQty: 4, locationBin: "A-01", receivingPurchaseOrderLineId: "po-line" };
   const unknown = { id: "unknown", barcode: "012345678905", count: 2, locationBin: "B-02" };
-  const audit = { id: "audit", auditNumber: "A-230", status, lines: [known], unknownBarcodes: [unknown], purchaseOrderExpectedLines: [{ id: "expected", sku: "SKU-1", expectedQty: 4 }] };
+  const audit = { id: "audit", auditNumber: "A-230", status, reason: "purchase_order_receipt", linkedPurchaseOrderId: "po", linkedPurchaseOrderNumber: "PO#141088", lines: [known], unknownBarcodes: [unknown], purchaseOrderExpectedLines: [{ id: "expected", lineIndex: 0, sku: "SKU-1", expectedQty: 4 }] };
+  const purchaseOrder = { id: "po", poNumber: "PO#141088", items: [{ id: "expected", sku: "SKU-1", qty: 4, receivedQty: 0 }] };
   let saved;
+  let savedPurchaseOrder;
+  let lineCancellation;
   let synced = 0;
   const context = {
     req: { method: "POST" },
@@ -22,15 +25,25 @@ async function run({ kind = "known", lineKey = "line", status = "in_progress", r
     sendJson: (_, responseStatus, data) => ({ status: responseStatus, data }),
     notFound: () => ({ status: 404 }),
     auditLineKey: (line) => String(line.id || `${line.productId || line.sku || ""}::${line.locationBin || ""}`),
+    readPurchaseOrderLinkedOrders: async () => [],
+    cancelPurchaseOrderLines: (po, orders, input) => {
+      lineCancellation = structuredClone(input);
+      po.items[0].canceledQty = po.items[0].qty;
+      return { purchaseOrder: po, orders, cancellations: input.lines };
+    },
+    clearOrderApiCache: () => {},
     syncPurchaseOrderReceivingProgress: async () => { synced += 1; },
     postgres: {
       isPostgresEnabled: () => true,
       readWarehouseAudit: async () => audit,
-      saveWarehouseAudit: async (nextAudit) => { saved = structuredClone(nextAudit); }
+      saveWarehouseAudit: async (nextAudit) => { saved = structuredClone(nextAudit); },
+      readPurchaseOrderByKey: async () => purchaseOrder,
+      savePurchaseOrder: async (nextPurchaseOrder) => { savedPurchaseOrder = structuredClone(nextPurchaseOrder); },
+      saveOrder: async () => {},
     }
   };
   const response = await vm.runInNewContext(`(async()=>{${route}})()`, context);
-  return { response, audit, saved, synced };
+  return { response, audit, saved, savedPurchaseOrder, lineCancellation, synced };
 }
 
 (async () => {
@@ -50,18 +63,27 @@ async function run({ kind = "known", lineKey = "line", status = "in_progress", r
   assert.equal(unknown.audit.removedItems[0].barcode, "012345678905");
   assert.equal(unknown.audit.removedItems[0].countedQty, 2);
 
+  const expected = await run({ kind: "po_expected", lineKey: "expected", reason: "Removed from supplier order" });
+  assert.equal(expected.response.status, 200);
+  assert.equal(expected.audit.purchaseOrderExpectedLines.length, 0);
+  assert.equal(expected.savedPurchaseOrder.items[0].canceledQty, 4);
+  assert.equal(expected.lineCancellation.lines[0].reasonCode, "buyer_removed");
+  assert.equal(expected.lineCancellation.lines[0].lineIndex, 0);
+  assert.equal(expected.audit.removedItems[0].kind, "po_expected");
+  assert.match(expected.response.data.message, /audit and canceled on PO#141088/);
+
   for (const options of [
-    { lineKey: "expected" },
+    { kind: "po_expected", lineKey: "expected", reason: "" },
     { lineKey: "missing" },
     { status: "completed" }
   ]) {
     const result = await run(options);
-    assert.equal(result.response.status, options.status === "completed" ? 400 : 404);
+    assert.equal(result.response.status, options.lineKey === "missing" ? 404 : 400);
     assert.equal(result.saved, undefined);
     assert.equal(result.synced, 0);
   }
 
-  console.log("Warehouse audit item removal: known and unknown scans, PO preservation, history, and closed-audit guards passed.");
+  console.log("Warehouse audit item removal: scans, expected PO lines, history, reason, and closed-audit guards passed.");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

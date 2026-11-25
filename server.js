@@ -14885,6 +14885,7 @@ const DROPSHIP_RETURN_REASONS = new Map([
 ]);
 
 const PURCHASE_ORDER_CANCEL_REASONS = new Map([
+  ["buyer_removed", "Removed by buyer"],
   ["discontinued", "Item discontinued"],
   ["below_cost", "Order would be below cost"],
   ["customer_canceled", "Customer canceled"],
@@ -15122,13 +15123,31 @@ function cancelPurchaseOrder(po = {}, orders = [], input = {}) {
 
 function cancelPurchaseOrderLines(po = {}, orders = [], input = {}) {
   const status = String(po.status || "draft").toLowerCase();
-  if (!["draft", "ready_to_send", "awaiting_approval", "approved"].includes(status) || purchaseOrderHasSubmissionRecord(po)) {
-    throw new Error("Only an unsubmitted draft purchase order can have individual lines canceled.");
-  }
+  const terminal = ["received", "completed", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted", "void", "voided"].includes(status);
+  if (terminal) throw new Error("Closed, canceled, and fully received purchase orders cannot have lines removed.");
+  const committed = purchaseOrderHasSupplierCommitment(po) || purchaseOrderHasSubmissionRecord(po);
+  const editableDraft = ["draft", "ready_to_send", "awaiting_approval", "approved", "hold"].includes(status) && !committed;
+  if (!editableDraft && !committed) throw new Error("This purchase order is not in a state where lines can be removed.");
   const requested = Array.isArray(input.lines) ? input.lines : [];
   if (!requested.length) throw new Error("Select at least one purchase order line to cancel.");
   const now = new Date().toISOString();
   const user = input.user || "Buyer";
+  const amendmentBefore = committed ? {
+    supplier: po.supplier || "",
+    warehouseName: po.warehouseName || "",
+    expectedAt: po.expectedAt || "",
+    items: (po.items || []).map((line) => ({
+      sku: line.sku,
+      qty: Number(line.qty || 0),
+      receivedQty: Number(line.receivedQty || 0),
+      canceledQty: Number(line.canceledQty || 0),
+      openQty: purchaseOrderOpenQuantity(line),
+      status: String(line.status || ""),
+      unitCost: Number(line.unitCost ?? line.estimatedUnitCost ?? 0),
+      uom: String(line.uom || ""),
+      uomQty: positivePurchaseInteger(line.uomQty, 1)
+    }))
+  } : null;
   const selectedIndexes = new Set();
   const cancellations = [];
   const changedOrders = new Map();
@@ -15145,7 +15164,12 @@ function cancelPurchaseOrderLines(po = {}, orders = [], input = {}) {
     const line = po.items[lineIndex];
     const openQty = purchaseOrderOpenQuantity(line);
     if (openQty <= 0) throw new Error(`${line.sku || "The selected line"} has no open quantity to cancel.`);
-    if (Number(line.receivedQty || 0) > 0) throw new Error(`${line.sku || "The selected line"} already has received quantity and cannot be canceled from a draft.`);
+    if (Number(line.receivedQty || 0) > 0) throw new Error(`${line.sku || "The selected line"} already has received quantity and cannot be removed.`);
+    const pendingScannedQty = (Array.isArray(po.activeReceivingAudit?.lineProgress) ? po.activeReceivingAudit.lineProgress : [])
+      .filter((entry) => String(entry.purchaseOrderLineId || "") === String(line.id || "")
+        || Number(entry.purchaseOrderLineIndex) === lineIndex)
+      .reduce((sum, entry) => sum + Math.max(0, Number(entry.countedQty || 0)), 0);
+    if (pendingScannedQty > 0) throw new Error(`${line.sku || "The selected line"} has ${pendingScannedQty} unit${pendingScannedQty === 1 ? "" : "s"} scanned in the active receiving audit. Remove that scan first.`);
     const reasonCode = String(selection?.reasonCode || "").trim().toLowerCase();
     const reasonLabel = PURCHASE_ORDER_CANCEL_REASONS.get(reasonCode);
     if (!reasonLabel) throw new Error(`Choose a cancellation reason for ${line.sku || `line ${lineIndex + 1}`}.`);
@@ -15189,9 +15213,11 @@ function cancelPurchaseOrderLines(po = {}, orders = [], input = {}) {
   po.estimatedCost = (po.items || []).reduce((sum, line) => sum + Math.max(0, Number(line.qty || 0) - Number(line.canceledQty || 0)) * Math.max(0, Number(line.unitCost ?? line.estimatedUnitCost ?? 0)), 0);
   po.openEstimatedCost = (po.items || []).reduce((sum, line) => sum + purchaseOrderOpenQuantity(line) * Math.max(0, Number(line.unitCost ?? line.estimatedUnitCost ?? 0)), 0);
   const allOpenLinesCanceled = (po.items || []).every((line) => purchaseOrderOpenQuantity(line) <= 0);
+  const hasReceivedLines = (po.items || []).some((line) => Number(line.receivedQty || 0) > 0);
+  const cancelEntirePo = allOpenLinesCanceled && !hasReceivedLines;
   const feeResult = applyDropshipPurchaseOrderFees(po, null, orders);
   for (const order of feeResult.updatedOrders) changedOrders.set(String(order.id || ""), order);
-  if (allOpenLinesCanceled) {
+  if (cancelEntirePo) {
     const cancellation = {
       id: crypto.randomUUID(), reasonCode: "all_lines_canceled", reasonLabel: "All open lines canceled",
       reasonNote: `${cancellations.length} line${cancellations.length === 1 ? "" : "s"} canceled with line-specific reasons.`,
@@ -15206,11 +15232,17 @@ function cancelPurchaseOrderLines(po = {}, orders = [], input = {}) {
     po.cancelReasonLabel = cancellation.reasonLabel;
     po.cancelReasonNote = cancellation.reasonNote;
   }
+  if (committed) {
+    const amendmentReason = String(input.amendmentReason || input.note || cancellations
+      .map((entry) => `${entry.sku || "PO line"}: ${entry.reasonLabel}${entry.reasonNote ? ` (${entry.reasonNote})` : ""}`)
+      .join("; ")).trim();
+    recordPurchaseOrderAmendment(po, amendmentBefore, amendmentReason || "Removed unreceived purchase order line(s).", user);
+  }
   po.updatedAt = now;
   addPoTimeline(po, {
-    type: allOpenLinesCanceled ? "canceled" : "line_canceled",
-    title: allOpenLinesCanceled ? "All open PO lines canceled" : "PO lines canceled",
-    message: `${cancellations.length} line${cancellations.length === 1 ? "" : "s"} canceled and retained with line-specific reasons.${allOpenLinesCanceled ? " The PO moved to the Canceled queue." : " Remaining draft lines were preserved."}`,
+    type: cancelEntirePo ? "canceled" : "line_canceled",
+    title: cancelEntirePo ? "All open PO lines canceled" : "PO lines removed",
+    message: `${cancellations.length} unreceived line${cancellations.length === 1 ? " was" : "s were"} removed from the open PO balance and retained with line-specific reasons.${cancelEntirePo ? " The PO moved to the Canceled queue." : committed ? " A supplier amendment is pending confirmation." : " Remaining draft lines were preserved."}`,
     user
   });
   for (const order of changedOrders.values()) {
@@ -15222,7 +15254,7 @@ function cancelPurchaseOrderLines(po = {}, orders = [], input = {}) {
     recalculateOrderOperationalStatus(order);
     order.updatedAt = now;
   }
-  return { purchaseOrder: po, orders: [...changedOrders.values()], cancellations, allOpenLinesCanceled };
+  return { purchaseOrder: po, orders: [...changedOrders.values()], cancellations, allOpenLinesCanceled: cancelEntirePo };
 }
 
 function returnDropshipPurchaseOrderToQueue(po = {}, orders = [], input = {}) {
@@ -16365,6 +16397,9 @@ function recordPurchaseOrderAmendment(po, before, reason, user) {
         sku: line.sku,
         qty: Number(line.qty || 0),
         receivedQty: Number(line.receivedQty || 0),
+        canceledQty: Number(line.canceledQty || 0),
+        openQty: purchaseOrderOpenQuantity(line),
+        status: String(line.status || ""),
         unitCost: Number(line.unitCost ?? line.estimatedUnitCost ?? 0),
         isFreeItem: line.isFreeItem === true,
         freeItemReason: String(line.freeItemReason || ""),
@@ -65025,15 +65060,49 @@ async function handleApi(req, res) {
     const audit = await postgres.readWarehouseAudit(parts[2]);
     if (!audit) return notFound(res);
     if (audit.status !== "in_progress") return sendJson(res, 400, { error: "Items can be removed only while the audit is in progress." });
-    const kind = body.kind === "unknown" ? "unknown" : "known";
+    const kind = body.kind === "po_expected" ? "po_expected" : body.kind === "unknown" ? "unknown" : "known";
     const lineKey = decodeURIComponent(parts[4]);
-    const rows = kind === "unknown" ? audit.unknownBarcodes || [] : audit.lines || [];
-    const index = rows.findIndex((entry) => String(kind === "unknown" ? entry.id || `${entry.barcode || ""}::${entry.locationBin || ""}` : auditLineKey(entry)) === lineKey);
-    if (index < 0) return sendJson(res, 404, { error: "Scanned audit item not found. Expected PO lines cannot be removed; they remain open until received or backordered." });
-    const [line] = rows.splice(index, 1);
+    const rows = kind === "po_expected"
+      ? audit.purchaseOrderExpectedLines || []
+      : kind === "unknown" ? audit.unknownBarcodes || [] : audit.lines || [];
+    const index = rows.findIndex((entry) => String(kind === "unknown"
+      ? entry.id || `${entry.barcode || ""}::${entry.locationBin || ""}`
+      : kind === "po_expected" ? entry.id || `index:${Number(entry.lineIndex)}` : auditLineKey(entry)) === lineKey);
+    if (index < 0) return sendJson(res, 404, { error: "Audit item not found. Refresh the audit and try again." });
+    const line = rows[index];
     const now = new Date().toISOString();
     const removedBy = String(authUser?.name || authUser?.username || body.user || "Warehouse user").trim() || "Warehouse user";
     const reason = String(body.reason || "").trim().slice(0, 500);
+    if (kind === "po_expected") {
+      if (reason.length < 3) return sendJson(res, 400, { error: "Enter a reason for removing this line from the purchase order." });
+      if (!audit.linkedPurchaseOrderId) return sendJson(res, 409, { error: "This expected line is not linked to a purchase order." });
+      const po = await postgres.readPurchaseOrderByKey(audit.linkedPurchaseOrderId);
+      if (!po) return sendJson(res, 404, { error: "The linked purchase order was not found." });
+      const linkedOrders = await readPurchaseOrderLinkedOrders(po);
+      let cancellation;
+      try {
+        cancellation = cancelPurchaseOrderLines(po, linkedOrders, {
+          lines: [{
+            routeId: String(line.routeId || ""),
+            lineIndex: Number(line.lineIndex),
+            reasonCode: "buyer_removed",
+            reasonNote: reason
+          }],
+          amendmentReason: reason,
+          user: removedBy
+        });
+      } catch (error) {
+        return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      }
+      await postgres.savePurchaseOrder(po, { allowStatusRegression: true });
+      for (const order of cancellation.orders) {
+        await postgres.saveOrder(order);
+        clearOrderApiCache(order.id);
+      }
+      rows.splice(index, 1);
+    } else {
+      rows.splice(index, 1);
+    }
     const removedItem = {
       id: String(line.id || ""),
       kind,
@@ -65043,7 +65112,7 @@ async function handleApi(req, res) {
       barcode: String(line.barcode || line.upc || ""),
       locationBin: String(line.locationBin || ""),
       countedQty: Number(kind === "unknown" ? line.count || 0 : line.countedQty || 0),
-      receivingPurchaseOrderLineId: String(line.receivingPurchaseOrderLineId || ""),
+      receivingPurchaseOrderLineId: String(line.receivingPurchaseOrderLineId || (kind === "po_expected" ? line.id : "") || ""),
       removedAt: now,
       removedBy,
       reason
@@ -65065,7 +65134,9 @@ async function handleApi(req, res) {
     return sendJson(res, 200, {
       audit,
       removedItem,
-      message: `${removedItem.sku || removedItem.barcode || "Audit item"} was removed from the active count.${removedItem.receivingPurchaseOrderLineId ? " Its PO requirement remains open." : ""}`
+      message: kind === "po_expected"
+        ? `${removedItem.sku || "PO line"} was removed from the audit and canceled on ${audit.linkedPurchaseOrderNumber || "the linked PO"}.`
+        : `${removedItem.sku || removedItem.barcode || "Audit item"} was removed from the active count.${removedItem.receivingPurchaseOrderLineId ? " Its PO requirement remains open." : ""}`
     });
   }
 
@@ -70274,8 +70345,16 @@ async function handleApi(req, res) {
         const result = lineMode ? cancelPurchaseOrderLines(po, orders, body) : cancelPurchaseOrder(po, orders, body);
         await postgres.savePurchaseOrder(po, { allowStatusRegression: true });
         for (const order of result.orders) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
+        const activeAuditId = lineMode ? String(po.activeReceivingAudit?.auditId || "").trim() : "";
+        if (activeAuditId) {
+          const activeAudit = await postgres.readWarehouseAudit(activeAuditId);
+          if (activeAudit && ["in_progress", "pending_review"].includes(String(activeAudit.status || "").toLowerCase())) {
+            await postgres.saveWarehouseAudit(activeAudit);
+            await syncPurchaseOrderReceivingProgress(activeAudit);
+          }
+        }
         return sendJson(res, 200, lineMode
-          ? { purchaseOrder: po, cancellations: result.cancellations, allOpenLinesCanceled: result.allOpenLinesCanceled, message: result.allOpenLinesCanceled ? `${po.poNumber || "Purchase order"} canceled because all open lines were canceled.` : `${result.cancellations.length} line${result.cancellations.length === 1 ? "" : "s"} canceled; remaining draft lines were preserved.` }
+          ? { purchaseOrder: po, cancellations: result.cancellations, allOpenLinesCanceled: result.allOpenLinesCanceled, message: result.allOpenLinesCanceled ? `${po.poNumber || "Purchase order"} canceled because all open lines were removed.` : `${result.cancellations.length} line${result.cancellations.length === 1 ? "" : "s"} removed from the open PO balance and retained in history.` }
           : { purchaseOrder: po, cancellation: result.cancellation, message: `${po.poNumber || "Purchase order"} canceled and retained in the Canceled queue.` });
       } catch (error) {
         return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
