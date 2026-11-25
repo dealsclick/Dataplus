@@ -102,6 +102,9 @@ async function run(mode, hasExisting, limit = 10, options = {}) {
   assert.deepEqual(selectOpenStatusSweep(sweepOrders,{limit:1}),{parentOrderSnList:['300'],candidateCount:2,nextOffset:0});
   const runner=source.slice(source.indexOf('async function runTemuOrderImportWorkerJob('),source.indexOf('async function runEbayListingLaunchWorkerJob('));
   assert(!runner.includes('upsertOrdersFromState(workDb.orders'), 'No broad final order rewrite');
+  assert(runner.includes('const scopedOrders = postgres.isPostgresEnabled() && !repairBlind;'), 'Ordinary PostgreSQL Temu jobs must use scoped state.');
+  assert(runner.includes('...await postgres.readStateFields(['), 'Ordinary PostgreSQL Temu jobs must not load the broad operational state.');
+  assert(runner.includes('orders: []'), 'Scoped Temu jobs must begin without a broad order collection.');
   assert(runner.includes('requestedTargetCount'), 'Targeted status jobs must detect incomplete requested-ID processing');
   assert(runner.includes('missingTargetCount'), 'Incomplete targeted jobs must finish with visible review errors');
   assert(body.includes('if (!targetedRefresh && !repairBlind && !batchedPages && listIndex < pageOffset) continue;'), 'Targeted batches must not inherit list-pagination offsets');
