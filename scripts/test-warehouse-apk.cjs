@@ -48,6 +48,8 @@ assert.equal(available.sha256, 'abc123')
 assert.ok(source.includes('if (/^\\/api\\/mobile\\/warehouse-apk(?:\\/|$)/.test(pathname)) return "warehouse";'))
 assert.match(source, /url\.pathname === "\/api\/mobile\/warehouse-apk\/status"/)
 assert.match(source, /"Content-Type": "application\/vnd\.android\.package-archive"/)
+assert.match(source, /"\.webmanifest": "application\/manifest\+json; charset=utf-8"/)
+assert.match(source, /"\.json": "application\/json; charset=utf-8"/)
 assert.ok(source.indexOf('const authUser = currentAuthUser') < source.indexOf('url.pathname === "/api/mobile/warehouse-apk/status"'), 'APK routes must stay behind authentication')
 
 const appSource = fs.readFileSync(path.join(__dirname, '../web/src/App.tsx'), 'utf8')
