@@ -29,6 +29,10 @@ assert.match(purchasingWorkspaces, /> Mark inbound</, "placed PO details must ex
 assert.match(purchasingWorkspaces, /<DropdownMenuLabel>Supplier and shipping<\/DropdownMenuLabel>/, "PO actions must be grouped for scanning");
 assert.match(purchasingWorkspaces, /<DropdownMenuLabel>Fulfillment<\/DropdownMenuLabel>/, "PO fulfillment actions must have their own group");
 assert.match(purchasingWorkspaces, /> Set inventory purpose<\/DropdownMenuItem>/, "PO actions must expose the inventory purpose directly");
+assert.match(purchasingWorkspaces, /function purchaseOrderLinkedOrderItems/, "linked PO orders must resolve their associated line items");
+assert.match(purchasingWorkspaces, /Items on this PO/, "linked PO orders must expose an item quick preview");
+assert.match(purchasingWorkspaces, /Preview items for order/, "each linked order must expose an accessible quick-preview action");
+assert.match(purchasingWorkspaces, /Cancel line item/, "PO rows must expose explicit line-item cancellation instead of quantity-zero workarounds");
 assert.match(purchasingWorkspaces, /Reusable across live sessions/, "the PO purpose dialog must explain that one PO can supply multiple live sessions");
 assert.match(purchasingWorkspaces, /value: "whatnot_live", label: "Whatnot"/, "PO live destinations must include Whatnot");
 assert.match(purchasingWorkspaces, /purchaseOrderCtechNumber\(po\)/, "a CTech PO number must count as supplier submission evidence in the UI");
@@ -55,6 +59,13 @@ assert.doesNotMatch(poEditor, /String\(candidate\.sku\) === sku/, "duplicate SKU
 assert.match(poEditor, /Confirm Each ordering with the supplier/, "Each overrides need one clear supplier-confirmation warning");
 assert.match(poEditor, /Estimated merchandise/, "the PO editor should summarize the live merchandise total");
 assert.match(poEditor, /CatalogImage src=\{purchaseOrderLineImage\(item\)\}/, "every PO editor row must reserve a product image");
+assert.match(poEditor, /Cancel line item/, "the PO editor must expose line-item cancellation directly");
+
+const dropshipTrackingStart = server.indexOf('parts[3] === "dropship-tracking"');
+const dropshipTrackingEnd = server.indexOf('parts[3] === "action"', dropshipTrackingStart);
+assert.ok(dropshipTrackingStart >= 0 && dropshipTrackingEnd > dropshipTrackingStart, "the dropship tracking route must exist");
+const dropshipTrackingRoute = server.slice(dropshipTrackingStart, dropshipTrackingEnd);
+assert.ok(dropshipTrackingRoute.indexOf("const db = await readDbFast") < dropshipTrackingRoute.indexOf("db.purchaseRequirements"), "dropship tracking must initialize operational state before reading purchase requirements");
 
 const poDetailStart = purchasingWorkspaces.indexOf("function PurchaseOrderDetailPage");
 const poDetailPage = purchasingWorkspaces.slice(poDetailStart, poDetailStart + 50000);

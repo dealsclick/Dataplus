@@ -63,7 +63,27 @@ assert.throws(() => cancelPurchaseOrderLines(received, [], {
 
 assert.throws(() => cancelPurchaseOrderLines(purchaseOrder({ status: "completed" }), [], {
   lines: [{ lineIndex: 0, reasonCode: "buyer_removed" }],
-}), /cannot have lines removed/);
+}), /cannot have line items canceled/);
+
+const closedZeroQuantityCorrection = purchaseOrder({
+  status: "closed",
+  items: [
+    { id: "line-zero", sku: "BUS-ZERO", qty: 0, receivedQty: 0, unitCost: 0 },
+    { id: "line-received", sku: "BUS-RECEIVED", qty: 2, receivedQty: 2, unitCost: 10 },
+  ],
+});
+const correction = cancelPurchaseOrderLines(closedZeroQuantityCorrection, [], {
+  lines: [{ lineIndex: 0, reasonCode: "buyer_removed", reasonNote: "Correct prior quantity-zero workaround" }],
+  user: "Buyer",
+});
+assert.equal(correction.historicalClassificationOnly, true);
+assert.equal(closedZeroQuantityCorrection.status, "closed", "classification must not reopen or cancel the closed PO");
+assert.equal(closedZeroQuantityCorrection.items[0].status, "canceled");
+assert.equal(closedZeroQuantityCorrection.items[0].qty, 0);
+assert.equal(closedZeroQuantityCorrection.items[0].receivedQty, 0);
+assert.equal(closedZeroQuantityCorrection.items[0].cancellationHistory[0].classificationOnly, true);
+assert.equal(closedZeroQuantityCorrection.supplierAmendment, undefined, "a closed-history correction must not create a new supplier amendment");
+assert.match(closedZeroQuantityCorrection.timeline.at(-1).message, /closed PO, inventory, and received quantities were not changed/i);
 
 const scannedAudit = {
   id: "audit-230",

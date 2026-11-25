@@ -346,6 +346,10 @@ assert.equal(secondLineOrder.operationalStatus, "buyer_review");
 const canceledFeePo = { id: "po-canceled-fee", status: "draft", fulfillmentMode: "dropship_per_order", dropShipFeePercent: 4, dropShipFeeFixedAmount: 2, items: [{ sku: "SKU-1", qty: 1, canceledQty: 1, unitCost: 5, orderId: firstLineOrder.id }] };
 assert.equal(applyDropshipPurchaseOrderFees(canceledFeePo, null, [firstLineOrder]).fee, 0, "fully canceled dropship demand has no percentage or fixed dropship fee");
 assert.throws(() => cancelPurchaseOrderLines({ id: "po-lines-invalid", status: "draft", items: [{ sku: "SKU-X", qty: 1 }] }, [], { lines: [{ lineIndex: 0 }] }), /Choose a cancellation reason/);
-assert.throws(() => cancelPurchaseOrderLines({ id: "po-lines-sent", status: "submitted", submittedAt: new Date().toISOString(), items: [{ sku: "SKU-X", qty: 1 }] }, [], { lines: [{ lineIndex: 0, reasonCode: "other" }] }), /unsubmitted draft/);
+const submittedLinePo = { id: "po-lines-sent", status: "submitted", submittedAt: new Date().toISOString(), items: [{ sku: "SKU-X", qty: 1, unitCost: 2 }], timeline: [] };
+const submittedLineCancellation = cancelPurchaseOrderLines(submittedLinePo, [], { lines: [{ lineIndex: 0, reasonCode: "other" }] });
+assert.equal(submittedLineCancellation.cancellations.length, 1, "a submitted PO line can be canceled with an audited supplier amendment");
+assert.equal(submittedLinePo.items[0].canceledQty, 1);
+assert.equal(submittedLinePo.supplierAmendment.status, "pending_supplier_confirmation");
 
 console.log("Dropship purchasing tests passed.");

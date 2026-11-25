@@ -15123,16 +15123,32 @@ function cancelPurchaseOrder(po = {}, orders = [], input = {}) {
 
 function cancelPurchaseOrderLines(po = {}, orders = [], input = {}) {
   const status = String(po.status || "draft").toLowerCase();
-  const terminal = ["received", "completed", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted", "void", "voided"].includes(status);
-  if (terminal) throw new Error("Closed, canceled, and fully received purchase orders cannot have lines removed.");
-  const committed = purchaseOrderHasSupplierCommitment(po) || purchaseOrderHasSubmissionRecord(po);
-  const editableDraft = ["draft", "ready_to_send", "awaiting_approval", "approved", "hold"].includes(status) && !committed;
-  if (!editableDraft && !committed) throw new Error("This purchase order is not in a state where lines can be removed.");
   const requested = Array.isArray(input.lines) ? input.lines : [];
   if (!requested.length) throw new Error("Select at least one purchase order line to cancel.");
+  const selectedLine = (selection) => {
+    const routeId = String(selection?.routeId || "").trim();
+    const requestedIndex = Number(selection?.lineIndex);
+    return (po.items || []).find((line, index) => routeId
+      ? String(line.routeId || "") === routeId
+      : Number.isInteger(requestedIndex) && requestedIndex === index);
+  };
+  const zeroQuantityCorrection = requested.every((selection) => {
+    const line = selectedLine(selection);
+    return line
+      && Number(line.qty || 0) <= 0
+      && Number(line.receivedQty || 0) <= 0
+      && Number(line.canceledQty || 0) <= 0
+      && !["canceled", "cancelled"].includes(String(line.status || "").toLowerCase());
+  });
+  const historicalClassificationOnly = ["received", "completed", "closed"].includes(status) && zeroQuantityCorrection;
+  const terminal = ["received", "completed", "closed", "canceled", "cancelled", "rejected", "superseded", "deleted", "void", "voided"].includes(status);
+  if (terminal && !historicalClassificationOnly) throw new Error("Closed, canceled, and fully received purchase orders cannot have line items canceled.");
+  const committed = purchaseOrderHasSupplierCommitment(po) || purchaseOrderHasSubmissionRecord(po);
+  const editableDraft = ["draft", "ready_to_send", "awaiting_approval", "approved", "hold"].includes(status) && !committed;
+  if (!editableDraft && !committed && !historicalClassificationOnly) throw new Error("This purchase order is not in a state where line items can be canceled.");
   const now = new Date().toISOString();
   const user = input.user || "Buyer";
-  const amendmentBefore = committed ? {
+  const amendmentBefore = committed && !historicalClassificationOnly ? {
     supplier: po.supplier || "",
     warehouseName: po.warehouseName || "",
     expectedAt: po.expectedAt || "",
@@ -15163,7 +15179,12 @@ function cancelPurchaseOrderLines(po = {}, orders = [], input = {}) {
     selectedIndexes.add(lineIndex);
     const line = po.items[lineIndex];
     const openQty = purchaseOrderOpenQuantity(line);
-    if (openQty <= 0) throw new Error(`${line.sku || "The selected line"} has no open quantity to cancel.`);
+    const classificationOnly = openQty <= 0
+      && Number(line.qty || 0) <= 0
+      && Number(line.receivedQty || 0) <= 0
+      && Number(line.canceledQty || 0) <= 0
+      && !["canceled", "cancelled"].includes(String(line.status || "").toLowerCase());
+    if (openQty <= 0 && !classificationOnly) throw new Error(`${line.sku || "The selected line"} has no open quantity to cancel.`);
     if (Number(line.receivedQty || 0) > 0) throw new Error(`${line.sku || "The selected line"} already has received quantity and cannot be removed.`);
     const pendingScannedQty = (Array.isArray(po.activeReceivingAudit?.lineProgress) ? po.activeReceivingAudit.lineProgress : [])
       .filter((entry) => String(entry.purchaseOrderLineId || "") === String(line.id || "")
@@ -15177,7 +15198,7 @@ function cancelPurchaseOrderLines(po = {}, orders = [], input = {}) {
     const cancellation = {
       id: crypto.randomUUID(), lineIndex, routeId: line.routeId || "", orderId: line.orderId || "",
       orderNumber: line.orderNumber || "", sku: line.sku || "", qty: openQty,
-      reasonCode, reasonLabel, reasonNote, canceledAt: now, canceledBy: user
+      reasonCode, reasonLabel, reasonNote, classificationOnly, canceledAt: now, canceledBy: user
     };
     line.canceledQty = Math.max(0, Number(line.canceledQty || 0)) + openQty;
     line.remainingQty = purchaseOrderOpenQuantity(line);
@@ -15232,7 +15253,7 @@ function cancelPurchaseOrderLines(po = {}, orders = [], input = {}) {
     po.cancelReasonLabel = cancellation.reasonLabel;
     po.cancelReasonNote = cancellation.reasonNote;
   }
-  if (committed) {
+  if (committed && !historicalClassificationOnly) {
     const amendmentReason = String(input.amendmentReason || input.note || cancellations
       .map((entry) => `${entry.sku || "PO line"}: ${entry.reasonLabel}${entry.reasonNote ? ` (${entry.reasonNote})` : ""}`)
       .join("; ")).trim();
@@ -15241,8 +15262,10 @@ function cancelPurchaseOrderLines(po = {}, orders = [], input = {}) {
   po.updatedAt = now;
   addPoTimeline(po, {
     type: cancelEntirePo ? "canceled" : "line_canceled",
-    title: cancelEntirePo ? "All open PO lines canceled" : "PO lines removed",
-    message: `${cancellations.length} unreceived line${cancellations.length === 1 ? " was" : "s were"} removed from the open PO balance and retained with line-specific reasons.${cancelEntirePo ? " The PO moved to the Canceled queue." : committed ? " A supplier amendment is pending confirmation." : " Remaining draft lines were preserved."}`,
+    title: cancelEntirePo ? "All open PO lines canceled" : historicalClassificationOnly ? "Zero-quantity PO line classified as canceled" : "PO line items canceled",
+    message: historicalClassificationOnly
+      ? `${cancellations.length} zero-quantity, unreceived line${cancellations.length === 1 ? " was" : "s were"} explicitly classified as canceled for historical accuracy. The closed PO, inventory, and received quantities were not changed.`
+      : `${cancellations.length} unreceived line${cancellations.length === 1 ? " was" : "s were"} canceled from the open PO balance and retained with line-specific reasons.${cancelEntirePo ? " The PO moved to the Canceled queue." : committed ? " A supplier amendment is pending confirmation." : " Remaining draft lines were preserved."}`,
     user
   });
   for (const order of changedOrders.values()) {
@@ -15254,7 +15277,7 @@ function cancelPurchaseOrderLines(po = {}, orders = [], input = {}) {
     recalculateOrderOperationalStatus(order);
     order.updatedAt = now;
   }
-  return { purchaseOrder: po, orders: [...changedOrders.values()], cancellations, allOpenLinesCanceled: cancelEntirePo };
+  return { purchaseOrder: po, orders: [...changedOrders.values()], cancellations, allOpenLinesCanceled: cancelEntirePo, historicalClassificationOnly };
 }
 
 function returnDropshipPurchaseOrderToQueue(po = {}, orders = [], input = {}) {
@@ -70353,6 +70376,7 @@ async function handleApi(req, res) {
     const body = await parseBody(req);
     const po = await postgres.readPurchaseOrderByKey(parts[2]);
     if (!po) return notFound(res);
+    const db = await readDbFast({ skipInventory: true });
     const linkedOrders = await readPurchaseOrderLinkedOrders(po);
     const requirementOrderKeys = [...new Set((db.purchaseRequirements || []).filter((requirement) => String(requirement.purchaseOrderId || "") === String(po.id || "")
       || (po.poNumber && String(requirement.purchaseOrderNumber || "").trim().toLowerCase() === String(po.poNumber).trim().toLowerCase()))
@@ -70363,7 +70387,6 @@ async function handleApi(req, res) {
     try {
       const results = orders.map((order) => recordDropshipPurchaseOrderTracking(po, order, body));
       await postgres.savePurchaseOrder(po);
-      const db = await readDbFast({ skipInventory: true });
       const channelResults = [];
       for (const order of orders) {
         await postgres.saveOrder(order);
@@ -70425,7 +70448,7 @@ async function handleApi(req, res) {
             const evidence = purchaseOrderLineAuditScanEvidence(audits, po, selectedLine, selectedIndex);
             if (evidence) {
               const auditReference = String(evidence.audit?.auditNumber || evidence.audit?.id || "a warehouse audit");
-              throw new Error(`${selectedLine.sku || "This PO line"} was scanned in ${auditReference} and cannot be removed from the PO. Correct the audit or receipt while keeping the original PO line in history.`);
+              throw new Error(`${selectedLine.sku || "This PO line"} was scanned in ${auditReference} and cannot be canceled. Correct the audit or receipt while keeping the original PO line in history.`);
             }
           }
         }
@@ -70442,7 +70465,7 @@ async function handleApi(req, res) {
           }
         }
         return sendJson(res, 200, lineMode
-          ? { purchaseOrder: po, cancellations: result.cancellations, allOpenLinesCanceled: result.allOpenLinesCanceled, message: result.allOpenLinesCanceled ? `${po.poNumber || "Purchase order"} canceled because all open lines were removed.` : `${result.cancellations.length} line${result.cancellations.length === 1 ? "" : "s"} removed from the open PO balance and retained in history.` }
+          ? { purchaseOrder: po, cancellations: result.cancellations, allOpenLinesCanceled: result.allOpenLinesCanceled, historicalClassificationOnly: result.historicalClassificationOnly, message: result.historicalClassificationOnly ? `${result.cancellations.length} zero-quantity line${result.cancellations.length === 1 ? " was" : "s were"} marked canceled without changing this closed PO.` : result.allOpenLinesCanceled ? `${po.poNumber || "Purchase order"} canceled because all open lines were canceled.` : `${result.cancellations.length} line${result.cancellations.length === 1 ? "" : "s"} canceled from the open PO balance and retained in history.` }
           : { purchaseOrder: po, cancellation: result.cancellation, message: `${po.poNumber || "Purchase order"} canceled and retained in the Canceled queue.` });
       } catch (error) {
         return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
