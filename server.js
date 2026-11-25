@@ -28384,7 +28384,26 @@ async function runTemuOrderImportWorkerJob(job = {}, attrs = {}) {
   });
   appendChannelApiLog({ channel: "Temu", transport: "Job", method: "RUN", path: "temu-orders", operation: "Temu order import started", statusCode: 102, ok: true, jobId: job.id, message: job.message });
   try {
-    const workDb = normalizeDb(await readDbFast({ skipInventory: true }));
+    const scopedOrders = postgres.isPostgresEnabled() && !repairBlind;
+    const workDb = scopedOrders
+      ? normalizeDb({
+        ...await postgres.readStateFields([
+          "connections",
+          "connectorState",
+          "sequence",
+          "systemSettings",
+          "vendors",
+          "warehouses",
+          "shopifySettings",
+          "ebaySettings",
+          "deletedOrders"
+        ]),
+        orders: [],
+        inventory: [],
+        purchaseOrders: [],
+        importJobs: []
+      })
+      : normalizeDb(await readDbFast({ skipInventory: true }));
     let lastOrderFlushCount = 0;
     const systemCreatedSkus = new Set();
     let linkedSavedReturns = 0;
@@ -44829,14 +44848,19 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
       : body.includeCanceled === true || String(body.includeCanceled).toLowerCase() === "true",
     repairBlind: body.repairBlind === true || String(body.repairBlind).toLowerCase() === "true",
     parentOrderSnList,
+    webhookEventId: String(body.webhookEventId || "").trim(),
     forceLookback: options.forceLookback === true || options.scheduled !== true,
     scheduled: options.scheduled === true,
     scheduleKey: options.scheduleKey || ""
   };
   const operation = options.operation || label;
+  let activeImport = null;
   for (const task of ['temu-order-import', 'temu-order-status', 'temu-order-enrichment']) {
-    const activeImport = await findActiveImportJobByWorkerTask(db, task, { accountId: account.accountId });
-    if (activeImport) return { duplicate: true, job: activeImport, workerPayload };
+    activeImport = await findActiveImportJobByWorkerTask(db, task, { accountId: account.accountId });
+    if (activeImport) break;
+  }
+  if (activeImport && !(options.allowQueuedTargeted === true && targetedOrderRequest)) {
+    return { duplicate: true, job: activeImport, workerPayload };
   }
   const duplicate = await findActiveDuplicateImportJob(db, {
     section: "Operations",
@@ -44858,8 +44882,10 @@ async function queueTemuOrderImportJob(db, body = {}, options = {}) {
     processedRows: 0,
     progressPercent: 0,
     phase: "queued",
+    prerequisiteJobId: activeImport?.id || "",
+    prerequisiteJobNumber: Number(activeImport?.jobNumber || 0) || 0,
     workerTask: shouldRunJobsInline() ? "" : workerTask,
-    workerPayload: shouldRunJobsInline() ? {} : workerPayload,
+    workerPayload: shouldRunJobsInline() ? {} : { ...workerPayload, prerequisiteJobId: activeImport?.id || "" },
     message: workerPayload.historicalBackfill
       ? parentOrderSnList.length
         ? `${account.accountName || account.mallId} historical order repair queued for ${parentOrderSnList.length.toLocaleString()} specified marketplace orders. Existing orders will be skipped and operational side effects are disabled.`
@@ -58279,68 +58305,52 @@ async function handleApi(req, res) {
     const eventId = String(payload.messageId || payload.message_id || payload.msgId || payload.id || req.headers["x-temu-message-id"] || crypto.createHash("sha256").update(rawBody).digest("hex")).trim();
     const parentOrderSnList = [...collectTemuParentOrderSns(payload)].slice(0, 250);
     const webhookAccountHeaders = { "x-temu-mall-id": req.headers["x-temu-mall-id"], "x-temu-shop-id": req.headers["x-temu-shop-id"] };
-    sendJson(res, 200, { success: true, accepted: true, eventType, parentOrderSnList, message: "Temu webhook accepted." });
-    void (async () => {
-      const db = await readDbFast({ skipInventory: true });
-      const channel = findChannelByName(db, "Temu");
-      const settings = channel?.settings || DEFAULT_CHANNEL_SETTINGS;
+    try {
+      const db = postgres.isPostgresEnabled()
+        ? normalizeDb({
+          ...await postgres.readStateFields(["connections", "connectorState", "systemSettings"]),
+          orders: [],
+          inventory: [],
+          purchaseOrders: [],
+          importJobs: []
+        })
+        : await readDbFast({ skipInventory: true });
       const accountIds = temuWebhookAccountIds(db, payload, webhookAccountHeaders);
       const logBase = { channel: "Temu", transport: "webhook", method: "POST", path: url.pathname, operation: eventType };
-      if (settings.channelEnabled === false) {
-        appendChannelApiLog({ ...logBase, statusCode: 202, ok: true, durationMs: Date.now() - startedAt, message: "Temu webhook received while the channel is disabled." });
-        return;
-      }
-      if (!settings.temuWebhookEnabled) {
-        appendChannelApiLog({ ...logBase, statusCode: 202, ok: true, durationMs: Date.now() - startedAt, message: "Temu webhook received while webhook processing is disabled." });
-        return;
-      }
-      const duplicateKey = `dataplus:temu:webhook:${eventId}`;
-      if (eventId && await redisCache.getJson(duplicateKey)) {
-        appendChannelApiLog({ ...logBase, statusCode: 200, ok: true, durationMs: Date.now() - startedAt, message: "Duplicate Temu webhook ignored." });
-        return;
-      }
-      if (eventId) await redisCache.setJson(duplicateKey, { receivedAt: new Date().toISOString(), eventType }, 60 * 60 * 24 * 7);
-      const limitedOrderSns = parentOrderSnList.slice(0, Math.min(250, Number(settings.temuOrderImportLimit || 250) || 250));
-      const shouldRefreshOrders = Boolean(settings.orderDownloadEnabled !== false && settings.temuOrderImportEnabled && (
-        limitedOrderSns.length
-        || /order|shipment|fulfill|delivery|cancel|refund|return/i.test(eventType)
-      ));
-      if (shouldRefreshOrders) {
-        if (!accountIds.length) throw new Error("Temu webhook order reconciliation needs at least one connected shop.");
-        for (const accountId of accountIds) {
-          await queueTemuOrderImportJob(db, {
-            accountId,
-            mode: "status",
-            lookbackDays: 1,
-            limit: limitedOrderSns.length ? limitedOrderSns.length : Math.min(250, Number(settings.temuOrderImportLimit || 250) || 250),
-            includeCanceled: true,
-            parentOrderSnList: limitedOrderSns
-          }, { accountId, operation: "Temu webhook order reconciliation", forceLookback: false });
-        }
-      }
+      const { acceptTemuOrderEvent } = require("./lib/temu-order-webhooks");
+      const result = await acceptTemuOrderEvent({
+        db,
+        eventId,
+        eventType,
+        orderIds: parentOrderSnList,
+        accountIds,
+        seen: (id) => redisCache.getJson(`dataplus:temu:webhook:${id}`),
+        remember: (id, value) => redisCache.setJson(`dataplus:temu:webhook:${id}`, value, 60 * 60 * 24 * 7),
+        queue: queueTemuOrderImportJob
+      });
       appendChannelApiLog({
         ...logBase,
-        statusCode: 202,
-        ok: true,
+        statusCode: 200,
+        ok: result.disposition !== "no_order_id",
         durationMs: Date.now() - startedAt,
-        message: shouldRefreshOrders
-          ? limitedOrderSns.length
-            ? `Temu event received; queued status refresh for ${limitedOrderSns.length} order${limitedOrderSns.length === 1 ? "" : "s"} across ${accountIds.length} shop${accountIds.length === 1 ? "" : "s"}.`
-            : `Temu event received; queued recent order reconciliation across ${accountIds.length} shop${accountIds.length === 1 ? "" : "s"}.`
-          : "Temu event received and recorded."
+        jobId: result.jobIds[0],
+        message: result.message
       });
-    })().catch((error) => appendChannelApiLog({
-      channel: "Temu",
-      transport: "webhook",
-      method: "POST",
-      path: url.pathname,
-      operation: eventType,
-      statusCode: 500,
-      ok: false,
-      durationMs: Date.now() - startedAt,
-      message: `Temu webhook background processing failed: ${error.message || "Unknown error"}`
-    }));
-    return;
+      return sendJson(res, 200, { success: true, accepted: true, eventType, parentOrderSnList, ...result });
+    } catch (error) {
+      appendChannelApiLog({
+        channel: "Temu",
+        transport: "webhook",
+        method: "POST",
+        path: url.pathname,
+        operation: eventType,
+        statusCode: 503,
+        ok: false,
+        durationMs: Date.now() - startedAt,
+        message: `Temu webhook could not be queued: ${error.message || "Unknown error"}`
+      });
+      return sendJson(res, 503, { success: false, accepted: false, retry: true, error: "Temu event could not be saved. Retry delivery." });
+    }
   }
 
   if (req.method === "GET" && url.pathname === "/api/auth/session") {
