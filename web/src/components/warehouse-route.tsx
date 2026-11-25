@@ -1356,6 +1356,10 @@ function buildLinkedPurchaseOrderReceiptItems(
   return items;
 }
 
+function purchaseOrderBackorderKey(line: Record<string, unknown>, index: number) {
+  return String(line.id || line.purchaseOrderLineId || line.routeId || `index:${Number(line.lineIndex ?? index)}`);
+}
+
 function linkedPurchaseOrderReceiptCompletion(audit: Record<string, unknown>) {
   const expectedLines = (Array.isArray(audit.purchaseOrderExpectedLines) ? audit.purchaseOrderExpectedLines as Array<Record<string, unknown>> : [])
     .filter((line) => Number(line.expectedQty || 0) > 0);
@@ -1479,6 +1483,7 @@ function WarehouseAuditPanel({
   const [actionPreviewError, setActionPreviewError] = useState("");
   const [returnDespiteDemand, setReturnDespiteDemand] = useState(false);
   const [closeShortPurchaseOrder, setCloseShortPurchaseOrder] = useState(false);
+  const [purchaseOrderBackorders, setPurchaseOrderBackorders] = useState<Record<string, number>>({});
   const [cameraMode, setCameraMode] = useState<"product" | "bin">("product");
   const [offlineScanCount, setOfflineScanCount] = useState(0);
   const [syncingOfflineScans, setSyncingOfflineScans] = useState(false);
@@ -2543,6 +2548,7 @@ function WarehouseAuditPanel({
     setActionPreviewError("");
     setReturnDespiteDemand(false);
     setCloseShortPurchaseOrder(false);
+    setPurchaseOrderBackorders({});
     if (["ebay_one_time_listing", "live_selling_inventory"].includes(String(resumedAudit.reason || ""))) {
       setDispositionType("stock_here");
       setActionPreview({ totalUsableQty: 0, affectedOrderCount: 0, orders: [], lines: [] });
@@ -2558,6 +2564,17 @@ function WarehouseAuditPanel({
     if (String(resumedAudit.reason || "") === "purchase_order_receipt" && resumedAudit.linkedPurchaseOrderId) {
       const expectedLines = Array.isArray(resumedAudit.purchaseOrderExpectedLines) ? resumedAudit.purchaseOrderExpectedLines as Array<Record<string, unknown>> : [];
       const receiptItems = buildLinkedPurchaseOrderReceiptItems(resumedAudit, expectedLines);
+      const receivedByExpectedLine = new Map<string, number>();
+      for (const item of receiptItems.filter((entry) => entry.extraItem !== true)) {
+        const key = String(item.purchaseOrderLineId || `index:${Number(item.lineIndex)}`);
+        receivedByExpectedLine.set(key, Number(receivedByExpectedLine.get(key) || 0) + Math.max(0, Number(item.qtyReceived || 0)));
+      }
+      setPurchaseOrderBackorders(Object.fromEntries(expectedLines.map((line, index) => {
+        const key = purchaseOrderBackorderKey(line, index);
+        const receiptKey = String(line.id || `index:${Number(line.lineIndex ?? index)}`);
+        const remaining = Math.max(0, Number(line.expectedQty || 0) - Number(receivedByExpectedLine.get(receiptKey) || 0));
+        return [key, Math.min(remaining, Math.max(0, Number(line.backorderedQty || 0)))];
+      })));
       const extraItems = receiptItems.filter((item) => item.extraItem === true);
       setActionPreviewLoading(true);
       try {
@@ -2643,9 +2660,16 @@ function WarehouseAuditPanel({
       if (String(resumedAudit.reason || "") === "purchase_order_receipt" && resumedAudit.linkedPurchaseOrderId) {
         const expectedLines = Array.isArray(resumedAudit.purchaseOrderExpectedLines) ? resumedAudit.purchaseOrderExpectedLines as Array<Record<string, unknown>> : [];
         const items = buildLinkedPurchaseOrderReceiptItems(resumedAudit, expectedLines);
-        const received = await api<{ purchaseOrder?: Record<string, unknown>; receipt?: Record<string, unknown>; extraItemUnits?: number; shortShipment?: Record<string, unknown> }>(`/api/purchase-orders/${encodeURIComponent(String(resumedAudit.linkedPurchaseOrderId))}/receive`, {
+        const backorders = expectedLines.map((line, index) => ({
+          purchaseOrderLineId: String(line.id || ""),
+          lineIndex: Number(line.lineIndex ?? index),
+          routeId: String(line.routeId || ""),
+          sku: String(line.sku || ""),
+          qtyBackordered: Math.max(0, Number(purchaseOrderBackorders[purchaseOrderBackorderKey(line, index)] || 0)),
+        }));
+        const received = await api<{ purchaseOrder?: Record<string, unknown>; receipt?: Record<string, unknown>; extraItemUnits?: number; backorder?: Record<string, unknown>; shortShipment?: Record<string, unknown> }>(`/api/purchase-orders/${encodeURIComponent(String(resumedAudit.linkedPurchaseOrderId))}/receive`, {
           method: "POST",
-          body: JSON.stringify({ mode: "final", warehouseId: resumedAudit.warehouseId, items, note: dispositionNote || `Received through ${String(resumedAudit.auditNumber || "inbound receiving")}`, user: operatorName, sourceAuditId: resumedAudit.id, sourceAuditNumber: resumedAudit.auditNumber, allocateOpenOrders: dispositionType === "fulfill_orders", closeRemaining: closeShortPurchaseOrder }),
+          body: JSON.stringify({ mode: "final", warehouseId: resumedAudit.warehouseId, items, backorders, note: dispositionNote || `Received through ${String(resumedAudit.auditNumber || "inbound receiving")}`, user: operatorName, sourceAuditId: resumedAudit.id, sourceAuditNumber: resumedAudit.auditNumber, allocateOpenOrders: dispositionType === "fulfill_orders", closeRemaining: closeShortPurchaseOrder }),
         });
         const finalized = await api<{ audit?: Record<string, unknown>; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/complete`, {
           method: "POST",
@@ -2657,7 +2681,9 @@ function WarehouseAuditPanel({
         const extraItemUnits = Number(received.extraItemUnits || received.receipt?.extraItemUnits || 0);
         const receiptShortShipment = received.receipt?.shortShipment && typeof received.receipt.shortShipment === "object" ? received.receipt.shortShipment as Record<string, unknown> : null;
         const shortUnits = Number(received.shortShipment?.totalUnits || receiptShortShipment?.totalUnits || 0);
-        toast.success(`${finalized.message || "PO receiving completed."}${extraItemUnits > 0 ? ` ${numberLabel(extraItemUnits)} unit${extraItemUnits === 1 ? " was" : "s were"} marked as extra.` : ""}${shortUnits > 0 ? ` ${numberLabel(shortUnits)} unreceived unit${shortUnits === 1 ? " was" : "s were"} closed as supplier short shipment.` : ""}`);
+        const receiptBackorder = received.receipt?.backorder && typeof received.receipt.backorder === "object" ? received.receipt.backorder as Record<string, unknown> : null;
+        const backorderUnits = Number(received.backorder?.totalUnits || receiptBackorder?.totalUnits || 0);
+        toast.success(`${finalized.message || "PO receiving completed."}${extraItemUnits > 0 ? ` ${numberLabel(extraItemUnits)} unit${extraItemUnits === 1 ? " was" : "s were"} marked as extra.` : ""}${backorderUnits > 0 ? ` ${numberLabel(backorderUnits)} unit${backorderUnits === 1 ? " remains" : "s remain"} open on supplier backorder.` : ""}${shortUnits > 0 ? ` ${numberLabel(shortUnits)} unreceived unit${shortUnits === 1 ? " was" : "s were"} closed as supplier short shipment.` : ""}`);
         await load();
         return;
       }
@@ -2837,6 +2863,18 @@ function WarehouseAuditPanel({
   const receivingReview = current?.packingSlipReview && typeof current.packingSlipReview === "object" ? current.packingSlipReview as Record<string, unknown> : null;
   const receivingReviewLines = Array.isArray(receivingReview?.lines) ? receivingReview.lines as Array<Record<string, unknown>> : [];
   const purchaseOrderExpectedLines = Array.isArray(current?.purchaseOrderExpectedLines) ? current.purchaseOrderExpectedLines as Array<Record<string, unknown>> : [];
+  const pendingReceiptItems = isLinkedPurchaseOrderReceipt ? buildLinkedPurchaseOrderReceiptItems(current || {}, purchaseOrderExpectedLines) : [];
+  const pendingReceiptQtyByLine = new Map<string, number>();
+  for (const item of pendingReceiptItems.filter((entry) => entry.extraItem !== true)) {
+    const key = String(item.purchaseOrderLineId || `index:${Number(item.lineIndex)}`);
+    pendingReceiptQtyByLine.set(key, Number(pendingReceiptQtyByLine.get(key) || 0) + Math.max(0, Number(item.qtyReceived || 0)));
+  }
+  const purchaseOrderBackorderRows = purchaseOrderExpectedLines.map((line, index) => {
+    const receiptKey = String(line.id || `index:${Number(line.lineIndex ?? index)}`);
+    const remainingQty = Math.max(0, Number(line.expectedQty || 0) - Number(pendingReceiptQtyByLine.get(receiptKey) || 0));
+    return { line, index, key: purchaseOrderBackorderKey(line, index), remainingQty };
+  }).filter((row) => row.remainingQty > 0);
+  const selectedPurchaseOrderBackorderUnits = purchaseOrderBackorderRows.reduce((sum, row) => sum + Math.min(row.remainingQty, Math.max(0, Number(purchaseOrderBackorders[row.key] || 0))), 0);
   const receivingExpectedLines = purchaseOrderExpectedLines.length ? purchaseOrderExpectedLines : receivingReviewLines;
   const baseAuditItems: Array<Record<string, unknown> & { auditItemKind: string }> = [...(Array.isArray(current?.lines) ? current.lines as Array<Record<string, unknown>> : []).map(row => ({ ...row, auditItemKind: "known" })), ...(Array.isArray(current?.unknownBarcodes) ? current.unknownBarcodes as Array<Record<string, unknown>> : []).map(row => ({ ...row, auditItemKind: "unknown" }))];
   const matchedReceivingIds = new Set<string>();
@@ -3234,7 +3272,12 @@ function WarehouseAuditPanel({
                   <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium">{compatibleDemandQty > 0 ? `${numberLabel(compatibleDemandQty)} received units also match additional open orders` : isLinkedPurchaseOrderReceipt && receiptFulfillmentOrders.length > 0 ? "No additional allocation is needed" : "No compatible open order demand found"}</p><p className="mt-1 text-xs text-muted-foreground">{compatibleDemandQty > 0 && dispositionType !== "fulfill_orders" ? "Optional: choose Allocate additional open orders below to reserve these units. Otherwise they stay available in the warehouse." : "Matched across UPC, manufacturer part number, vendor SKU, and equivalent supplier SKUs."}</p></div>{compatibleOrderCount > 0 && <Badge className="bg-emerald-600 text-white">{numberLabel(compatibleOrderCount)} order{compatibleOrderCount === 1 ? "" : "s"}</Badge>}</div>
                   {dispositionType === "fulfill_orders" && compatibleOrders.length > 0 && <div className="mt-3 max-h-40 overflow-y-auto overscroll-contain pr-1"><div className="grid gap-2">{compatibleOrders.slice(0, 12).map((order) => <a key={String(order.id)} href={`/orders/${encodeURIComponent(String(order.id))}`} className="grid min-w-0 gap-2 rounded-md border border-emerald-300/70 bg-background/80 px-3 py-2 text-sm hover:bg-background sm:flex sm:items-center sm:justify-between sm:gap-3"><span className="min-w-0"><span className="block font-medium">#{String(order.orderNumber || order.id)}</span><span className="block break-words text-xs text-muted-foreground sm:truncate">{String(order.orderSku || order.auditSku || "Matched item")}</span></span><span className="flex min-w-0 flex-wrap items-center gap-2 sm:shrink-0 sm:justify-end"><Badge variant="outline">{String(order.matchedBy || "") === "supplier_family" ? "Supplier-equivalent" : "Catalog SKU"}</Badge><span className="text-muted-foreground">{numberLabel(Number(order.remainingQty || 0))} needed</span></span></a>)}</div></div>}
                 </div>}
-                {isLinkedPurchaseOrderReceipt && remainingPurchaseOrderUnits > 0 && !actionPreviewLoading && !actionPreviewError && <label className={`flex items-start gap-3 rounded-md border p-3 transition-colors ${closeShortPurchaseOrder ? "border-amber-500/50 bg-amber-500/10" : "bg-muted/20"}`}><Checkbox checked={closeShortPurchaseOrder} onCheckedChange={(checked) => setCloseShortPurchaseOrder(checked === true)} /><span className="text-sm"><strong>Close {numberLabel(remainingPurchaseOrderUnits)} unreceived unit{remainingPurchaseOrderUnits === 1 ? "" : "s"} as supplier short shipment.</strong><span className="mt-1 block text-muted-foreground">Use this when the supplier will not send the balance. Ordered and received quantities remain in history, and linked unfilled demand returns to buyer review.</span></span></label>}
+                {isLinkedPurchaseOrderReceipt && purchaseOrderBackorderRows.length > 0 && <div className="grid gap-3 rounded-md border border-amber-500/40 bg-amber-500/5 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="font-medium">Unreceived supplier balance</p><p className="mt-1 text-xs text-muted-foreground">Mark only quantities the supplier still plans to ship. Posting the current scan will keep the PO partially received and open.</p></div><Button size="sm" variant="outline" onClick={() => { setCloseShortPurchaseOrder(false); setPurchaseOrderBackorders((currentValues) => ({ ...currentValues, ...Object.fromEntries(purchaseOrderBackorderRows.map((row) => [row.key, row.remainingQty])) })); }}>Mark all remaining backordered</Button></div>
+                  <div className="max-h-64 overflow-y-auto rounded-md border bg-background"><div className="divide-y">{purchaseOrderBackorderRows.map((row) => <div key={row.key} className="grid gap-3 p-3 sm:grid-cols-[minmax(0,1fr)_8rem] sm:items-center"><div className="min-w-0"><p className="truncate text-sm font-medium" title={String(row.line.title || row.line.description || row.line.sku || "PO line")}>{String(row.line.title || row.line.description || row.line.sku || "PO line")}</p><div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground"><span className="font-mono">{String(row.line.sku || "Unresolved SKU")}</span><span>{numberLabel(row.remainingQty)} unreceived</span></div></div><Field label="Backordered"><Input aria-label={`Backordered quantity for ${String(row.line.sku || "PO line")}`} type="number" min="0" max={row.remainingQty} step="1" inputMode="numeric" value={String(purchaseOrderBackorders[row.key] || 0)} onChange={(event) => { const qty = Math.min(row.remainingQty, Math.max(0, Number(event.target.value || 0))); setPurchaseOrderBackorders((values) => ({ ...values, [row.key]: qty })); if (qty > 0) setCloseShortPurchaseOrder(false); }} /></Field></div>)}</div></div>
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-sm"><span className="text-muted-foreground">This is not received inventory until it arrives and is scanned in a later receipt.</span><Badge variant={selectedPurchaseOrderBackorderUnits > 0 ? "warning" : "outline"}>{numberLabel(selectedPurchaseOrderBackorderUnits)} backordered</Badge></div>
+                </div>}
+                {isLinkedPurchaseOrderReceipt && remainingPurchaseOrderUnits > 0 && !actionPreviewLoading && !actionPreviewError && <label className={`flex items-start gap-3 rounded-md border p-3 transition-colors ${closeShortPurchaseOrder ? "border-amber-500/50 bg-amber-500/10" : "bg-muted/20"}`}><Checkbox checked={closeShortPurchaseOrder} onCheckedChange={(checked) => { const next = checked === true; setCloseShortPurchaseOrder(next); if (next) setPurchaseOrderBackorders({}); }} /><span className="text-sm"><strong>Close {numberLabel(remainingPurchaseOrderUnits)} unreceived unit{remainingPurchaseOrderUnits === 1 ? "" : "s"} as supplier short shipment.</strong><span className="mt-1 block text-muted-foreground">Use this when the supplier will not send the balance. Ordered and received quantities remain in history, and linked unfilled demand returns to buyer review.</span></span></label>}
                 {isMarketplacePurposeAudit && <Alert className="border-blue-500/30 bg-blue-500/10"><Store className="size-4" /><AlertTitle>{isLiveSellingAudit ? `${liveChannelLabel} inventory purpose` : "Reusable warehouse shadows"}</AlertTitle><AlertDescription>{isLiveSellingAudit ? "DataPlus will stock these counts here, use the manufacturer part number as the channel-facing merchant SKU, and create or reuse a separate internal shadow identity. Supplier inventory will not inflate the physical quantity." : "DataPlus will stock these counts here and create or reuse one cross-channel shadow per product using this warehouse code. Supplier inventory will not replenish these shadows."}</AlertDescription></Alert>}
                 {!isPurchaseOrderRecount && <div className="grid gap-3 md:grid-cols-2">
                   {[
@@ -3252,7 +3295,7 @@ function WarehouseAuditPanel({
                 </div>
                 <DialogFooter className="relative z-20 !m-0 shrink-0 rounded-none border-t bg-popover px-4 pt-3 pb-[max(1rem,env(safe-area-inset-bottom))] sm:px-6">
                   <Button variant="outline" onClick={() => { setDispositionOpen(false); setAutoCompletionPrompt(false); }}>{autoCompletionPrompt ? "Go back and edit" : "Cancel"}</Button>
-                  <Button disabled={finishActionBlocked} onClick={() => void complete()}>{busy && <Loader2 className="size-4 animate-spin" />}{autoCompletionPrompt ? "Post inventory" : isPurchaseOrderRecount ? "Complete PO recount" : isLinkedPurchaseOrderReceipt ? closeShortPurchaseOrder ? "Post receipt & close PO" : dispositionType === "fulfill_orders" ? "Post receipt & allocate remaining" : "Post receipt" : isLiveSellingAudit ? "Apply & prepare live item" : isEbayOneTimeAudit ? "Apply & create shadows" : dispositionType === "fulfill_orders" ? "Receive & use for open orders" : dispositionType === "transfer" ? "Apply & transfer" : dispositionType === "return_to_supplier" ? "Create supplier return draft(s)" : isReceivingAudit ? "Receive & stock" : "Apply & stock"}</Button>
+                  <Button disabled={finishActionBlocked} onClick={() => void complete()}>{busy && <Loader2 className="size-4 animate-spin" />}{autoCompletionPrompt ? "Post inventory" : isPurchaseOrderRecount ? "Complete PO recount" : isLinkedPurchaseOrderReceipt ? closeShortPurchaseOrder ? "Post receipt & close PO" : selectedPurchaseOrderBackorderUnits > 0 ? "Post partial receipt & keep PO open" : dispositionType === "fulfill_orders" ? "Post receipt & allocate remaining" : "Post receipt" : isLiveSellingAudit ? "Apply & prepare live item" : isEbayOneTimeAudit ? "Apply & create shadows" : dispositionType === "fulfill_orders" ? "Receive & use for open orders" : dispositionType === "transfer" ? "Apply & transfer" : dispositionType === "return_to_supplier" ? "Create supplier return draft(s)" : isReceivingAudit ? "Receive & stock" : "Apply & stock"}</Button>
                 </DialogFooter>
               </DialogContent>
             </Dialog>

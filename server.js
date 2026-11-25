@@ -13120,6 +13120,7 @@ function addInventoryLedger(db, item, event = {}) {
     referenceNumber: event.referenceNumber || "",
     sourcePurchaseOrderId: event.sourcePurchaseOrderId || "",
     sourcePurchaseOrderNumber: event.sourcePurchaseOrderNumber || "",
+    sourcePurchaseOrderLineId: event.sourcePurchaseOrderLineId || "",
     sourceAuditId: event.sourceAuditId || "",
     sourceAuditNumber: event.sourceAuditNumber || "",
     liveSessionId: event.liveSessionId || "",
@@ -13131,6 +13132,10 @@ function addInventoryLedger(db, item, event = {}) {
     warehouseId: event.warehouseId || "",
     warehouseName: event.warehouseName || "",
     locationBin: event.locationBin || "",
+    unitCost: Number.isFinite(Number(event.unitCost)) ? Number(event.unitCost) : null,
+    costSource: event.costSource || "",
+    isFreeItem: event.isFreeItem === true,
+    freeItemReason: event.freeItemReason || "",
     quantityChange,
     reservedChange,
     qtyBefore,
@@ -14199,7 +14204,8 @@ function normalizeManualPurchaseOrderItems(rawItems = [], options = {}) {
     const qty = Number.isFinite(requestedQty) && requestedQty > 0 && purchaseMultiple > 1
       ? Math.ceil(requestedQty / purchaseMultiple) * purchaseMultiple
       : requestedQty;
-    const estimatedUnitCost = Number(raw?.estimatedUnitCost ?? raw?.unitCost ?? raw?.cost ?? 0);
+    const isFreeItem = raw?.isFreeItem === true;
+    const estimatedUnitCost = isFreeItem ? 0 : Number(raw?.estimatedUnitCost ?? raw?.unitCost ?? raw?.cost ?? 0);
     if (!allowIncompleteDraft && !requestedSku && !unresolvedCatalogLine) throw new Error(`Enter a SKU for line ${index + 1}.`);
     const lineLabel = requestedSku || String(raw?.vendorSku || raw?.manufacturerPartNumber || `line ${index + 1}`);
     if (!allowIncompleteDraft && (!Number.isFinite(qty) || qty <= 0)) throw new Error(`Enter a quantity greater than zero for ${lineLabel}.`);
@@ -14223,6 +14229,11 @@ function normalizeManualPurchaseOrderItems(rawItems = [], options = {}) {
       supplierUom: String(raw?.supplierUom || raw?.uom || "EA").trim() || "EA",
       supplierUomQty: positivePurchaseInteger(raw?.supplierUomQty || raw?.uomQty, 1),
       estimatedUnitCost: Number.isFinite(estimatedUnitCost) ? estimatedUnitCost : 0,
+      unitCost: Number.isFinite(estimatedUnitCost) ? estimatedUnitCost : 0,
+      isFreeItem,
+      freeItemReason: isFreeItem ? String(raw?.freeItemReason || "Supplier promotion / minimum purchase").trim() : "",
+      costSource: isFreeItem ? "supplier_free_item" : String(raw?.costSource || "").trim(),
+      costStatus: isFreeItem ? "confirmed" : String(raw?.costStatus || "").trim(),
       receivedQty: Math.max(0, Number(raw?.receivedQty || 0)),
       remainingQty: Math.max(0, (Number.isFinite(qty) ? qty : 0) - Math.max(0, Number(raw?.receivedQty || 0))),
       source,
@@ -15269,8 +15280,6 @@ function updatePurchaseOrderLineCost(po = {}, orders = [], product = null, body 
   if (terminalPoStatuses.has(String(po.status || "").toLowerCase())) {
     throw new Error("Closed or completed purchase orders keep their recorded cost history and cannot be repriced.");
   }
-  const unitCost = Number(body.unitCost);
-  if (!Number.isFinite(unitCost) || unitCost < 0) throw new Error("Enter a valid unit cost of zero or greater.");
   const routeId = String(body.routeId || "").trim();
   const requestedIndex = Number(body.lineIndex);
   const lineIndex = (po.items || []).findIndex((line, index) => routeId
@@ -15278,15 +15287,26 @@ function updatePurchaseOrderLineCost(po = {}, orders = [], product = null, body 
     : Number.isInteger(requestedIndex) && requestedIndex === index);
   if (lineIndex < 0) throw new Error("Purchase order line not found.");
   const line = po.items[lineIndex];
+  const isFreeItem = body.isFreeItem === undefined ? line.isFreeItem === true : body.isFreeItem === true;
+  const unitCost = isFreeItem ? 0 : Number(body.unitCost);
+  if (!Number.isFinite(unitCost) || unitCost < 0) throw new Error("Enter a valid unit cost of zero or greater.");
   const previousCost = Number(line.unitCost ?? line.estimatedUnitCost ?? 0);
+  const wasFreeItem = line.isFreeItem === true;
   const now = new Date().toISOString();
   const user = body.user || "Luis";
-  const scope = String(body.scope || "po_order_only").toLowerCase() === "catalog_forward" ? "catalog_forward" : "po_order_only";
+  const freeItemReason = isFreeItem ? String(body.freeItemReason || line.freeItemReason || "Supplier promotion / minimum purchase").trim() : "";
+  const scope = !isFreeItem && String(body.scope || "po_order_only").toLowerCase() === "catalog_forward" ? "catalog_forward" : "po_order_only";
   line.unitCost = unitCost;
   line.estimatedUnitCost = unitCost;
+  line.isFreeItem = isFreeItem;
+  line.freeItemReason = freeItemReason;
+  line.costSource = isFreeItem ? "supplier_free_item" : "buyer_po_update";
+  line.costStatus = "confirmed";
+  line.costConfirmedAt = now;
+  line.costConfirmedBy = user;
   line.costUpdatedAt = now;
   line.costUpdatedBy = user;
-  line.costHistory = [...(Array.isArray(line.costHistory) ? line.costHistory : []).slice(-49), { previousCost, unitCost, updatedAt: now, updatedBy: user, source: "buyer_po_update" }];
+  line.costHistory = [...(Array.isArray(line.costHistory) ? line.costHistory : []).slice(-49), { previousCost, unitCost, previousFreeItem: wasFreeItem, isFreeItem, freeItemReason, updatedAt: now, updatedBy: user, source: line.costSource }];
   po.estimatedCost = (po.items || []).reduce((sum, item) => sum + Math.max(0, Number(item.qty || 0)) * Math.max(0, Number(item.unitCost ?? item.estimatedUnitCost ?? 0)), 0);
   po.openEstimatedCost = (po.items || []).reduce((sum, item) => sum + purchaseOrderOpenQuantity(item) * Math.max(0, Number(item.unitCost ?? item.estimatedUnitCost ?? 0)), 0);
   po.updatedAt = now;
@@ -15309,11 +15329,23 @@ function updatePurchaseOrderLineCost(po = {}, orders = [], product = null, body 
     if (orderLineIndex < 0) continue;
     orderItems[orderLineIndex].unitCost = unitCost;
     orderItems[orderLineIndex].cost = unitCost;
+    orderItems[orderLineIndex].isFreeItem = isFreeItem;
+    orderItems[orderLineIndex].freeItemReason = freeItemReason;
+    orderItems[orderLineIndex].costSource = line.costSource;
+    orderItems[orderLineIndex].costStatus = "confirmed";
+    orderItems[orderLineIndex].costConfirmedAt = now;
+    orderItems[orderLineIndex].costConfirmedBy = user;
+    orderItems[orderLineIndex].purchaseOrderId = po.id || "";
+    orderItems[orderLineIndex].purchaseOrderLineId = line.id || "";
     orderItems[orderLineIndex].costUpdatedAt = now;
     orderItems[orderLineIndex].costUpdatedBy = user;
     order.items = orderItems;
     if (route) {
       route.unitCost = unitCost;
+      route.isFreeItem = isFreeItem;
+      route.freeItemReason = freeItemReason;
+      route.costSource = line.costSource;
+      route.costStatus = "confirmed";
       route.updatedAt = now;
     }
     order.productCost = orderItems.reduce((sum, item) => sum + Math.max(0, Number(item.qty || 0)) * Math.max(0, Number(item.unitCost ?? item.cost ?? 0)), 0);
@@ -15336,10 +15368,12 @@ function updatePurchaseOrderLineCost(po = {}, orders = [], product = null, body 
   }
   const feeResult = applyDropshipPurchaseOrderFees(po, null, orders);
   for (const order of feeResult.updatedOrders) if (!updatedOrders.includes(order)) updatedOrders.push(order);
-  const scopeMessage = productUpdated
+  const scopeMessage = isFreeItem
+    ? "The zero cost was confirmed as a supplier free item for this PO and linked open order"
+    : productUpdated
     ? "The linked open order and catalog cost going forward were updated"
     : "Only this PO and its linked open order were updated";
-  addPoTimeline(po, { type: "cost", title: "PO line cost updated", message: `${line.sku || "PO line"} unit cost changed from ${previousCost.toFixed(2)} to ${unitCost.toFixed(2)}. ${scopeMessage}; closed orders were preserved.`, user });
+  addPoTimeline(po, { type: "cost", title: isFreeItem ? "Supplier free item confirmed" : wasFreeItem ? "Supplier free item removed" : "PO line cost updated", message: `${line.sku || "PO line"} unit cost changed from ${previousCost.toFixed(2)} to ${unitCost.toFixed(2)}. ${scopeMessage}; closed orders were preserved.${freeItemReason ? ` Reason: ${freeItemReason}.` : ""}`, user });
   return { line, lineIndex, previousCost, unitCost, scope, product, productUpdated, updatedOrders, skippedClosedOrders, customerPaid: purchaseOrderLineCustomerPaid(line, orders) };
 }
 
@@ -16332,6 +16366,8 @@ function recordPurchaseOrderAmendment(po, before, reason, user) {
         qty: Number(line.qty || 0),
         receivedQty: Number(line.receivedQty || 0),
         unitCost: Number(line.unitCost ?? line.estimatedUnitCost ?? 0),
+        isFreeItem: line.isFreeItem === true,
+        freeItemReason: String(line.freeItemReason || ""),
         uom: String(line.uom || ""),
         uomQty: positivePurchaseInteger(line.uomQty, 1)
       }))
@@ -16497,6 +16533,82 @@ function validatePurchaseOrderReceiptLines(po = {}, receivedLines = []) {
     }
   }
   return "";
+}
+
+function purchaseOrderReceiptQuantitiesByLine(po = {}, receivedLines = []) {
+  const quantities = new Map();
+  for (const input of Array.isArray(receivedLines) ? receivedLines : []) {
+    const qty = Math.max(0, Number(input.qtyReceived || 0));
+    if (!qty || input.extraItem === true) continue;
+    const line = findPurchaseOrderReceiptLine(po, input);
+    if (line) quantities.set(line, Number(quantities.get(line) || 0) + qty);
+  }
+  return quantities;
+}
+
+function validatePurchaseOrderBackorders(po = {}, receivedLines = [], requestedBackorders = []) {
+  const receivedByLine = purchaseOrderReceiptQuantitiesByLine(po, receivedLines);
+  for (const input of Array.isArray(requestedBackorders) ? requestedBackorders : []) {
+    const qty = Number(input.qtyBackordered ?? input.backorderedQty ?? input.qty ?? 0);
+    if (!Number.isFinite(qty) || qty < 0) return "Enter a valid backorder quantity of zero or greater.";
+    const line = findPurchaseOrderReceiptLine(po, input);
+    if (!line) return `SKU ${String(input.sku || "unknown")} is not an open line on this purchase order.`;
+    const remainingAfterReceipt = Math.max(0, purchaseOrderOpenQuantity(line) - Number(receivedByLine.get(line) || 0));
+    if (qty > remainingAfterReceipt) {
+      return `Cannot backorder ${qty} units of ${String(line.sku || "this line")}; only ${remainingAfterReceipt} remain after this receipt.`;
+    }
+  }
+  return "";
+}
+
+function applyPurchaseOrderReceiptBackorders(po = {}, requestedBackorders = [], receipt = null, options = {}) {
+  const now = String(options.updatedAt || new Date().toISOString());
+  const user = String(options.user || "Warehouse");
+  const note = String(options.note || "").trim();
+  const requested = new Map();
+  for (const input of Array.isArray(requestedBackorders) ? requestedBackorders : []) {
+    const line = findPurchaseOrderReceiptLine(po, input);
+    if (!line) continue;
+    requested.set(line, Math.max(0, Number(input.qtyBackordered ?? input.backorderedQty ?? input.qty ?? 0)));
+  }
+  const lines = [];
+  for (const [lineIndex, line] of (Array.isArray(po.items) ? po.items : []).entries()) {
+    const openQty = purchaseOrderOpenQuantity(line);
+    const backorderedQty = requested.has(line)
+      ? Math.min(openQty, Number(requested.get(line) || 0))
+      : Math.min(openQty, Math.max(0, Number(line.backorderedQty || 0)));
+    line.backorderedQty = backorderedQty;
+    if (backorderedQty > 0) {
+      line.supplierDisposition = "backordered";
+      line.backorderStatus = "open";
+      line.backorderedAt = now;
+      line.backorderedBy = user;
+      line.backorderNote = note;
+      lines.push({
+        lineIndex,
+        purchaseOrderLineId: String(line.id || ""),
+        routeId: String(line.routeId || ""),
+        orderId: String(line.orderId || ""),
+        orderNumber: String(line.orderNumber || ""),
+        sku: String(line.sku || ""),
+        title: String(line.title || line.sku || "PO line"),
+        qty: backorderedQty
+      });
+    } else {
+      if (line.supplierDisposition === "backordered") line.supplierDisposition = "";
+      line.backorderStatus = "";
+      line.backorderNote = "";
+    }
+  }
+  const totalUnits = lines.reduce((sum, line) => sum + Number(line.qty || 0), 0);
+  po.backorderedUnits = totalUnits;
+  po.hasBackorderedItems = totalUnits > 0;
+  po.backorderUpdatedAt = now;
+  po.backorderUpdatedBy = user;
+  if (receipt && typeof receipt === "object") {
+    receipt.backorder = totalUnits > 0 ? { status: "open", totalUnits, lines, updatedAt: now, updatedBy: user, note } : null;
+  }
+  return { status: totalUnits > 0 ? "open" : "cleared", totalUnits, lines };
 }
 
 function openPurchaseOrderExpectationsFromState(purchaseOrders = [], skus = [], excludePurchaseOrderId = "") {
@@ -36502,6 +36614,23 @@ async function completePrintedPurchasedShipment(db, order, shipment, actor = "Wa
         continue;
       }
       const inventoryQty = completedLine.qty * orderLineInventoryMultiplier(orderLine, inventory);
+      let remainingCostLotQty = inventoryQty;
+      let consumedFreeItemQty = 0;
+      let consumedFreeItemSource = null;
+      for (const route of order.fulfillmentRoutes || []) {
+        if (remainingCostLotQty <= 0) break;
+        const routeMatchesLine = Number(route.lineIndex) === Number(completedLine.lineIndex)
+          || (route.lineIndex == null && String(route.sku || "").trim().toLowerCase() === String(completedLine.sku || "").trim().toLowerCase());
+        if (!routeMatchesLine || String(route.type || "").toLowerCase() !== "warehouse" || !Array.isArray(route.costLotAssignments)) continue;
+        const consumed = consumeSupplierFreeItemLotAssignments(inventory, route.costLotAssignments, remainingCostLotQty);
+        if (consumed.quantity > 0) {
+          consumedFreeItemQty += consumed.quantity;
+          remainingCostLotQty -= consumed.quantity;
+          route.freeItemConsumedQty = Math.max(0, Number(route.freeItemConsumedQty || 0)) + consumed.quantity;
+          route.costLotConsumedAt = completedAt;
+          consumedFreeItemSource = consumedFreeItemSource || route.costLotAssignments.find((assignment) => Number(assignment.consumedQty || 0) > 0) || null;
+        }
+      }
       const stockRow = ensureInventoryWarehouseStock(inventory, warehouse);
       const qtyBefore = Number(stockRow.qty || 0);
       const reservedBefore = Number(stockRow.reserved || 0);
@@ -36519,6 +36648,14 @@ async function completePrintedPurchasedShipment(db, order, shipment, actor = "Wa
         warehouseId: warehouse.id,
         warehouseName: warehouse.name,
         locationBin: stockRow.locationBin || "",
+        receiptId: String(consumedFreeItemSource?.receiptId || ""),
+        receiptNumber: String(consumedFreeItemSource?.receiptNumber || ""),
+        sourcePurchaseOrderId: String(consumedFreeItemSource?.purchaseOrderId || ""),
+        sourcePurchaseOrderNumber: String(consumedFreeItemSource?.purchaseOrderNumber || ""),
+        unitCost: consumedFreeItemQty > 0 ? 0 : null,
+        costSource: consumedFreeItemQty > 0 ? "supplier_free_item" : "",
+        isFreeItem: consumedFreeItemQty > 0,
+        freeItemReason: consumedFreeItemQty > 0 ? String(consumedFreeItemSource?.freeItemReason || "Supplier promotion / minimum purchase") : "",
         quantityChange: Number(stockRow.qty || 0) - qtyBefore,
         reservedChange: Number(stockRow.reserved || 0) - reservedBefore,
         qtyBefore,
@@ -40790,6 +40927,83 @@ function openLineQuantity(line = {}, routes = []) {
   return Math.max(0, Number(line.qty || 0) - committed);
 }
 
+function reserveSupplierFreeItemLots(product = {}, warehouse = {}, quantity = 0, options = {}) {
+  const requested = Math.max(0, Number(quantity || 0));
+  if (!requested) return { quantity: 0, assignments: [], reason: "" };
+  product.inventoryCostLots = Array.isArray(product.inventoryCostLots) ? product.inventoryCostLots : [];
+  const warehouseId = String(warehouse.id || "");
+  const preferredReceiptId = String(options.preferredReceiptId || "");
+  const lots = product.inventoryCostLots.filter((lot) => lot?.isFreeItem === true
+    && (!warehouseId || !lot.warehouseId || String(lot.warehouseId) === warehouseId)
+    && Math.max(0, Number(lot.availableQty ?? lot.quantityAvailable ?? 0)) > 0)
+    .sort((left, right) => Number(String(right.receiptId || "") === preferredReceiptId) - Number(String(left.receiptId || "") === preferredReceiptId)
+      || String(left.receivedAt || left.createdAt || "").localeCompare(String(right.receivedAt || right.createdAt || "")));
+  let remaining = requested;
+  const assignments = [];
+  for (const lot of lots) {
+    if (remaining <= 0) break;
+    const available = Math.max(0, Number(lot.availableQty ?? lot.quantityAvailable ?? 0));
+    const assigned = Math.min(remaining, available);
+    if (!assigned) continue;
+    lot.availableQty = available - assigned;
+    lot.quantityAvailable = lot.availableQty;
+    lot.reservedQty = Math.max(0, Number(lot.reservedQty || 0)) + assigned;
+    lot.updatedAt = new Date().toISOString();
+    assignments.push({ lotId: String(lot.id || ""), receiptId: String(lot.receiptId || ""), receiptNumber: String(lot.receiptNumber || ""), purchaseOrderId: String(lot.purchaseOrderId || ""), purchaseOrderNumber: String(lot.purchaseOrderNumber || ""), quantity: assigned, unitCost: 0, isFreeItem: true, freeItemReason: String(lot.freeItemReason || "Supplier promotion / minimum purchase") });
+    remaining -= assigned;
+  }
+  return { quantity: requested - remaining, assignments, reason: String(assignments[0]?.freeItemReason || "") };
+}
+
+function updateSupplierFreeItemLotAssignments(product = {}, assignments = [], quantity = 0, action = "release") {
+  const requested = Math.max(0, Number(quantity || 0));
+  if (!requested || !Array.isArray(assignments) || !assignments.length) return { quantity: 0, assignments: [] };
+  product.inventoryCostLots = Array.isArray(product.inventoryCostLots) ? product.inventoryCostLots : [];
+  let remaining = requested;
+  const updated = [];
+  for (const assignment of assignments) {
+    if (remaining <= 0) break;
+    const assignedQty = Math.max(0, Number(assignment.quantity || 0));
+    const alreadyProcessed = Math.max(0, Number(assignment.consumedQty || 0)) + Math.max(0, Number(assignment.releasedQty || 0));
+    const assignmentRemaining = Math.max(0, assignedQty - alreadyProcessed);
+    if (!assignmentRemaining) continue;
+    const lot = product.inventoryCostLots.find((candidate) => String(candidate.id || "") === String(assignment.lotId || ""))
+      || product.inventoryCostLots.find((candidate) => String(candidate.receiptId || "") === String(assignment.receiptId || "")
+        && String(candidate.purchaseOrderLineId || "") === String(assignment.purchaseOrderLineId || candidate.purchaseOrderLineId || ""));
+    if (!lot) continue;
+    const reservedQty = Math.max(0, Number(lot.reservedQty || 0));
+    const availableQty = Math.max(0, Number(lot.availableQty ?? lot.quantityAvailable ?? 0));
+    const consumedQty = Math.max(0, Number(lot.consumedQty || 0));
+    const totalQty = Math.max(0, Number(lot.quantityReceived || lot.quantity || 0), availableQty + reservedQty + consumedQty);
+    const processedQty = Math.min(remaining, assignmentRemaining, reservedQty);
+    if (!processedQty) continue;
+    lot.reservedQty = reservedQty - processedQty;
+    if (action === "consume") {
+      lot.consumedQty = Math.max(0, Number(lot.consumedQty || 0)) + processedQty;
+      assignment.consumedQty = Math.max(0, Number(assignment.consumedQty || 0)) + processedQty;
+    } else {
+      const maximumAvailable = Math.max(0, totalQty - consumedQty - lot.reservedQty);
+      lot.availableQty = Math.min(maximumAvailable, availableQty + processedQty);
+      lot.quantityAvailable = lot.availableQty;
+      assignment.releasedQty = Math.max(0, Number(assignment.releasedQty || 0)) + processedQty;
+    }
+    const now = new Date().toISOString();
+    lot.updatedAt = now;
+    assignment.updatedAt = now;
+    updated.push({ lotId: String(lot.id || ""), quantity: processedQty, action });
+    remaining -= processedQty;
+  }
+  return { quantity: requested - remaining, assignments: updated };
+}
+
+function releaseSupplierFreeItemLotAssignments(product = {}, assignments = [], quantity = 0) {
+  return updateSupplierFreeItemLotAssignments(product, assignments, quantity, "release");
+}
+
+function consumeSupplierFreeItemLotAssignments(product = {}, assignments = [], quantity = 0) {
+  return updateSupplierFreeItemLotAssignments(product, assignments, quantity, "consume");
+}
+
 function createWorkflowRoute(order, input = {}) {
   order.fulfillmentRoutes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes : [];
   const existing = order.fulfillmentRoutes.find((route) => route.lineIndex === input.lineIndex
@@ -40801,6 +41015,17 @@ function createWorkflowRoute(order, input = {}) {
     existing.qty = Number(existing.qty || 0) + Number(input.qty || 0);
     if (Number(input.inventoryQty || 0) > 0) existing.inventoryQty = Number(existing.inventoryQty || 0) + Number(input.inventoryQty || 0);
     if (Number(input.inventoryMultiplier || 0) > 0) existing.inventoryMultiplier = Number(input.inventoryMultiplier);
+    if (Number(input.freeItemQty || 0) > 0) {
+      existing.isFreeItem = true;
+      existing.freeItemQty = Number(existing.freeItemQty || 0) + Number(input.freeItemQty || 0);
+      existing.freeItemReason = input.freeItemReason || existing.freeItemReason || "Supplier promotion / minimum purchase";
+      existing.costSource = "supplier_free_item";
+      existing.costLotAssignments = [...(Array.isArray(existing.costLotAssignments) ? existing.costLotAssignments : []), ...(Array.isArray(input.costLotAssignments) ? input.costLotAssignments : [])];
+    }
+    if (input.sourceReceiptId) {
+      existing.sourceReceiptId = input.sourceReceiptId;
+      existing.sourceReceiptNumber = input.sourceReceiptNumber || existing.sourceReceiptNumber || "";
+    }
     existing.updatedAt = new Date().toISOString();
     return existing;
   }
@@ -40966,6 +41191,7 @@ async function releaseOrderWarehouseReservations(db, order, options = {}) {
       const releaseQty = Math.min(reservedBefore, Math.max(0, Number(route.inventoryQty || route.qty || route.quantity || 0)));
       if (releaseQty > 0) {
         stock.reserved = Math.max(0, reservedBefore - releaseQty);
+        releaseSupplierFreeItemLotAssignments(product, route.costLotAssignments, releaseQty);
         stock.updatedAt = now;
         syncInventoryTotalsFromWarehouses(product);
         product.updatedAt = now;
@@ -41025,6 +41251,7 @@ async function releaseExpiredWarehouseReservations(db, order, options = {}) {
       const releaseQty = Math.min(reservedBefore, Math.max(0, Number(route.inventoryQty || route.qty || route.quantity || 0)));
       if (releaseQty > 0) {
         stock.reserved = Math.max(0, reservedBefore - releaseQty);
+        releaseSupplierFreeItemLotAssignments(product, route.costLotAssignments, releaseQty);
         stock.updatedAt = now;
         syncInventoryTotalsFromWarehouses(product);
         product.updatedAt = now;
@@ -41706,6 +41933,9 @@ async function applyReceiptAllocation(db, product, warehouse, receipt, options =
     if (available <= 0) break;
     const qty = Math.min(available, Number(candidate.qty || 0));
     if (!qty) continue;
+    const freeLotAllocation = reserveSupplierFreeItemLots(product, warehouse, qty, { preferredReceiptId: receipt.id });
+    const freeItemQty = Math.min(qty, freeLotAllocation.quantity);
+    const receiptFreeItemReason = String(freeLotAllocation.reason || "Supplier promotion / minimum purchase");
     const order = candidate.order;
     let releaseRemaining = qty;
     for (const route of candidate.purchaseRoutes) {
@@ -41744,13 +41974,13 @@ async function applyReceiptAllocation(db, product, warehouse, receipt, options =
     stock.reserved = Number(stock.reserved || 0) + qty;
     stock.updatedAt = now;
     order.inventoryAllocations = Array.isArray(order.inventoryAllocations) ? order.inventoryAllocations : [];
-    order.inventoryAllocations.push({ id: crypto.randomUUID(), sku: product.sku, productId: product.id, warehouseId: warehouse.id, warehouseName: warehouse.name, qty, status: "reserved", assignedAt: now, receiptId: receipt.id, receiptNumber: receipt.receiptNumber, note: `Allocated from ${receipt.receiptNumber}` });
-    createWorkflowRoute(order, { type: "warehouse", status: "allocated", lineIndex: candidate.lineIndex, sku: candidate.sku, title: candidate.title, qty, warehouseId: warehouse.id, warehouseName: warehouse.name, productId: product.id, sourceReceiptId: receipt.id, sourceReceiptNumber: receipt.receiptNumber, reservationExpiresAt: warehouseReservationExpiryAt(orderRuntimeSettings(db)) });
+    order.inventoryAllocations.push({ id: crypto.randomUUID(), sku: product.sku, productId: product.id, warehouseId: warehouse.id, warehouseName: warehouse.name, qty, status: "reserved", assignedAt: now, receiptId: receipt.id, receiptNumber: receipt.receiptNumber, isFreeItem: freeItemQty > 0, freeItemQty, freeItemReason: freeItemQty > 0 ? receiptFreeItemReason : "", costSource: freeItemQty > 0 ? "supplier_free_item" : "", costLotAssignments: freeLotAllocation.assignments, note: `Allocated from ${receipt.receiptNumber}` });
+    createWorkflowRoute(order, { type: "warehouse", status: "allocated", lineIndex: candidate.lineIndex, sku: candidate.sku, title: candidate.title, qty, warehouseId: warehouse.id, warehouseName: warehouse.name, productId: product.id, sourceReceiptId: receipt.id, sourceReceiptNumber: receipt.receiptNumber, isFreeItem: freeItemQty > 0, freeItemQty, freeItemReason: freeItemQty > 0 ? receiptFreeItemReason : "", costSource: freeItemQty > 0 ? "supplier_free_item" : "", costLotAssignments: freeLotAllocation.assignments, reservationExpiresAt: warehouseReservationExpiryAt(orderRuntimeSettings(db)) });
     order.reservedQty = (order.inventoryAllocations || []).filter((entry) => entry.status !== "released").reduce((sum, entry) => sum + Number(entry.qty || 0), 0);
     order.reservationWarehouseId = warehouse.id;
     order.reservationWarehouseName = warehouse.name;
     order.reservedAt = now;
-    addInventoryLedger(db, product, { type: "receipt_order_allocation", source: "warehouse_receiving", referenceId: order.id, referenceNumber: order.orderNumber || order.id, warehouseId: warehouse.id, warehouseName: warehouse.name, locationBin: stock.locationBin || "", quantityChange: 0, reservedChange: qty, qtyBefore: Number(stock.qty || 0), qtyAfter: Number(stock.qty || 0), reservedBefore: Number(stock.reserved || 0) - qty, reservedAfter: Number(stock.reserved || 0), reason: `${receipt.receiptNumber} allocated to ${order.orderNumber || order.id}`, user: options.user || "Warehouse" });
+    addInventoryLedger(db, product, { type: "receipt_order_allocation", source: "warehouse_receiving", referenceId: order.id, referenceNumber: order.orderNumber || order.id, receiptId: receipt.id, receiptNumber: receipt.receiptNumber, warehouseId: warehouse.id, warehouseName: warehouse.name, locationBin: stock.locationBin || "", unitCost: freeItemQty > 0 ? 0 : null, costSource: freeItemQty > 0 ? "supplier_free_item" : "", isFreeItem: freeItemQty > 0, freeItemReason: freeItemQty > 0 ? receiptFreeItemReason : "", quantityChange: 0, reservedChange: qty, qtyBefore: Number(stock.qty || 0), qtyAfter: Number(stock.qty || 0), reservedBefore: Number(stock.reserved || 0) - qty, reservedAfter: Number(stock.reserved || 0), reason: `${receipt.receiptNumber} allocated to ${order.orderNumber || order.id}${freeItemQty > 0 ? `; ${freeItemQty} supplier free item unit${freeItemQty === 1 ? "" : "s"}` : ""}`, user: options.user || "Warehouse" });
     addOrderWorkflowEvent(order, { step: "receipt_stock_allocation", title: "Received stock allocated", message: `${qty} unit${qty === 1 ? " was" : "s were"} reserved from ${warehouse.name} after ${receipt.receiptNumber}.`, user: options.user || "Warehouse" });
     recalculateOrderOperationalStatus(order);
     order.updatedAt = now;
@@ -43122,6 +43352,16 @@ async function routeOrderForFulfillment(db, order, body = {}) {
   const resetRoutes = resetReroutableReviewRoutes(order, db, { force: body.force === true, user: body.user || "System" });
   const expiredReservations = await releaseExpiredWarehouseReservations(db, order, { user: body.user || "System" });
   const created = []; const touchedProducts = [...expiredReservations.touchedProducts]; const pooledRequirements = [];
+  const sourceReceiptFreeItems = new Map();
+  for (const item of Array.isArray(body.sourceReceiptItems) ? body.sourceReceiptItems : []) {
+    if (item?.isFreeItem !== true) continue;
+    const key = String(item.sku || "").trim().toLowerCase();
+    if (!key) continue;
+    const current = sourceReceiptFreeItems.get(key) || { qty: 0, reason: "Supplier promotion / minimum purchase" };
+    current.qty += Math.max(0, Number(item.inventoryQtyReceived || item.qtyReceived || 0));
+    current.reason = String(item.freeItemReason || current.reason);
+    sourceReceiptFreeItems.set(key, current);
+  }
   order.routingExplanation = Array.isArray(order.routingExplanation) ? order.routingExplanation : [];
   for (let lineIndex = 0; lineIndex < orderLineItems(order).length; lineIndex += 1) {
     const line = orderLineItems(order)[lineIndex];
@@ -43246,6 +43486,14 @@ async function routeOrderForFulfillment(db, order, body = {}) {
         const qty = Math.min(remaining, Math.floor(candidate.available / candidateMultiplier));
         const inventoryQty = qty * candidateMultiplier;
         if (!qty) continue;
+        const freeLotAllocation = reserveSupplierFreeItemLots(candidate.product, warehouse, inventoryQty, { preferredReceiptId: body.sourceReceiptId });
+        const freeItemKey = [candidate.product.sku, line.sku, importedSku].map((value) => String(value || "").trim().toLowerCase()).find((key) => Number(sourceReceiptFreeItems.get(key)?.qty || 0) > 0) || "";
+        const freeItemSource = freeItemKey ? sourceReceiptFreeItems.get(freeItemKey) : null;
+        const fallbackFreeItemQty = freeLotAllocation.quantity > 0 || !freeItemSource ? 0 : Math.min(qty, Math.floor(Number(freeItemSource.qty || 0) / candidateMultiplier));
+        const freeItemQty = Math.min(qty, freeLotAllocation.quantity / candidateMultiplier + fallbackFreeItemQty);
+        const freeItemReason = String(freeLotAllocation.reason || freeItemSource?.reason || "");
+        if (freeItemSource && fallbackFreeItemQty > 0) freeItemSource.qty = Math.max(0, Number(freeItemSource.qty || 0) - fallbackFreeItemQty * candidateMultiplier);
+        const freeLotSource = freeLotAllocation.assignments[0] || null;
         candidate.stock.reserved = Number(candidate.stock.reserved || 0) + inventoryQty;
         candidate.stock.updatedAt = new Date().toISOString();
         syncInventoryTotalsFromWarehouses(candidate.product);
@@ -43262,7 +43510,13 @@ async function routeOrderForFulfillment(db, order, body = {}) {
           liveSessionId: line.liveSessionId || "",
           liveSessionNumber: line.liveSessionNumber || "",
           liveSessionItemId: line.liveSessionItemId || "",
-          ...(body.sourceReceiptId ? { sourceReceiptId: body.sourceReceiptId, sourceReceiptNumber: body.sourceReceiptNumber || "" } : {}),
+          isFreeItem: freeItemQty > 0,
+          freeItemQty,
+          freeItemInventoryQty: freeLotAllocation.quantity + fallbackFreeItemQty * candidateMultiplier,
+          freeItemReason: freeItemQty > 0 ? freeItemReason : "",
+          costSource: freeItemQty > 0 ? "supplier_free_item" : "",
+          costLotAssignments: freeLotAllocation.assignments,
+          ...((body.sourceReceiptId || freeLotSource?.receiptId) ? { sourceReceiptId: body.sourceReceiptId || freeLotSource?.receiptId || "", sourceReceiptNumber: body.sourceReceiptNumber || freeLotSource?.receiptNumber || "" } : {}),
           reservationExpiresAt: warehouseReservationExpiryAt(systemSettings)
         }));
         explanation.decisions.push({
@@ -43272,7 +43526,7 @@ async function routeOrderForFulfillment(db, order, body = {}) {
             ? (plan.matchedRule ? `Matched routing rule ${plan.matchedRule.name}.` : "Selected by channel warehouse priority and available stock.")
             : `Used related managed SKU ${candidate.product.sku} because it has physical stock for the same product identity.`
         });
-        addInventoryLedger(db, candidate.product, { type: "workflow_reservation", source: "order_workflow", referenceId: order.id, referenceNumber: order.orderNumber, liveSessionId: line.liveSessionId || "", liveSessionNumber: line.liveSessionNumber || "", warehouseId: warehouse.id, warehouseName: warehouse.name, quantityChange: 0, reservedChange: inventoryQty, reason: `Workflow allocation for ${order.orderNumber}: ${qty} sell unit${qty === 1 ? "" : "s"} (${inventoryQty} piece${inventoryQty === 1 ? "" : "s"}) from related SKU ${candidate.product.sku}`, user: body.user || "System" });
+        addInventoryLedger(db, candidate.product, { type: "workflow_reservation", source: "order_workflow", referenceId: order.id, referenceNumber: order.orderNumber, receiptId: body.sourceReceiptId || freeLotSource?.receiptId || "", receiptNumber: body.sourceReceiptNumber || freeLotSource?.receiptNumber || "", liveSessionId: line.liveSessionId || "", liveSessionNumber: line.liveSessionNumber || "", warehouseId: warehouse.id, warehouseName: warehouse.name, unitCost: freeItemQty > 0 ? 0 : null, costSource: freeItemQty > 0 ? "supplier_free_item" : "", isFreeItem: freeItemQty > 0, freeItemReason: freeItemQty > 0 ? freeItemReason : "", quantityChange: 0, reservedChange: inventoryQty, reason: `Workflow allocation for ${order.orderNumber}: ${qty} sell unit${qty === 1 ? "" : "s"} (${inventoryQty} piece${inventoryQty === 1 ? "" : "s"}) from related SKU ${candidate.product.sku}${freeItemQty > 0 ? `; ${freeItemQty} supplier free item unit${freeItemQty === 1 ? "" : "s"}` : ""}`, user: body.user || "System" });
         remaining -= qty;
         warehouseAllocated += qty;
       }
@@ -56730,7 +56984,7 @@ async function enrichOrderDetail(order = {}) {
   let itemRevenue = 0;
   let estimatedCogs = 0;
   const preserveHistoricalOrderCost = isTerminalCustomerDemand(order);
-  const enrichedLines = lines.map((line) => {
+  const enrichedLines = lines.map((line, lineIndex) => {
     const resolved = resolveOrderLineCatalogCost(order, line, localByKey);
     const { lineKeys, directProduct, product, ebayVariant, matchedVariant, matchedShadow, shadowUnitsPerPack } = resolved;
     const sellUnitQty = Number(matchedShadow ? shadowUnitsPerPack : matchedVariant?.uomQty || 1) || 1;
@@ -56740,8 +56994,12 @@ async function enrichOrderDetail(order = {}) {
       : resolved.unitCost || line.cost;
     const unitCost = Number(sourceUnitCost || 0);
     const quantity = Number(line.qty || 0);
+    const routeFreeItemQty = (order.fulfillmentRoutes || []).filter((route) => Number(route.lineIndex) === lineIndex
+      && !["canceled", "cancelled", "released", "void", "superseded_by_receipt_stock"].includes(String(route.status || "").toLowerCase()))
+      .reduce((sum, route) => sum + Math.max(0, Number(route.freeItemQty || (route.isFreeItem === true ? route.qty : 0) || 0)), 0);
+    const freeItemQty = Math.min(quantity, line.isFreeItem === true ? quantity : routeFreeItemQty);
     const revenue = Number(line.price || 0) * quantity;
-    const cogs = unitCost * quantity;
+    const cogs = unitCost * Math.max(0, quantity - freeItemQty);
     itemRevenue += revenue;
     estimatedCogs += cogs;
     return {
@@ -56782,7 +57040,11 @@ async function enrichOrderDetail(order = {}) {
         persistence: matchedShadow.persistence || { inventory: "parent", cost: "parent-piece", content: "parent" }
       } : null,
       sellUnitQty,
-      unitCost,
+      unitCost: freeItemQty >= quantity && quantity > 0 ? 0 : unitCost,
+      isFreeItem: freeItemQty > 0,
+      freeItemQty,
+      freeItemReason: String(line.freeItemReason || (order.fulfillmentRoutes || []).find((route) => Number(route.lineIndex) === lineIndex && Number(route.freeItemQty || 0) > 0)?.freeItemReason || ""),
+      costSource: freeItemQty > 0 ? "supplier_free_item" : line.costSource,
       revenue,
       estimatedCogs: cogs,
       grossProfit: revenue - cogs,
@@ -63629,6 +63891,10 @@ async function handleApi(req, res) {
         supplierCode: String(line.supplierCode || linkedPurchaseOrder.supplierCode || (productMatchesSupplier ? product.supplierCode : "") || ""),
         supplierSku: String(line.sourceSku || line.supplierSku || (productMatchesSupplier ? product.sourceSku : "") || line.sku || ""),
         unitCost: rawUnitCost === null || rawUnitCost === undefined || rawUnitCost === "" || !Number.isFinite(Number(rawUnitCost)) ? null : Number(rawUnitCost),
+        isFreeItem: line.isFreeItem === true,
+        freeItemReason: String(line.freeItemReason || ""),
+        costSource: String(line.costSource || ""),
+        backorderedQty: Math.max(0, Number(line.backorderedQty || 0)),
         orderedQty: Number(line.qty || 0),
         receivedQty: Number(line.receivedQty || 0),
         expectedQty: purchaseOrderOpenQuantity(line),
@@ -69713,18 +69979,23 @@ async function handleApi(req, res) {
           const hasRequestedUnitCost = item?.estimatedUnitCost !== undefined
             || item?.unitCost !== undefined
             || item?.cost !== undefined;
-          const requestedUnitCost = Number(item?.estimatedUnitCost ?? item?.unitCost ?? item?.cost);
+          const requestedFreeItem = item?.isFreeItem === undefined ? line.isFreeItem === true : item.isFreeItem === true;
+          const currentUnitCost = Number(line.unitCost ?? line.estimatedUnitCost ?? line.cost ?? 0);
+          const requestedUnitCost = requestedFreeItem ? 0 : Number(item?.estimatedUnitCost ?? item?.unitCost ?? item?.cost ?? currentUnitCost);
           if (hasRequestedUnitCost && (!Number.isFinite(requestedUnitCost) || requestedUnitCost < 0)) {
             return sendJson(res, 400, { error: `Enter a valid unit cost for ${line.sku || "this PO line"}.` });
           }
-          const currentUnitCost = Number(line.unitCost ?? line.estimatedUnitCost ?? line.cost ?? 0);
           const costChanged = hasRequestedUnitCost && Math.abs(currentUnitCost - requestedUnitCost) > 0.000001;
-          amendmentNeeded = amendmentNeeded || committed && (Number(line.qty || 0) !== qty || uomChanged || costChanged);
-          if (costChanged) {
+          const freeItemChanged = requestedFreeItem !== (line.isFreeItem === true)
+            || (requestedFreeItem && String(item?.freeItemReason || "Supplier promotion / minimum purchase").trim() !== String(line.freeItemReason || "").trim());
+          amendmentNeeded = amendmentNeeded || committed && (Number(line.qty || 0) !== qty || uomChanged || costChanged || freeItemChanged);
+          if (costChanged || freeItemChanged) {
             pendingLineCostChanges.push({
               lineIndex: (po.items || []).indexOf(line),
               orderId: String(line.orderId || "").trim(),
-              unitCost: requestedUnitCost
+              unitCost: requestedUnitCost,
+              isFreeItem: requestedFreeItem,
+              freeItemReason: requestedFreeItem ? String(item?.freeItemReason || "Supplier promotion / minimum purchase").trim() : ""
             });
           }
           line.qty = qty;
@@ -69782,6 +70053,8 @@ async function handleApi(req, res) {
         const result = updatePurchaseOrderLineCost(po, linkedOrders, null, {
           lineIndex: change.lineIndex,
           unitCost: change.unitCost,
+          isFreeItem: change.isFreeItem,
+          freeItemReason: change.freeItemReason,
           scope: "po_order_only",
           user: actor
         });
@@ -70679,6 +70952,13 @@ async function handleApi(req, res) {
     }
     const receiptValidationError = validatePurchaseOrderReceiptLines(po, receivedLines);
     if (receiptValidationError) return sendJson(res, 400, { error: receiptValidationError });
+    const requestedBackorders = Array.isArray(body.backorders) ? body.backorders : [];
+    const requestedBackorderUnitsForValidation = requestedBackorders.reduce((sum, item) => sum + Math.max(0, Number(item.qtyBackordered ?? item.backorderedQty ?? item.qty ?? 0)), 0);
+    if (body.closeRemaining === true && requestedBackorderUnitsForValidation > 0) {
+      return sendJson(res, 400, { error: "Choose either backorder or supplier short shipment for the unreceived balance, not both." });
+    }
+    const backorderValidationError = validatePurchaseOrderBackorders(po, receivedLines, requestedBackorders);
+    if (backorderValidationError) return sendJson(res, 400, { error: backorderValidationError });
     const extraExpectationRows = await postgres.findOpenPurchaseOrdersExpectingSkus(
       receivedLines.filter((line) => line.extraItem === true).map((line) => line.sku),
       { excludePurchaseOrderId: po.id }
@@ -70800,7 +71080,10 @@ async function handleApi(req, res) {
         orderId: String(poLine?.orderId || ""),
         title: product?.title || poLine?.title || sku,
         supplierName: String(line.supplierName || product?.supplier || po.supplier || ""),
-        unitCost: line.unitCost ?? line.cost ?? poLine?.estimatedUnitCost ?? poLine?.unitCost ?? poLine?.cost ?? product?.cost ?? null,
+        unitCost: poLine?.isFreeItem === true ? 0 : line.unitCost ?? line.cost ?? poLine?.estimatedUnitCost ?? poLine?.unitCost ?? poLine?.cost ?? product?.cost ?? null,
+        isFreeItem: poLine?.isFreeItem === true,
+        freeItemReason: String(poLine?.freeItemReason || ""),
+        costSource: poLine?.isFreeItem === true ? "supplier_free_item" : String(poLine?.costSource || ""),
         inventoryPurpose: normalizeInventoryPurpose(poLine?.inventoryPurpose, poPurpose.inventoryPurpose),
         liveChannel: normalizeLiveInventoryChannel(poLine?.liveChannel || poPurpose.liveChannel),
         qtyReceived,
@@ -70858,6 +71141,31 @@ async function handleApi(req, res) {
       product.stockStatus = varianceStatus === "damaged" ? "Received with damage" : "Received";
       product.stockUpdatedAt = receivedAt;
       product.updatedAt = new Date().toISOString();
+      if (poLine?.isFreeItem === true) {
+        product.inventoryCostLots = Array.isArray(product.inventoryCostLots) ? product.inventoryCostLots : [];
+        product.inventoryCostLots.push({
+          id: crypto.randomUUID(),
+          sku: product.sku,
+          receiptId: receipt.id,
+          receiptNumber: receipt.receiptNumber,
+          purchaseOrderId: po.id,
+          purchaseOrderNumber: po.poNumber,
+          purchaseOrderLineId: String(poLine.id || ""),
+          warehouseId: warehouse?.id || po.warehouseId || "",
+          warehouseName: warehouse?.name || po.warehouseName || "",
+          locationBin,
+          quantityReceived: inventoryQtyReceived,
+          quantityAvailable: inventoryQtyReceived,
+          availableQty: inventoryQtyReceived,
+          reservedQty: 0,
+          unitCost: 0,
+          costSource: "supplier_free_item",
+          isFreeItem: true,
+          freeItemReason: String(poLine.freeItemReason || "Supplier promotion / minimum purchase"),
+          receivedAt,
+          createdAt: new Date().toISOString()
+        });
+      }
       if (poLine) {
         poLine.receivedQty = Number(poLine.receivedQty || 0) + qtyReceived;
         poLine.remainingQty = purchaseOrderOpenQuantity(poLine);
@@ -70877,6 +71185,7 @@ async function handleApi(req, res) {
         referenceNumber: po.poNumber,
         sourcePurchaseOrderId: po.id,
         sourcePurchaseOrderNumber: po.poNumber,
+        sourcePurchaseOrderLineId: String(poLine?.id || ""),
         sourceAuditId,
         sourceAuditNumber: String(body.sourceAuditNumber || sourceAudit?.auditNumber || ""),
         inventoryPurpose: normalizeInventoryPurpose(poLine?.inventoryPurpose, poPurpose.inventoryPurpose),
@@ -70884,6 +71193,10 @@ async function handleApi(req, res) {
         warehouseId: warehouse?.id || po.warehouseId || "",
         warehouseName: warehouse?.name || po.warehouseName || "",
         locationBin,
+        unitCost: poLine?.isFreeItem === true ? 0 : receipt.items[receipt.items.length - 1].unitCost,
+        costSource: poLine?.isFreeItem === true ? "supplier_free_item" : String(poLine?.costSource || ""),
+        isFreeItem: poLine?.isFreeItem === true,
+        freeItemReason: String(poLine?.freeItemReason || ""),
         quantityChange: inventoryQtyReceived,
         qtyBefore,
         qtyAfter: Number(warehouseStockRow?.qty ?? product.qty),
@@ -70902,7 +71215,8 @@ async function handleApi(req, res) {
     const unresolvedHeldUnits = mode === "final" ? receipt.items.filter((item) => item.inventoryStatus === "held_unresolved").reduce((sum, item) => sum + Number(item.qtyReceived || 0), 0) : 0;
     receipt.unresolvedHeldUnits = unresolvedHeldUnits;
     receipt.extraItemUnits = extraItemUnits;
-    if (!totalReceived && !(mode === "final" && body.closeRemaining === true)) return sendJson(res, 400, { error: mode === "draft" ? "Enter at least one line to save a draft receipt." : "Enter at least one received quantity or choose to close the unreceived balance as a short shipment." });
+    const requestedBackorderUnits = requestedBackorders.reduce((sum, item) => sum + Math.max(0, Number(item.qtyBackordered ?? item.backorderedQty ?? item.qty ?? 0)), 0);
+    if (!totalReceived && !(mode === "final" && (body.closeRemaining === true || requestedBackorderUnits > 0))) return sendJson(res, 400, { error: mode === "draft" ? "Enter at least one line to save a draft receipt." : "Enter at least one received quantity, mark remaining units as backordered, or close the unreceived balance as a short shipment." });
     if (mode === "draft") {
       po.receiptDrafts = Array.isArray(po.receiptDrafts) ? po.receiptDrafts : [];
       po.receiptDrafts.unshift(receipt);
@@ -70928,6 +71242,7 @@ async function handleApi(req, res) {
     po.lastReceivedBy = receivingUser;
     po.receivedUnits = Number(po.receivedUnits || 0) + orderedReceivedUnits;
     po.extraReceivedUnits = Number(po.extraReceivedUnits || 0) + extraItemUnits;
+    const backorderResult = applyPurchaseOrderReceiptBackorders(po, requestedBackorders, receipt, { user: receivingUser, note, updatedAt: new Date().toISOString() });
     if (body.closeRemaining === true) {
       const shortClosedAt = new Date().toISOString();
       shortShipmentLines = (po.items || []).map((item, lineIndex) => {
@@ -70939,6 +71254,10 @@ async function handleApi(req, res) {
         item.shortClosedAt = shortClosedAt;
         item.shortClosedBy = receivingUser;
         item.shortCloseNote = note;
+        item.backorderedQty = 0;
+        item.backorderStatus = "";
+        item.backorderNote = "";
+        if (item.supplierDisposition === "backordered") item.supplierDisposition = "";
         return {
           lineIndex,
           routeId: String(item.routeId || ""),
@@ -70962,11 +71281,21 @@ async function handleApi(req, res) {
         po.closedAt = shortClosedAt;
         po.closedBy = receivingUser;
         po.closeReason = "supplier_short_shipment";
+        po.backorderedUnits = 0;
+        po.hasBackorderedItems = false;
+        receipt.backorder = null;
       }
     }
     const noOpenQuantity = (po.items || []).every((item) => purchaseOrderOpenQuantity(item) <= 0);
     const allOrderedUnitsReceived = (po.items || []).every((item) => Number(item.receivedQty || 0) >= Number(item.qty || 0));
-    if (orderedReceivedUnits > 0 || shortShipmentLines.length) po.status = shortShipmentLines.length ? "closed" : noOpenQuantity ? (allOrderedUnitsReceived ? "received" : "closed") : "partially_received";
+    const cumulativeOrderedReceivedUnits = (po.items || []).reduce((sum, item) => sum + Math.max(0, Number(item.receivedQty || 0)), 0);
+    if (orderedReceivedUnits > 0 || shortShipmentLines.length || backorderResult.totalUnits > 0) {
+      po.status = shortShipmentLines.length
+        ? "closed"
+        : noOpenQuantity
+          ? (allOrderedUnitsReceived ? "received" : "closed")
+          : cumulativeOrderedReceivedUnits > 0 ? "partially_received" : "receiving";
+    }
     if (po.status === "closed") po.workflowStage = "history";
     po.openEstimatedCost = purchaseOrderOpenCommitment(po);
     if (orderedReceivedUnits > 0) po.receivedAt = receivedAt;
@@ -70975,8 +71304,8 @@ async function handleApi(req, res) {
     po.updatedAt = new Date().toISOString();
     addPoTimeline(po, {
       type: "received",
-      title: shortShipmentLines.length ? "PO closed with short shipment" : orderedReceivedUnits <= 0 ? "Extra PO items received" : po.status === "received" ? "PO received" : po.status === "closed" ? "PO closed after receipt" : "PO partially received",
-      message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${shortShipmentLines.length ? `; ${shortShipmentLines.reduce((sum, item) => sum + Number(item.qty || 0), 0)} unreceived unit${shortShipmentLines.reduce((sum, item) => sum + Number(item.qty || 0), 0) === 1 ? " was" : "s were"} closed as supplier short shipment` : ""}${extraItemUnits ? `; ${extraItemUnits} marked as extra item${extraItemUnits === 1 ? "" : "s"} not ordered on this PO` : ""}${unresolvedHeldUnits ? `; ${unresolvedHeldUnits} held pending SKU resolution` : ""}${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
+      title: shortShipmentLines.length ? "PO closed with short shipment" : backorderResult.totalUnits > 0 ? "PO partially received with backorder" : orderedReceivedUnits <= 0 ? "Extra PO items received" : po.status === "received" ? "PO received" : po.status === "closed" ? "PO closed after receipt" : "PO partially received",
+      message: `${totalReceived} unit${totalReceived === 1 ? "" : "s"} received${backorderResult.totalUnits ? `; ${backorderResult.totalUnits} unreceived unit${backorderResult.totalUnits === 1 ? " remains" : "s remain"} open on supplier backorder` : ""}${shortShipmentLines.length ? `; ${shortShipmentLines.reduce((sum, item) => sum + Number(item.qty || 0), 0)} unreceived unit${shortShipmentLines.reduce((sum, item) => sum + Number(item.qty || 0), 0) === 1 ? " was" : "s were"} closed as supplier short shipment` : ""}${extraItemUnits ? `; ${extraItemUnits} marked as extra item${extraItemUnits === 1 ? "" : "s"} not ordered on this PO` : ""}${unresolvedHeldUnits ? `; ${unresolvedHeldUnits} held pending SKU resolution` : ""}${attachments.length ? ` / ${attachments.length} attachment${attachments.length === 1 ? "" : "s"}` : ""}${note ? `: ${note}` : "."}`,
       user: receivingUser
     });
     acknowledgeCanceledDemandReceipt(po, receipt, canceledDemandExceptions, receivingUser);
@@ -70995,6 +71324,12 @@ async function handleApi(req, res) {
           route.status = route.receivedQty >= Number(route.qty || 0) ? "received" : "partially_received";
           route.updatedAt = new Date().toISOString();
         }
+        const backorderLine = backorderResult.lines.find((item) => (item.routeId && String(item.routeId) === String(route.id || ""))
+          || (String(item.sku || "").toLowerCase() === String(route.sku || "").toLowerCase() && (!item.orderId || String(item.orderId) === String(linkedOrder.id || ""))));
+        route.backorderedQty = Math.max(0, Number(backorderLine?.qty || 0));
+        route.backorderStatus = route.backorderedQty > 0 ? "open" : "";
+        route.backorderPurchaseOrderId = route.backorderedQty > 0 ? po.id : "";
+        route.backorderPurchaseOrderNumber = route.backorderedQty > 0 ? po.poNumber : "";
         const shortLine = shortShipmentLines.find((item) => (item.routeId && String(item.routeId) === String(route.id || ""))
           || (String(item.sku || "").toLowerCase() === String(route.sku || "").toLowerCase() && (!item.orderId || String(item.orderId) === String(linkedOrder.id || ""))));
         const unfilledRouteQty = Math.max(0, Number(route.qty || 0) - Number(route.receivedQty || 0));
@@ -71034,7 +71369,7 @@ async function handleApi(req, res) {
         continue;
       }
       if (shouldRerouteAfterReceiving) {
-          const reroute = await routeOrderForFulfillment(db, linkedOrder, { user: receivingUser, workflowSettings, sourceReceiptId: receipt.id, sourceReceiptNumber: receipt.receiptNumber });
+        const reroute = await routeOrderForFulfillment(db, linkedOrder, { user: receivingUser, workflowSettings, sourceReceiptId: receipt.id, sourceReceiptNumber: receipt.receiptNumber, sourceReceiptItems: receipt.items });
         releasedProducts.push(...(reroute.touchedProducts || []));
       }
       recalculateOrderOperationalStatus(linkedOrder);
@@ -71072,7 +71407,7 @@ async function handleApi(req, res) {
     await postgres.writeStateDocuments({ inventoryLedger: db.inventoryLedger || [], purchaseRequirements: db.purchaseRequirements || [] });
     await postgres.savePurchaseOrder(po);
     await redisCache.deleteByPrefix("dataplus:purchasing:");
-    return sendJson(res, 200, { purchaseOrder: po, receipt, unresolvedHeldUnits, extraItemUnits, shortShipment: receipt.shortShipment || null, allocation: allocationResult ? receipt.allocation : null });
+    return sendJson(res, 200, { purchaseOrder: po, receipt, unresolvedHeldUnits, extraItemUnits, backorder: receipt.backorder || null, shortShipment: receipt.shortShipment || null, allocation: allocationResult ? receipt.allocation : null });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "returns" && postgres.isPostgresEnabled()) {
@@ -86353,6 +86688,7 @@ module.exports = {
   purchaseOrderStatusAfterReceiptCorrection,
   applyPurchaseOrderReceiptHistoryCorrection,
   createManualPurchaseOrder,
+  normalizeManualPurchaseOrderItems,
   purchaseOrderCatalogAddition,
   purchaseOrderUomSelection,
   purchaseOrderUomLabel,
@@ -86360,6 +86696,11 @@ module.exports = {
   applyProductPurchasingUomOverride,
   manualPurchaseOrderDraftIssues,
   validatePurchaseOrderReceiptLines,
+  validatePurchaseOrderBackorders,
+  applyPurchaseOrderReceiptBackorders,
+  reserveSupplierFreeItemLots,
+  releaseSupplierFreeItemLotAssignments,
+  consumeSupplierFreeItemLotAssignments,
   purchaseOrderReceivingProgressFromAudit,
   openPurchaseOrderExpectationsFromState,
   applyUnresolvedPurchaseOrderReceipt,
