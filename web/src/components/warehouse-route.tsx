@@ -10,6 +10,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Drawer, DrawerContent, DrawerDescription, DrawerFooter, DrawerHeader, DrawerTitle } from "@/components/ui/drawer"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Input } from "@/components/ui/input"
@@ -25,7 +26,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 import { BinLabelDialog } from "./bin-label-dialog"
-import { WarehouseMobile } from "./warehouse-mobile"
+import { isInstalledWarehouseApp, WarehouseMobile } from "./warehouse-mobile"
 import { OutboundAuditWorkspace } from "./outbound-audit-workspace"
 import { ReturnReceiving } from "./return-receiving"
 import { VendorCreateDialog } from "./vendor-create-dialog"
@@ -1420,11 +1421,13 @@ function WarehouseAuditPanel({
   auditId = "",
   createOnly = false,
   mobile = false,
+  installedApp = false,
   operatorName = "Luis",
 }: {
   auditId?: string;
   createOnly?: boolean;
   mobile?: boolean;
+  installedApp?: boolean;
   operatorName?: string;
 }) {
   const [binLabelsOpen, setBinLabelsOpen] = useState(false);
@@ -1517,9 +1520,15 @@ function WarehouseAuditPanel({
   } | null>(null);
   const [cameraScanQuantity, setCameraScanQuantity] = useState("1");
   const [cameraLookupBusy, setCameraLookupBusy] = useState(false);
+  const [hardwareScanOpen, setHardwareScanOpen] = useState(false);
+  const hardwareScanOpenRef = useRef(hardwareScanOpen);
+  hardwareScanOpenRef.current = hardwareScanOpen;
+  const [hardwareLookupBusy, setHardwareLookupBusy] = useState(false);
+  const [manualBarcodeKeyboard, setManualBarcodeKeyboard] = useState(false);
   const [quickCreateBusy, setQuickCreateBusy] = useState(false);
   const [quickCreatePhotoOpen, setQuickCreatePhotoOpen] = useState(false);
   const [quickCreateResumeScanner, setQuickCreateResumeScanner] = useState(false);
+  const [quickCreateResumeHardware, setQuickCreateResumeHardware] = useState(false);
   const [manualQuickCreateClientId, setManualQuickCreateClientId] = useState("");
   const [torchAvailable, setTorchAvailable] = useState(false);
   const [torchEnabled, setTorchEnabled] = useState(false);
@@ -1556,6 +1565,9 @@ function WarehouseAuditPanel({
   const [ebayReadinessBusy, setEbayReadinessBusy] = useState(false);
   const [ebayShadowLaunchBusy, setEbayShadowLaunchBusy] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const hardwareScanInputRef = useRef<HTMLInputElement | null>(null);
+  const hardwareScanLookupRef = useRef<(value: string) => Promise<void>>(async () => undefined);
+  const hardwareKeyBufferRef = useRef({ value: "", lastAt: 0 });
   const quickCreatePhotoInputRef = useRef<HTMLInputElement | null>(null);
   const manualTitleRef = useRef<HTMLInputElement | null>(null);
   const manualCreateRef = useRef<HTMLDivElement | null>(null);
@@ -2144,11 +2156,13 @@ function WarehouseAuditPanel({
       casePack: String(Math.max(1, Math.floor(Number(nextDraft.casePack || nextDraft.packQuantity || 1) || 1))),
     };
     const resumeScanner = Boolean(cameraOpen && lastScan && !lastScan.matched);
+    const resumeHardwareScanner = Boolean(hardwareScanOpen && lastScan && !lastScan.matched);
     setManualUnknown(quickDraft);
     setManualQuickCreateClientId(crypto.randomUUID());
     setManualPhotoUrls([]);
     setPhotoAnalysisStatus("idle");
     setQuickCreateResumeScanner(resumeScanner);
+    setQuickCreateResumeHardware(resumeHardwareScanner);
     setQuickCreatePhotoOpen(true);
     setCameraOpen(false);
     setCameraMessage(`Take product photos for ${quickDraft.barcode}, then create the draft SKU.`);
@@ -2209,6 +2223,95 @@ function WarehouseAuditPanel({
     } finally {
       setCameraLookupBusy(false);
     }
+  };
+  const focusHardwareScanner = () => {
+    if (!installedApp) return;
+    setManualBarcodeKeyboard(false);
+    window.setTimeout(() => hardwareScanInputRef.current?.focus({ preventScroll: true }), 80);
+  };
+  const closeHardwareScanPrompt = () => {
+    setHardwareScanOpen(false);
+    setHardwareLookupBusy(false);
+    setLastScan(null);
+    setBarcode("");
+    setCameraScanQuantity("1");
+    setCameraMessage("Hardware scanner ready. Press either scan trigger.");
+    hardwareKeyBufferRef.current = { value: "", lastAt: 0 };
+    focusHardwareScanner();
+  };
+  const lookupHardwareScan = async (rawValue = barcode) => {
+    const value = String(rawValue || "").trim();
+    if (!resumedAudit?.id || !value || hardwareLookupBusy || busy) return;
+    if (!navigator.onLine) {
+      toast.error("Reconnect before scanning. DataPlus must verify the SKU before it can be received.");
+      focusHardwareScanner();
+      return;
+    }
+    setBarcode(value);
+    setLastScan(null);
+    setCameraScanQuantity("1");
+    setCameraMessage(`Looking up ${value}...`);
+    setHardwareScanOpen(true);
+    setHardwareLookupBusy(true);
+    scannerFeedback("pending");
+    try {
+      const lookup = await api<{
+        matched?: boolean;
+        purchaseOrderLineMatched?: boolean;
+        catalogResolved?: boolean;
+        message?: string;
+        product?: { sku?: string; title?: string; marketplaceTitle?: string; uom?: string; uomName?: string; casePack?: number; uomQty?: number } | null;
+      }>(
+        `/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/lookup`,
+        { method: "POST", body: JSON.stringify({ barcode: value }) },
+      );
+      const matched = lookup.matched === true;
+      const product = lookup.product || null;
+      setLastScan({
+        barcode: value,
+        matched,
+        purchaseOrderLineMatched: lookup.purchaseOrderLineMatched === true,
+        catalogResolved: lookup.catalogResolved !== false,
+        message: lookup.message || (matched ? "Catalog item found." : "No catalog item found."),
+        sku: product?.sku,
+        title: product?.marketplaceTitle || product?.title,
+        uom: product?.uom,
+        uomName: product?.uomName,
+        casePack: Number(product?.casePack || product?.uomQty || 1),
+      });
+      setCameraMessage(matched
+        ? `${product?.sku || value} matched. Confirm the receiving quantity.`
+        : `No approved catalog SKU matches ${value}.`);
+      scannerFeedback(matched ? "success" : "unknown");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to look up this barcode.";
+      setCameraMessage(message);
+      scannerFeedback("error");
+    } finally {
+      setHardwareLookupBusy(false);
+    }
+  };
+  hardwareScanLookupRef.current = lookupHardwareScan;
+  const confirmHardwareScan = async () => {
+    if (!lastScan?.matched || hardwareLookupBusy || busy) return;
+    const quantity = Math.max(1, Math.min(100000, Math.floor(Number(cameraScanQuantity) || 0)));
+    if (!(quantity > 0)) {
+      setCameraMessage("Enter a quantity of at least 1.");
+      return;
+    }
+    setHardwareLookupBusy(true);
+    const candidate = lastScan;
+    try {
+      const saved = await submit(candidate.barcode, quantity);
+      if (saved) closeHardwareScanPrompt();
+    } finally {
+      setHardwareLookupBusy(false);
+    }
+  };
+  const continueHardwareToFullCreate = async () => {
+    if (!lastScan || lastScan.matched || hardwareLookupBusy || busy) return;
+    setHardwareScanOpen(false);
+    await continueToFullCreate();
   };
   const flushOfflineScans = async () => {
     if (!resumedAudit?.id || !navigator.onLine || syncingOfflineScans) return;
@@ -2401,11 +2504,18 @@ function WarehouseAuditPanel({
   const closeQuickCreatePhotoCapture = () => {
     setQuickCreatePhotoOpen(false);
     setQuickCreateResumeScanner(false);
+    setQuickCreateResumeHardware(false);
     if (quickCreateResumeScanner) {
       setManualUnknown(null);
       setManualPhotoUrls([]);
       setManualQuickCreateClientId("");
       setCameraOpen(true);
+    } else if (quickCreateResumeHardware) {
+      setManualUnknown(null);
+      setManualPhotoUrls([]);
+      setManualQuickCreateClientId("");
+      resetCameraScan("Hardware scanner ready. Press either scan trigger.");
+      focusHardwareScanner();
     }
   };
   const saveManualQuickCreatedProduct = async () => {
@@ -2420,13 +2530,16 @@ function WarehouseAuditPanel({
       if (result.audit) applyAuditUpdate(result.audit);
       const message = result.message || `${String(result.product?.sku || "Draft SKU")} quick-created.`;
       const resumeScanner = quickCreateResumeScanner;
+      const resumeHardwareScanner = quickCreateResumeHardware;
       setQuickCreatePhotoOpen(false);
       setQuickCreateResumeScanner(false);
+      setQuickCreateResumeHardware(false);
       setManualUnknown(null);
       setManualPhotoUrls([]);
       setManualQuickCreateClientId("");
       resetCameraScan(`${message} Ready for the next barcode.`);
       if (resumeScanner) setCameraOpen(true);
+      else if (resumeHardwareScanner) focusHardwareScanner();
       scannerFeedback("success");
       toast.success(message);
     } catch (error) {
@@ -2939,6 +3052,37 @@ function WarehouseAuditPanel({
   const recentPoMatchedItems = allSortedItems.filter((line) => Array.isArray(line.recentOpenPurchaseOrders) && line.recentOpenPurchaseOrders.length > 0);
   const recentOpenPurchaseOrders = [...new Map(recentPoMatchedItems.flatMap((line) => line.recentOpenPurchaseOrders as Array<Record<string, unknown>>).map((purchaseOrder) => [String(purchaseOrder.purchaseOrderId || ""), purchaseOrder])).values()];
   const auditStatus = String(current?.status || "");
+  useEffect(() => {
+    if (!installedApp || !current?.id || auditStatus !== "in_progress") return;
+    const focusTimer = window.setTimeout(() => hardwareScanInputRef.current?.focus({ preventScroll: true }), 120);
+    const captureHardwareScan = (event: KeyboardEvent) => {
+      if (cameraOpenRef.current || hardwareScanOpenRef.current || quickCreatePhotoOpen || event.isComposing || event.ctrlKey || event.altKey || event.metaKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target === hardwareScanInputRef.current) return;
+      if (target?.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(String(target?.tagName || ""))) return;
+      const now = Date.now();
+      const buffer = hardwareKeyBufferRef.current;
+      if (event.key.length === 1 && !/\s/.test(event.key)) {
+        if (now - buffer.lastAt > 140) buffer.value = "";
+        buffer.value += event.key;
+        buffer.lastAt = now;
+        event.preventDefault();
+        return;
+      }
+      if ((event.key === "Enter" || event.key === "Tab") && buffer.value.length >= 3 && now - buffer.lastAt < 500) {
+        const scannedValue = buffer.value;
+        hardwareKeyBufferRef.current = { value: "", lastAt: 0 };
+        event.preventDefault();
+        event.stopPropagation();
+        void hardwareScanLookupRef.current(scannedValue);
+      }
+    };
+    window.addEventListener("keydown", captureHardwareScan, true);
+    return () => {
+      window.clearTimeout(focusTimer);
+      window.removeEventListener("keydown", captureHardwareScan, true);
+    };
+  }, [installedApp, current?.id, auditStatus, quickCreatePhotoOpen]);
   const auditItemActionMenu = (line: Record<string, unknown>, allowCountEdit = false) => {
     const itemKind = String(line.auditItemKind || "known");
     const sku = String(line.sku || (line.receivingPoLine as Record<string, unknown> | undefined)?.sku || "").trim();
@@ -3144,7 +3288,7 @@ function WarehouseAuditPanel({
     return <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Audit not found</AlertTitle><AlertDescription>This warehouse audit could not be loaded. Return to the audit register and try again.</AlertDescription></Alert>;
   }
   return (
-    <><Card className="warehouse-audit-panel">
+    <><Card className={cn("warehouse-audit-panel", installedApp && "border-0 bg-transparent shadow-none")}>
       {(!mobile || !current) && <CardHeader>
         <CardTitle className="text-base">{isLinkedPurchaseOrderReceipt ? "PO receiving" : isPurchaseOrderRecount ? "PO recount" : "Warehouse audit"}</CardTitle>
         <CardDescription>
@@ -3155,7 +3299,7 @@ function WarehouseAuditPanel({
               : "Start a count, scan UPCs with a phone camera or keyboard-wedge scanner, then apply verified inventory counts."}
         </CardDescription>
       </CardHeader>}
-      <CardContent className="grid gap-3">
+      <CardContent className={cn("grid gap-3", installedApp && "p-0")}>
         {!current ? (
           <div className="flex flex-wrap items-end gap-2">
             <Field label="Warehouse">
@@ -3182,7 +3326,7 @@ function WarehouseAuditPanel({
           </div>
         ) : (
           <>
-            <div className="flex flex-col items-stretch gap-3 rounded-md border bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className={cn("flex flex-col items-stretch gap-3 rounded-md border bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between", installedApp && "rounded-xl bg-card shadow-sm")}>
               <div>
                 <p className="font-medium">{canonicalWarehouseAuditReference(current.auditNumber, current.id)}</p>
                 <p className="text-xs text-muted-foreground">
@@ -3209,7 +3353,7 @@ function WarehouseAuditPanel({
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-2 sm:flex sm:w-auto">
-                <Button
+                {!installedApp && <Button
                   size="sm"
                   variant={mobile ? "default" : "outline"}
                   disabled={busy || auditStatus !== "in_progress"}
@@ -3228,14 +3372,53 @@ function WarehouseAuditPanel({
                 >
                   <ScanBarcode className={mobile ? "size-5 shrink-0" : "size-4"} />
                   Scan
-                </Button>
-                {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setLastScan(null); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}><ScanBarcode className="size-4" /> Scan bin</Button>}
+                </Button>}
+                {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setLastScan(null); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}><ScanBarcode className="size-4" /> {installedApp ? "Camera bin" : "Scan bin"}</Button>}
                 {["in_progress", "pending_review"].includes(auditStatus) && <Button size="sm" disabled={busy || !lines.length} onClick={() => void openInventoryAction(false)}><ArrowRight className="size-4" /> {isPurchaseOrderRecount ? "Finish PO recount" : isReceivingAudit ? "Finish receipt" : isLiveSellingAudit ? "Prepare live items" : isEbayOneTimeAudit ? "Create shadows" : "Finish count"}</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}><Play className="size-4" /> Continue counting</Button>}
                 {auditStatus === "completed" && (isEbayOneTimeAudit || isEbayLiveAudit) && <Button size="sm" disabled={ebayShadowLaunchBusy} onClick={() => void launchAuditShadowsOnEbay()}>{ebayShadowLaunchBusy ? <Loader2 className="size-4 animate-spin" /> : <Store className="size-4" />} {isEbayLiveAudit ? "Publish eBay listing" : "Launch shadows"}</Button>}
                 <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem asChild><a href={`/live-sessions?sourceType=warehouse_audit&sourceId=${encodeURIComponent(String(current.id))}`}><Store className="size-4" /> Create live session</a></DropdownMenuItem>{!current.linkedPurchaseOrderId && <DropdownMenuItem asChild><a href={`/purchasing?createFromAudit=${encodeURIComponent(String(current.id))}`}><ShoppingCart className="size-4" /> Create and link PO</a></DropdownMenuItem>}<DropdownMenuItem onSelect={() => setBinLabelsOpen(true)}><Printer className="size-4" /> Print bin labels</DropdownMenuItem><DropdownMenuItem onSelect={() => void shareAuditLink()}><Share2 className="size-4" /> Share audit link</DropdownMenuItem>{activeBin && auditStatus === "in_progress" && <DropdownMenuItem disabled={busy || clearBinBusy} onSelect={requestClearBin}><X className="size-4" /> Clear bin</DropdownMenuItem>}{!mobile && desktopAuditTools && <DropdownMenuItem onSelect={() => setAuditToolsOpen(true)}><FileUp className="size-4" /> Import stock / eBay tools</DropdownMenuItem>}{!isLinkedPurchaseOrderReceipt && !isPurchaseOrderRecount && <DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem>}<DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
               </div>
             </div>
+            {installedApp && auditStatus === "in_progress" && <section data-testid="hardware-scanner-panel" className="grid gap-3 rounded-2xl border border-primary/25 bg-card p-4 shadow-sm">
+              <div className="flex items-start gap-3">
+                <div className="grid size-12 shrink-0 place-items-center rounded-2xl bg-primary text-primary-foreground shadow-sm"><ScanBarcode className="size-6" /></div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2"><p className="font-semibold">Hardware scanner ready</p><Badge variant="success">G47 active</Badge></div>
+                  <p className="mt-1 text-sm text-muted-foreground">Press either physical scan trigger. DataPlus will identify the item and ask for quantity before saving it.</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+                <div className="relative min-w-0">
+                  <ScanBarcode className="pointer-events-none absolute left-3 top-1/2 size-5 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    ref={hardwareScanInputRef}
+                    aria-label="Hardware barcode scanner"
+                    className="h-12 rounded-xl pl-10 pr-3 font-mono text-base"
+                    autoFocus
+                    autoComplete="off"
+                    inputMode={manualBarcodeKeyboard ? "text" : "none"}
+                    enterKeyHint="done"
+                    disabled={busy || hardwareLookupBusy}
+                    value={barcode}
+                    onFocus={() => { if (!manualBarcodeKeyboard) setCameraMessage("Hardware scanner ready. Press either scan trigger."); }}
+                    onChange={(event) => setBarcode(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === "Tab") {
+                        event.preventDefault();
+                        void lookupHardwareScan(event.currentTarget.value);
+                      }
+                    }}
+                    placeholder={manualBarcodeKeyboard ? "Type SKU or UPC" : "Press scanner trigger"}
+                  />
+                </div>
+                <Button type="button" size="icon" variant={manualBarcodeKeyboard ? "secondary" : "outline"} className="size-12 rounded-xl" title={manualBarcodeKeyboard ? "Hide phone keyboard" : "Type a barcode"} aria-label={manualBarcodeKeyboard ? "Hide phone keyboard" : "Type a barcode"} onClick={() => { setManualBarcodeKeyboard((enabled) => !enabled); window.setTimeout(() => hardwareScanInputRef.current?.focus(), 0); }}><Pencil className="size-5" /></Button>
+              </div>
+              <div className="flex items-center justify-between gap-3 border-t pt-3">
+                <p className="text-xs text-muted-foreground">Camera scanning is optional on this device.</p>
+                <Button size="sm" variant="outline" disabled={busy || hardwareLookupBusy} onClick={() => { setCameraMode("product"); setLastScan(null); setCameraScanQuantity("1"); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage(activeBin ? `Counting in bin ${activeBin}. Point at the next product barcode.` : "Camera ready. Point it at the next product barcode."); setCameraOpen(true); }}><Camera className="size-4" /> Use camera</Button>
+              </div>
+            </section>}
             {!mobile && isReceivingAudit && ["in_progress", "pending_review"].includes(auditStatus) && <section data-testid="receiving-progress" className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 px-4 py-3">
               <div className="flex min-w-0 flex-wrap items-center gap-2">
                 <div className="flex items-center gap-2"><Activity className="size-4 text-emerald-600" /><p className="font-medium">Receiving progress</p></div>
@@ -3449,6 +3632,50 @@ function WarehouseAuditPanel({
                 </DialogFooter>
               </DialogContent>
             </Dialog>
+            <Drawer open={hardwareScanOpen} onOpenChange={(open) => { if (!open && !hardwareLookupBusy && !busy) closeHardwareScanPrompt(); }}>
+              <DrawerContent data-testid="hardware-scan-confirmation" className="max-h-[92dvh] rounded-t-3xl">
+                <DrawerHeader className="border-b px-5 pb-4 pt-3 text-left">
+                  <div className="flex items-start gap-3">
+                    <div className={cn("grid size-11 shrink-0 place-items-center rounded-2xl", hardwareLookupBusy && !lastScan ? "bg-primary/10 text-primary" : lastScan?.matched ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300" : "bg-amber-500/15 text-amber-700 dark:text-amber-300")}>
+                      {hardwareLookupBusy && !lastScan ? <Loader2 className="size-5 animate-spin" /> : lastScan?.matched ? <CheckCircle2 className="size-5" /> : <AlertTriangle className="size-5" />}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <DrawerTitle>{hardwareLookupBusy && !lastScan ? "Checking barcode" : lastScan?.matched ? "Confirm scanned item" : lastScan ? "Product not found" : "Scanner could not complete"}</DrawerTitle>
+                      <DrawerDescription className="mt-1">{hardwareLookupBusy && !lastScan ? `Searching for ${barcode}...` : cameraMessage}</DrawerDescription>
+                    </div>
+                  </div>
+                </DrawerHeader>
+                <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+                  {lastScan ? <div className="grid gap-4">
+                    <div className={cn("rounded-2xl border p-4", lastScan.matched ? "border-emerald-500/30 bg-emerald-500/5" : "border-amber-500/30 bg-amber-500/5")}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="break-all font-mono text-lg font-semibold">{lastScan.sku || lastScan.barcode}</p>
+                          {lastScan.title && <p className="mt-1 text-sm text-muted-foreground">{lastScan.title}</p>}
+                          {lastScan.sku && lastScan.barcode !== lastScan.sku && <p className="mt-2 break-all font-mono text-xs text-muted-foreground">Scanned {lastScan.barcode}</p>}
+                        </div>
+                        <Badge variant={lastScan.matched ? "success" : "warning"}>{lastScan.matched ? "Matched" : "Review"}</Badge>
+                      </div>
+                      {lastScan.matched && <div className="mt-4 grid grid-cols-2 gap-2">
+                        <div className="rounded-xl bg-background p-3"><p className="text-xs text-muted-foreground">Unit of measure</p><p className="mt-1 font-medium">{lastScan.uomName || "Each"} ({lastScan.uom || "EA"})</p></div>
+                        <div className="rounded-xl bg-background p-3"><p className="text-xs text-muted-foreground">Case pack</p><p className="mt-1 font-medium">{Math.max(1, Number(lastScan.casePack || 1))}</p></div>
+                      </div>}
+                    </div>
+                    {lastScan.matched ? <div className="grid gap-3">
+                      <div className="flex items-center justify-between gap-3"><div><Label htmlFor="hardware-scan-quantity" className="text-base">{isReceivingAudit ? "Quantity to receive" : "Counted quantity"}</Label><p className="text-xs text-muted-foreground">Confirm before this scan changes the audit.</p></div>{activeBin && <Badge variant="outline">Bin {activeBin}</Badge>}</div>
+                      <div className="grid grid-cols-[3rem_minmax(0,1fr)_3rem] gap-2">
+                        <Button type="button" size="icon" variant="outline" className="size-12 rounded-xl text-xl" aria-label="Decrease quantity" onClick={() => setCameraScanQuantity(String(Math.max(1, Math.floor(Number(cameraScanQuantity) || 1) - 1)))}>−</Button>
+                        <Input id="hardware-scan-quantity" className="h-12 rounded-xl text-center text-xl font-semibold" type="number" min="1" max="100000" inputMode="numeric" autoFocus value={cameraScanQuantity} onChange={(event) => setCameraScanQuantity(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void confirmHardwareScan(); } }} />
+                        <Button type="button" size="icon" variant="outline" className="size-12 rounded-xl text-xl" aria-label="Increase quantity" onClick={() => setCameraScanQuantity(String(Math.min(100000, Math.floor(Number(cameraScanQuantity) || 1) + 1)))}>+</Button>
+                      </div>
+                    </div> : <Alert className="border-amber-500/30 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>UPC needs review</AlertTitle><AlertDescription>Skip it, create a draft product with photos, or open the full product workflow. Nothing has been received yet.</AlertDescription></Alert>}
+                  </div> : !hardwareLookupBusy ? <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Lookup failed</AlertTitle><AlertDescription>{cameraMessage}</AlertDescription></Alert> : null}
+                </div>
+                <DrawerFooter className="border-t bg-background px-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-4">
+                  {lastScan?.matched ? <div className="grid grid-cols-2 gap-2"><Button variant="outline" disabled={hardwareLookupBusy || busy} onClick={closeHardwareScanPrompt}>Cancel</Button><Button disabled={hardwareLookupBusy || busy || Number(cameraScanQuantity) < 1} onClick={() => void confirmHardwareScan()}>{hardwareLookupBusy || busy ? <Loader2 className="size-4 animate-spin" /> : <PackageCheck className="size-4" />} {isReceivingAudit ? "Receive quantity" : "Add count"}</Button></div> : lastScan ? <div className="grid grid-cols-3 gap-2"><Button variant="outline" disabled={hardwareLookupBusy || busy} onClick={closeHardwareScanPrompt}>Skip</Button><Button variant="outline" disabled={hardwareLookupBusy || busy} onClick={() => void continueHardwareToFullCreate()}><Sparkles className="size-4" /> Full</Button><Button disabled={hardwareLookupBusy || busy} onClick={() => { setHardwareScanOpen(false); beginQuickCreate(); }}><Camera className="size-4" /> Quick</Button></div> : <Button variant="outline" disabled={hardwareLookupBusy || busy} onClick={closeHardwareScanPrompt}>Close</Button>}
+                </DrawerFooter>
+              </DrawerContent>
+            </Drawer>
             <input
               ref={quickCreatePhotoInputRef}
               className="sr-only"
@@ -3567,7 +3794,7 @@ function WarehouseAuditPanel({
 
               <p className="max-w-sm text-xs text-muted-foreground sm:pb-2">{activeAuditBins.length ? "Choose a configured bin before scanning. The selection is saved against each new count line." : "No active bins are configured for this warehouse. Enter a location manually; the selection is saved against each new count line."}</p>
             </div>
-            <div className="flex flex-col gap-2 sm:flex-row">
+            {!installedApp && <div className="flex flex-col gap-2 sm:flex-row">
               <Input
                 autoFocus
                 disabled={auditStatus !== "in_progress"}
@@ -3588,13 +3815,13 @@ function WarehouseAuditPanel({
               >
                 <Plus className="size-4" /> Add scan
               </Button>
-            </div>
-            {busy && barcode.trim() && auditStatus === "in_progress" && (
+            </div>}
+            {!installedApp && busy && barcode.trim() && auditStatus === "in_progress" && (
               <div className="flex items-center gap-2 rounded-md border border-primary/25 bg-primary/10 px-3 py-2 text-sm font-medium text-primary" role="status" aria-live="polite">
                 <Loader2 className="size-4 animate-spin" /> Looking up {barcode.trim()} in the catalog...
               </div>
             )}
-            {lastScan && (
+            {!installedApp && lastScan && (
               <div
                 className={`rounded-md border p-3 text-sm ${lastScan.matched ? "border-emerald-200 bg-emerald-50 text-emerald-950" : "border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-500/40 dark:bg-amber-950/30 dark:text-amber-200"}`}
               >
@@ -4240,8 +4467,10 @@ function WarehouseMobileRoute({ canPurchase, canReturn, fulfillment, inventory, 
   purchaseOrder: (id: string) => ReactNode
   warehouses: Array<Record<string, unknown>>
 }) {
+  const installedApp = isInstalledWarehouseApp()
   return <WarehouseMobile
     canPurchase={canPurchase}
+    installedApp={installedApp}
     returns={canReturn ? <div className="grid gap-3"><h1 className="text-xl font-semibold">Receive returns</h1><ReturnReceiving warehouses={warehouses} onUpdated={async () => undefined} /></div> : <p>Returns access is required.</p>}
     fulfillment={fulfillment}
     inventory={inventory}
@@ -4251,8 +4480,8 @@ function WarehouseMobileRoute({ canPurchase, canReturn, fulfillment, inventory, 
     manual={canReceive ? <ManualReceivingPanel mobile /> : <p>Receiving access is required.</p>}
     outbound={<OutboundAuditWorkspace warehouses={warehouses} />}
     bins={canManageBins ? <WarehouseBinManager mobile /> : <p>Bin access is required.</p>}
-    audits={canAudit ? <><WarehouseAuditPanel createOnly mobile operatorName={operatorName} /><WarehouseAuditHistory mobile /></> : <p>Audit access is required.</p>}
-    audit={(id) => canAudit ? <WarehouseAuditPanel key={id} auditId={id} mobile /> : <p>Audit access is required.</p>}
+    audits={canAudit ? <><WarehouseAuditPanel createOnly mobile installedApp={installedApp} operatorName={operatorName} /><WarehouseAuditHistory mobile /></> : <p>Audit access is required.</p>}
+    audit={(id) => canAudit ? <WarehouseAuditPanel key={id} auditId={id} mobile installedApp={installedApp} /> : <p>Audit access is required.</p>}
     purchaseOrder={purchaseOrder}
   />
 }

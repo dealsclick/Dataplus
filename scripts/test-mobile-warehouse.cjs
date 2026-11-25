@@ -31,6 +31,16 @@ assert.match(warehouseRouteSource, /const beginQuickCreate = \(draft\?[\s\S]*qui
 assert.match(warehouseRouteSource, /<DialogTitle>Quick create product<\/DialogTitle>[\s\S]*\{manualPhotoUrls\.length\}\/8 photos[\s\S]*Take another[\s\S]*Create draft SKU/, 'Warehouse quick create must support a compact multi-photo capture flow');
 assert.match(warehouseRouteSource, /Quick create unit of measure[\s\S]*Quick create case pack/, 'Warehouse quick create must collect UOM and case pack');
 assert.match(warehouseRouteSource, /UOM \{lastScan\.uomName[\s\S]*Case pack \{Math\.max/, 'Matched scans must display UOM and case pack');
+assert.match(warehouseRouteSource, /data-testid="hardware-scanner-panel"[\s\S]*Hardware scanner ready[\s\S]*Press either physical scan trigger/, 'The phone audit must lead with the G47 hardware scanner');
+assert.match(warehouseRouteSource, /inputMode=\{manualBarcodeKeyboard \? "text" : "none"\}[\s\S]*lookupHardwareScan\(event\.currentTarget\.value\)/, 'The scanner field must accept wedge input without forcing the phone keyboard');
+assert.match(warehouseRouteSource, /const lookupHardwareScan = async[\s\S]*setHardwareScanOpen\(true\)[\s\S]*\/lookup`/, 'Hardware scans must open confirmation and look up the item before posting a count');
+assert.match(warehouseRouteSource, /data-testid="hardware-scan-confirmation"[\s\S]*Confirm scanned item[\s\S]*Unit of measure[\s\S]*Quantity to receive[\s\S]*Receive quantity/, 'Hardware scans must show the native confirmation sheet with SKU, UOM, and quantity');
+assert.match(warehouseRouteSource, /Camera scanning is optional on this device[\s\S]*Use camera/, 'Camera scanning must be presented as an explicit fallback');
+assert.match(mobileSource, /function isInstalledWarehouseApp\(\)[\s\S]*android-app:\/\/com\.dataplus\.warehouse[\s\S]*display-mode: standalone/, 'Installed-app mode must be detected independently from ordinary mobile web');
+assert.doesNotMatch(mobileSource, /display-mode: fullscreen/, 'Ordinary mobile web fullscreen mode must not enable Android-app UI');
+assert.match(warehouseRouteSource, /installedApp && auditStatus === "in_progress"[\s\S]*data-testid="hardware-scanner-panel"/, 'The hardware scanner UI must be limited to the installed app');
+assert.match(warehouseRouteSource, /!installedApp && <Button[\s\S]*<ScanBarcode[\s\S]*Scan/, 'Mobile web must retain its existing camera-first Scan action');
+assert.match(mobileSource, /data-mobile-app-shell=\{installedApp \? "android" : "web"\}[\s\S]*installedApp \? <span[\s\S]*bg-primary\/15/, 'Only the installed app may use the Android-style shell and navigation indicator');
 assert.match(warehouseRouteSource, /if \(resumeScanner\) setCameraOpen\(true\)/, 'Camera quick create must return the worker to barcode scanning');
 assert.match(appSource, /href="\/warehouse\/mobile"[\s\S]*Warehouse Mobile/, 'The mobile account menu must link to Warehouse Mobile');
 assert.match(appSource, /canReturn=\{userCan\(authUser, "orders\.returns", "view"\)/, 'Warehouse Mobile must apply return permissions to the focused receiving flow');
