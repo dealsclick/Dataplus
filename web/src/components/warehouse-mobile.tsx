@@ -37,7 +37,7 @@ export function WarehouseMobile({ canPurchase, account, brand, receiving, manual
   }, [])
   return <MobileTables><div className="warehouse-mobile min-h-dvh bg-background">
     <header className="border-b bg-card px-3 py-2"><div className="mx-auto flex max-w-3xl items-center justify-between gap-2"><a href={base} className="flex min-w-0 items-center gap-2">{brand}</a>{account}</div></header>
-    <main className="mx-auto grid max-w-3xl gap-4 p-3 pb-28 sm:p-6 sm:pb-28">
+    <main className="mx-auto grid max-w-3xl gap-4 p-3 pb-[calc(8rem+env(safe-area-inset-bottom))] sm:p-6 sm:pb-32">
       {id && <Button variant="outline" className="justify-self-start" asChild><a href={`${base}/${section}`}>← Back to {section === "receiving" ? "POs" : "audits"}</a></Button>}
       {section === "receiving" && (id ? canPurchase ? purchaseOrder(id) : <p>Your account does not have purchasing access.</p> : receiving)}
       {section === "manual" && manual}

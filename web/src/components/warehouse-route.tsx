@@ -18,6 +18,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -1437,6 +1438,7 @@ function WarehouseAuditPanel({
   const [upcLine, setUpcLine] = useState<Record<string, unknown> | null>(null);
   const [newUpc, setNewUpc] = useState("");
   const [upcSaving, setUpcSaving] = useState(false);
+  const [mobileAuditActionLine, setMobileAuditActionLine] = useState<Record<string, unknown> | null>(null);
   const [auditToolsOpen, setAuditToolsOpen] = useState(false);
   const [shareAuditUrl, setShareAuditUrl] = useState("");
   const [desktopAuditTools, setDesktopAuditTools] = useState(() => window.matchMedia("(min-width: 768px)").matches);
@@ -1913,7 +1915,7 @@ function WarehouseAuditPanel({
       setBusy(false);
     }
   };
-  const uploadReceivingDocuments = async (files: FileList | File[] | null) => {
+  const uploadReceivingDocuments = async (files: FileList | File[] | null, documentType = receivingDocumentType) => {
     if (!current?.id || !files?.length) return;
     const selected = await Promise.all(Array.from(files).map(async (file) => {
       if (!/^image\/(?:jpe?g|png|webp)$/i.test(file.type)) return file;
@@ -1925,7 +1927,7 @@ function WarehouseAuditPanel({
       let updatedAudit: Record<string, unknown> | null = null;
       for (const file of selected) {
         const contentBase64 = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result || "")); reader.onerror = () => reject(new Error(`Unable to read ${file.name}.`)); reader.readAsDataURL(file) });
-        const result = await api<{ audit?: Record<string, unknown> }>(`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/attachments`, { method: "POST", body: JSON.stringify({ name: file.name, mimeType: file.type, contentBase64, documentType: receivingDocumentType, user: operatorName }) });
+        const result = await api<{ audit?: Record<string, unknown> }>(`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/attachments`, { method: "POST", body: JSON.stringify({ name: file.name, mimeType: file.type, contentBase64, documentType, user: operatorName }) });
         updatedAudit = result.audit || updatedAudit;
       }
       if (updatedAudit) {
@@ -2924,6 +2926,61 @@ function WarehouseAuditPanel({
       </DropdownMenuContent>
     </DropdownMenu>;
   };
+  const mobileAuditItemCard = (line: Record<string, unknown>) => {
+    const poLine = line.receivingPoLine && typeof line.receivingPoLine === "object" ? line.receivingPoLine as Record<string, unknown> : null;
+    const expectedQty = poLine ? Math.max(0, Number(poLine.expectedQty ?? poLine.quantity ?? 0)) : 0;
+    const countedQty = Math.max(0, Number(line.countedQty ?? line.count ?? 0));
+    const remainingQty = Math.max(0, expectedQty - countedQty);
+    const title = String(line.title || poLine?.description || poLine?.title || line.sku || line.barcode || "Product");
+    const workingSku = String(line.receivingSubstitution === true
+      ? line.sku
+      : isLinkedPurchaseOrderReceipt
+        ? line.receivingCatalogSku || line.sku || line.selectedSupplierSku || poLine?.sku || ""
+        : line.selectedSupplierSku || line.sku || "").trim();
+    const catalogSku = String(line.sku || poLine?.sku || workingSku).trim();
+    const barcodeValue = String(line.receivingSubstitution === true ? line.barcode || line.upc : line.selectedSupplierUpc || line.barcode || line.upc || poLine?.upc || "").trim();
+    const supplierName = String(line.selectedSupplierName || current?.supplierName || poLine?.supplierName || "").trim();
+    const poNumber = String(poLine?.poNumber || current?.linkedPurchaseOrderNumber || receivingReview?.documentNumber || "").trim();
+    const status = warehouseReceivingStatus(line);
+    const isUnknown = line.auditItemKind === "unknown";
+    const isExpectedOnly = line.auditItemKind === "po_expected";
+    const statusBadge = status === "complete"
+      ? <Badge variant="success"><CheckCircle2 className="mr-1 size-3" />{countedQty > expectedQty ? `Complete · +${numberLabel(countedQty - expectedQty)}` : "Complete"}</Badge>
+      : status === "partial"
+        ? <Badge variant="warning"><AlertTriangle className="mr-1 size-3" />Partial</Badge>
+        : status === "awaiting_scan"
+          ? <Badge variant="outline">Awaiting scan</Badge>
+          : <Badge variant="warning">Extra item</Badge>;
+    const stateClass = status === "complete"
+      ? "border-emerald-500/35"
+      : status === "partial" || status === "extra"
+        ? "border-amber-500/40"
+        : "border-border";
+    return <article key={`mobile-audit-${String(line.id || line.productId || line.barcode || catalogSku)}`} className={cn("grid gap-3 rounded-md border bg-card p-3 shadow-sm", stateClass)}>
+      <div className="flex items-start gap-3">
+        {String(line.image || "")
+          ? <button type="button" className="relative size-14 shrink-0 overflow-hidden rounded-md border bg-muted" title="Open product image" data-no-image-preview onClick={() => setItemImage({ src: String(line.image), title })}><img src={String(line.image)} alt={title} loading="lazy" className="size-full object-cover" /></button>
+          : <span className={cn("grid size-14 shrink-0 place-items-center rounded-md border", isUnknown ? "border-red-500/30 bg-red-500/10 text-red-600" : isExpectedOnly ? "border-amber-500/30 bg-amber-500/10 text-amber-700" : "border-emerald-500/30 bg-emerald-500/10 text-emerald-700")}>{isUnknown ? <X className="size-5" /> : isExpectedOnly ? <FileText className="size-5" /> : <CheckCircle2 className="size-5" />}</span>}
+        <div className="min-w-0 flex-1"><p className="line-clamp-2 text-sm font-semibold leading-5" title={title}>{title}</p>{workingSku ? <a className="mt-1 inline-flex min-h-7 items-center font-mono text-xs font-medium text-primary underline underline-offset-4" href={`/products/${encodeURIComponent(catalogSku || workingSku)}`} target="_blank" rel="noreferrer">{workingSku}</a> : <p className="mt-1 font-mono text-xs text-destructive">{String(line.barcode || "SKU not identified")}</p>}</div>
+        {!isUnknown && <Button size="icon" variant="ghost" className="size-10 shrink-0" aria-label={`Actions for ${workingSku || title}`} onClick={() => setMobileAuditActionLine(line)}><MoreHorizontal className="size-5" /></Button>}
+      </div>
+      <div className="grid grid-cols-3 divide-x rounded-md border bg-muted/20 py-2 text-center">
+        <div><p className="text-[11px] text-muted-foreground">Expected</p><p className="mt-0.5 font-semibold tabular-nums">{poLine ? numberLabel(expectedQty) : "-"}</p></div>
+        <button type="button" className="min-h-11 px-1" disabled={auditStatus !== "in_progress" || isExpectedOnly || isUnknown} onClick={() => openCountEdit(line)}><p className="text-[11px] text-muted-foreground">Scanned</p><p className="mt-0.5 inline-flex items-center gap-1 font-semibold tabular-nums">{numberLabel(countedQty)}{auditStatus === "in_progress" && !isExpectedOnly && !isUnknown ? <Pencil className="size-3" /> : null}</p></button>
+        <div><p className="text-[11px] text-muted-foreground">Remaining</p><p className="mt-0.5 font-semibold tabular-nums">{poLine ? numberLabel(remainingQty) : "-"}</p></div>
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5 text-xs">
+        {statusBadge}
+        {supplierName && <Badge variant="outline">{supplierName}</Badge>}
+        {poNumber && <a href={purchaseOrderUrl(poNumber, current?.linkedPurchaseOrderId || poLine?.purchaseOrderId)} target="_blank" rel="noreferrer"><Badge variant="outline">{poNumber}<ExternalLink className="ml-1 size-3" /></Badge></a>}
+        <span className={cn("rounded-sm px-1.5 py-1 font-mono", barcodeValue ? "bg-muted text-muted-foreground" : "bg-amber-500/10 text-amber-700 dark:text-amber-300")}>{barcodeValue ? `UPC ${barcodeValue}` : "UPC missing"}</span>
+        {String(line.locationBin || "").trim() && <span className="rounded-sm bg-muted px-1.5 py-1 text-muted-foreground">Bin {String(line.locationBin)}</span>}
+      </div>
+      {!isLinkedPurchaseOrderReceipt && !isUnknown && <AuditSupplierCell auditId={String(current?.id || "")} auditStatus={auditStatus} line={line} onLineUpdate={applyAuditLineUpdate} />}
+      {isLinkedPurchaseOrderReceipt && !poLine && countedQty > 0 && auditStatus === "in_progress" ? <Button size="sm" variant="outline" onClick={() => openSubstitutionMatch(line)}><Link2 className="size-4" /> Match to PO line</Button> : null}
+      {isUnknown && !line.createdProductSku && auditStatus === "in_progress" && <div className="grid grid-cols-2 gap-2"><Button size="sm" variant="outline" disabled={busy || upcResearchBusy || photoAnalysisBusy} onClick={() => void reopenUnknownSku(line, "quick")}><Camera className="size-4" /> Quick create</Button><Button size="sm" variant="outline" disabled={busy || upcResearchBusy || photoAnalysisBusy} onClick={() => void reopenUnknownSku(line, "full")}><Plus className="size-4" /> Create SKU</Button></div>}
+    </article>;
+  };
   const foundStockLines = lines.filter((line) => String(line.source || "").includes("found-stock") || Boolean(line.foundStock));
   const latestFoundStockImport = Array.isArray(current?.foundStockImports) ? current?.foundStockImports[0] as Record<string, unknown> : null;
   const latestFoundStockSummary = latestFoundStockImport?.summary && typeof latestFoundStockImport.summary === "object" ? latestFoundStockImport.summary as Record<string, unknown> : null;
@@ -3124,7 +3181,8 @@ function WarehouseAuditPanel({
               <div className="grid grid-cols-2 gap-2 sm:flex sm:w-auto">
                 <Button
                   size="sm"
-                  variant="outline"
+                  variant={mobile ? "default" : "outline"}
+                  className={mobile ? "col-span-2 h-16 justify-start gap-3 px-4 text-left" : ""}
                   disabled={busy || auditStatus !== "in_progress"}
                   onClick={() => {
                     setCameraMode("product");
@@ -3139,13 +3197,14 @@ function WarehouseAuditPanel({
                     setCameraOpen(true);
                   }}
                 >
-                  <Camera className="size-4" /> Use phone camera
+                  <ScanBarcode className={mobile ? "size-7 shrink-0" : "size-4"} />
+                  {mobile ? <span><span className="block text-base font-semibold">Scan</span><span className="block text-xs font-normal text-primary-foreground/80">Open the barcode scanner</span></span> : "Scan"}
                 </Button>
                 {auditStatus === "in_progress" && <Button size="sm" variant="outline" disabled={busy} onClick={() => { setCameraMode("bin"); setLastScan(null); scanRef.current = false; setCameraStreamState("opening"); setCameraAttempt((attempt) => attempt + 1); setCameraMessage("Scan the shelf or bin label now."); setCameraOpen(true); }}><ScanBarcode className="size-4" /> Scan bin</Button>}
                 {["in_progress", "pending_review"].includes(auditStatus) && <Button size="sm" disabled={busy || !lines.length} onClick={() => void openInventoryAction(false)}><ArrowRight className="size-4" /> {isPurchaseOrderRecount ? "Finish PO recount" : isReceivingAudit ? "Finish receipt" : isLiveSellingAudit ? "Prepare live items" : isEbayOneTimeAudit ? "Create shadows" : "Finish count"}</Button>}
                 {auditStatus === "pending_review" && <Button size="sm" variant="outline" disabled={busy} onClick={() => void returnToCount()}><Play className="size-4" /> Continue counting</Button>}
                 {auditStatus === "completed" && (isEbayOneTimeAudit || isEbayLiveAudit) && <Button size="sm" disabled={ebayShadowLaunchBusy} onClick={() => void launchAuditShadowsOnEbay()}>{ebayShadowLaunchBusy ? <Loader2 className="size-4 animate-spin" /> : <Store className="size-4" />} {isEbayLiveAudit ? "Publish eBay listing" : "Launch shadows"}</Button>}
-                <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline"><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem asChild><a href={`/live-sessions?sourceType=warehouse_audit&sourceId=${encodeURIComponent(String(current.id))}`}><Store className="size-4" /> Create live session</a></DropdownMenuItem>{!current.linkedPurchaseOrderId && <DropdownMenuItem asChild><a href={`/purchasing?createFromAudit=${encodeURIComponent(String(current.id))}`}><ShoppingCart className="size-4" /> Create and link PO</a></DropdownMenuItem>}<DropdownMenuItem onSelect={() => setBinLabelsOpen(true)}><Printer className="size-4" /> Print bin labels</DropdownMenuItem><DropdownMenuItem onSelect={() => void shareAuditLink()}><Share2 className="size-4" /> Share audit link</DropdownMenuItem>{activeBin && auditStatus === "in_progress" && <DropdownMenuItem disabled={busy || clearBinBusy} onSelect={requestClearBin}><X className="size-4" /> Clear bin</DropdownMenuItem>}{!mobile && desktopAuditTools && <DropdownMenuItem onSelect={() => setAuditToolsOpen(true)}><FileUp className="size-4" /> Import stock / eBay tools</DropdownMenuItem>}{!isLinkedPurchaseOrderReceipt && !isPurchaseOrderRecount && <DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem>}<DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+                <DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" className={mobile ? "col-span-2" : ""}><MoreHorizontal className="size-4" /> More</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem asChild><a href={`/live-sessions?sourceType=warehouse_audit&sourceId=${encodeURIComponent(String(current.id))}`}><Store className="size-4" /> Create live session</a></DropdownMenuItem>{!current.linkedPurchaseOrderId && <DropdownMenuItem asChild><a href={`/purchasing?createFromAudit=${encodeURIComponent(String(current.id))}`}><ShoppingCart className="size-4" /> Create and link PO</a></DropdownMenuItem>}<DropdownMenuItem onSelect={() => setBinLabelsOpen(true)}><Printer className="size-4" /> Print bin labels</DropdownMenuItem><DropdownMenuItem onSelect={() => void shareAuditLink()}><Share2 className="size-4" /> Share audit link</DropdownMenuItem>{activeBin && auditStatus === "in_progress" && <DropdownMenuItem disabled={busy || clearBinBusy} onSelect={requestClearBin}><X className="size-4" /> Clear bin</DropdownMenuItem>}{!mobile && desktopAuditTools && <DropdownMenuItem onSelect={() => setAuditToolsOpen(true)}><FileUp className="size-4" /> Import stock / eBay tools</DropdownMenuItem>}{!isLinkedPurchaseOrderReceipt && !isPurchaseOrderRecount && <DropdownMenuItem onSelect={openPurposeEditor}><Pencil className="size-4" /> Edit purpose</DropdownMenuItem>}<DropdownMenuItem asChild><a href={`/api/warehouse-audits/${encodeURIComponent(String(current.id))}/export`}><FileDown className="size-4" /> Export audit</a></DropdownMenuItem></DropdownMenuContent></DropdownMenu>
               </div>
             </div>
             {!mobile && isReceivingAudit && ["in_progress", "pending_review"].includes(auditStatus) && <section data-testid="receiving-progress" className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/20 px-4 py-3">
@@ -3199,6 +3258,40 @@ function WarehouseAuditPanel({
               const documents = Array.isArray(current.receivingDocuments) ? current.receivingDocuments as Array<Record<string, unknown>> : [];
               const review = receivingReview;
               const reviewLines = receivingReviewLines;
+              if (mobile) {
+                const packingSlipStatus = review ? "Analyzed" : hasPackingSlip ? "Attached" : "Missing";
+                const varianceCount = reviewLines.filter((line) => line.status === "variance").length;
+                return <Card className="border-blue-500/30">
+                  <CardContent className="grid gap-3 p-3">
+                    <div className="flex items-center gap-3">
+                      <div className={cn("grid size-11 shrink-0 place-items-center rounded-md border", hasPackingSlip ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "bg-muted/40 text-muted-foreground")}>
+                        <FileText className="size-5" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2"><p className="font-medium">Packing slip</p><Badge variant={review ? "success" : hasPackingSlip ? "secondary" : "warning"}>{packingSlipStatus}</Badge></div>
+                        <p className="mt-0.5 text-xs text-muted-foreground">{review ? `${numberLabel(reviewLines.length)} extracted line${reviewLines.length === 1 ? "" : "s"}${varianceCount ? ` · ${numberLabel(varianceCount)} need review` : " · quantities compared"}` : hasPackingSlip ? `${numberLabel(documents.length)} document${documents.length === 1 ? "" : "s"} saved` : "Optional evidence · not attached yet"}</p>
+                      </div>
+                      <label className="relative grid size-14 shrink-0 cursor-pointer place-items-center rounded-md bg-primary text-primary-foreground shadow-sm hover:bg-primary/90" aria-label="Take packing slip photo">
+                        {receivingDocumentBusy ? <Loader2 className="size-6 animate-spin" /> : <Camera className="size-6" />}
+                        <span className="sr-only">Take packing slip photo</span>
+                        <input className="sr-only" type="file" accept="image/*" capture="environment" disabled={receivingDocumentBusy} onChange={(event) => { void uploadReceivingDocuments(event.target.files, "packing_slip"); event.currentTarget.value = "" }} />
+                      </label>
+                    </div>
+                    {documents.length > 0 && <div className="flex gap-2 overflow-x-auto pb-1">{documents.map((document) => <Button key={String(document.id)} size="sm" variant="outline" className="shrink-0" onClick={() => setReceivingDocumentPreview(document)}><Eye className="size-3.5" />{String(document.name || "View document")}</Button>)}</div>}
+                    <Collapsible>
+                      <CollapsibleTrigger asChild><Button size="sm" variant="ghost" className="w-full justify-between px-2">Document options and OCR <ChevronDown className="size-4" /></Button></CollapsibleTrigger>
+                      <CollapsibleContent className="grid gap-3 border-t pt-3">
+                        <div className="grid grid-cols-2 gap-2">
+                          <Field label="Document type"><Select value={receivingDocumentType} onValueChange={(value) => setReceivingDocumentType(value as "packing_slip" | "purchase_order")}><SelectTrigger className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="packing_slip">Packing slip</SelectItem><SelectItem value="purchase_order">Purchase order</SelectItem></SelectContent></Select></Field>
+                          <label className="mt-auto inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted"><FileUp className="size-4" /> Upload<input className="sr-only" type="file" multiple accept="application/pdf,image/jpeg,image/png,image/webp,image/heic,image/heif" disabled={receivingDocumentBusy} onChange={(event) => { void uploadReceivingDocuments(event.target.files); event.currentTarget.value = "" }} /></label>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2"><Button size="sm" disabled={receivingDocumentBusy || !current.supplierName || !documents.some((document) => /^image\/(?:jpe?g|png|webp)$/i.test(String(document.mimeType || "")))} onClick={() => void analyzeReceivingDocuments("ocr")}><ScanSearch className="size-4" /> Re-run OCR</Button><Button size="sm" variant="outline" disabled={receivingDocumentBusy || !documents.some((document) => /^image\/(?:jpe?g|png|webp)$/i.test(String(document.mimeType || "")))} onClick={() => void analyzeReceivingDocuments("ai")}><Sparkles className="size-4" /> David fallback</Button></div>
+                        {review && <div className="grid gap-2 rounded-md border bg-muted/20 p-2"><div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><Badge variant={String(review.provider) === "local-ocr" ? "success" : "secondary"}>{String(review.provider) === "local-ocr" ? "Local OCR" : "David"}</Badge>{Number(review.averageConfidence || 0) > 0 && <span>{numberLabel(Number(review.averageConfidence || 0))}% confidence</span>}</div>{reviewLines.slice(0, 12).map((line) => <div key={String(line.id)} className="flex items-center justify-between gap-3 border-t pt-2 text-xs"><span className="min-w-0 truncate">{String(line.description || line.vendorItemNumber || line.upc || "Packing slip line")}</span><Badge variant={line.status === "matched" ? "success" : line.status === "variance" ? "destructive" : "outline"}>{line.status === "matched" ? "Matched" : line.status === "variance" ? `Variance ${Number(line.variance || 0) > 0 ? "+" : ""}${numberLabel(Number(line.variance || 0))}` : "Not scanned"}</Badge></div>)}</div>}
+                      </CollapsibleContent>
+                    </Collapsible>
+                  </CardContent>
+                </Card>;
+              }
               return <Card className="border-blue-500/30"><CardHeader className="pb-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-sm">Packing slip and receiving documents</CardTitle><CardDescription>Take packing-slip photos or upload files when available. DataPlus saves the originals, runs local OCR automatically, and compares extracted quantities with shipment scans.</CardDescription></div><div className="flex flex-wrap gap-2"><Badge variant="outline">{String(current.supplierName || "Supplier not set")}</Badge>{String(current.externalPurchaseOrderNumber || "") && <Badge variant="outline">External PO {String(current.externalPurchaseOrderNumber)}</Badge>}{String(current.linkedPurchaseOrderNumber || "") && <Badge variant="outline">DataPlus PO {String(current.linkedPurchaseOrderNumber)}</Badge>}</div></div></CardHeader><CardContent className="grid gap-4"><div className="flex flex-wrap items-end gap-2"><Field label="Document type"><Select value={receivingDocumentType} onValueChange={(value) => setReceivingDocumentType(value as "packing_slip" | "purchase_order")}><SelectTrigger className="w-44"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="packing_slip">Packing slip</SelectItem><SelectItem value="purchase_order">Purchase order</SelectItem></SelectContent></Select></Field><label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted"><FileUp className="size-4" /> Upload files<input className="sr-only" type="file" multiple accept="application/pdf,image/jpeg,image/png,image/webp,image/heic,image/heif" disabled={receivingDocumentBusy} onChange={(event) => { void uploadReceivingDocuments(event.target.files); event.currentTarget.value = "" }} /></label><label className="inline-flex h-9 cursor-pointer items-center gap-2 rounded-md border bg-background px-3 text-sm font-medium hover:bg-muted"><Camera className="size-4" /> Take photo<input className="sr-only" type="file" accept="image/*" capture="environment" disabled={receivingDocumentBusy} onChange={(event) => { void uploadReceivingDocuments(event.target.files); event.currentTarget.value = "" }} /></label><Button disabled={receivingDocumentBusy || !current.supplierName || !documents.some((document) => /^image\/(?:jpe?g|png|webp)$/i.test(String(document.mimeType || "")))} onClick={() => void analyzeReceivingDocuments("ocr")}>{receivingDocumentBusy ? <Loader2 className="size-4 animate-spin" /> : <ScanSearch className="size-4" />} Re-run local OCR</Button><Button variant="outline" disabled={receivingDocumentBusy || !documents.some((document) => /^image\/(?:jpe?g|png|webp)$/i.test(String(document.mimeType || "")))} onClick={() => void analyzeReceivingDocuments("ai")}><Sparkles className="size-4" /> Use David fallback</Button></div>{!hasPackingSlip && <Alert><FileText className="size-4" /><AlertTitle>No packing slip attached</AlertTitle><AlertDescription>You can still finish this receipt. Upload the document now only if it is available.</AlertDescription></Alert>}{documents.length > 0 && <div className="flex flex-wrap gap-2">{documents.map((document) => <Button key={String(document.id)} size="sm" variant="outline" onClick={() => setReceivingDocumentPreview(document)}><Eye className="size-3.5" /> {String(document.name || "Document")}</Button>)}</div>}{review && <div className="grid gap-3"><div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"><Badge variant={String(review.provider) === "local-ocr" ? "success" : "secondary"}>{String(review.provider) === "local-ocr" ? "Local OCR" : "David fallback"}</Badge><Badge variant="outline">{String(review.templateKey || "generic-packing-slip-v1")}</Badge><span>{numberLabel(Number((review.documentsAnalyzed as unknown[] || []).length))} of {numberLabel(Number(review.documentCount || documents.length))} documents analyzed</span>{Number(review.averageConfidence || 0) > 0 && <span>{numberLabel(Number(review.averageConfidence || 0))}% confidence</span>}<span>{dateLabel(String(review.analyzedAt || ""))}</span></div>{Array.isArray(review.warnings) && review.warnings.length > 0 && <Alert className="border-amber-500/40 bg-amber-500/10"><AlertTriangle className="size-4" /><AlertTitle>Review extraction warnings</AlertTitle><AlertDescription>{(review.warnings as string[]).join(" ")}</AlertDescription></Alert>}<div className="max-h-80 overflow-auto rounded-md border"><Table><TableHeader className="sticky top-0 z-10 bg-background"><TableRow><TableHead>Vendor item</TableHead><TableHead>UPC / Mfr SKU</TableHead><TableHead>Description</TableHead><TableHead className="text-right">Slip qty</TableHead><TableHead className="text-right">Scanned</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>{reviewLines.map((line) => <TableRow key={String(line.id)}><TableCell className="font-medium">{String(line.vendorItemNumber || "-")}</TableCell><TableCell><p>{String(line.upc || "-")}</p><p className="text-xs text-muted-foreground">{String(line.manufacturerSku || "-")}</p></TableCell><TableCell className="max-w-56 truncate">{String(line.description || "-")}</TableCell><TableCell className="text-right">{numberLabel(Number(line.expectedQty || 0))}</TableCell><TableCell className="text-right">{numberLabel(Number(line.countedQty || 0))}</TableCell><TableCell><Badge variant={line.status === "matched" ? "default" : line.status === "variance" ? "destructive" : "outline"}>{line.status === "matched" ? "Matched" : line.status === "variance" ? `Variance ${Number(line.variance || 0) > 0 ? "+" : ""}${numberLabel(Number(line.variance || 0))}` : "Not scanned"}</Badge></TableCell></TableRow>)}{!reviewLines.length && <TableRow><TableCell colSpan={6} className="h-20 text-center text-muted-foreground">No readable line items were extracted. Review this supplier's column mapping or use David fallback.</TableCell></TableRow>}</TableBody></Table></div><p className="text-xs text-muted-foreground">The packing slip is optional evidence, not inventory. When attached, review any slip-only, scan-only, over, or short lines before posting the receipt.</p></div>}</CardContent></Card>;
             })()}
 
@@ -3813,7 +3906,13 @@ function WarehouseAuditPanel({
                 <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input aria-label="Search audit items" className="pl-9" value={itemQuery} onChange={(event) => setItemQuery(event.target.value)} placeholder="Find SKU, UPC, MPN, vendor SKU, or title" />
               </div>
-              <Select value={itemReceivingStatus} onValueChange={(value) => setItemReceivingStatus(value as WarehouseReceivingStatusFilter)}>
+              {mobile ? <div className="-mx-1 flex gap-1 overflow-x-auto px-1 pb-1">{([
+                ["all", "All", allSortedItems.length],
+                ["awaiting_scan", "Awaiting", receivingStatusCounts.awaiting_scan],
+                ["partial", "Partial", receivingStatusCounts.partial],
+                ["complete", "Complete", receivingStatusCounts.complete],
+                ["extra", "Extra", receivingStatusCounts.extra],
+              ] as Array<[WarehouseReceivingStatusFilter, string, number]>).map(([value, label, count]) => <Button key={value} size="sm" variant={itemReceivingStatus === value ? "default" : "outline"} className="h-9 shrink-0" onClick={() => setItemReceivingStatus(value)}>{label}<Badge variant={itemReceivingStatus === value ? "secondary" : "outline"} className="ml-1 px-1.5">{numberLabel(count)}</Badge></Button>)}</div> : <Select value={itemReceivingStatus} onValueChange={(value) => setItemReceivingStatus(value as WarehouseReceivingStatusFilter)}>
                 <SelectTrigger aria-label="Filter by receiving status"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All statuses ({allSortedItems.length})</SelectItem>
@@ -3822,12 +3921,16 @@ function WarehouseAuditPanel({
                   <SelectItem value="awaiting_scan">Awaiting scan ({receivingStatusCounts.awaiting_scan})</SelectItem>
                   <SelectItem value="extra">Extra item ({receivingStatusCounts.extra})</SelectItem>
                 </SelectContent>
-              </Select>
-              <WarehouseAuditSortControl value={itemSort} onChange={setItemSort} items />
-              {(itemQuery || itemReceivingStatus !== "all") ? <Button size="sm" variant="ghost" onClick={() => { setItemQuery(""); setItemReceivingStatus("all"); }}><X className="size-4" />Clear</Button> : <p className="text-right text-xs text-muted-foreground">{sortedItems.length} shown</p>}
+              </Select>}
+              <div className={mobile ? "flex items-center justify-between gap-2" : "contents"}><WarehouseAuditSortControl value={itemSort} onChange={setItemSort} items />
+              {(itemQuery || itemReceivingStatus !== "all") ? <Button size="sm" variant="ghost" onClick={() => { setItemQuery(""); setItemReceivingStatus("all"); }}><X className="size-4" />Clear</Button> : <p className="text-right text-xs text-muted-foreground">{sortedItems.length} shown</p>}</div>
             </div>
             {isManualExternalReceipt && recentPoMatchedItems.length > 0 && <Alert className="border-blue-400 bg-blue-50/70 dark:border-blue-700 dark:bg-blue-950/30"><FileText className="size-4 text-blue-700 dark:text-blue-300" /><AlertTitle>{numberLabel(recentPoMatchedItems.length)} received item{recentPoMatchedItems.length === 1 ? "" : "s"} found on {numberLabel(recentOpenPurchaseOrders.length)} recent open PO{recentOpenPurchaseOrders.length === 1 ? "" : "s"}</AlertTitle><AlertDescription><div className="mt-2 flex flex-wrap gap-1.5">{recentOpenPurchaseOrders.map((purchaseOrder) => <a key={String(purchaseOrder.purchaseOrderId)} href={purchaseOrderUrl(purchaseOrder.purchaseOrderNumber, purchaseOrder.purchaseOrderId)} target="_blank" rel="noreferrer"><Badge variant="secondary" className="hover:bg-muted">{String(purchaseOrder.purchaseOrderNumber || "Open PO")}<ExternalLink className="ml-1 size-3" /></Badge></a>)}</div></AlertDescription></Alert>}
-            <div className="overflow-x-auto rounded-md border">
+            {mobile ? <div className="grid gap-3">
+              {sortedItems.map(mobileAuditItemCard)}
+              {!allSortedItems.length && <div className="rounded-md border border-dashed p-8 text-center text-sm text-muted-foreground"><ScanBarcode className="mx-auto mb-2 size-7" />Scan the first UPC to begin counting.</div>}
+              {allSortedItems.length > 0 && !sortedItems.length && <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">No audit items match these filters. Search another SKU or clear the receiving status.</div>}
+            </div> : <div className="overflow-x-auto rounded-md border">
               <Table className="warehouse-audit-table">
                 <TableHeader>
                   <TableRow>
@@ -3971,7 +4074,21 @@ function WarehouseAuditPanel({
                   )}
                 </TableBody>
               </Table>
-            </div>
+            </div>}
+            <Sheet open={Boolean(mobileAuditActionLine)} onOpenChange={(open) => { if (!open) setMobileAuditActionLine(null); }}>
+              <SheetContent side="bottom" className="z-[70] rounded-t-lg border-t px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-4">
+                <SheetHeader className="px-0 text-left">
+                  <SheetTitle className="font-mono">{String(mobileAuditActionLine?.sku || (mobileAuditActionLine?.receivingPoLine as Record<string, unknown> | undefined)?.sku || "Product actions")}</SheetTitle>
+                  <SheetDescription className="line-clamp-2">{String(mobileAuditActionLine?.title || "Choose an action for this audit item.")}</SheetDescription>
+                </SheetHeader>
+                <div className="mt-4 grid gap-2">
+                  {String(mobileAuditActionLine?.sku || (mobileAuditActionLine?.receivingPoLine as Record<string, unknown> | undefined)?.sku || "").trim() && <Button variant="outline" className="h-12 justify-start" asChild><a href={`/products/${encodeURIComponent(String(mobileAuditActionLine?.sku || (mobileAuditActionLine?.receivingPoLine as Record<string, unknown> | undefined)?.sku || ""))}`} target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> Open catalog product</a></Button>}
+                  {auditStatus === "in_progress" && mobileAuditActionLine?.auditItemKind !== "po_expected" && <Button variant="outline" className="h-12 justify-start" onClick={() => { const line = mobileAuditActionLine; if (!line) return; setMobileAuditActionLine(null); openCountEdit(line); }}><Pencil className="size-4" /> Edit scanned quantity</Button>}
+                  {!String(mobileAuditActionLine?.catalogBarcode || "").trim() && auditStatus === "in_progress" && <Button variant="outline" className="h-12 justify-start" onClick={() => { const line = mobileAuditActionLine; if (!line) return; setMobileAuditActionLine(null); openAddUpc(line); }}><ScanBarcode className="size-4" /> Add UPC</Button>}
+                  {mobileAuditActionLine?.auditItemKind !== "po_expected" && <Button variant="outline" className="h-12 justify-start" onClick={() => { const line = mobileAuditActionLine; if (!line) return; setMobileAuditActionLine(null); openItemNote(line); }}><MessageSquare className="size-4" />{mobileAuditActionLine?.note ? "View or edit note" : "Add note"}</Button>}
+                </div>
+              </SheetContent>
+            </Sheet>
             {!mobile && desktopAuditTools && <Dialog open={auditToolsOpen} onOpenChange={setAuditToolsOpen}>
               <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-2xl">
                 <DialogHeader><DialogTitle>Import stock / eBay tools</DialogTitle><DialogDescription>Import a stock file for this audit or prepare found stock for eBay.</DialogDescription></DialogHeader>
