@@ -1,0 +1,74 @@
+{
+  "packageId": "com.dataplus.warehouse",
+  "host": "dataplusapp.duckdns.org",
+  "name": "DataPlus Warehouse",
+  "launcherName": "Warehouse",
+  "display": "standalone",
+  "themeColor": "#7C3AED",
+  "themeColorDark": "#000000",
+  "navigationColor": "#000000",
+  "navigationColorDark": "#000000",
+  "navigationDividerColor": "#000000",
+  "navigationDividerColorDark": "#000000",
+  "backgroundColor": "#09090B",
+  "enableNotifications": true,
+  "startUrl": "/warehouse/mobile",
+  "iconUrl": "https://dataplusapp.duckdns.org/warehouse-icon.svg",
+  "maskableIconUrl": "https://dataplusapp.duckdns.org/warehouse-icon.svg",
+  "splashScreenFadeOutDuration": 300,
+  "signingKey": {
+    "path": "./android.keystore",
+    "alias": "datapluswarehouse"
+  },
+  "appVersionName": "1.0.0",
+  "appVersionCode": 1,
+  "shortcuts": [
+    {
+      "name": "Receive purchase orders",
+      "shortName": "Receiving",
+      "url": "https://dataplusapp.duckdns.org/warehouse/mobile/receiving",
+      "chosenIconUrl": "https://dataplusapp.duckdns.org/warehouse-icon.svg"
+    },
+    {
+      "name": "Warehouse audits",
+      "shortName": "Audits",
+      "url": "https://dataplusapp.duckdns.org/warehouse/mobile/audits",
+      "chosenIconUrl": "https://dataplusapp.duckdns.org/warehouse-icon.svg"
+    },
+    {
+      "name": "Bin tools",
+      "shortName": "Bins",
+      "url": "https://dataplusapp.duckdns.org/warehouse/mobile/bins",
+      "chosenIconUrl": "https://dataplusapp.duckdns.org/warehouse-icon.svg"
+    }
+  ],
+  "generatorApp": "bubblewrap-cli",
+  "webManifestUrl": "https://dataplusapp.duckdns.org/warehouse.webmanifest",
+  "fallbackType": "customtabs",
+  "features": {},
+  "alphaDependencies": {
+    "enabled": false
+  },
+  "enableSiteSettingsShortcut": true,
+  "isChromeOSOnly": false,
+  "isMetaQuest": false,
+  "fullScopeUrl": "https://dataplusapp.duckdns.org/",
+  "minSdkVersion": 24,
+  "orientation": "portrait-primary",
+  "fingerprints": [
+    {
+      "name": "release",
+      "value": "EC:F5:56:86:9D:4D:14:1E:7C:B1:B1:DC:2B:35:36:93:B7:A5:C7:BD:07:7E:15:DB:DD:2A:9D:0F:18:42:5B:44"
+    }
+  ],
+  "additionalTrustedOrigins": [],
+  "retainedBundles": [],
+  "protocolHandlers": [],
+  "fileHandlers": [],
+  "launchHandlerClientMode": "",
+  "displayOverride": [
+    "standalone",
+    "minimal-ui"
+  ],
+  "appVersion": "1.0.0"
+}

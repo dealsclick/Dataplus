@@ -20,6 +20,7 @@ COPY lib ./lib
 COPY public ./public
 COPY browser-extension ./browser-extension
 COPY scripts ./scripts
+COPY release-assets ./release-assets
 COPY web ./web
 
 ARG SENTRY_ORG=buysupply

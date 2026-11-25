@@ -302,6 +302,7 @@ const CONNECTOR_STATE_FILE = path.join(DATA_DIR, "connectors.json");
 const ENV_FILE = path.join(ROOT, ".env");
 const SHOPIFY_RUNTIME_CREDENTIALS_FILE = path.join(DATA_DIR, "shopify-runtime-credentials.json");
 const EBAY_RUNTIME_CREDENTIALS_FILE = path.join(DATA_DIR, "ebay-runtime-credentials.json");
+const WAREHOUSE_APK_FILE = path.resolve(String(process.env.WAREHOUSE_APK_FILE || path.join(ROOT, "release-assets", "warehouse", "dataplus-warehouse.apk")));
 const BACKGROUND_EXPORT_PAGE_SIZE = 100;
 const IMPORT_JOB_FILE_RETENTION_DAYS = Math.max(1, Number(process.env.IMPORT_JOB_FILE_RETENTION_DAYS || 7) || 7);
 const PURCHASE_ORDER_REQUEST_RETENTION_DAYS = Math.max(1, Number(process.env.PURCHASE_ORDER_REQUEST_RETENTION_DAYS || 30) || 30);
@@ -6804,6 +6805,34 @@ function currentAuthUser(req, settings = readSystemSettingsStore(dbCache.data?.s
   return user;
 }
 
+function warehouseApkMetadata() {
+  const downloadUrl = "/api/mobile/warehouse-apk";
+  const fileName = "dataplus-warehouse.apk";
+  if (!fs.existsSync(WAREHOUSE_APK_FILE)) {
+    return { available: false, fileName, downloadUrl, message: "The Android installer has not been published yet." };
+  }
+  const stat = fs.statSync(WAREHOUSE_APK_FILE);
+  if (!stat.isFile()) {
+    return { available: false, fileName, downloadUrl, message: "The Android installer is unavailable." };
+  }
+  const metadataFile = path.join(path.dirname(WAREHOUSE_APK_FILE), `${path.basename(WAREHOUSE_APK_FILE, path.extname(WAREHOUSE_APK_FILE))}.json`);
+  let release = {};
+  if (fs.existsSync(metadataFile)) {
+    try { release = JSON.parse(fs.readFileSync(metadataFile, "utf8")); }
+    catch (error) { console.warn("Unable to read Warehouse APK metadata:", error.message); }
+  }
+  return {
+    available: true,
+    fileName,
+    downloadUrl,
+    bytes: stat.size,
+    updatedAt: stat.mtime.toISOString(),
+    version: String(release.version || process.env.WAREHOUSE_APK_VERSION || "").trim(),
+    sha256: String(release.sha256 || "").trim(),
+    publishedAt: String(release.publishedAt || "").trim()
+  };
+}
+
 function authAreaForPath(pathname = "") {
   if (pathname === "/api/quote-terms") return "settings";
   if (/^\/api\/shipping-providers(?:\/|$)/.test(pathname)) return "settings";
@@ -6817,6 +6846,7 @@ function authAreaForPath(pathname = "") {
   if (/^\/api\/(orders|order-drafts|drafts|returns|customers|search)/.test(pathname)) return "orders";
   if (/^\/api\/(fulfillment|shipments|pick-lists)/.test(pathname)) return "fulfillment";
   if (/^\/api\/(purchase-orders|purchasing|vendors\/[^/]+\/purchase)/.test(pathname)) return "purchasing";
+  if (/^\/api\/mobile\/warehouse-apk(?:\/|$)/.test(pathname)) return "warehouse";
   if (/^\/api\/(warehouse|warehouse-audits|live-sessions|inventory|warehouses|barcodes)/.test(pathname)) return "warehouse";
   if (/^\/api\/(catalog|products|categories|source-catalog|attribute|brands|vendors)/.test(pathname)) return pathname.includes("/vendors") ? "vendors" : pathname.includes("/brands") ? "brands" : "catalog";
   if (/^\/api\/(channels|shopify|ebay|temu|tiktok|walmart|webhooks)/.test(pathname)) return "channels";
@@ -58642,6 +58672,23 @@ async function handleApi(req, res) {
       error: `Your account does not have ${requiredAction} access for ${requiredArea || "this area"}.`,
       missingPermission: { area: requiredArea || "", action: requiredAction || "view" }
     });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/mobile/warehouse-apk/status") {
+    return sendJson(res, 200, warehouseApkMetadata());
+  }
+  if (["GET", "HEAD"].includes(req.method || "") && url.pathname === "/api/mobile/warehouse-apk") {
+    const release = warehouseApkMetadata();
+    if (!release.available) return sendJson(res, 404, { error: release.message });
+    res.writeHead(200, {
+      "Content-Type": "application/vnd.android.package-archive",
+      "Content-Disposition": `attachment; filename="${release.fileName}"`,
+      "Content-Length": release.bytes,
+      "Cache-Control": "private, no-store, max-age=0",
+      "X-Content-Type-Options": "nosniff"
+    });
+    if (req.method === "HEAD") return res.end();
+    return fs.createReadStream(WAREHOUSE_APK_FILE).pipe(res);
   }
 
   const isNotificationRequest = url.pathname === "/api/notifications" || url.pathname.startsWith("/api/notifications/");

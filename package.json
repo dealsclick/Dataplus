@@ -11,6 +11,8 @@
     "print-agent": "node scripts/dataplus-print-agent.js",
     "web:build": "npm --prefix web run build",
     "web:dev": "npm --prefix web run dev",
+    "android:publish": "node scripts/publish-warehouse-apk.cjs",
+    "test:warehouse-apk": "node scripts/test-warehouse-apk.cjs",
     "db:migrate": "node scripts/migrate-json-to-postgres.js",
     "import:product-dump": "node scripts/import-product-dump.js",
     "import:shopify-taxonomy": "node scripts/import-shopify-taxonomy.js",
