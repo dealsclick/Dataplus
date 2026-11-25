@@ -1,0 +1,14 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.dataplus.warehouse",
+      "sha256_cert_fingerprints": [
+        "EC:F5:56:86:9D:4D:14:1E:7C:B1:B1:DC:2B:35:36:93:B7:A5:C7:BD:07:7E:15:DB:DD:2A:9D:0F:18:42:5B:44"
+      ]
+    }
+  }
+]

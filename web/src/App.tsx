@@ -2260,6 +2260,39 @@ function LoginPage({ onLogin }: { onLogin: (session: AuthSession) => void }) {
   </TooltipProvider>
 }
 
+type WarehouseApkStatus = {
+  available?: boolean
+  fileName?: string
+  downloadUrl?: string
+  version?: string
+  message?: string
+}
+
+function WarehouseApkInstallMenuItem() {
+  const [release, setRelease] = useState<WarehouseApkStatus | null>(null)
+
+  useEffect(() => {
+    let active = true
+    void api<WarehouseApkStatus>("/api/mobile/warehouse-apk/status")
+      .then((result) => { if (active) setRelease(result) })
+      .catch(() => { if (active) setRelease({ available: false, message: "Android installer unavailable." }) })
+    return () => { active = false }
+  }, [])
+
+  if (release?.available) {
+    return <DropdownMenuItem asChild>
+      <a href={release.downloadUrl || "/api/mobile/warehouse-apk"} download={release.fileName || "dataplus-warehouse.apk"}>
+        <FileDown className="size-4" />
+        <span>Install Warehouse APK{release.version ? ` v${release.version}` : ""}</span>
+      </a>
+    </DropdownMenuItem>
+  }
+
+  return <DropdownMenuItem disabled title={release?.message || "Checking Android installer availability."}>
+    <FileDown className="size-4" /> {release ? "Warehouse APK unavailable" : "Checking Warehouse APK..."}
+  </DropdownMenuItem>
+}
+
 function App({ companySettings = false, orderTools = false }: { companySettings?: boolean; orderTools?: boolean }) {
   const warehouseMobile = window.location.pathname === "/warehouse/mobile" || window.location.pathname.startsWith("/warehouse/mobile/")
   const companyOnly = companySettings || orderTools || warehouseMobile
@@ -2844,7 +2877,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
       fulfillment={userCan(authUser, "fulfillment", "view") ? <FulfillmentPage /> : <p>Fulfillment access is required.</p>}
       inventory={userCan(authUser, "warehouse.inventory", "view") ? <InventoryWorkspace /> : <p>Inventory access is required.</p>}
       brand={<><SystemBrandMark settings={state.systemSettings} className="size-8" /><span className="truncate font-semibold">Warehouse</span></>}
-      account={<DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" className="max-w-44"><Users className="size-4" /><span className="truncate">{authUser.name || authUser.username || "Account"}</span><ChevronDown className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-72 max-w-[calc(100vw-1rem)]"><DropdownMenuLabel><span className="block truncate text-sm text-foreground">{authUser.name || authUser.username}</span><span className="block truncate font-normal">{authUser.role || "Warehouse user"}</span></DropdownMenuLabel><DropdownMenuSeparator /><CompanyMenuItems /><DropdownMenuSeparator /><DropdownMenuItem asChild><a href="/warehouse/warehouses"><Warehouse className="size-4" /> Full app</a></DropdownMenuItem><DropdownMenuItem asChild><a href="/extensions"><Puzzle className="size-4" /> Extensions</a></DropdownMenuItem><DropdownMenuItem onClick={() => setPasswordOpen(true)}><LockKeyhole className="size-4" /> Change password</DropdownMenuItem><DropdownMenuItem variant="destructive" onClick={() => void signOut()}><UnlockKeyhole className="size-4" /> Sign out</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
+      account={<DropdownMenu><DropdownMenuTrigger asChild><Button size="sm" variant="outline" className="max-w-44"><Users className="size-4" /><span className="truncate">{authUser.name || authUser.username || "Account"}</span><ChevronDown className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end" className="w-72 max-w-[calc(100vw-1rem)]"><DropdownMenuLabel><span className="block truncate text-sm text-foreground">{authUser.name || authUser.username}</span><span className="block truncate font-normal">{authUser.role || "Warehouse user"}</span></DropdownMenuLabel><DropdownMenuSeparator /><CompanyMenuItems /><DropdownMenuSeparator /><DropdownMenuItem asChild><a href="/warehouse/warehouses"><Warehouse className="size-4" /> Full app</a></DropdownMenuItem><WarehouseApkInstallMenuItem /><DropdownMenuItem asChild><a href="/extensions"><Puzzle className="size-4" /> Extensions</a></DropdownMenuItem><DropdownMenuItem onClick={() => setPasswordOpen(true)}><LockKeyhole className="size-4" /> Change password</DropdownMenuItem><DropdownMenuItem variant="destructive" onClick={() => void signOut()}><UnlockKeyhole className="size-4" /> Sign out</DropdownMenuItem></DropdownMenuContent></DropdownMenu>}
       canReceive={userCan(authUser, "warehouse.receiving", "view")}
       canManageBins={userCan(authUser, "warehouse.locations", "view")}
       canAudit={userCan(authUser, "warehouse.audits", "view")}
@@ -3056,6 +3089,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
                     <CompanyMenuItems />
                     <DropdownMenuSeparator />
                     {userCan(authUser, "warehouse", "view") && <DropdownMenuItem asChild className="sm:hidden"><a href="/warehouse/mobile"><Warehouse className="size-4" /> Warehouse Mobile</a></DropdownMenuItem>}
+                    {userCan(authUser, "warehouse", "view") && <WarehouseApkInstallMenuItem />}
                     <DropdownMenuItem onClick={() => { window.history.pushState({}, "", "/extensions"); setView("extensions") }}><Puzzle className="size-4" /> Extensions</DropdownMenuItem>
                     <DropdownMenuCheckboxItem checked={colorblindMode} onCheckedChange={(checked) => updateColorblindMode(checked === true)}><Accessibility className="size-4" /> Colorblind-friendly colors</DropdownMenuCheckboxItem>
                     <DropdownMenuSeparator />
