@@ -65020,6 +65020,55 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { audit, line, expectedLine, message: `${line.sku || "Scanned item"} assigned as a substitution for ${expectedLine.sku || "the PO line"}.` });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "remove" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const audit = await postgres.readWarehouseAudit(parts[2]);
+    if (!audit) return notFound(res);
+    if (audit.status !== "in_progress") return sendJson(res, 400, { error: "Items can be removed only while the audit is in progress." });
+    const kind = body.kind === "unknown" ? "unknown" : "known";
+    const lineKey = decodeURIComponent(parts[4]);
+    const rows = kind === "unknown" ? audit.unknownBarcodes || [] : audit.lines || [];
+    const index = rows.findIndex((entry) => String(kind === "unknown" ? entry.id || `${entry.barcode || ""}::${entry.locationBin || ""}` : auditLineKey(entry)) === lineKey);
+    if (index < 0) return sendJson(res, 404, { error: "Scanned audit item not found. Expected PO lines cannot be removed; they remain open until received or backordered." });
+    const [line] = rows.splice(index, 1);
+    const now = new Date().toISOString();
+    const removedBy = String(authUser?.name || authUser?.username || body.user || "Warehouse user").trim() || "Warehouse user";
+    const reason = String(body.reason || "").trim().slice(0, 500);
+    const removedItem = {
+      id: String(line.id || ""),
+      kind,
+      productId: String(line.productId || ""),
+      sku: String(line.sku || line.createdProductSku || ""),
+      title: String(line.title || line.description || ""),
+      barcode: String(line.barcode || line.upc || ""),
+      locationBin: String(line.locationBin || ""),
+      countedQty: Number(kind === "unknown" ? line.count || 0 : line.countedQty || 0),
+      receivingPurchaseOrderLineId: String(line.receivingPurchaseOrderLineId || ""),
+      removedAt: now,
+      removedBy,
+      reason
+    };
+    audit.removedItems = [...(Array.isArray(audit.removedItems) ? audit.removedItems : []), removedItem].slice(-250);
+    audit.lifecycleEvents = [...(Array.isArray(audit.lifecycleEvents) ? audit.lifecycleEvents : []), {
+      type: "audit_item_removed",
+      at: now,
+      user: removedBy,
+      kind,
+      sku: removedItem.sku,
+      barcode: removedItem.barcode,
+      quantity: removedItem.countedQty,
+      reason
+    }].slice(-250);
+    audit.updatedAt = now;
+    await postgres.saveWarehouseAudit(audit);
+    await syncPurchaseOrderReceivingProgress(audit);
+    return sendJson(res, 200, {
+      audit,
+      removedItem,
+      message: `${removedItem.sku || removedItem.barcode || "Audit item"} was removed from the active count.${removedItem.receivingPurchaseOrderLineId ? " Its PO requirement remains open." : ""}`
+    });
+  }
+
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "count" && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const audit = await postgres.readWarehouseAudit(parts[2]);

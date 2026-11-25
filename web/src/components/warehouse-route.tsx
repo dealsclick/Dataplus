@@ -1439,6 +1439,9 @@ function WarehouseAuditPanel({
   const [newUpc, setNewUpc] = useState("");
   const [upcSaving, setUpcSaving] = useState(false);
   const [mobileAuditActionLine, setMobileAuditActionLine] = useState<Record<string, unknown> | null>(null);
+  const [removeAuditItemLine, setRemoveAuditItemLine] = useState<Record<string, unknown> | null>(null);
+  const [removeAuditItemReason, setRemoveAuditItemReason] = useState("");
+  const [removeAuditItemBusy, setRemoveAuditItemBusy] = useState(false);
   const [auditToolsOpen, setAuditToolsOpen] = useState(false);
   const [shareAuditUrl, setShareAuditUrl] = useState("");
   const [desktopAuditTools, setDesktopAuditTools] = useState(() => window.matchMedia("(min-width: 768px)").matches);
@@ -2833,6 +2836,34 @@ function WarehouseAuditPanel({
     }
   };
   const openItemNote = (line: Record<string, unknown>) => { setNoteItem(line); setItemNote(String(line.note || "")); };
+  const openRemoveAuditItem = (line: Record<string, unknown>) => {
+    if (line.auditItemKind === "po_expected") return;
+    setMobileAuditActionLine(null);
+    setRemoveAuditItemReason("");
+    setRemoveAuditItemLine(line);
+  };
+  const removeAuditItem = async () => {
+    if (!resumedAudit?.id || !removeAuditItemLine || removeAuditItemBusy) return;
+    const kind = removeAuditItemLine.auditItemKind === "unknown" ? "unknown" : "known";
+    const lineKey = kind === "unknown"
+      ? String(removeAuditItemLine.id || `${String(removeAuditItemLine.barcode || "")}::${String(removeAuditItemLine.locationBin || "")}`)
+      : auditLineKey(removeAuditItemLine);
+    setRemoveAuditItemBusy(true);
+    try {
+      const result = await api<{ audit: Record<string, unknown>; message?: string }>(`/api/warehouse-audits/${encodeURIComponent(String(resumedAudit.id))}/lines/${encodeURIComponent(lineKey)}/remove`, {
+        method: "POST",
+        body: JSON.stringify({ kind, reason: removeAuditItemReason, user: operatorName }),
+      });
+      applyAuditUpdate(result.audit);
+      setRemoveAuditItemLine(null);
+      setRemoveAuditItemReason("");
+      toast.success(result.message || "Item removed from audit.");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to remove the audit item.");
+    } finally {
+      setRemoveAuditItemBusy(false);
+    }
+  };
   const saveItemNote = async () => {
     if (!resumedAudit || !noteItem || noteSaving) return;
     setNoteSaving(true);
@@ -2912,17 +2943,19 @@ function WarehouseAuditPanel({
   const recentOpenPurchaseOrders = [...new Map(recentPoMatchedItems.flatMap((line) => line.recentOpenPurchaseOrders as Array<Record<string, unknown>>).map((purchaseOrder) => [String(purchaseOrder.purchaseOrderId || ""), purchaseOrder])).values()];
   const auditStatus = String(current?.status || "");
   const auditItemActionMenu = (line: Record<string, unknown>, allowCountEdit = false) => {
-    if (line.auditItemKind === "unknown") return null;
+    const itemKind = String(line.auditItemKind || "known");
     const sku = String(line.sku || (line.receivingPoLine as Record<string, unknown> | undefined)?.sku || "").trim();
+    const itemLabel = sku || String(line.barcode || "Audit item").trim();
     const catalogBarcode = String(line.catalogBarcode || "").trim();
-    if (!sku) return null;
+    if (!itemLabel) return null;
     return <DropdownMenu>
-      <DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-8" aria-label={`Actions for ${sku}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
+      <DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-8" aria-label={`Actions for ${itemLabel}`}><MoreHorizontal className="size-4" /></Button></DropdownMenuTrigger>
       <DropdownMenuContent align="end">
-        <DropdownMenuLabel>{sku}</DropdownMenuLabel>
-        <DropdownMenuItem asChild><a href={`/products/${encodeURIComponent(sku)}`} target="_blank" rel="noreferrer"><ExternalLink className="size-4" />Open catalog product</a></DropdownMenuItem>
-        {allowCountEdit && auditStatus === "in_progress" ? <DropdownMenuItem onSelect={() => openCountEdit(line)}><Pencil className="size-4" />Edit counted quantity</DropdownMenuItem> : null}
-        {!catalogBarcode && auditStatus === "in_progress" ? <DropdownMenuItem onSelect={() => openAddUpc(line)}><ScanBarcode className="size-4" />Add UPC</DropdownMenuItem> : null}
+        <DropdownMenuLabel>{itemLabel}</DropdownMenuLabel>
+        {sku ? <DropdownMenuItem asChild><a href={`/products/${encodeURIComponent(sku)}`} target="_blank" rel="noreferrer"><ExternalLink className="size-4" />Open catalog product</a></DropdownMenuItem> : null}
+        {itemKind !== "unknown" && allowCountEdit && auditStatus === "in_progress" ? <DropdownMenuItem onSelect={() => openCountEdit(line)}><Pencil className="size-4" />Edit counted quantity</DropdownMenuItem> : null}
+        {itemKind !== "unknown" && !catalogBarcode && auditStatus === "in_progress" ? <DropdownMenuItem onSelect={() => openAddUpc(line)}><ScanBarcode className="size-4" />Add UPC</DropdownMenuItem> : null}
+        {itemKind !== "po_expected" && auditStatus === "in_progress" ? <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => openRemoveAuditItem(line)}><Trash2 className="size-4" />Remove from audit</DropdownMenuItem> : null}
       </DropdownMenuContent>
     </DropdownMenu>;
   };
@@ -2962,7 +2995,7 @@ function WarehouseAuditPanel({
           ? <button type="button" className="relative size-14 shrink-0 overflow-hidden rounded-md border bg-muted" title="Open product image" data-no-image-preview onClick={() => setItemImage({ src: String(line.image), title })}><img src={String(line.image)} alt={title} loading="lazy" className="size-full object-cover" /></button>
           : <span className={cn("grid size-14 shrink-0 place-items-center rounded-md border", isUnknown ? "border-red-500/30 bg-red-500/10 text-red-600" : isExpectedOnly ? "border-amber-500/30 bg-amber-500/10 text-amber-700" : "border-emerald-500/30 bg-emerald-500/10 text-emerald-700")}>{isUnknown ? <X className="size-5" /> : isExpectedOnly ? <FileText className="size-5" /> : <CheckCircle2 className="size-5" />}</span>}
         <div className="min-w-0 flex-1"><p className="line-clamp-2 text-sm font-semibold leading-5" title={title}>{title}</p>{workingSku ? <a className="mt-1 inline-flex min-h-7 items-center font-mono text-xs font-medium text-primary underline underline-offset-4" href={`/products/${encodeURIComponent(catalogSku || workingSku)}`} target="_blank" rel="noreferrer">{workingSku}</a> : <p className="mt-1 font-mono text-xs text-destructive">{String(line.barcode || "SKU not identified")}</p>}</div>
-        {!isUnknown && <Button size="icon" variant="ghost" className="size-10 shrink-0" aria-label={`Actions for ${workingSku || title}`} onClick={() => setMobileAuditActionLine(line)}><MoreHorizontal className="size-5" /></Button>}
+        {!isExpectedOnly && <Button size="icon" variant="ghost" className="size-10 shrink-0" aria-label={`Actions for ${workingSku || title}`} onClick={() => setMobileAuditActionLine(line)}><MoreHorizontal className="size-5" /></Button>}
       </div>
       <div className="grid grid-cols-3 divide-x rounded-md border bg-muted/20 py-2 text-center">
         <div><p className="text-[11px] text-muted-foreground">Expected</p><p className="mt-0.5 font-semibold tabular-nums">{poLine ? numberLabel(expectedQty) : "-"}</p></div>
@@ -4017,6 +4050,7 @@ function WarehouseAuditPanel({
                               </Button>
                             </>
                           )}
+                          {auditItemActionMenu(item)}
                         </div>
                       </TableCell>
                     </TableRow>);
@@ -4082,12 +4116,24 @@ function WarehouseAuditPanel({
                 </SheetHeader>
                 <div className="mt-4 grid gap-2">
                   {String(mobileAuditActionLine?.sku || (mobileAuditActionLine?.receivingPoLine as Record<string, unknown> | undefined)?.sku || "").trim() && <Button variant="outline" className="h-12 justify-start" asChild><a href={`/products/${encodeURIComponent(String(mobileAuditActionLine?.sku || (mobileAuditActionLine?.receivingPoLine as Record<string, unknown> | undefined)?.sku || ""))}`} target="_blank" rel="noreferrer"><ExternalLink className="size-4" /> Open catalog product</a></Button>}
-                  {auditStatus === "in_progress" && mobileAuditActionLine?.auditItemKind !== "po_expected" && <Button variant="outline" className="h-12 justify-start" onClick={() => { const line = mobileAuditActionLine; if (!line) return; setMobileAuditActionLine(null); openCountEdit(line); }}><Pencil className="size-4" /> Edit scanned quantity</Button>}
-                  {!String(mobileAuditActionLine?.catalogBarcode || "").trim() && auditStatus === "in_progress" && <Button variant="outline" className="h-12 justify-start" onClick={() => { const line = mobileAuditActionLine; if (!line) return; setMobileAuditActionLine(null); openAddUpc(line); }}><ScanBarcode className="size-4" /> Add UPC</Button>}
+                  {auditStatus === "in_progress" && !["po_expected", "unknown"].includes(String(mobileAuditActionLine?.auditItemKind || "")) && <Button variant="outline" className="h-12 justify-start" onClick={() => { const line = mobileAuditActionLine; if (!line) return; setMobileAuditActionLine(null); openCountEdit(line); }}><Pencil className="size-4" /> Edit scanned quantity</Button>}
+                  {!String(mobileAuditActionLine?.catalogBarcode || "").trim() && auditStatus === "in_progress" && !["po_expected", "unknown"].includes(String(mobileAuditActionLine?.auditItemKind || "")) && <Button variant="outline" className="h-12 justify-start" onClick={() => { const line = mobileAuditActionLine; if (!line) return; setMobileAuditActionLine(null); openAddUpc(line); }}><ScanBarcode className="size-4" /> Add UPC</Button>}
                   {mobileAuditActionLine?.auditItemKind !== "po_expected" && <Button variant="outline" className="h-12 justify-start" onClick={() => { const line = mobileAuditActionLine; if (!line) return; setMobileAuditActionLine(null); openItemNote(line); }}><MessageSquare className="size-4" />{mobileAuditActionLine?.note ? "View or edit note" : "Add note"}</Button>}
+                  {auditStatus === "in_progress" && mobileAuditActionLine?.auditItemKind !== "po_expected" && <Button variant="outline" className="h-12 justify-start text-destructive hover:text-destructive" onClick={() => { const line = mobileAuditActionLine; if (!line) return; openRemoveAuditItem(line); }}><Trash2 className="size-4" /> Remove from audit</Button>}
                 </div>
               </SheetContent>
             </Sheet>
+            <Dialog open={Boolean(removeAuditItemLine)} onOpenChange={(open) => { if (!open && !removeAuditItemBusy) { setRemoveAuditItemLine(null); setRemoveAuditItemReason(""); } }}>
+              <DialogContent className="max-h-[100dvh] overflow-y-auto rounded-none sm:max-h-[90dvh] sm:max-w-lg sm:rounded-lg">
+                <DialogHeader>
+                  <DialogTitle>Remove item from audit?</DialogTitle>
+                  <DialogDescription>Remove {String(removeAuditItemLine?.sku || removeAuditItemLine?.barcode || "this item")} and its {numberLabel(Number(removeAuditItemLine?.countedQty ?? removeAuditItemLine?.count ?? 0))} scanned unit(s) from {String(current?.auditNumber || "this audit")}. The catalog product is not deleted.</DialogDescription>
+                </DialogHeader>
+                {Boolean(removeAuditItemLine?.receivingPoLine || removeAuditItemLine?.receivingPurchaseOrderLineId) && <Alert className="border-blue-500/30 bg-blue-500/5"><ShoppingCart className="size-4" /><AlertTitle>The PO line will remain open</AlertTitle><AlertDescription>After removal, this item returns to Awaiting scan so the purchase order requirement is not hidden.</AlertDescription></Alert>}
+                <Field label="Reason (optional)"><Textarea value={removeAuditItemReason} maxLength={500} disabled={removeAuditItemBusy} onChange={(event) => setRemoveAuditItemReason(event.target.value)} placeholder="Example: scanned the wrong carton" /></Field>
+                <DialogFooter className="sticky bottom-0 bg-background pb-[max(0.25rem,env(safe-area-inset-bottom))]"><Button variant="outline" disabled={removeAuditItemBusy} onClick={() => { setRemoveAuditItemLine(null); setRemoveAuditItemReason(""); }}>Keep item</Button><Button variant="destructive" disabled={removeAuditItemBusy} onClick={() => void removeAuditItem()}>{removeAuditItemBusy ? <Loader2 className="size-4 animate-spin" /> : <Trash2 className="size-4" />} Remove item</Button></DialogFooter>
+              </DialogContent>
+            </Dialog>
             {!mobile && desktopAuditTools && <Dialog open={auditToolsOpen} onOpenChange={setAuditToolsOpen}>
               <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-2xl">
                 <DialogHeader><DialogTitle>Import stock / eBay tools</DialogTitle><DialogDescription>Import a stock file for this audit or prepare found stock for eBay.</DialogDescription></DialogHeader>
