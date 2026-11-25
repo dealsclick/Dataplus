@@ -1,5 +1,9 @@
 const assert = require("node:assert/strict");
-const { cancelPurchaseOrderLines } = require("../server");
+const {
+  cancelPurchaseOrderLines,
+  purchaseOrderLineAuditScanEvidence,
+  purchaseOrderReceivingProgressFromAudit,
+} = require("../server");
 
 function purchaseOrder(overrides = {}) {
   return {
@@ -61,4 +65,42 @@ assert.throws(() => cancelPurchaseOrderLines(purchaseOrder({ status: "completed"
   lines: [{ lineIndex: 0, reasonCode: "buyer_removed" }],
 }), /cannot have lines removed/);
 
-console.log("Purchase order line removal: committed amendments, pending scans, and received quantity guards passed.");
+const scannedAudit = {
+  id: "audit-230",
+  auditNumber: "A-230",
+  linkedPurchaseOrderId: "po-141088",
+  lines: [{
+    id: "audit-line-1",
+    sku: "BUS-ONE",
+    countedQty: 2,
+    receivingPurchaseOrderLineId: "line-1",
+    receivingPurchaseOrderLineIndex: 0,
+  }],
+};
+const currentEvidence = purchaseOrderLineAuditScanEvidence([scannedAudit], purchaseOrder(), purchaseOrder().items[0], 0);
+assert.equal(currentEvidence.audit.auditNumber, "A-230");
+assert.equal(currentEvidence.quantity, 2);
+
+const removedAudit = {
+  ...scannedAudit,
+  lines: [],
+  removedItems: [{
+    sku: "BUS-ONE",
+    countedQty: 2,
+    receivingPurchaseOrderLineId: "line-1",
+    receivingPurchaseOrderLineIndex: 0,
+  }],
+};
+assert.ok(purchaseOrderLineAuditScanEvidence([removedAudit], purchaseOrder(), purchaseOrder().items[0], 0), "A removed audit scan must still block PO line removal.");
+assert.equal(purchaseOrderLineAuditScanEvidence([removedAudit], purchaseOrder(), purchaseOrder().items[1], 1), null);
+
+const progress = purchaseOrderReceivingProgressFromAudit({
+  ...removedAudit,
+  reason: "purchase_order_receipt",
+  purchaseOrderExpectedLines: [{ id: "line-1", lineIndex: 0, sku: "BUS-ONE", expectedQty: 5 }],
+});
+assert.equal(progress.lineProgress.length, 0, "Removing an audit scan clears the active count.");
+assert.equal(progress.scanHistory.length, 1, "Removing an audit scan keeps durable scan history for PO safeguards.");
+assert.equal(progress.scanHistory[0].removed, true);
+
+console.log("Purchase order line removal: amendments, active/removed scan history, and received quantity guards passed.");

@@ -16347,6 +16347,70 @@ function purchaseOrderOpenQuantity(line = {}) {
   return Math.max(0, ordered - received - reSourced - canceled - shortClosed);
 }
 
+function normalizedPurchaseOrderScanIdentifier(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function purchaseOrderLineAuditScanEvidence(audits = [], po = {}, line = {}, lineIndex = -1) {
+  const purchaseOrderId = String(po.id || "").trim();
+  const purchaseOrderNumber = normalizedPurchaseOrderScanIdentifier(po.poNumber);
+  const purchaseOrderLineId = String(line.id || line.lineId || "").trim();
+  const purchaseOrderLineIndex = Number(line.lineIndex ?? lineIndex);
+  const lineIdentifiers = new Set([
+    line.sku,
+    line.sourceSku,
+    line.vendorSku,
+    line.sourceItemNumber,
+    line.upc,
+    line.barcode,
+    line.gtin,
+    line.manufacturerSku,
+    line.mfrPartNumber,
+    line.manufacturerPartNumber,
+    line.mpn,
+  ].map(normalizedPurchaseOrderScanIdentifier).filter(Boolean));
+
+  for (const audit of Array.isArray(audits) ? audits : []) {
+    const linkedId = String(audit?.linkedPurchaseOrderId || "").trim();
+    const linkedNumber = normalizedPurchaseOrderScanIdentifier(audit?.linkedPurchaseOrderNumber || audit?.externalPurchaseOrderNumber);
+    if (purchaseOrderId && linkedId ? linkedId !== purchaseOrderId : !purchaseOrderNumber || linkedNumber !== purchaseOrderNumber) continue;
+    const records = [
+      ...(Array.isArray(audit?.lines) ? audit.lines : []),
+      ...(Array.isArray(audit?.unknownBarcodes) ? audit.unknownBarcodes : []),
+      ...(Array.isArray(audit?.removedItems) ? audit.removedItems : []),
+      ...(Array.isArray(audit?.lifecycleEvents) ? audit.lifecycleEvents.filter((entry) => String(entry?.type || "") === "audit_item_removed") : []),
+    ];
+    for (const record of records) {
+      const quantity = Number(record?.countedQty ?? record?.count ?? record?.quantity ?? 0);
+      if (!(quantity > 0)) continue;
+      const recordLineId = String(record?.receivingPurchaseOrderLineId || record?.purchaseOrderLineId || record?.poLineId || "").trim();
+      if (recordLineId) {
+        if (purchaseOrderLineId && recordLineId === purchaseOrderLineId) return { audit, record, quantity };
+        continue;
+      }
+      const recordLineIndex = Number(record?.receivingPurchaseOrderLineIndex ?? record?.purchaseOrderLineIndex ?? -1);
+      if (Number.isInteger(recordLineIndex) && recordLineIndex >= 0) {
+        if (Number.isInteger(purchaseOrderLineIndex) && recordLineIndex === purchaseOrderLineIndex) return { audit, record, quantity };
+        continue;
+      }
+      const recordIdentifiers = [
+        record?.sku,
+        record?.orderedSku,
+        record?.selectedSupplierSku,
+        record?.selectedVendorSku,
+        record?.vendorSku,
+        record?.barcode,
+        record?.upc,
+        record?.gtin,
+        record?.manufacturerSku,
+        record?.mfrPartNumber,
+      ].map(normalizedPurchaseOrderScanIdentifier).filter(Boolean);
+      if (recordIdentifiers.some((identifier) => lineIdentifiers.has(identifier))) return { audit, record, quantity };
+    }
+  }
+  return null;
+}
+
 function purchaseOrderSupplierQuantity(line = {}) {
   return Math.max(0, Number(line.qty || 0) - Number(line.reSourcedQty || 0) - Number(line.canceledQty || 0));
 }
@@ -51629,6 +51693,7 @@ function purchaseOrderReceivingProgressFromAudit(audit = {}) {
   const countedLines = (Array.isArray(audit.lines) ? audit.lines : []).filter((line) => Number(line.countedQty || 0) > 0);
   const expectedLines = Array.isArray(audit.purchaseOrderExpectedLines) ? audit.purchaseOrderExpectedLines : [];
   const unknownBarcodes = (Array.isArray(audit.unknownBarcodes) ? audit.unknownBarcodes : []).filter((entry) => Number(entry.count || 0) > 0);
+  const removedItems = (Array.isArray(audit.removedItems) ? audit.removedItems : []).filter((entry) => Number(entry.countedQty || 0) > 0);
   const scannedUnits = countedLines.reduce((sum, line) => sum + Number(line.countedQty || 0), 0);
   const unknownUnits = unknownBarcodes.reduce((sum, entry) => sum + Number(entry.count || 0), 0);
   const documents = Array.isArray(audit.receivingDocuments) ? audit.receivingDocuments : [];
@@ -51654,6 +51719,37 @@ function purchaseOrderReceivingProgressFromAudit(audit = {}) {
     matchedUnits: scannedUnits,
     unknownUnits,
     scannedSkuCount: countedLines.length,
+    scanHistory: [
+      ...countedLines.map((line) => {
+        const expectedLine = expectedLines.find((candidate) => purchaseOrderReceivingLineMatch(line, candidate)) || null;
+        return {
+          sku: String(line.sku || ""),
+          barcode: String(line.barcode || line.upc || line.gtin || ""),
+          countedQty: Number(line.countedQty || 0),
+          purchaseOrderLineId: String(expectedLine?.id || line.receivingPurchaseOrderLineId || ""),
+          purchaseOrderLineIndex: Number(expectedLine?.lineIndex ?? line.receivingPurchaseOrderLineIndex ?? -1),
+          removed: false,
+        };
+      }),
+      ...unknownBarcodes.map((entry) => ({
+        sku: "",
+        barcode: String(entry.barcode || entry.upc || ""),
+        countedQty: Number(entry.count || 0),
+        purchaseOrderLineId: "",
+        purchaseOrderLineIndex: -1,
+        removed: false,
+      })),
+      ...removedItems.map((entry) => ({
+        sku: String(entry.sku || ""),
+        barcode: String(entry.barcode || entry.upc || ""),
+        countedQty: Number(entry.countedQty || 0),
+        purchaseOrderLineId: String(entry.receivingPurchaseOrderLineId || ""),
+        purchaseOrderLineIndex: Number(entry.receivingPurchaseOrderLineIndex ?? -1),
+        removed: true,
+        removedAt: String(entry.removedAt || ""),
+        removedBy: String(entry.removedBy || ""),
+      })),
+    ],
     extraItemUnits: extraItems.reduce((sum, item) => sum + Number(item.qtyReceived || 0), 0),
     extraItems,
     lineProgress: countedLines.map((line) => {
@@ -65070,49 +65166,15 @@ async function handleApi(req, res) {
     const audit = await postgres.readWarehouseAudit(parts[2]);
     if (!audit) return notFound(res);
     if (audit.status !== "in_progress") return sendJson(res, 400, { error: "Items can be removed only while the audit is in progress." });
-    const kind = body.kind === "po_expected" ? "po_expected" : body.kind === "unknown" ? "unknown" : "known";
+    const kind = body.kind === "unknown" ? "unknown" : "known";
     const lineKey = decodeURIComponent(parts[4]);
-    const rows = kind === "po_expected"
-      ? audit.purchaseOrderExpectedLines || []
-      : kind === "unknown" ? audit.unknownBarcodes || [] : audit.lines || [];
-    const index = rows.findIndex((entry) => String(kind === "unknown"
-      ? entry.id || `${entry.barcode || ""}::${entry.locationBin || ""}`
-      : kind === "po_expected" ? entry.id || `index:${Number(entry.lineIndex)}` : auditLineKey(entry)) === lineKey);
-    if (index < 0) return sendJson(res, 404, { error: "Audit item not found. Refresh the audit and try again." });
-    const line = rows[index];
+    const rows = kind === "unknown" ? audit.unknownBarcodes || [] : audit.lines || [];
+    const index = rows.findIndex((entry) => String(kind === "unknown" ? entry.id || `${entry.barcode || ""}::${entry.locationBin || ""}` : auditLineKey(entry)) === lineKey);
+    if (index < 0) return sendJson(res, 404, { error: "Scanned audit item not found. Expected PO lines remain open until received, backordered, or changed by purchasing." });
+    const [line] = rows.splice(index, 1);
     const now = new Date().toISOString();
     const removedBy = String(authUser?.name || authUser?.username || body.user || "Warehouse user").trim() || "Warehouse user";
-    const reason = String(body.reason || "").trim().slice(0, 500);
-    if (kind === "po_expected") {
-      if (reason.length < 3) return sendJson(res, 400, { error: "Enter a reason for removing this line from the purchase order." });
-      if (!audit.linkedPurchaseOrderId) return sendJson(res, 409, { error: "This expected line is not linked to a purchase order." });
-      const po = await postgres.readPurchaseOrderByKey(audit.linkedPurchaseOrderId);
-      if (!po) return sendJson(res, 404, { error: "The linked purchase order was not found." });
-      const linkedOrders = await readPurchaseOrderLinkedOrders(po);
-      let cancellation;
-      try {
-        cancellation = cancelPurchaseOrderLines(po, linkedOrders, {
-          lines: [{
-            routeId: String(line.routeId || ""),
-            lineIndex: Number(line.lineIndex),
-            reasonCode: "buyer_removed",
-            reasonNote: reason
-          }],
-          amendmentReason: reason,
-          user: removedBy
-        });
-      } catch (error) {
-        return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
-      }
-      await postgres.savePurchaseOrder(po, { allowStatusRegression: true });
-      for (const order of cancellation.orders) {
-        await postgres.saveOrder(order);
-        clearOrderApiCache(order.id);
-      }
-      rows.splice(index, 1);
-    } else {
-      rows.splice(index, 1);
-    }
+    const reason = String(body.reason || "").trim().slice(0, 500) || "Removed from audit";
     const removedItem = {
       id: String(line.id || ""),
       kind,
@@ -65122,7 +65184,8 @@ async function handleApi(req, res) {
       barcode: String(line.barcode || line.upc || ""),
       locationBin: String(line.locationBin || ""),
       countedQty: Number(kind === "unknown" ? line.count || 0 : line.countedQty || 0),
-      receivingPurchaseOrderLineId: String(line.receivingPurchaseOrderLineId || (kind === "po_expected" ? line.id : "") || ""),
+      receivingPurchaseOrderLineId: String(line.receivingPurchaseOrderLineId || ""),
+      receivingPurchaseOrderLineIndex: Number(line.receivingPurchaseOrderLineIndex ?? -1),
       removedAt: now,
       removedBy,
       reason
@@ -65144,9 +65207,7 @@ async function handleApi(req, res) {
     return sendJson(res, 200, {
       audit,
       removedItem,
-      message: kind === "po_expected"
-        ? `${removedItem.sku || "PO line"} was removed from the audit and canceled on ${audit.linkedPurchaseOrderNumber || "the linked PO"}.`
-        : `${removedItem.sku || removedItem.barcode || "Audit item"} was removed from the active count.${removedItem.receivingPurchaseOrderLineId ? " Its PO requirement remains open." : ""}`
+      message: `${removedItem.sku || removedItem.barcode || "Audit item"} was removed from the active count.${removedItem.receivingPurchaseOrderLineId ? " Its PO requirement remains open." : ""}`
     });
   }
 
@@ -70350,8 +70411,25 @@ async function handleApi(req, res) {
     }
     if (action === "cancel") {
       try {
-        const orders = await readPurchaseOrderLinkedOrders(po);
         const lineMode = Array.isArray(body.lines);
+        if (lineMode) {
+          const audits = await postgres.readWarehouseAudits();
+          for (const selection of body.lines) {
+            const routeId = String(selection?.routeId || "").trim();
+            const requestedIndex = Number(selection?.lineIndex);
+            const selectedIndex = (po.items || []).findIndex((line, index) => routeId
+              ? String(line.routeId || "") === routeId
+              : Number.isInteger(requestedIndex) && requestedIndex === index);
+            if (selectedIndex < 0) continue;
+            const selectedLine = po.items[selectedIndex];
+            const evidence = purchaseOrderLineAuditScanEvidence(audits, po, selectedLine, selectedIndex);
+            if (evidence) {
+              const auditReference = String(evidence.audit?.auditNumber || evidence.audit?.id || "a warehouse audit");
+              throw new Error(`${selectedLine.sku || "This PO line"} was scanned in ${auditReference} and cannot be removed from the PO. Correct the audit or receipt while keeping the original PO line in history.`);
+            }
+          }
+        }
+        const orders = await readPurchaseOrderLinkedOrders(po);
         const result = lineMode ? cancelPurchaseOrderLines(po, orders, body) : cancelPurchaseOrder(po, orders, body);
         await postgres.savePurchaseOrder(po, { allowStatusRegression: true });
         for (const order of result.orders) { await postgres.saveOrder(order); clearOrderApiCache(order.id); }
@@ -83567,6 +83645,22 @@ async function handleApi(req, res) {
         const orderIds = [...new Set([...(po.orderIds || []), po.orderId, ...(po.items || []).map((line) => line.orderId)].filter(Boolean).map(String))];
         const orders = (db.orders || []).filter((row) => orderIds.includes(String(row.id)));
         const lineMode = Array.isArray(body.lines);
+        if (lineMode) {
+          for (const selection of body.lines) {
+            const routeId = String(selection?.routeId || "").trim();
+            const requestedIndex = Number(selection?.lineIndex);
+            const selectedIndex = (po.items || []).findIndex((line, index) => routeId
+              ? String(line.routeId || "") === routeId
+              : Number.isInteger(requestedIndex) && requestedIndex === index);
+            if (selectedIndex < 0) continue;
+            const selectedLine = po.items[selectedIndex];
+            const evidence = purchaseOrderLineAuditScanEvidence(db.warehouseAudits || [], po, selectedLine, selectedIndex);
+            if (evidence) {
+              const auditReference = String(evidence.audit?.auditNumber || evidence.audit?.id || "a warehouse audit");
+              throw new Error(`${selectedLine.sku || "This PO line"} was scanned in ${auditReference} and cannot be removed from the PO. Correct the audit or receipt while keeping the original PO line in history.`);
+            }
+          }
+        }
         const result = lineMode ? cancelPurchaseOrderLines(po, orders, body) : cancelPurchaseOrder(po, orders, body);
         await writeDb(db);
         for (const order of result.orders) clearOrderApiCache(order.id);
@@ -86818,6 +86912,8 @@ module.exports = {
   rejectPurchaseOrder,
   cancelPurchaseOrder,
   cancelPurchaseOrderLines,
+  purchaseOrderLineAuditScanEvidence,
+  purchaseOrderReceivingProgressFromAudit,
   purchaseOrderAllowsDraftRecalculation,
   restorePurchaseOrderStatusFromEvidence,
   refreshPurchaseOrderCutoffStates,

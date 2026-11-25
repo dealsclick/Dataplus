@@ -63,27 +63,27 @@ async function run({ kind = "known", lineKey = "line", status = "in_progress", r
   assert.equal(unknown.audit.removedItems[0].barcode, "012345678905");
   assert.equal(unknown.audit.removedItems[0].countedQty, 2);
 
+  const withoutReason = await run({ reason: "" });
+  assert.equal(withoutReason.response.status, 200);
+  assert.equal(withoutReason.audit.removedItems[0].reason, "Removed from audit");
+
   const expected = await run({ kind: "po_expected", lineKey: "expected", reason: "Removed from supplier order" });
-  assert.equal(expected.response.status, 200);
-  assert.equal(expected.audit.purchaseOrderExpectedLines.length, 0);
-  assert.equal(expected.savedPurchaseOrder.items[0].canceledQty, 4);
-  assert.equal(expected.lineCancellation.lines[0].reasonCode, "buyer_removed");
-  assert.equal(expected.lineCancellation.lines[0].lineIndex, 0);
-  assert.equal(expected.audit.removedItems[0].kind, "po_expected");
-  assert.match(expected.response.data.message, /audit and canceled on PO#141088/);
+  assert.equal(expected.response.status, 404);
+  assert.equal(expected.audit.purchaseOrderExpectedLines.length, 1, "Warehouse removal must never change an expected PO line.");
+  assert.equal(expected.savedPurchaseOrder, undefined);
+  assert.equal(expected.lineCancellation, undefined);
 
   for (const options of [
-    { kind: "po_expected", lineKey: "expected", reason: "" },
     { lineKey: "missing" },
     { status: "completed" }
   ]) {
     const result = await run(options);
-    assert.equal(result.response.status, options.lineKey === "missing" ? 404 : 400);
+    assert.equal(result.response.status, options.status === "completed" ? 400 : 404);
     assert.equal(result.saved, undefined);
     assert.equal(result.synced, 0);
   }
 
-  console.log("Warehouse audit item removal: scans, expected PO lines, history, reason, and closed-audit guards passed.");
+  console.log("Warehouse audit item removal: audit-only scans, PO preservation, history, and closed-audit guards passed.");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;
