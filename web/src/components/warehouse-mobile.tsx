@@ -1,5 +1,5 @@
 import { useEffect, type ReactNode } from "react"
-import { Archive, Boxes, CheckCircle2, Package, Menu, RotateCcw, ScanBarcode } from "lucide-react"
+import { Archive, ArrowLeft, Boxes, CheckCircle2, Package, Menu, RotateCcw, ScanBarcode } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { MobileTables } from "@/components/ui/table"
 
@@ -36,9 +36,8 @@ export function WarehouseMobile({ canPurchase, account, brand, receiving, manual
     return () => document.body.classList.remove("warehouse-mobile-mode")
   }, [])
   return <MobileTables><div className="warehouse-mobile min-h-dvh bg-background">
-    <header className="border-b bg-card px-3 py-2"><div className="mx-auto flex max-w-3xl items-center justify-between gap-2"><a href={base} className="flex min-w-0 items-center gap-2">{brand}</a>{account}</div></header>
+    <header className="border-b bg-card px-3 py-2"><div className="mx-auto flex max-w-3xl items-center justify-between gap-2"><div className="flex min-w-0 items-center gap-1">{id && <Button size="icon" variant="ghost" className="size-9 shrink-0" title={`Back to ${section === "receiving" ? "POs" : "audits"}`} aria-label={`Back to ${section === "receiving" ? "POs" : "audits"}`} asChild><a href={`${base}/${section}`}><ArrowLeft className="size-5" /></a></Button>}<a href={base} className="flex min-w-0 items-center gap-2">{brand}</a></div>{account}</div></header>
     <main className="mx-auto grid max-w-3xl gap-4 p-3 pb-[calc(8rem+env(safe-area-inset-bottom))] sm:p-6 sm:pb-32">
-      {id && <Button variant="outline" className="justify-self-start" asChild><a href={`${base}/${section}`}>← Back to {section === "receiving" ? "POs" : "audits"}</a></Button>}
       {section === "receiving" && (id ? canPurchase ? purchaseOrder(id) : <p>Your account does not have purchasing access.</p> : receiving)}
       {section === "manual" && manual}
       {section === "outbound" && outbound}
