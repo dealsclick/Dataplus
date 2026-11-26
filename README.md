@@ -65,6 +65,70 @@ npm.cmd start
 
 Open `http://localhost:4173`.
 
+## Multiplayer Lotería
+
+The Lotería game is a public, account-free part of the React app. Its room timer, shuffled deck, boards, marks, and first valid winner are authoritative in the Node server process.
+
+### Run and verify locally
+
+```powershell
+cd C:\Users\luis\Documents\codex\dataplus
+npm install
+npm --prefix web install
+npm run web:build
+npm start
+```
+
+Open the private host page at `http://localhost:4173/loteria/host`, create a room, and use the **Open TV display** button. Guests use the QR code or `http://localhost:4173/loteria`. Run the automated game lifecycle check with:
+
+```powershell
+npm run test:loteria
+```
+
+The test covers two players, automatic calls, pause/resume, reconnection with the same board, an invalid claim, the first valid winner, late arrivals, and a new round.
+
+### Public HTTPS deployment
+
+The normal Docker deployment includes the game. Set the public origin in the server's private `.env` so QR codes contain the guest-facing HTTPS address:
+
+```env
+LOTERIA_PUBLIC_URL=https://play.example.com
+```
+
+Then rebuild and start the existing service:
+
+```powershell
+docker compose up -d --build dataplus
+```
+
+Point the HTTPS reverse proxy at the DataPlus service and allow long-lived `text/event-stream` responses under `/api/loteria/`; proxy buffering should remain disabled for immediate updates. Rooms are deliberately process-local: do not run multiple app replicas without adding a shared room store/pub-sub adapter, and expect active rooms to end when the server restarts. The host URL contains a private random control token; do not put it on the TV or share it with guests.
+
+### Replace the deck
+
+Edit `web/public/loteria/deck.json` and put card art in `web/public/loteria/cards/`. Every entry uses this shape:
+
+```json
+{
+  "id": "sol",
+  "nameEs": "El Sol",
+  "nameEn": "The Sun",
+  "image": "/loteria/cards/sol.webp",
+  "symbol": "☀️"
+}
+```
+
+`id` must be stable and unique, `nameEs` is required, `nameEn` is the English label, and `image` is the public path to the artwork. `symbol` is the visible sample/fallback illustration. A round cannot start with fewer than 16 valid distinct cards. Rebuild the React app after changing the manifest or artwork.
+
+### Game-night checklist
+
+1. Confirm the public HTTPS URL opens on a phone using cellular data.
+2. Open `/loteria/host`, create the room, and keep this private page on the host's phone or laptop.
+3. Open the TV link from the host page, make it full screen, and optionally press **Activar sonido**.
+4. Scan the TV QR code with two phones and enter display names. Confirm both names appear on the TV.
+5. Choose the call interval, press **Iniciar**, and verify the three-second opening countdown.
+6. Use Pause/Continue once, then play. A late guest can watch and receives a board after **Nueva ronda**.
+7. After a winner is validated and shown on every screen, press **Nueva ronda**; nobody needs to scan again.
+
 ## Run with Docker
 
 Docker keeps the app and Node dependencies isolated. Your local `data` folder is mounted into the container, so product catalog files, jobs, imports, and `data/db.json` stay on your PC.

@@ -9,6 +9,7 @@
     "worker:child": "node scripts/dataplus-worker.js",
     "worker:once": "node -e \"process.env.DATAPLUS_WORKER_ONCE='1'; require('./scripts/dataplus-worker')\"",
     "print-agent": "node scripts/dataplus-print-agent.js",
+    "test:loteria": "node scripts/test-loteria-game.cjs",
     "web:build": "npm --prefix web run build",
     "web:dev": "npm --prefix web run dev",
     "android:publish": "node scripts/publish-warehouse-apk.cjs",

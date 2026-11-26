@@ -1,0 +1,29 @@
+{
+  "name": "Lotería de la Fiesta",
+  "cards": [
+    { "id": "sol", "nameEs": "El Sol", "nameEn": "The Sun", "symbol": "☀️", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "luna", "nameEs": "La Luna", "nameEn": "The Moon", "symbol": "🌙", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "cactus", "nameEs": "El Nopal", "nameEn": "The Cactus", "symbol": "🌵", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "corazon", "nameEs": "El Corazón", "nameEn": "The Heart", "symbol": "❤️", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "estrella", "nameEs": "La Estrella", "nameEn": "The Star", "symbol": "⭐", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "guitarra", "nameEs": "La Guitarra", "nameEn": "The Guitar", "symbol": "🎸", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "campana", "nameEs": "La Campana", "nameEn": "The Bell", "symbol": "🔔", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "rosa", "nameEs": "La Rosa", "nameEn": "The Rose", "symbol": "🌹", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "sandia", "nameEs": "La Sandía", "nameEn": "The Watermelon", "symbol": "🍉", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "tambor", "nameEs": "El Tambor", "nameEn": "The Drum", "symbol": "🥁", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "sombrero", "nameEs": "El Sombrero", "nameEn": "The Hat", "symbol": "👒", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "mariposa", "nameEs": "La Mariposa", "nameEn": "The Butterfly", "symbol": "🦋", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "pajaro", "nameEs": "El Pájaro", "nameEn": "The Bird", "symbol": "🐦", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "pez", "nameEs": "El Pescado", "nameEn": "The Fish", "symbol": "🐟", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "perro", "nameEs": "El Perrito", "nameEn": "The Little Dog", "symbol": "🐕", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "mano", "nameEs": "La Mano", "nameEn": "The Hand", "symbol": "✋", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "llave", "nameEs": "La Llave", "nameEn": "The Key", "symbol": "🔑", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "mundo", "nameEs": "El Mundo", "nameEn": "The World", "symbol": "🌎", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "corona", "nameEs": "La Corona", "nameEn": "The Crown", "symbol": "👑", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "botella", "nameEs": "La Botella", "nameEn": "The Bottle", "symbol": "🍾", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "calavera", "nameEs": "La Calavera", "nameEn": "The Skull", "symbol": "💀", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "tamborin", "nameEs": "El Pandero", "nameEn": "The Tambourine", "symbol": "🪘", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "vela", "nameEs": "La Vela", "nameEn": "The Candle", "symbol": "🕯️", "image": "/loteria/cards/placeholder.svg" },
+    { "id": "fiesta", "nameEs": "La Fiesta", "nameEn": "The Fiesta", "symbol": "🎉", "image": "/loteria/cards/placeholder.svg" }
+  ]
+}

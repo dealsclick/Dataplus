@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 520">
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#fff8de"/><stop offset="1" stop-color="#f6d98c"/>
+    </linearGradient>
+    <pattern id="stars" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M24 8l4 11 12 1-9 8 3 12-10-6-10 6 3-12-9-8 12-1z" fill="#e54b4b" opacity=".13"/>
+    </pattern>
+  </defs>
+  <rect width="400" height="520" rx="34" fill="url(#paper)"/>
+  <rect width="400" height="520" rx="34" fill="url(#stars)"/>
+  <path d="M48 420c82-78 119-50 174-108 52-54 85-38 130-102v258H48z" fill="#188f79" opacity=".2"/>
+  <circle cx="200" cy="235" r="108" fill="#fff" opacity=".35"/>
+  <path d="M200 145l20 55 59 2-46 36 17 57-50-32-50 32 17-57-46-36 59-2z" fill="#d2384b" opacity=".32"/>
+</svg>
