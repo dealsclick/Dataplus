@@ -133,13 +133,41 @@ function useRoom(code: string, playerToken = "") {
   useEffect(() => {
     if (!code) return
     const params = new URLSearchParams(playerToken ? { playerToken } : {})
+    const roomPath = `/api/loteria/rooms/${encodeURIComponent(code)}?${params}`
+    let cancelled = false
+    let fallbackTimer: number | undefined
+    const loadSnapshot = async () => {
+      try {
+        const next = await request<RoomState>(roomPath)
+        if (!cancelled) {
+          setState(next)
+          setError("")
+        }
+      } catch {
+        if (!cancelled) setError("Reconectando…")
+      }
+    }
+    void loadSnapshot()
     const source = new EventSource(`/api/loteria/rooms/${encodeURIComponent(code)}/events?${params}`)
     source.addEventListener("state", (event) => {
       setState(JSON.parse((event as MessageEvent<string>).data) as RoomState)
       setError("")
+      if (fallbackTimer !== undefined) {
+        window.clearInterval(fallbackTimer)
+        fallbackTimer = undefined
+      }
     })
-    source.onerror = () => setError("Reconectando…")
-    return () => source.close()
+    source.onopen = () => setError("")
+    source.onerror = () => {
+      setError("Reconectando…")
+      void loadSnapshot()
+      fallbackTimer ??= window.setInterval(() => void loadSnapshot(), 2_000)
+    }
+    return () => {
+      cancelled = true
+      source.close()
+      if (fallbackTimer !== undefined) window.clearInterval(fallbackTimer)
+    }
   }, [code, playerToken])
   return { state, setState, error }
 }
