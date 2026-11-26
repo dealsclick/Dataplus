@@ -46,6 +46,7 @@ import { Tabs,TabsContent,TabsList,TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip,TooltipContent,TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
+import { resolveOrderLineAvailability } from "@/lib/order-line-availability"
 import {
   AlertCircle,
   AlertTriangle,
@@ -723,25 +724,15 @@ function lineShipmentFor(line: Record<string, unknown>, index: number, shipments
 }
 
 function orderLineSupplySummary(line: Record<string, unknown>, index: number, unfulfilled: number, routes: Array<Record<string, unknown>>, explanations: Array<Record<string, unknown>>) {
+  const availability = resolveOrderLineAvailability(line, index, unfulfilled, routes)
   const sku = String(line.sku || "").trim().toLowerCase()
-  const routeIsCurrent = (route: Record<string, unknown>) => !["canceled", "cancelled", "expired", "failed", "released", "void", "voided", "closed"].includes(String(route.status || "").toLowerCase())
-  const lineRoutes = routes.filter((route) => (Number(route.lineIndex ?? -1) === index || (sku && String(route.sku || "").trim().toLowerCase() === sku)) && routeIsCurrent(route))
-  const routeType = (route: Record<string, unknown>) => String(route.type || route.routeType || "").toLowerCase()
-  const physicalRoute = lineRoutes.find((route) => ["warehouse", "inventory", "physical_stock"].includes(routeType(route)) && !["inventory_shortage", "buyer_review"].includes(String(route.status || "").toLowerCase()))
-  const dropshipRoute = lineRoutes.find((route) => ["drop_ship", "dropship", "supplier_dropship"].includes(routeType(route)) && String(route.status || "").toLowerCase() !== "buyer_review")
-  const purchaseRoute = lineRoutes.find((route) => routeType(route) === "purchase" && String(route.status || "").toLowerCase() !== "buyer_review")
-  const reviewRoute = lineRoutes.find((route) => ["buyer_review", "inventory_shortage", "blocked", "exception"].includes(String(route.status || "").toLowerCase()))
   const explanation = explanations.find((entry) => Number(entry.lineIndex ?? -1) === index || (sku && String(entry.sku || "").trim().toLowerCase() === sku))
   const cheaper = (explanation?.cheaperSupplierAlternative || {}) as Record<string, unknown>
-  if (unfulfilled <= 0) return { state: "fulfilled", label: "Fulfilled", source: "Shipment complete", route: null, cheaper: null }
-  if (physicalRoute) return { state: "physical", label: "Physical stock", source: String(physicalRoute.warehouseName || "Warehouse inventory"), route: physicalRoute, cheaper: null }
-  if (dropshipRoute) return { state: "dropship", label: "Drop ship", source: String(dropshipRoute.vendorName || "Supplier dropship"), route: dropshipRoute, cheaper: Object.keys(cheaper).length ? cheaper : null }
-  if (purchaseRoute) return { state: "purchase", label: "Supplier purchase", source: String(purchaseRoute.vendorName || "Purchasing queue"), route: purchaseRoute, cheaper: Object.keys(cheaper).length ? cheaper : null }
-  return { state: "issue", label: "Needs routing", source: String(reviewRoute?.reviewReason || "No usable supply route"), route: reviewRoute || null, cheaper: Object.keys(cheaper).length ? cheaper : null }
+  return { ...availability, cheaper: availability.state === "physical" || !Object.keys(cheaper).length ? null : cheaper }
 }
 
 export function OrderFulfillmentItemRows({ lines, shipments, fulfillmentRoutes = [], routingExplanations = [], remaining, onEditTracking, onEditSku, vendorHrefForLine }: { lines: Array<Record<string, unknown>>; shipments: Array<Record<string, unknown>>; fulfillmentRoutes?: Array<Record<string, unknown>>; routingExplanations?: Array<Record<string, unknown>>; remaining: (line: Record<string, unknown>, index: number) => number; onEditTracking?: (shipment: Record<string, unknown>) => void; onEditSku?: (line: Record<string, unknown>, index: number) => void; vendorHrefForLine?: (line: Record<string, unknown>, index: number) => string }) {
-  return <div className="overflow-x-auto rounded-md border"><Table className="min-w-[1040px] [&_th]:h-9 [&_th]:px-2 [&_td]:px-2 [&_td]:py-2"><TableHeader><TableRow><TableHead>Title</TableHead><TableHead>Status</TableHead><TableHead>SKU</TableHead><TableHead>Supplier</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">Unit price</TableHead><TableHead className="text-right">Unit cost</TableHead><TableHead className="text-right">P&amp;L</TableHead><TableHead className="text-right">Remaining</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => {
+  return <div className="grid gap-2"><div className="flex flex-wrap items-center gap-2 text-xs"><span className="font-medium text-muted-foreground">Line availability</span><Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200">Physical stock</Badge><Badge variant="outline" className="border-violet-500/40 bg-violet-500/10 text-violet-800 dark:text-violet-200">Assigned to PO</Badge><Badge variant="outline">No stock or PO</Badge></div><div className="overflow-x-auto rounded-md border"><Table className="min-w-[1040px] [&_th]:h-9 [&_th]:px-2 [&_td]:px-2 [&_td]:py-2"><TableHeader><TableRow><TableHead>Title</TableHead><TableHead>Status</TableHead><TableHead>SKU</TableHead><TableHead>Supplier</TableHead><TableHead className="text-right">Qty</TableHead><TableHead className="text-right">Unit price</TableHead><TableHead className="text-right">Unit cost</TableHead><TableHead className="text-right">P&amp;L</TableHead><TableHead className="text-right">Remaining</TableHead></TableRow></TableHeader><TableBody>{lines.map((line, index) => {
     const local = (line.localProduct || {}) as Record<string, unknown>
     const variant = (line.variant || {}) as Record<string, unknown>
     const shadow = (line.shadow || {}) as Record<string, unknown>
@@ -763,12 +754,10 @@ export function OrderFulfillmentItemRows({ lines, shipments, fulfillmentRoutes =
     const cheaper = supply.cheaper as Record<string, unknown> | null
     return <TableRow key={`${sku}-${index}`} className={cn(
       supply.state === "physical" && "bg-emerald-500/10 hover:bg-emerald-500/15",
-      supply.state === "dropship" && "bg-pink-500/10 hover:bg-pink-500/15",
-      supply.state === "purchase" && "bg-sky-500/5 hover:bg-sky-500/10",
-      supply.state === "issue" && "bg-destructive/10 hover:bg-destructive/15",
+      supply.state === "purchase-order" && "bg-violet-500/10 hover:bg-violet-500/15",
     )}>
       <TableCell className="min-w-72"><div className="flex min-w-0 items-start gap-2">{image ? <CatalogImage src={image} alt={title} className="size-10 shrink-0" imageClassName="p-1" /> : <div className="grid size-10 shrink-0 place-items-center rounded-md border bg-muted text-xs text-muted-foreground">--</div>}<div className="min-w-0"><p className="font-medium" title={title}>{displayTitle}</p>{variant.sku ? <p className="text-xs text-muted-foreground">{String(variant.label || "Variant")}</p> : shadow.shadowSku ? <p className="text-xs text-muted-foreground">{numberLabel(Number(shadow.unitsPerPack || line.sellUnitQty || 1))}-pack shadow · Merchant {String(shadow.merchantSku || shadow.shadowSku)}</p> : null}{lineShipment ? <div className="mt-2 rounded-md border bg-muted/20 px-2 py-1.5 text-xs"><div className="flex flex-wrap items-start justify-between gap-2"><p className="font-medium">{carrierName || "Carrier not imported"}{serviceName ? <span className="font-normal text-muted-foreground"> / {serviceName}</span> : null}</p>{onEditTracking ? <Button type="button" size="sm" variant="ghost" className="h-6 px-1.5 text-[11px]" onClick={() => onEditTracking(lineShipment)}><Pencil className="size-3" /> Edit</Button> : null}</div>{trackingNumber ? trackingUrl ? <a className="break-all font-mono text-primary hover:underline" href={trackingUrl} target="_blank" rel="noreferrer">Tracking {trackingNumber}</a> : <p className="break-all font-mono">Tracking {trackingNumber}</p> : <p className="text-muted-foreground">Label purchased; tracking pending</p>}</div> : null}</div></div></TableCell>
-      <TableCell className="min-w-40"><div className="grid gap-1"><Badge className="w-fit" variant={supply.state === "issue" ? "destructive" : supply.state === "physical" ? "success" : "outline"}>{supply.label}</Badge><span className="max-w-48 text-xs text-muted-foreground">{supply.source}</span></div></TableCell>
+      <TableCell className="min-w-40"><div className="grid gap-1"><Badge className={cn("w-fit", supply.state === "purchase-order" && "border-violet-500/40 bg-violet-500/10 text-violet-800 dark:text-violet-200")} variant={supply.state === "physical" ? "success" : "outline"}>{supply.label}</Badge><span className="max-w-48 text-xs text-muted-foreground">{supply.source}</span></div></TableCell>
       <TableCell className="font-mono text-xs"><div className="flex items-center gap-1">{local.sku ? <a className="text-foreground hover:underline" href={`/products/${encodeURIComponent(String(local.sku))}`}>{sku}</a> : <span className="inline-flex items-center gap-1">{sku}<AlertCircle className="size-3.5 text-amber-700" aria-label="No local catalog match" /></span>}{onEditSku ? <Button type="button" size="icon" variant="ghost" className="size-7 shrink-0" title={`Edit SKU ${sku}`} aria-label={`Edit SKU ${sku}`} onClick={() => onEditSku(line, index)}><Pencil className="size-3.5" /></Button> : null}</div>{shadow.shadowSku ? <><p className="mt-1 font-sans text-[11px] text-muted-foreground">Shadow {String(shadow.shadowSku)}</p><p className="font-sans text-[11px] text-muted-foreground">{String(shadow.marketplace || "Channel")} SKU {String(shadow.marketplaceSku || "-")}</p></> : line.originalSku && String(line.originalSku) !== sku ? <p className="mt-1 font-sans text-[11px] text-muted-foreground">Imported as {String(line.originalSku)}</p> : null}</TableCell>
       <TableCell className="min-w-48"><div className="grid gap-1">{vendorHref ? <a className="text-primary hover:underline" href={vendorHref}>{vendorName}</a> : vendorName}{cheaper ? <p className="text-xs font-medium text-emerald-700 dark:text-emerald-300">Cheaper source: {String(cheaper.vendorName || "Supplier")} {moneyLabel(Number(cheaper.unitCost || 0))} <span className="font-normal">(save {moneyLabel(Number(cheaper.savingsPerUnit || 0))}/unit)</span></p> : null}</div></TableCell>
       <TableCell className="text-right">{inventoryHref ? <a className="font-medium text-primary hover:underline" href={inventoryHref}>{numberLabel(quantity)}</a> : numberLabel(quantity)}</TableCell>
@@ -777,7 +766,7 @@ export function OrderFulfillmentItemRows({ lines, shipments, fulfillmentRoutes =
       <TableCell className="text-right"><p className={Number(line.grossProfit || 0) < 0 ? "text-destructive" : "font-medium"}>{moneyLabel(Number(line.grossProfit || 0))}</p><p className="text-xs text-muted-foreground">{Number(line.grossMarginPercent || 0).toFixed(1)}%</p></TableCell>
       <TableCell className="text-right">{numberLabel(unfulfilled)}</TableCell>
     </TableRow>
-  })}</TableBody></Table></div>
+  })}</TableBody></Table></div></div>
 }
 
 export function ActionTile({

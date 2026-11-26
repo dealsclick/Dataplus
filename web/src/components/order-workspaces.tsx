@@ -39,6 +39,7 @@ import { Tabs,TabsContent,TabsList,TabsTrigger } from "@/components/ui/tabs"
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip,TooltipContent,TooltipTrigger } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
+import { resolveOrderLineAvailability } from "@/lib/order-line-availability"
 import {
   AlertCircle,
   Archive,
@@ -1712,6 +1713,8 @@ export function OrderListPreview({ order, orderId, reference, itemCount, hasPo, 
   const shipping = (order.shippingAddress || order.shipping_address || {}) as Record<string, unknown>
   const destination = [shipping.city, shipping.state || shipping.province, shipping.postalCode || shipping.zip].filter(Boolean).join(", ")
   const financialStatus = String(order.financialStatus || order.paymentStatus || "Unpaid")
+  const lines = Array.isArray(order.items) ? order.items as Array<Record<string, unknown>> : []
+  const routes = Array.isArray(order.fulfillmentRoutes) ? order.fulfillmentRoutes as Array<Record<string, unknown>> : []
 
   return <HoverCard openDelay={180} closeDelay={120}>
     <Tooltip><TooltipTrigger asChild><HoverCardTrigger asChild>
@@ -1730,6 +1733,20 @@ export function OrderListPreview({ order, orderId, reference, itemCount, hasPo, 
         <div><p className="text-muted-foreground">Total</p><p className="mt-0.5 font-medium">{moneyLabel(Number(order.total || 0))}</p></div>
         <div><p className="text-muted-foreground">Supplier PO</p><p className="mt-0.5 font-medium">{hasPo ? "Linked" : "Not created"}</p></div>
       </div>
+      {lines.length > 0 && <div className="overflow-hidden rounded-md border text-xs">{lines.slice(0, 4).map((line, index) => {
+        const quantity = Math.max(0, Number(line.qty ?? line.quantity ?? 0))
+        const fulfilled = Math.max(0, Number(line.fulfilledQty ?? line.fulfilledQuantity ?? line.qtyFulfilled ?? 0))
+        const availability = resolveOrderLineAvailability(line, index, Math.max(0, quantity - fulfilled), routes)
+        return <div key={`${String(line.sku || "line")}-${index}`} className={cn(
+          "flex items-center justify-between gap-2 border-b px-2 py-1.5 last:border-b-0",
+          availability.state === "physical" && "bg-emerald-500/10",
+          availability.state === "purchase-order" && "bg-violet-500/10",
+        )}><span className="min-w-0 truncate font-mono" title={String(line.title || line.sku || "Order line")}>{String(line.sku || line.title || "Order line")}</span><Badge variant="outline" className={cn(
+          "shrink-0 text-[10px]",
+          availability.state === "physical" && "border-emerald-500/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-200",
+          availability.state === "purchase-order" && "border-violet-500/40 bg-violet-500/10 text-violet-800 dark:text-violet-200",
+        )}>{availability.label}</Badge></div>
+      })}{lines.length > 4 && <p className="border-t px-2 py-1.5 text-muted-foreground">+{numberLabel(lines.length - 4)} more line{lines.length - 4 === 1 ? "" : "s"}</p>}</div>}
       <Collapsible className="text-xs text-muted-foreground"><CollapsibleTrigger asChild><Button className="h-auto px-0 py-0 text-xs text-muted-foreground hover:bg-transparent hover:text-foreground" variant="ghost">More order context</Button></CollapsibleTrigger><CollapsibleContent className="grid gap-1 pt-2"><p>{String(order.channelSource || order.salesChannel || order.source || "Unclassified channel")}</p>{destination && <p>Ship to {destination}</p>}{Boolean(order.shipBy) && <p>Ship by {String(order.shipBy)}</p>}</CollapsibleContent></Collapsible>
       <Button size="sm" className="w-full" asChild><a href={`/orders/${encodeURIComponent(orderId || reference)}`}>Open full order</a></Button>
     </HoverCardContent>
