@@ -223,13 +223,34 @@ function TvView({ code }: { code: string }) {
   const { state, error } = useRoom(code)
   const spokenCard = useRef("")
   useEffect(() => {
-    if (!sound || !state?.currentCard || spokenCard.current === state.currentCard.id) return
-    spokenCard.current = state.currentCard.id
-    const utterance = new SpeechSynthesisUtterance(state.currentCard.nameEs)
-    utterance.lang = "es-MX"
-    window.speechSynthesis.cancel()
-    window.speechSynthesis.speak(utterance)
-  }, [sound, state?.currentCard])
+    if (!sound || !state?.currentCard) return
+    const currentCard = state.currentCard
+    const speechId = `${state.round}:${currentCard.id}`
+    if (spokenCard.current === speechId) return
+    const speakInSpanish = () => {
+      const spanishVoices = window.speechSynthesis.getVoices().filter((voice) => /^es(?:[-_]|$)/i.test(voice.lang))
+      if (!spanishVoices.length) return false
+      const feminineVoice = /sabina|paulina|dalia|m[oó]nica|helena|ximena|laura|luciana|paloma|soledad|female|mujer/i
+      const voice = spanishVoices.find((candidate) => /^es[-_]MX$/i.test(candidate.lang) && feminineVoice.test(candidate.name))
+        || spanishVoices.find((candidate) => feminineVoice.test(candidate.name))
+        || spanishVoices.find((candidate) => /^es[-_]MX$/i.test(candidate.lang))
+        || spanishVoices[0]
+      const lockKey = `loteria:${code}:spoken:${speechId}`
+      const lastSpokenAt = Number(window.localStorage.getItem(lockKey) || 0)
+      spokenCard.current = speechId
+      if (Date.now() - lastSpokenAt < 30_000) return true
+      window.localStorage.setItem(lockKey, String(Date.now()))
+      const utterance = new SpeechSynthesisUtterance(currentCard.nameEs)
+      utterance.voice = voice
+      utterance.lang = voice.lang
+      window.speechSynthesis.cancel()
+      window.speechSynthesis.speak(utterance)
+      return true
+    }
+    if (speakInSpanish()) return
+    window.speechSynthesis.addEventListener("voiceschanged", speakInSpanish, { once: true })
+    return () => window.speechSynthesis.removeEventListener("voiceschanged", speakInSpanish)
+  }, [code, sound, state?.currentCard, state?.round])
   if (!state) return <Loading message={error || text[language].connecting} />
   const t = text[language]
   return <main className="loteria-shell loteria-tv">
