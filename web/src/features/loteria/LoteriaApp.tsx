@@ -50,6 +50,15 @@ type RoomState = {
   }
 }
 
+type PublicRoom = {
+  code: string
+  status: GameStatus
+  round: number
+  playerCount: number
+  joinUrl: string
+  createdAt: string
+}
+
 const text = {
   es: {
     title: "Lotería de la Fiesta",
@@ -115,10 +124,19 @@ const text = {
   }
 } as const
 
+class RequestError extends Error {
+  status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.status = status
+  }
+}
+
 async function request<T>(path: string, options: RequestInit = {}) {
   const response = await fetch(path, { ...options, headers: { "Content-Type": "application/json", ...options.headers } })
   const result = await response.json().catch(() => ({})) as T & { error?: string }
-  if (!response.ok) throw new Error(result.error || `Request failed (${response.status})`)
+  if (!response.ok) throw new RequestError(result.error || `Request failed (${response.status})`, response.status)
   return result
 }
 
@@ -147,8 +165,13 @@ function useRoom(code: string, playerToken = "") {
           setState(next)
           setError("")
         }
-      } catch {
-        if (!cancelled) setError("Reconectando…")
+      } catch (loadError) {
+        if (cancelled) return
+        if (loadError instanceof RequestError && loadError.status === 404) {
+          window.location.replace(`/loteria?expired=${encodeURIComponent(code)}`)
+          return
+        }
+        setError("Reconectando…")
       }
     }
     void loadSnapshot()
@@ -294,8 +317,30 @@ function Players({ state, language }: { state: RoomState; language: Language }) 
 function JoinLanding() {
   const [language, setLanguage] = useState<Language>("es")
   const [code, setCode] = useState("")
+  const [rooms, setRooms] = useState<PublicRoom[]>([])
+  const [roomsLoading, setRoomsLoading] = useState(true)
+  const expiredCode = useMemo(() => new URLSearchParams(window.location.search).get("expired") || "", [])
   const t = text[language]
-  return <main className="loteria-shell loteria-center"><LanguageButton language={language} onChange={setLanguage} /><Card className="loteria-entry-card"><CardHeader><span className="loteria-logo">✦</span><CardTitle>{t.title}</CardTitle><CardDescription>{t.instructions}</CardDescription></CardHeader><CardContent><Label htmlFor="room-code">{t.code}</Label><Input id="room-code" inputMode="numeric" maxLength={4} value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, ""))} placeholder="1234" /><Button size="lg" disabled={code.length !== 4} onClick={() => window.location.assign(`/loteria/${code}`)}>{t.enter}</Button></CardContent></Card></main>
+  useEffect(() => {
+    let cancelled = false
+    const loadRooms = async () => {
+      try {
+        const result = await request<{ rooms: PublicRoom[] }>("/api/loteria/rooms")
+        if (!cancelled) setRooms(result.rooms)
+      } catch {
+        if (!cancelled) setRooms([])
+      } finally {
+        if (!cancelled) setRoomsLoading(false)
+      }
+    }
+    void loadRooms()
+    const timer = window.setInterval(() => void loadRooms(), 5_000)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [])
+  const statusLabel = (status: GameStatus) => language === "es"
+    ? ({ lobby: "Esperando", countdown: "Comenzando", playing: "Jugando", paused: "Pausada", won: "Ganador", ended: "Terminada" } as const)[status]
+    : ({ lobby: "Waiting", countdown: "Starting", playing: "Playing", paused: "Paused", won: "Winner", ended: "Ended" } as const)[status]
+  return <main className="loteria-shell loteria-center loteria-landing"><LanguageButton language={language} onChange={setLanguage} /><div className="loteria-landing-content">{expiredCode && <p className="loteria-message is-error">{language === "es" ? `La sala ${expiredCode} ya terminó. Elige una sala activa o escribe otro código.` : `Room ${expiredCode} has ended. Choose an active room or enter another code.`}</p>}<Card className="loteria-entry-card"><CardHeader><span className="loteria-logo">✦</span><CardTitle>{t.title}</CardTitle><CardDescription>{t.instructions}</CardDescription></CardHeader><CardContent><Label htmlFor="room-code">{t.code}</Label><Input id="room-code" inputMode="numeric" maxLength={4} value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, ""))} placeholder="1234" /><Button size="lg" disabled={code.length !== 4} onClick={() => window.location.assign(`/loteria/${code}`)}>{t.enter}</Button></CardContent></Card><section className="loteria-active-rooms" aria-live="polite"><h2>{language === "es" ? "Salas activas" : "Active rooms"}</h2>{roomsLoading ? <p>{t.connecting}</p> : rooms.length ? <div className="loteria-room-list">{rooms.map((room) => <Card key={room.code} className="loteria-room-option"><CardContent><div><strong>{room.code}</strong><span>{statusLabel(room.status)} · {language === "es" ? "Ronda" : "Round"} {room.round} · {room.playerCount} {room.playerCount === 1 ? (language === "es" ? "jugador" : "player") : (language === "es" ? "jugadores" : "players")}</span></div><Button asChild><a href={`/loteria/${room.code}`}>{language === "es" ? "Entrar" : "Join"}</a></Button></CardContent></Card>)}</div> : <p>{language === "es" ? "No hay salas activas ahora." : "There are no active rooms right now."}</p>}</section></div></main>
 }
 
 function TvLanding() {

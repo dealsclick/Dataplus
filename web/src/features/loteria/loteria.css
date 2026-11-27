@@ -34,6 +34,17 @@
 .loteria-shell [data-variant="default"] { background: var(--lot-red); color: #fff; }
 .loteria-shell [data-variant="default"]:hover { background: #a92136; }
 .loteria-center { display: grid; place-items: center; }
+.loteria-landing { align-content: center; }
+.loteria-landing-content { display: grid; gap: 1.25rem; width: min(100%, 44rem); padding-block: 4rem 2rem; }
+.loteria-landing-content > .loteria-entry-card { width: 100%; justify-self: center; }
+.loteria-active-rooms { display: grid; gap: .7rem; }
+.loteria-active-rooms > h2 { font-size: clamp(1.35rem, 4vw, 2rem); color: var(--lot-teal); }
+.loteria-active-rooms > p { padding: 1rem; border-radius: .8rem; background: rgba(255,252,238,.86); text-align: center; }
+.loteria-room-list { display: grid; gap: .6rem; }
+.loteria-room-option [data-slot="card-content"] { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .8rem 1rem; }
+.loteria-room-option [data-slot="card-content"] > div { display: grid; gap: .15rem; min-width: 0; }
+.loteria-room-option strong { font: 1.65rem "Rye", serif; letter-spacing: .12em; color: var(--lot-red); }
+.loteria-room-option span { color: #67584d; font-size: .85rem; }
 .loteria-language { position: fixed; z-index: 20; right: 1rem; top: 1rem; background: #fffaf0 !important; }
 .loteria-entry-card { width: min(100%, 30rem); text-align: center; }
 .loteria-entry-card [data-slot="card-content"] { display: grid; gap: .8rem; text-align: left; }
@@ -156,6 +167,8 @@ button.loteria-card:active { transform: scale(.97); }
   .loteria-tv-header { align-items: end; }
   .loteria-room-code { font-size: 1.6rem; }
   .loteria-phone { padding-top: 3.6rem; }
+  .loteria-landing-content { padding-top: 1rem; }
+  .loteria-room-option [data-slot="card-content"] { align-items: stretch; flex-direction: column; }
   .loteria-card-name-editor { grid-template-columns: 1fr; }
   .loteria-card-name-editor > button { grid-column: auto; }
 }
