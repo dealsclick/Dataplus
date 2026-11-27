@@ -43,11 +43,14 @@ import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.UUID;
 
 public class LauncherActivity extends Activity {
     private static final String SCREEN_RECEIVING = "receiving";
     private static final String SCREEN_AUDITS = "audits";
+    private static final String SCREEN_OUTBOUND = "outbound";
     private static final String SCREEN_SCANNER = "scanner";
+    private static final String SCREEN_OUTBOUND_SCANNER = "outbound_scanner";
     private static final String SCREEN_MORE = "more";
 
     private final ApiClient api = new ApiClient();
@@ -66,6 +69,10 @@ public class LauncherActivity extends Activity {
     private JSONObject currentAudit;
     private JSONArray audits = new JSONArray();
     private JSONArray warehouses = new JSONArray();
+    private JSONArray outboundAudits = new JSONArray();
+    private JSONObject currentOutboundSession;
+    private JSONArray outboundScans = new JSONArray();
+    private JSONObject activeOutboundPackage;
     private boolean busy;
     private boolean modalOpen;
     private final StringBuilder scanBuffer = new StringBuilder();
@@ -100,12 +107,12 @@ public class LauncherActivity extends Activity {
     protected void onResume() {
         super.onResume();
         updateNetworkState();
-        if (SCREEN_SCANNER.equals(screen)) focusScanner();
+        if (isHardwareScannerScreen()) focusScanner();
     }
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
-        if (!SCREEN_SCANNER.equals(screen) || modalOpen || event.getAction() != KeyEvent.ACTION_DOWN) {
+        if (!isHardwareScannerScreen() || modalOpen || event.getAction() != KeyEvent.ACTION_DOWN) {
             return super.dispatchKeyEvent(event);
         }
         if (event.isCtrlPressed() || event.isAltPressed() || event.isMetaPressed()) return super.dispatchKeyEvent(event);
@@ -115,7 +122,7 @@ public class LauncherActivity extends Activity {
             if (scanBuffer.length() >= 3) {
                 String barcode = scanBuffer.toString();
                 resetScanBuffer();
-                if (!busy) lookupBarcode(barcode);
+                if (!busy) handleHardwareScan(barcode);
                 return true;
             }
             resetScanBuffer();
@@ -140,6 +147,10 @@ public class LauncherActivity extends Activity {
     public void onBackPressed() {
         if (SCREEN_SCANNER.equals(screen)) {
             showDashboard(dashboardMode, false);
+            return;
+        }
+        if (SCREEN_OUTBOUND_SCANNER.equals(screen)) {
+            showOutboundDashboard(false);
             return;
         }
         if (!SCREEN_RECEIVING.equals(screen)) {
@@ -213,6 +224,7 @@ public class LauncherActivity extends Activity {
         bottomNav.setElevation(Ui.dp(this, 10));
         bottomNav.addView(navItem("▣\nReceive", SCREEN_RECEIVING), new LinearLayout.LayoutParams(0, Ui.dp(this, 64), 1));
         bottomNav.addView(navItem("✓\nAudits", SCREEN_AUDITS), new LinearLayout.LayoutParams(0, Ui.dp(this, 64), 1));
+        bottomNav.addView(navItem("⇥\nOutbound", SCREEN_OUTBOUND), new LinearLayout.LayoutParams(0, Ui.dp(this, 64), 1));
         bottomNav.addView(navItem("☰\nMore", SCREEN_MORE), new LinearLayout.LayoutParams(0, Ui.dp(this, 64), 1));
         bottomNav.setVisibility(View.GONE);
         root.addView(bottomNav, Ui.matchWrap());
@@ -225,6 +237,7 @@ public class LauncherActivity extends Activity {
         item.setTag(target);
         item.setOnClickListener(view -> {
             if (SCREEN_MORE.equals(target)) showMore();
+            else if (SCREEN_OUTBOUND.equals(target)) showOutboundDashboard(false);
             else showDashboard(target, false);
         });
         return item;
@@ -282,7 +295,7 @@ public class LauncherActivity extends Activity {
 
         LinearLayout card = Ui.card(this);
         card.addView(Ui.text(this, "DataPlus Warehouse", 25, Ui.TEXT, true));
-        TextView subtitle = Ui.text(this, "Native receiving and audit scanner for the G47.", 14, Ui.MUTED, false);
+        TextView subtitle = Ui.text(this, "Native receiving, audit, and outbound scanner for the G47.", 14, Ui.MUTED, false);
         Ui.margin(subtitle, 0, 7, 0, 22);
         card.addView(subtitle);
 
@@ -998,6 +1011,752 @@ public class LauncherActivity extends Activity {
         sizeBottomDialog(dialog);
     }
 
+    private void showOutboundDashboard(boolean refresh) {
+        screen = SCREEN_OUTBOUND;
+        dashboardMode = SCREEN_OUTBOUND;
+        currentAudit = null;
+        currentOutboundSession = null;
+        outboundScans = new JSONArray();
+        activeOutboundPackage = null;
+        modalOpen = false;
+        resetScanBuffer();
+        bottomNav.setVisibility(View.VISIBLE);
+        backButton.setVisibility(View.GONE);
+        accountButton.setVisibility(View.VISIBLE);
+        toolbarTitle.setText("Outbound");
+        updateNavSelection(SCREEN_OUTBOUND);
+        if (refresh || outboundAudits.length() == 0) loadOutboundDashboard();
+        else renderOutboundDashboard();
+    }
+
+    private void loadOutboundDashboard() {
+        if (!isOnline()) {
+            renderOutboundDashboard();
+            return;
+        }
+        showLoading("Loading outbound handoffs…");
+        api.get("/api/fulfillment/outbound-audits?limit=100", new ApiClient.Callback() {
+            @Override public void onSuccess(JSONObject response) {
+                outboundAudits = response.optJSONArray("audits");
+                if (outboundAudits == null) outboundAudits = new JSONArray();
+                if (warehouses.length() > 0) {
+                    renderOutboundDashboard();
+                    return;
+                }
+                api.get("/api/app/references?include=warehouses", new ApiClient.Callback() {
+                    @Override public void onSuccess(JSONObject referenceResponse) {
+                        warehouses = referenceResponse.optJSONArray("warehouses");
+                        if (warehouses == null) warehouses = new JSONArray();
+                        renderOutboundDashboard();
+                    }
+                    @Override public void onError(ApiClient.ApiException error) { renderOutboundDashboard(); }
+                });
+            }
+            @Override public void onError(ApiClient.ApiException error) {
+                if (error.isUnauthorized()) showLogin();
+                else showRetry("Unable to load outbound handoffs", error.getMessage(), LauncherActivity.this::loadOutboundDashboard);
+            }
+        });
+    }
+
+    private void renderOutboundDashboard() {
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout page = Ui.column(this, 0);
+        page.setPadding(Ui.dp(this, 14), Ui.dp(this, 16), Ui.dp(this, 14), Ui.dp(this, 28));
+
+        page.addView(Ui.text(this, "Outbound handoffs", 24, Ui.TEXT, true));
+        TextView subtitle = Ui.text(this, "Scan every shipping label with the G47 before the packages leave the warehouse.", 14, Ui.MUTED, false);
+        Ui.margin(subtitle, 0, 5, 0, 16);
+        page.addView(subtitle);
+
+        LinearLayout actions = Ui.row(this);
+        Button start = Ui.button(this, "Use today's audit", true);
+        start.setOnClickListener(view -> showStartOutboundDialog());
+        actions.addView(start, new LinearLayout.LayoutParams(0, Ui.dp(this, 50), 1));
+        Button refresh = Ui.button(this, "Refresh", false);
+        refresh.setOnClickListener(view -> loadOutboundDashboard());
+        LinearLayout.LayoutParams refreshParams = new LinearLayout.LayoutParams(Ui.dp(this, 110), Ui.dp(this, 50));
+        refreshParams.setMargins(Ui.dp(this, 8), 0, 0, 0);
+        actions.addView(refresh, refreshParams);
+        page.addView(actions, Ui.matchWrap());
+
+        int shown = 0;
+        for (int index = 0; index < outboundAudits.length() && shown < 12; index++) {
+            JSONObject audit = outboundAudits.optJSONObject(index);
+            if (audit == null) continue;
+            LinearLayout card = outboundAuditCard(audit);
+            LinearLayout.LayoutParams params = Ui.matchWrap();
+            params.setMargins(0, Ui.dp(this, shown == 0 ? 18 : 10), 0, 0);
+            page.addView(card, params);
+            shown++;
+        }
+        if (shown == 0) {
+            LinearLayout empty = Ui.card(this);
+            TextView icon = Ui.text(this, "⇥", 32, Ui.MUTED, false);
+            icon.setGravity(Gravity.CENTER);
+            empty.addView(icon, Ui.matchWrap());
+            TextView title = Ui.text(this, "No outbound audits yet", 17, Ui.TEXT, true);
+            title.setGravity(Gravity.CENTER);
+            Ui.margin(title, 0, 8, 0, 4);
+            empty.addView(title);
+            TextView detail = Ui.text(this, "Start today's audit, then scan package tracking labels natively.", 13, Ui.MUTED, false);
+            detail.setGravity(Gravity.CENTER);
+            empty.addView(detail);
+            LinearLayout.LayoutParams params = Ui.matchWrap();
+            params.setMargins(0, Ui.dp(this, 18), 0, 0);
+            page.addView(empty, params);
+        }
+        scroll.addView(page);
+        setScreen(scroll);
+    }
+
+    private LinearLayout outboundAuditCard(JSONObject audit) {
+        boolean open = "open".equalsIgnoreCase(audit.optString("status"));
+        LinearLayout card = Ui.card(this);
+        card.setClickable(true);
+        card.setFocusable(true);
+        card.setOnClickListener(view -> {
+            if (open) openOutboundAudit(audit.optString("id"));
+            else openWeb("/warehouse/outbound");
+        });
+        LinearLayout heading = Ui.row(this);
+        heading.addView(Ui.text(this, outboundAuditReference(audit), 18, Ui.TEXT, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        heading.addView(Ui.chip(this, open ? "Open" : "Closed", open ? Ui.WARNING : Ui.SUCCESS, open ? Ui.WARNING_SOFT : Ui.SUCCESS_SOFT));
+        card.addView(heading);
+        TextView warehouse = Ui.text(this, audit.optString("warehouseName", "Warehouse"), 14, Ui.TEXT, true);
+        Ui.margin(warehouse, 0, 9, 0, 3);
+        card.addView(warehouse);
+        card.addView(Ui.text(this, audit.optString("carrier").isEmpty() ? "Any carrier" : audit.optString("carrier"), 13, Ui.MUTED, false));
+        String counts = audit.optInt("packageCount") + " package" + (audit.optInt("packageCount") == 1 ? "" : "s")
+            + " · " + audit.optInt("matchedCount") + " matched";
+        if (audit.optInt("unmatchedCount") > 0) counts += " · " + audit.optInt("unmatchedCount") + " unmatched";
+        TextView progress = Ui.text(this, counts, 12, audit.optInt("unmatchedCount") > 0 ? Ui.WARNING : Ui.MUTED, false);
+        Ui.margin(progress, 0, 12, 0, 0);
+        card.addView(progress);
+        return card;
+    }
+
+    private void showStartOutboundDialog() {
+        List<JSONObject> physical = new ArrayList<>();
+        for (int index = 0; index < warehouses.length(); index++) {
+            JSONObject warehouse = warehouses.optJSONObject(index);
+            if (warehouse != null && isPhysicalWarehouse(warehouse)) physical.add(warehouse);
+        }
+        if (physical.isEmpty()) {
+            Toast.makeText(this, "No active physical warehouse is available.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        String[] names = new String[physical.size()];
+        for (int index = 0; index < physical.size(); index++) names[index] = warehouseName(physical.get(index));
+        modalOpen = true;
+        AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle("Use today's outbound audit")
+            .setItems(names, (value, which) -> startOutboundAudit(physical.get(which)))
+            .setNegativeButton("Cancel", null)
+            .create();
+        dialog.setOnDismissListener(value -> { modalOpen = false; });
+        dialog.show();
+    }
+
+    private void startOutboundAudit(JSONObject warehouse) {
+        if (busy || !isOnline()) return;
+        busy = true;
+        showLoading("Opening today's outbound audit…");
+        JSONObject body = new JSONObject();
+        try {
+            body.put("warehouseId", warehouse.optString("id"));
+            body.put("warehouseName", warehouseName(warehouse));
+            body.put("carrier", "");
+            body.put("notes", "Started from the Warehouse Android app");
+        } catch (Exception ignored) {}
+        api.post("/api/fulfillment/outbound-audits", body, new ApiClient.Callback() {
+            @Override public void onSuccess(JSONObject response) {
+                busy = false;
+                JSONObject audit = response.optJSONObject("audit");
+                if (audit == null || audit.optString("id").isEmpty()) {
+                    showRetry("Outbound audit unavailable", "DataPlus did not return an audit.", LauncherActivity.this::loadOutboundDashboard);
+                    return;
+                }
+                Toast.makeText(LauncherActivity.this, response.optString("message", "Outbound audit ready."), Toast.LENGTH_SHORT).show();
+                openOutboundAudit(audit.optString("id"));
+            }
+            @Override public void onError(ApiClient.ApiException error) {
+                busy = false;
+                if (error.isUnauthorized()) showLogin();
+                else showRetry("Unable to start outbound audit", error.getMessage(), LauncherActivity.this::loadOutboundDashboard);
+            }
+        });
+    }
+
+    private void openOutboundAudit(String auditId) {
+        if (auditId == null || auditId.trim().isEmpty()) return;
+        showLoading("Opening outbound scanner…");
+        api.get("/api/fulfillment/outbound-audits/" + Uri.encode(auditId), new ApiClient.Callback() {
+            @Override public void onSuccess(JSONObject response) {
+                currentOutboundSession = response.optJSONObject("session");
+                outboundScans = response.optJSONArray("scans");
+                if (outboundScans == null) outboundScans = new JSONArray();
+                activeOutboundPackage = firstIncompleteRequiredPackage();
+                if (currentOutboundSession == null) {
+                    showRetry("Outbound audit not found", "DataPlus did not return this handoff.", () -> showOutboundDashboard(true));
+                    return;
+                }
+                showOutboundScanner();
+            }
+            @Override public void onError(ApiClient.ApiException error) {
+                if (error.isUnauthorized()) showLogin();
+                else showRetry("Unable to open outbound scanner", error.getMessage(), () -> openOutboundAudit(auditId));
+            }
+        });
+    }
+
+    private JSONObject firstIncompleteRequiredPackage() {
+        for (int index = 0; index < outboundScans.length(); index++) {
+            JSONObject scan = outboundScans.optJSONObject(index);
+            if (scan != null && scan.optBoolean("liveItemRequired") && !"complete".equalsIgnoreCase(scan.optString("liveItemStatus"))) return scan;
+        }
+        return null;
+    }
+
+    private void showOutboundScanner() {
+        if (currentOutboundSession == null) return;
+        screen = SCREEN_OUTBOUND_SCANNER;
+        modalOpen = false;
+        busy = false;
+        bottomNav.setVisibility(View.GONE);
+        backButton.setVisibility(View.VISIBLE);
+        accountButton.setVisibility(View.VISIBLE);
+        toolbarTitle.setText(activeOutboundPackage == null ? "Scan outbound" : "Scan package items");
+
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout page = Ui.column(this, 0);
+        page.setFocusableInTouchMode(true);
+        page.setPadding(Ui.dp(this, 13), Ui.dp(this, 14), Ui.dp(this, 13), Ui.dp(this, 30));
+
+        LinearLayout auditCard = Ui.card(this);
+        LinearLayout heading = Ui.row(this);
+        heading.addView(Ui.text(this, outboundAuditReference(currentOutboundSession), 18, Ui.TEXT, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        heading.addView(Ui.chip(this, currentOutboundSession.optString("status", "open"), Ui.SUCCESS, Ui.SUCCESS_SOFT));
+        auditCard.addView(heading);
+        TextView warehouse = Ui.text(this, currentOutboundSession.optString("warehouseName", "Warehouse"), 14, Ui.TEXT, true);
+        Ui.margin(warehouse, 0, 9, 0, 3);
+        auditCard.addView(warehouse);
+        auditCard.addView(Ui.text(this, currentOutboundSession.optString("carrier").isEmpty() ? "Any carrier" : currentOutboundSession.optString("carrier"), 13, Ui.MUTED, false));
+        String summary = currentOutboundSession.optInt("packageCount") + " packages · " + currentOutboundSession.optInt("matchedCount") + " matched";
+        if (currentOutboundSession.optInt("unmatchedCount") > 0) summary += " · " + currentOutboundSession.optInt("unmatchedCount") + " unmatched";
+        TextView counts = Ui.text(this, summary, 13, currentOutboundSession.optInt("unmatchedCount") > 0 ? Ui.WARNING : Ui.MUTED, true);
+        Ui.margin(counts, 0, 12, 0, 0);
+        auditCard.addView(counts);
+        page.addView(auditCard, Ui.matchWrap());
+
+        if (activeOutboundPackage != null) addActiveOutboundPackage(page);
+
+        LinearLayout scannerCard = Ui.card(this);
+        scannerCard.setBackground(Ui.bordered(Ui.SURFACE, activeOutboundPackage == null ? 0xFFBFDBFE : 0xFFFCD34D, 18, this));
+        LinearLayout scannerHeading = Ui.row(this);
+        TextView scannerIcon = Ui.text(this, activeOutboundPackage == null ? "⇥" : "▣", 24, Color.WHITE, true);
+        scannerIcon.setGravity(Gravity.CENTER);
+        scannerIcon.setBackground(Ui.rounded(activeOutboundPackage == null ? Ui.PRIMARY : Ui.WARNING, 15, this));
+        scannerHeading.addView(scannerIcon, new LinearLayout.LayoutParams(Ui.dp(this, 52), Ui.dp(this, 52)));
+        LinearLayout scannerTitle = Ui.column(this, 0);
+        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+        titleParams.setMargins(Ui.dp(this, 12), 0, 0, 0);
+        scannerHeading.addView(scannerTitle, titleParams);
+        scannerTitle.addView(Ui.text(this, activeOutboundPackage == null ? "Tracking scanner ready" : "Item scanner ready", 17, Ui.TEXT, true));
+        TextView instruction = Ui.text(this, activeOutboundPackage == null
+            ? "Scan the shipping label. DataPlus records the package and shows the order match."
+            : "Scan each physical item UPC for this package before moving to the next label.", 13, Ui.MUTED, false);
+        Ui.margin(instruction, 0, 3, 0, 0);
+        scannerTitle.addView(instruction);
+        scannerCard.addView(scannerHeading);
+
+        scannerPreview = Ui.text(this, "Waiting for barcode", 16, Ui.MUTED, false);
+        scannerPreview.setGravity(Gravity.CENTER_VERTICAL);
+        scannerPreview.setTypeface(Typeface.MONOSPACE);
+        scannerPreview.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 14), 0);
+        scannerPreview.setBackground(Ui.bordered(0xFFF8FAFC, Ui.BORDER, 13, this));
+        LinearLayout.LayoutParams previewParams = Ui.matchWrap();
+        previewParams.height = Ui.dp(this, 54);
+        previewParams.setMargins(0, Ui.dp(this, 16), 0, 0);
+        scannerCard.addView(scannerPreview, previewParams);
+
+        scannerStatus = Ui.text(this, "Ready · scan suffix Enter/CR", 12, Ui.SUCCESS, true);
+        Ui.margin(scannerStatus, 0, 8, 0, 0);
+        scannerCard.addView(scannerStatus);
+
+        LinearLayout fallbackRow = Ui.row(this);
+        Button typeButton = Ui.button(this, activeOutboundPackage == null ? "Type tracking" : "Type item UPC", false);
+        typeButton.setOnClickListener(view -> showOutboundManualBarcodeDialog());
+        fallbackRow.addView(typeButton, new LinearLayout.LayoutParams(0, Ui.dp(this, 50), 1));
+        Button webButton = Ui.button(this, "Photos & exceptions", false);
+        webButton.setOnClickListener(view -> openWeb("/warehouse/outbound"));
+        LinearLayout.LayoutParams webParams = new LinearLayout.LayoutParams(0, Ui.dp(this, 50), 1);
+        webParams.setMargins(Ui.dp(this, 8), 0, 0, 0);
+        fallbackRow.addView(webButton, webParams);
+        LinearLayout.LayoutParams fallbackParams = Ui.matchWrap();
+        fallbackParams.setMargins(0, Ui.dp(this, 12), 0, 0);
+        scannerCard.addView(fallbackRow, fallbackParams);
+        LinearLayout.LayoutParams scannerParams = Ui.matchWrap();
+        scannerParams.setMargins(0, Ui.dp(this, 12), 0, 0);
+        page.addView(scannerCard, scannerParams);
+
+        TextView recentTitle = Ui.text(this, "Recent packages", 17, Ui.TEXT, true);
+        Ui.margin(recentTitle, 2, 20, 0, 8);
+        page.addView(recentTitle);
+        addRecentOutboundPackages(page);
+
+        LinearLayout actionCard = Ui.card(this);
+        Button reconcile = Ui.button(this, "Recheck unmatched packages", false);
+        reconcile.setEnabled(currentOutboundSession.optInt("unmatchedCount") > 0);
+        reconcile.setOnClickListener(view -> reconcileOutboundAudit());
+        actionCard.addView(reconcile, Ui.matchWrap());
+        Button close = Ui.button(this, "Close handoff audit", false);
+        close.setTextColor(Ui.ERROR);
+        close.setOnClickListener(view -> showCloseOutboundDialog());
+        Ui.margin(close, 0, 9, 0, 0);
+        actionCard.addView(close, Ui.matchWrap());
+        LinearLayout.LayoutParams actionParams = Ui.matchWrap();
+        actionParams.setMargins(0, Ui.dp(this, 18), 0, 0);
+        page.addView(actionCard, actionParams);
+
+        scroll.addView(page);
+        setScreen(scroll);
+        page.requestFocus();
+        focusScanner();
+    }
+
+    private void addActiveOutboundPackage(LinearLayout page) {
+        LinearLayout card = Ui.card(this);
+        card.setBackground(Ui.bordered(Ui.WARNING_SOFT, 0xFFFCD34D, 16, this));
+        LinearLayout heading = Ui.row(this);
+        heading.addView(Ui.text(this, "Finish this package", 16, Ui.TEXT, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        heading.addView(Ui.chip(this, outboundItemProgress(activeOutboundPackage), Ui.WARNING, 0xFFFFFBEB));
+        card.addView(heading);
+        TextView tracking = Ui.text(this, activeOutboundPackage.optString("trackingNumber", "Package"), 14, Ui.TEXT, true);
+        tracking.setTypeface(Typeface.MONOSPACE);
+        Ui.margin(tracking, 0, 9, 0, 3);
+        card.addView(tracking);
+        card.addView(Ui.text(this, outboundOrderLabel(activeOutboundPackage), 13, Ui.MUTED, false));
+        if (!activeOutboundPackage.optBoolean("liveItemRequired")) {
+            Button skip = Ui.button(this, "Skip optional item verification", false);
+            skip.setOnClickListener(view -> {
+                activeOutboundPackage = null;
+                showOutboundScanner();
+            });
+            Ui.margin(skip, 0, 12, 0, 0);
+            card.addView(skip, Ui.matchWrap());
+        }
+        LinearLayout.LayoutParams params = Ui.matchWrap();
+        params.setMargins(0, Ui.dp(this, 12), 0, 0);
+        page.addView(card, params);
+    }
+
+    private void addRecentOutboundPackages(LinearLayout page) {
+        if (outboundScans.length() == 0) {
+            LinearLayout empty = Ui.card(this);
+            TextView text = Ui.text(this, "Scan the first tracking label to begin.", 14, Ui.MUTED, false);
+            text.setGravity(Gravity.CENTER);
+            empty.addView(text, Ui.matchWrap());
+            page.addView(empty, Ui.matchWrap());
+            return;
+        }
+        for (int index = 0; index < outboundScans.length() && index < 6; index++) {
+            JSONObject scan = outboundScans.optJSONObject(index);
+            if (scan == null) continue;
+            LinearLayout card = Ui.card(this);
+            LinearLayout first = Ui.row(this);
+            TextView tracking = Ui.text(this, scan.optString("trackingNumber", "Package"), 14, Ui.TEXT, true);
+            tracking.setTypeface(Typeface.MONOSPACE);
+            first.addView(tracking, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            boolean unmatched = "unmatched".equalsIgnoreCase(scan.optString("matchStatus"));
+            first.addView(Ui.chip(this, unmatched ? "Unmatched" : "Matched", unmatched ? Ui.WARNING : Ui.SUCCESS, unmatched ? Ui.WARNING_SOFT : Ui.SUCCESS_SOFT));
+            card.addView(first);
+            TextView order = Ui.text(this, outboundOrderLabel(scan), 13, Ui.MUTED, false);
+            Ui.margin(order, 0, 7, 0, 0);
+            card.addView(order);
+            if (scan.optInt("liveItemExpectedCount") > 0 || scan.optInt("liveItemScannedCount") > 0) {
+                TextView items = Ui.text(this, "Items " + outboundItemProgress(scan), 12, "complete".equalsIgnoreCase(scan.optString("liveItemStatus")) ? Ui.SUCCESS : Ui.WARNING, true);
+                Ui.margin(items, 0, 6, 0, 0);
+                card.addView(items);
+            }
+            LinearLayout.LayoutParams params = Ui.matchWrap();
+            params.setMargins(0, index == 0 ? 0 : Ui.dp(this, 8), 0, 0);
+            page.addView(card, params);
+        }
+    }
+
+    private void handleHardwareScan(String barcode) {
+        if (SCREEN_OUTBOUND_SCANNER.equals(screen)) {
+            if (activeOutboundPackage == null) recordOutboundPackage(barcode);
+            else recordOutboundItem(barcode);
+        } else {
+            lookupBarcode(barcode);
+        }
+    }
+
+    private void recordOutboundPackage(String rawTracking) {
+        String tracking = rawTracking.replaceAll("[^0-9A-Za-z-]", "").trim();
+        if (tracking.isEmpty() || currentOutboundSession == null || busy) return;
+        if (!isOnline()) {
+            scannerMessage("Offline — reconnect before scanning.", false);
+            feedback(false);
+            return;
+        }
+        busy = true;
+        scannerMessage("Matching " + tracking + "…", true);
+        JSONObject body = new JSONObject();
+        try { body.put("trackingNumber", tracking).put("clientScanId", UUID.randomUUID().toString()); } catch (Exception ignored) {}
+        String path = "/api/fulfillment/outbound-audits/" + Uri.encode(currentOutboundSession.optString("id")) + "/scan";
+        api.post(path, body, new ApiClient.Callback() {
+            @Override public void onSuccess(JSONObject response) {
+                busy = false;
+                JSONObject session = response.optJSONObject("session");
+                JSONObject scan = response.optJSONObject("scan");
+                if (session != null) currentOutboundSession = session;
+                if (scan == null) {
+                    scannerMessage("Package details were not returned.", false);
+                    feedback(false);
+                    return;
+                }
+                updateOutboundScan(scan);
+                boolean required = scan.optBoolean("liveItemRequired") && !"complete".equalsIgnoreCase(scan.optString("liveItemStatus"));
+                activeOutboundPackage = required ? scan : null;
+                feedback(true);
+                showOutboundPackageResult(scan, response.optBoolean("duplicate"), response.optString("message", "Package recorded."));
+            }
+            @Override public void onError(ApiClient.ApiException error) {
+                busy = false;
+                if (error.isUnauthorized()) showLogin();
+                else {
+                    scannerMessage(error.getMessage(), false);
+                    feedback(false);
+                    focusScanner();
+                }
+            }
+        });
+    }
+
+    private void showOutboundPackageResult(JSONObject scan, boolean duplicate, String message) {
+        modalOpen = true;
+        Dialog dialog = bottomDialog();
+        LinearLayout sheet = Ui.column(this, 0);
+        sheet.setPadding(Ui.dp(this, 20), Ui.dp(this, 12), Ui.dp(this, 20), Ui.dp(this, 24));
+        sheet.setBackground(Ui.rounded(Ui.SURFACE, 24, this));
+        View handle = new View(this);
+        handle.setBackground(Ui.rounded(0xFFD1D5DB, 99, this));
+        LinearLayout.LayoutParams handleParams = new LinearLayout.LayoutParams(Ui.dp(this, 44), Ui.dp(this, 5));
+        handleParams.gravity = Gravity.CENTER_HORIZONTAL;
+        sheet.addView(handle, handleParams);
+        TextView title = Ui.text(this, duplicate ? "Package already recorded" : "Package recorded", 20, Ui.TEXT, true);
+        Ui.margin(title, 0, 17, 0, 5);
+        sheet.addView(title);
+        sheet.addView(Ui.text(this, message, 14, Ui.MUTED, false));
+
+        LinearLayout packageCard = Ui.card(this);
+        boolean unmatched = "unmatched".equalsIgnoreCase(scan.optString("matchStatus"));
+        packageCard.setBackground(Ui.bordered(unmatched ? Ui.WARNING_SOFT : Ui.SUCCESS_SOFT, unmatched ? 0xFFFCD34D : 0xFFA7F3D0, 16, this));
+        LinearLayout packageHeading = Ui.row(this);
+        TextView tracking = Ui.text(this, scan.optString("trackingNumber", "Package"), 16, Ui.TEXT, true);
+        tracking.setTypeface(Typeface.MONOSPACE);
+        packageHeading.addView(tracking, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        packageHeading.addView(Ui.chip(this, unmatched ? "No order match" : "Order matched", unmatched ? Ui.WARNING : Ui.SUCCESS, Ui.SURFACE));
+        packageCard.addView(packageHeading);
+        TextView order = Ui.text(this, outboundOrderLabel(scan), 13, Ui.MUTED, false);
+        Ui.margin(order, 0, 9, 0, 0);
+        packageCard.addView(order);
+        if (scan.optInt("liveItemExpectedCount") > 0) {
+            TextView items = Ui.text(this, (scan.optBoolean("liveItemRequired") ? "Required item scans " : "Optional item scans ") + outboundItemProgress(scan), 13, Ui.WARNING, true);
+            Ui.margin(items, 0, 8, 0, 0);
+            packageCard.addView(items);
+        }
+        LinearLayout.LayoutParams packageParams = Ui.matchWrap();
+        packageParams.setMargins(0, Ui.dp(this, 16), 0, 0);
+        sheet.addView(packageCard, packageParams);
+
+        LinearLayout actions = Ui.row(this);
+        boolean canScanItems = scan.optInt("liveItemExpectedCount") > 0 && !"complete".equalsIgnoreCase(scan.optString("liveItemStatus"));
+        Button next = Ui.button(this, canScanItems && scan.optBoolean("liveItemRequired") ? "Full tools" : "Next package", false);
+        actions.addView(next, new LinearLayout.LayoutParams(0, Ui.dp(this, 52), 1));
+        Button primary = Ui.button(this, canScanItems ? "Scan package items" : "Done", true);
+        LinearLayout.LayoutParams primaryParams = new LinearLayout.LayoutParams(0, Ui.dp(this, 52), 1);
+        primaryParams.setMargins(Ui.dp(this, 8), 0, 0, 0);
+        actions.addView(primary, primaryParams);
+        Ui.margin(actions, 0, 18, 0, 0);
+        sheet.addView(actions);
+        next.setOnClickListener(view -> {
+            if (canScanItems && scan.optBoolean("liveItemRequired")) {
+                dialog.dismiss();
+                openWeb("/warehouse/outbound");
+            } else {
+                activeOutboundPackage = null;
+                dialog.dismiss();
+            }
+        });
+        primary.setOnClickListener(view -> {
+            activeOutboundPackage = canScanItems ? scan : null;
+            dialog.dismiss();
+        });
+        dialog.setContentView(sheet);
+        dialog.setOnDismissListener(value -> {
+            modalOpen = false;
+            showOutboundScanner();
+        });
+        dialog.show();
+        sizeBottomDialog(dialog);
+    }
+
+    private void recordOutboundItem(String rawBarcode) {
+        String barcode = rawBarcode.replaceAll("[^0-9A-Za-z-]", "").trim();
+        if (barcode.isEmpty() || activeOutboundPackage == null || currentOutboundSession == null || busy) return;
+        if (!isOnline()) {
+            scannerMessage("Offline — reconnect before scanning.", false);
+            feedback(false);
+            return;
+        }
+        busy = true;
+        scannerMessage("Checking item " + barcode + "…", true);
+        JSONObject body = new JSONObject();
+        try {
+            body.put("scanId", activeOutboundPackage.optString("id"));
+            body.put("barcode", barcode);
+            body.put("clientScanId", UUID.randomUUID().toString());
+        } catch (Exception ignored) {}
+        String path = "/api/fulfillment/outbound-audits/" + Uri.encode(currentOutboundSession.optString("id")) + "/item-scan";
+        api.post(path, body, new ApiClient.Callback() {
+            @Override public void onSuccess(JSONObject response) {
+                busy = false;
+                if (response.optBoolean("trackingCandidate")) {
+                    feedback(false);
+                    showOutboundItemWarning("Tracking label detected", response.optString("message", "This looks like another package label. Finish the current package items first."));
+                    return;
+                }
+                if (response.optBoolean("notFound")) {
+                    feedback(false);
+                    showOutboundItemWarning("Item not found", response.optString("message", "This item could not be matched. Use full tools to review or create it."));
+                    return;
+                }
+                JSONObject scan = response.optJSONObject("scan");
+                if (scan == null) {
+                    scannerMessage("Item details were not returned.", false);
+                    feedback(false);
+                    return;
+                }
+                updateOutboundScan(scan);
+                activeOutboundPackage = "complete".equalsIgnoreCase(scan.optString("liveItemStatus")) ? null : scan;
+                feedback(!response.optBoolean("duplicate"));
+                Toast.makeText(LauncherActivity.this, response.optString("message", response.optBoolean("duplicate") ? "Item already scanned." : "Item recorded."), Toast.LENGTH_SHORT).show();
+                showOutboundScanner();
+            }
+            @Override public void onError(ApiClient.ApiException error) {
+                busy = false;
+                if (error.isUnauthorized()) showLogin();
+                else {
+                    scannerMessage(error.getMessage(), false);
+                    feedback(false);
+                    focusScanner();
+                }
+            }
+        });
+    }
+
+    private void showOutboundItemWarning(String title, String message) {
+        modalOpen = true;
+        AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(message)
+            .setPositiveButton("Continue scanning items", null)
+            .setNeutralButton("Open full tools", (value, which) -> openWeb("/warehouse/outbound"))
+            .create();
+        dialog.setOnDismissListener(value -> { modalOpen = false; focusScanner(); });
+        dialog.show();
+    }
+
+    private void showOutboundManualBarcodeDialog() {
+        modalOpen = true;
+        EditText value = input(activeOutboundPackage == null ? "Tracking number" : "Item SKU or UPC", false);
+        value.setInputType(InputType.TYPE_CLASS_TEXT);
+        LinearLayout wrapper = Ui.column(this, 0);
+        wrapper.setPadding(Ui.dp(this, 20), Ui.dp(this, 4), Ui.dp(this, 20), 0);
+        wrapper.addView(value, Ui.matchWrap());
+        AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle(activeOutboundPackage == null ? "Type tracking label" : "Type package item")
+            .setView(wrapper)
+            .setPositiveButton("Continue", (selected, which) -> {
+                String barcode = value.getText().toString().trim();
+                modalOpen = false;
+                if (!barcode.isEmpty()) handleHardwareScan(barcode);
+            })
+            .setNegativeButton("Cancel", null)
+            .create();
+        dialog.setOnDismissListener(selected -> { modalOpen = false; focusScanner(); });
+        dialog.setOnShowListener(selected -> {
+            value.requestFocus();
+            dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+        });
+        dialog.show();
+    }
+
+    private void reconcileOutboundAudit() {
+        if (currentOutboundSession == null || busy || !isOnline()) return;
+        busy = true;
+        scannerMessage("Rechecking unmatched packages…", true);
+        String path = "/api/fulfillment/outbound-audits/" + Uri.encode(currentOutboundSession.optString("id")) + "/reconcile";
+        api.post(path, new JSONObject(), new ApiClient.Callback() {
+            @Override public void onSuccess(JSONObject response) {
+                busy = false;
+                JSONObject session = response.optJSONObject("session");
+                JSONArray scans = response.optJSONArray("scans");
+                if (session != null) currentOutboundSession = session;
+                if (scans != null) outboundScans = scans;
+                activeOutboundPackage = firstIncompleteRequiredPackage();
+                feedback(true);
+                Toast.makeText(LauncherActivity.this, response.optString("message", "Unmatched packages checked."), Toast.LENGTH_SHORT).show();
+                showOutboundScanner();
+            }
+            @Override public void onError(ApiClient.ApiException error) {
+                busy = false;
+                if (error.isUnauthorized()) showLogin();
+                else {
+                    scannerMessage(error.getMessage(), false);
+                    feedback(false);
+                }
+            }
+        });
+    }
+
+    private void showCloseOutboundDialog() {
+        if (currentOutboundSession == null) return;
+        modalOpen = true;
+        Dialog dialog = bottomDialog();
+        LinearLayout sheet = Ui.column(this, 0);
+        sheet.setPadding(Ui.dp(this, 20), Ui.dp(this, 12), Ui.dp(this, 20), Ui.dp(this, 24));
+        sheet.setBackground(Ui.rounded(Ui.SURFACE, 24, this));
+        TextView title = Ui.text(this, "Close outbound handoff", 20, Ui.TEXT, true);
+        Ui.margin(title, 0, 8, 0, 5);
+        sheet.addView(title);
+        sheet.addView(Ui.text(this, "Confirm who received the packages. Required Live item scans must be complete.", 13, Ui.MUTED, false));
+        TextView driverLabel = Ui.text(this, "Driver / receiving party", 13, Ui.TEXT, true);
+        Ui.margin(driverLabel, 0, 18, 0, 6);
+        sheet.addView(driverLabel);
+        EditText driver = input("Name", false);
+        sheet.addView(driver, Ui.matchWrap());
+        TextView confirmationLabel = Ui.text(this, "Pickup confirmation", 13, Ui.TEXT, true);
+        Ui.margin(confirmationLabel, 0, 14, 0, 6);
+        sheet.addView(confirmationLabel);
+        EditText confirmation = input("Reference or confirmation", false);
+        sheet.addView(confirmation, Ui.matchWrap());
+        TextView error = Ui.text(this, "", 13, Ui.ERROR, true);
+        error.setVisibility(View.GONE);
+        Ui.margin(error, 0, 12, 0, 0);
+        sheet.addView(error);
+        LinearLayout actions = Ui.row(this);
+        Button cancel = Ui.button(this, "Cancel", false);
+        actions.addView(cancel, new LinearLayout.LayoutParams(0, Ui.dp(this, 52), 1));
+        Button close = Ui.button(this, "Close audit", true);
+        LinearLayout.LayoutParams closeParams = new LinearLayout.LayoutParams(0, Ui.dp(this, 52), 1);
+        closeParams.setMargins(Ui.dp(this, 8), 0, 0, 0);
+        actions.addView(close, closeParams);
+        Ui.margin(actions, 0, 18, 0, 0);
+        sheet.addView(actions);
+        cancel.setOnClickListener(view -> dialog.dismiss());
+        close.setOnClickListener(view -> closeOutboundAudit(dialog, error, cancel, close, driver.getText().toString().trim(), confirmation.getText().toString().trim()));
+        dialog.setContentView(sheet);
+        dialog.setOnDismissListener(value -> { modalOpen = false; focusScanner(); });
+        dialog.show();
+        sizeBottomDialog(dialog);
+    }
+
+    private void closeOutboundAudit(Dialog dialog, TextView error, Button cancel, Button close, String driver, String confirmation) {
+        if (currentOutboundSession == null || busy) return;
+        if (!isOnline()) {
+            error.setText("Reconnect before closing the audit.");
+            error.setVisibility(View.VISIBLE);
+            return;
+        }
+        busy = true;
+        cancel.setEnabled(false);
+        close.setEnabled(false);
+        close.setText("Closing…");
+        JSONObject body = new JSONObject();
+        try {
+            body.put("handoffMethod", "pickup");
+            body.put("driverName", driver);
+            body.put("pickupConfirmation", confirmation);
+        } catch (Exception ignored) {}
+        String path = "/api/fulfillment/outbound-audits/" + Uri.encode(currentOutboundSession.optString("id")) + "/close";
+        api.post(path, body, new ApiClient.Callback() {
+            @Override public void onSuccess(JSONObject response) {
+                busy = false;
+                feedback(true);
+                Toast.makeText(LauncherActivity.this, response.optString("message", "Outbound handoff closed."), Toast.LENGTH_SHORT).show();
+                dialog.dismiss();
+                showOutboundDashboard(true);
+            }
+            @Override public void onError(ApiClient.ApiException exception) {
+                busy = false;
+                if (exception.isUnauthorized()) {
+                    dialog.dismiss();
+                    showLogin();
+                    return;
+                }
+                feedback(false);
+                error.setText(exception.getMessage());
+                error.setVisibility(View.VISIBLE);
+                cancel.setEnabled(true);
+                close.setEnabled(true);
+                close.setText("Close audit");
+            }
+        });
+    }
+
+    private void updateOutboundScan(JSONObject updated) {
+        JSONArray next = new JSONArray();
+        next.put(updated);
+        String id = updated.optString("id");
+        for (int index = 0; index < outboundScans.length(); index++) {
+            JSONObject scan = outboundScans.optJSONObject(index);
+            if (scan != null && !id.equals(scan.optString("id"))) next.put(scan);
+        }
+        outboundScans = next;
+    }
+
+    private boolean isPhysicalWarehouse(JSONObject warehouse) {
+        if (!warehouse.optBoolean("active", true)) return false;
+        String type = warehouse.optString("type", warehouse.optString("warehouseType")).toLowerCase(Locale.US);
+        return !type.contains("virtual") && !type.contains("supplier_feed") && !type.contains("supplier feed");
+    }
+
+    private String warehouseName(JSONObject warehouse) {
+        String name = warehouse.optString("name");
+        if (name.isEmpty()) name = warehouse.optString("code");
+        return name.isEmpty() ? warehouse.optString("id", "Warehouse") : name;
+    }
+
+    private String outboundAuditReference(JSONObject audit) {
+        String number = audit == null ? "" : audit.optString("auditNumber");
+        return number.isEmpty() ? "Outbound audit" : number;
+    }
+
+    private String outboundItemProgress(JSONObject scan) {
+        int scanned = scan == null ? 0 : scan.optInt("liveItemScannedCount");
+        int expected = scan == null ? 0 : scan.optInt("liveItemExpectedCount");
+        return expected > 0 ? scanned + "/" + expected : scanned + " scanned";
+    }
+
+    private String outboundOrderLabel(JSONObject scan) {
+        JSONArray matches = scan == null ? null : scan.optJSONArray("matches");
+        if (matches == null || matches.length() == 0) return "Tracking retained without an order match";
+        List<String> numbers = new ArrayList<>();
+        for (int index = 0; index < matches.length(); index++) {
+            JSONObject match = matches.optJSONObject(index);
+            if (match == null) continue;
+            String number = match.optString("orderNumber", match.optString("orderId"));
+            if (!number.isEmpty()) numbers.add(number);
+        }
+        if (numbers.isEmpty()) return matches.length() + " order match" + (matches.length() == 1 ? "" : "es");
+        return "DataPlus order" + (numbers.size() == 1 ? " " : "s ") + String.join(", ", numbers);
+    }
+
     private Dialog bottomDialog() {
         Dialog dialog = new Dialog(this, R.style.Theme_DataPlusWarehouse_BottomDialog);
         Window window = dialog.getWindow();
@@ -1034,7 +1793,7 @@ public class LauncherActivity extends Activity {
         page.addView(subtitle);
 
         LinearLayout card = Ui.card(this);
-        card.addView(Ui.text(this, "DataPlus Warehouse 2.0.0", 17, Ui.TEXT, true));
+        card.addView(Ui.text(this, "DataPlus Warehouse 2.1.0", 17, Ui.TEXT, true));
         TextView device = Ui.text(this, "Optimized for G47 · Android " + Build.VERSION.RELEASE, 13, Ui.MUTED, false);
         Ui.margin(device, 0, 5, 0, 15);
         card.addView(device);
@@ -1060,7 +1819,9 @@ public class LauncherActivity extends Activity {
         menu.setOnMenuItemClickListener(item -> {
             String title = item.getTitle().toString();
             if ("Refresh".equals(title)) {
-                if (SCREEN_SCANNER.equals(screen) && currentAudit != null) openAudit(currentAudit.optString("id"));
+                if (SCREEN_OUTBOUND_SCANNER.equals(screen) && currentOutboundSession != null) openOutboundAudit(currentOutboundSession.optString("id"));
+                else if (SCREEN_OUTBOUND.equals(screen)) showOutboundDashboard(true);
+                else if (SCREEN_SCANNER.equals(screen) && currentAudit != null) openAudit(currentAudit.optString("id"));
                 else showDashboard(dashboardMode, true);
             } else if ("Open full DataPlus".equals(title)) openWeb("/warehouse/mobile");
             else if ("Sign out".equals(title)) signOut();
@@ -1083,6 +1844,10 @@ public class LauncherActivity extends Activity {
             currentAudit = null;
             audits = new JSONArray();
             warehouses = new JSONArray();
+            outboundAudits = new JSONArray();
+            currentOutboundSession = null;
+            outboundScans = new JSONArray();
+            activeOutboundPackage = null;
             showLogin();
         });
     }
@@ -1140,7 +1905,7 @@ public class LauncherActivity extends Activity {
     private void updateNetworkState() {
         boolean online = isOnline();
         offlineBanner.setVisibility(online ? View.GONE : View.VISIBLE);
-        if (scannerStatus != null && SCREEN_SCANNER.equals(screen) && !online) {
+        if (scannerStatus != null && isHardwareScannerScreen() && !online) {
             scannerStatus.setText("Offline — scanning is paused");
             scannerStatus.setTextColor(Ui.ERROR);
         }
@@ -1182,17 +1947,21 @@ public class LauncherActivity extends Activity {
     private void resetScanBuffer() {
         scanBuffer.setLength(0);
         lastScanKeyAt = 0;
-        if (scannerPreview != null && SCREEN_SCANNER.equals(screen)) scannerPreview.setText("Waiting for barcode");
-        if (scannerStatus != null && SCREEN_SCANNER.equals(screen)) {
+        if (scannerPreview != null && isHardwareScannerScreen()) scannerPreview.setText("Waiting for barcode");
+        if (scannerStatus != null && isHardwareScannerScreen()) {
             scannerStatus.setText("Ready · scan suffix Enter/CR");
             scannerStatus.setTextColor(Ui.SUCCESS);
         }
     }
 
     private void focusScanner() {
-        if (!SCREEN_SCANNER.equals(screen) || modalOpen) return;
+        if (!isHardwareScannerScreen() || modalOpen) return;
         contentHost.setFocusableInTouchMode(true);
         contentHost.requestFocus();
+    }
+
+    private boolean isHardwareScannerScreen() {
+        return SCREEN_SCANNER.equals(screen) || SCREEN_OUTBOUND_SCANNER.equals(screen);
     }
 
     private void feedback(boolean success) {

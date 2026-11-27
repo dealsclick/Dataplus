@@ -1,12 +1,12 @@
 # DataPlus Warehouse for Android
 
-DataPlus Warehouse 2 is a native Android scanner for receiving and warehouse audits. It uses the existing DataPlus APIs and shares the authenticated session with a restricted in-app DataPlus web fallback for complex workflows. The normal G47 barcode path is native and does not open the camera.
+DataPlus Warehouse 2 is a native Android scanner for receiving, warehouse audits, and outbound handoffs. It uses the existing DataPlus APIs and shares the authenticated session with a restricted in-app DataPlus web fallback for complex workflows. The normal G47 barcode path is native and does not open the camera.
 
 ## Native application contract
 
 - App name: DataPlus Warehouse
 - Package name: `com.dataplus.warehouse`
-- Version: `2.0.0` (`versionCode 2`)
+- Version: `2.1.0` (`versionCode 3`)
 - Minimum Android version: Android 7 / API 24
 - Target: Android API 36; the warehouse G47 runs Android 14
 - Server: `https://dataplusapp.duckdns.org`
@@ -19,6 +19,8 @@ The installed package keeps the same application ID and signing certificate as v
 ## Native workflow
 
 The native app owns sign-in, active receiving/audit selection, warehouse bin selection, hardware-key capture, product lookup, SKU/title/UOM/case-pack review, quantity confirmation, saving, recent counts, and sound/haptic feedback. A barcode lookup never changes inventory. The app calls the scan mutation only after the operator confirms the quantity.
+
+Outbound is also native: the operator can start or reopen today's warehouse handoff, scan tracking labels, review the matched DataPlus orders, complete required or optional package-item scans, recheck unmatched packages, and close the handoff. Package photos, quick item creation, and unusual exceptions remain available through **Photos & exceptions**, which opens the responsive full outbound workspace.
 
 Unknown barcodes are not received automatically. The operator may skip them or open the full DataPlus workflow to research or create the product. Starting a new receipt/audit, camera scanning, and administrative tools also use the explicit web fallback. That WebView permits navigation only inside the DataPlus HTTPS origin; other links open in an external app. Camera permission is requested only if the operator chooses the web camera scanner.
 
@@ -50,7 +52,7 @@ The signed output is `android/warehouse/app-release-signed.apk`. The build align
 ## Publish the direct download
 
 ```powershell
-npm run android:publish -- android/warehouse/app-release-signed.apk 2.0.0
+npm run android:publish -- android/warehouse/app-release-signed.apk 2.1.0
 ```
 
 Publishing validates the APK container, copies it to `release-assets/warehouse/dataplus-warehouse.apk`, and records its SHA-256 checksum. Authenticated warehouse users download it from the existing **Install Warehouse APK** option in the name menu. `GET /api/mobile/warehouse-apk/status` reports availability and `GET /api/mobile/warehouse-apk` serves the installer with the Android APK MIME type.
@@ -69,7 +71,7 @@ git diff --check
 
 On the G47:
 
-1. Install version 2 over the existing DataPlus Warehouse app and confirm Android treats it as an update.
+1. Install version 2.1 over the existing DataPlus Warehouse app and confirm Android treats it as an update.
 2. Sign in, close the app, reopen it, and confirm the session persists.
 3. Open a test receipt and choose a bin.
 4. Scan with both physical triggers. Confirm one trigger press opens one native confirmation sheet.
@@ -78,3 +80,6 @@ On the G47:
 7. Disable Wi-Fi and confirm the red offline banner blocks the scan write.
 8. Use **Camera & tools** and verify camera permission is requested only there.
 9. Verify the saved count in the full React warehouse workspace.
+10. Open **Outbound**, start or reopen today's audit, and scan a package tracking label with the G47 trigger.
+11. Verify matched and unmatched packages are clearly identified, then complete any required package-item UPC scans.
+12. Close the handoff only after all required Live item scans are complete; confirm the same audit in the React outbound workspace.
