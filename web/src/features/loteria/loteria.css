@@ -59,7 +59,7 @@
 .loteria-card-shell > .loteria-card { width: 100%; }
 .loteria-card { position: relative; display: grid; grid-template-rows: 1fr auto; gap: .35rem; overflow: hidden; padding: .45rem; aspect-ratio: 3 / 4; border: 3px solid #5d3a2e; border-radius: .8rem; background: #fff8dc; color: var(--lot-ink); text-align: center; box-shadow: 0 8px 22px rgba(63, 34, 18, .18); transition: transform .12s, filter .12s, border-color .12s; }
 button.loteria-card:active { transform: scale(.97); }
-.loteria-card-art { position: relative; display: grid; place-items: center; min-height: 0; overflow: hidden; border-radius: .5rem; background: #efe4ce; }
+.loteria-card-art { position: relative; display: grid; place-items: center; min-height: 0; overflow: hidden; border-radius: .5rem; background-color: #efe4ce; background-position: center; background-size: cover; background-repeat: no-repeat; }
 .loteria-card-art > img { width: 100%; height: 100%; min-height: 0; object-fit: cover; }
 .loteria-card-art > span { position: absolute; inset: 0; display: grid; place-items: center; font-size: clamp(2rem, 10vw, 8rem); filter: drop-shadow(0 4px 2px rgba(50, 20, 10, .18)); }
 .loteria-card strong { padding: .25rem; font: clamp(.72rem, 2vw, 1.45rem) "Rye", Georgia, serif; }
@@ -87,6 +87,10 @@ button.loteria-card:active { transform: scale(.97); }
 @keyframes pulse { to { transform: scale(.93); } }
 .loteria-sound { position: fixed; left: 1rem; bottom: 1rem; background: #fffaf0 !important; }
 .loteria-tv .loteria-language { top: auto; bottom: 1rem; }
+.loteria-tv .loteria-current > .loteria-card-shell { width: 54vh; max-width: 36rem; height: 72vh; max-height: 48rem; }
+.loteria-tv .loteria-current > .loteria-card-shell > .loteria-card { height: 100%; aspect-ratio: auto; }
+.loteria-tv .loteria-history .loteria-card-shell { width: 8rem; height: 10.67rem; }
+.loteria-tv .loteria-history .loteria-card { height: 100%; aspect-ratio: auto; }
 .loteria-winner { position: relative; z-index: 5; display: grid; justify-items: center; gap: 1rem; padding: clamp(1.5rem, 4vw, 4rem); text-align: center; border: 7px double var(--lot-gold); border-radius: 2rem; background: linear-gradient(135deg, #fff8d9, #ffe6a0); box-shadow: 0 25px 80px rgba(111, 45, 20, .25); }
 .loteria-winner p { font: clamp(3rem, 10vw, 9rem) "Rye", serif; line-height: .9; color: var(--lot-red); }
 .loteria-winner h1 { color: var(--lot-teal); }

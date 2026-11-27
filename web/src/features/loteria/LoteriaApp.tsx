@@ -192,7 +192,7 @@ function CardFace({ card, marked = false, called = false, compact = false, winni
 }) {
   const [showArtwork, setShowArtwork] = useState(false)
   const content = <>
-    <span className="loteria-card-art">
+    <span className="loteria-card-art" style={{ backgroundImage: `url(${card.image})` }}>
       <img src={card.image} alt="" aria-hidden="true" />
       {!card.originalImage && <span>{card.symbol}</span>}
     </span>
