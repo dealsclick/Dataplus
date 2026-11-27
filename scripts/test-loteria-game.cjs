@@ -15,10 +15,14 @@ const selectedCardIds = configuredGame.cards.slice(0, 16).map((card) => card.id)
 assert.throws(() => configuredGame.hostAction(configured.code, configured.hostToken, "set-cards", { enabledCardIds: selectedCardIds.slice(0, 15) }), /at least 16|al menos 16/i, "host cannot enable fewer than 16 cards");
 const configuredState = configuredGame.hostAction(configured.code, configured.hostToken, "set-cards", { enabledCardIds: selectedCardIds });
 assert.deepStrictEqual(configuredState.enabledCardIds, selectedCardIds, "host selection is authoritative");
+const renamedState = configuredGame.hostAction(configured.code, configured.hostToken, "set-card-name", { cardId: selectedCardIds[0], nameEs: "La Carta Familiar", nameEn: "The Family Card" });
+assert.equal(renamedState.cards.find((card) => card.id === selectedCardIds[0]).nameEs, "La Carta Familiar", "host can rename a card for the room");
 const configuredPlayer = configuredGame.join(configured.code, "Deck Tester");
+assert.equal(configuredPlayer.state.player.board.find((card) => card.id === selectedCardIds[0])?.nameEs, "La Carta Familiar", "room card names reach player boards");
 assert(configuredPlayer.state.player.board.every((card) => selectedCardIds.includes(card.id)), "boards only contain enabled cards");
 configuredGame.hostAction(configured.code, configured.hostToken, "start");
 assert.throws(() => configuredGame.hostAction(configured.code, configured.hostToken, "set-cards", { enabledCardIds: selectedCardIds }), /before|antes/i, "cards cannot change after the round starts");
+assert.throws(() => configuredGame.hostAction(configured.code, configured.hostToken, "set-card-name", { cardId: selectedCardIds[0], nameEs: "Muy tarde" }), /before|antes/i, "card names cannot change after the round starts");
 const created = game.createRoom({ publicUrl: "https://game.example", intervalSeconds: 8 });
 const first = game.join(created.code, "Ana");
 const second = game.join(created.code, "Beto");

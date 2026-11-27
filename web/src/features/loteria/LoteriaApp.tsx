@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Switch } from "@/components/ui/switch"
-import { ImageIcon, Maximize2, Pause, Play, RotateCcw, Volume2, VolumeX, Users } from "lucide-react"
+import { ImageIcon, Maximize2, Pause, Pencil, Play, RotateCcw, Save, Volume2, VolumeX, Users } from "lucide-react"
 import "./loteria.css"
 
 type Language = "es" | "en"
@@ -378,6 +378,8 @@ function HostView({ initialCode, initialToken }: { initialCode: string; initialT
   const [message, setMessage] = useState("")
   const [deckSettingsOpen, setDeckSettingsOpen] = useState(false)
   const [previewCard, setPreviewCard] = useState<LoteriaCard | null>(null)
+  const [cardNameEs, setCardNameEs] = useState("")
+  const [cardNameEn, setCardNameEn] = useState("")
   const { state, setState } = useRoom(code)
   const t = text[language]
 
@@ -409,6 +411,24 @@ function HostView({ initialCode, initialToken }: { initialCode: string; initialT
     } catch (cardError) { setMessage(cardError instanceof Error ? cardError.message : "No se pudieron actualizar las cartas.") }
   }
 
+  function openCardPreview(card: LoteriaCard) {
+    setCardNameEs(card.nameEs)
+    setCardNameEn(card.nameEn)
+    setDeckSettingsOpen(false)
+    setPreviewCard(card)
+  }
+
+  async function saveCardName() {
+    if (!state || !previewCard) return
+    setMessage("")
+    try {
+      const next = await request<RoomState>(`/api/loteria/rooms/${code}/host`, { method: "POST", headers: { "X-Loteria-Host-Token": hostToken }, body: JSON.stringify({ action: "set-card-name", cardId: previewCard.id, nameEs: cardNameEs, nameEn: cardNameEn }) })
+      setState(next)
+      const updated = next.cards.find((card) => card.id === previewCard.id)
+      if (updated) setPreviewCard(updated)
+    } catch (cardError) { setMessage(cardError instanceof Error ? cardError.message : "No se pudo cambiar el nombre.") }
+  }
+
   function closeCardPreview() {
     setPreviewCard(null)
     window.setTimeout(() => setDeckSettingsOpen(true), 0)
@@ -426,7 +446,7 @@ function HostView({ initialCode, initialToken }: { initialCode: string; initialT
         <DialogHeader><DialogTitle>{language === "es" ? "Cartas de esta sala" : "Cards in this room"}</DialogTitle><DialogDescription>{state.enabledCardIds.length} de {state.cards.length} {language === "es" ? "activadas · activa un mínimo de 16" : "enabled · enable at least 16"}</DialogDescription></DialogHeader>
         <div className="loteria-deck-grid">{state.cards.map((card) => {
         const enabled = state.enabledCardIds.includes(card.id)
-        return <div key={card.id} className={`loteria-deck-option${enabled ? " is-enabled" : ""}`}><button type="button" className="loteria-deck-preview" onClick={() => { setDeckSettingsOpen(false); setPreviewCard(card) }} aria-label={`${language === "es" ? "Ampliar" : "Preview"} ${card.nameEs}`}><span className="loteria-deck-thumb" style={{ backgroundImage: `url(${card.image})` }}>{!card.originalImage && card.symbol}</span><span><strong>{language === "es" ? card.nameEs : card.nameEn}</strong><small>{enabled ? (language === "es" ? "Activada" : "Enabled") : (language === "es" ? "Desactivada" : "Disabled")}</small></span><Maximize2 aria-hidden="true" /></button><Switch size="sm" checked={enabled} disabled={state.status !== "lobby"} onCheckedChange={(checked) => void setCardEnabled(card.id, checked)} aria-label={`${enabled ? "Desactivar" : "Activar"} ${card.nameEs}`} /></div>
+        return <div key={card.id} className={`loteria-deck-option${enabled ? " is-enabled" : ""}`}><button type="button" className="loteria-deck-preview" onClick={() => openCardPreview(card)} aria-label={`${language === "es" ? "Ampliar" : "Preview"} ${card.nameEs}`}><span className="loteria-deck-thumb" style={{ backgroundImage: `url(${card.image})` }}>{!card.originalImage && card.symbol}</span><span><strong>{language === "es" ? card.nameEs : card.nameEn}</strong><small>{enabled ? (language === "es" ? "Activada" : "Enabled") : (language === "es" ? "Desactivada" : "Disabled")}</small></span><Maximize2 aria-hidden="true" /></button><button type="button" className="loteria-card-name-button" disabled={state.status !== "lobby"} onClick={() => openCardPreview(card)} aria-label={`${language === "es" ? "Editar nombre de" : "Edit name for"} ${card.nameEs}`}><Pencil /></button><Switch size="sm" checked={enabled} disabled={state.status !== "lobby"} onCheckedChange={(checked) => void setCardEnabled(card.id, checked)} aria-label={`${enabled ? "Desactivar" : "Activar"} ${card.nameEs}`} /></div>
       })}</div>
       </DialogContent>
     </Dialog>
@@ -435,6 +455,7 @@ function HostView({ initialCode, initialToken }: { initialCode: string; initialT
         {previewCard && <>
           <DialogHeader><DialogTitle>{language === "es" ? previewCard.nameEs : previewCard.nameEn}</DialogTitle><DialogDescription>{language === "es" ? "Vista ampliada de la carta" : "Full-size card preview"}</DialogDescription></DialogHeader>
           <img className="loteria-card-preview-art" src={previewCard.image} alt={`${language === "es" ? "Carta" : "Card"} ${previewCard.nameEs}`} />
+          <div className="loteria-card-name-editor"><div><Label htmlFor="loteria-name-es">Nombre en español</Label><Input id="loteria-name-es" value={cardNameEs} maxLength={48} disabled={state.status !== "lobby"} onChange={(event) => setCardNameEs(event.target.value)} /></div><div><Label htmlFor="loteria-name-en">Nombre en inglés</Label><Input id="loteria-name-en" value={cardNameEn} maxLength={48} disabled={state.status !== "lobby"} onChange={(event) => setCardNameEn(event.target.value)} /></div><Button disabled={state.status !== "lobby" || !cardNameEs.trim()} onClick={() => void saveCardName()}><Save /> {language === "es" ? "Guardar nombre" : "Save name"}</Button></div>
           {previewCard.originalImage && <details className="loteria-card-preview-original"><summary><ImageIcon /> {language === "es" ? "Ver foto original" : "View original photo"}</summary><img src={previewCard.originalImage} alt={`${language === "es" ? "Foto original de" : "Original photo for"} ${previewCard.nameEs}`} /></details>}
         </>}
       </DialogContent>
