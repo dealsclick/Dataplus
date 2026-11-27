@@ -91,6 +91,9 @@ assert.match(warehouseUi, /Post partial receipt & close audit/, 'the primary par
 assert.match(warehouseUi, /allows another audit when the balance arrives/, 'the finish dialog explains that one PO can support multiple receiving audits');
 assert.match(warehouseUi, /No action is required[\s\S]*marks the PO partially received/, 'partial receipt completion does not require a backorder classification');
 assert.match(server, /partialReceipt,\s*remainingQty[\s\S]*backorderLines/, 'completed audits retain the PO balance deferred to a future receipt');
+assert.match(warehouseUi, /Remove from this audit/, 'expected-only PO rows expose an audit-only removal action');
+assert.match(warehouseUi, /Its unreceived quantity stays on the PO and will be available in the next receiving audit/, 'the removal confirmation explains that the PO line remains open');
+assert.match(server, /audit_expected_line_excluded/, 'the server records expected-line exclusion separately from removed scan evidence');
 assert.match(warehouseUi, /Orders this receipt can move forward/, 'PO receiving shows pending, allocated, and label-purchased orders that can move forward');
 assert.match(warehouseUi, /Recent PO receiving/, 'mobile receiving shows recent and resumable PO sessions');
 assert.match(warehouseUi, /activeReceivingParticipants/, 'the shared scanner shows teammates who are actively receiving the PO');

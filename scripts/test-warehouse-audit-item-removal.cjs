@@ -67,9 +67,13 @@ async function run({ kind = "known", lineKey = "line", status = "in_progress", r
   assert.equal(withoutReason.response.status, 200);
   assert.equal(withoutReason.audit.removedItems[0].reason, "Removed from audit");
 
-  const expected = await run({ kind: "po_expected", lineKey: "expected", reason: "Removed from supplier order" });
-  assert.equal(expected.response.status, 404);
-  assert.equal(expected.audit.purchaseOrderExpectedLines.length, 1, "Warehouse removal must never change an expected PO line.");
+  const expected = await run({ kind: "po_expected", lineKey: "expected", reason: "Not part of this receipt" });
+  assert.equal(expected.response.status, 200);
+  assert.equal(expected.audit.purchaseOrderExpectedLines.length, 0, "An expected-only row can be removed from the current audit.");
+  assert.equal(expected.audit.removedItems[0].kind, "po_expected");
+  assert.equal(expected.audit.removedItems[0].countedQty, 0, "Excluding an expected row must not create scan history.");
+  assert.equal(expected.audit.lifecycleEvents[0].type, "audit_expected_line_excluded");
+  assert.match(expected.response.data.message, /PO quantity remains open for a future receipt/);
   assert.equal(expected.savedPurchaseOrder, undefined);
   assert.equal(expected.lineCancellation, undefined);
 
@@ -83,7 +87,7 @@ async function run({ kind = "known", lineKey = "line", status = "in_progress", r
     assert.equal(result.synced, 0);
   }
 
-  console.log("Warehouse audit item removal: audit-only scans, PO preservation, history, and closed-audit guards passed.");
+  console.log("Warehouse audit item removal: scanned corrections, expected-line exclusion, PO preservation, history, and closed-audit guards passed.");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

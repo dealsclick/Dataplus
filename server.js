@@ -65776,11 +65776,17 @@ async function handleApi(req, res) {
     const audit = await postgres.readWarehouseAudit(parts[2]);
     if (!audit) return notFound(res);
     if (audit.status !== "in_progress") return sendJson(res, 400, { error: "Items can be removed only while the audit is in progress." });
-    const kind = body.kind === "unknown" ? "unknown" : "known";
+    const kind = body.kind === "unknown" ? "unknown" : body.kind === "po_expected" ? "po_expected" : "known";
     const lineKey = decodeURIComponent(parts[4]);
-    const rows = kind === "unknown" ? audit.unknownBarcodes || [] : audit.lines || [];
-    const index = rows.findIndex((entry) => String(kind === "unknown" ? entry.id || `${entry.barcode || ""}::${entry.locationBin || ""}` : auditLineKey(entry)) === lineKey);
-    if (index < 0) return sendJson(res, 404, { error: "Scanned audit item not found. Expected PO lines remain open until received, backordered, or changed by purchasing." });
+    const rows = kind === "unknown" ? audit.unknownBarcodes || [] : kind === "po_expected" ? audit.purchaseOrderExpectedLines || [] : audit.lines || [];
+    const index = rows.findIndex((entry) => String(
+      kind === "unknown"
+        ? entry.id || `${entry.barcode || ""}::${entry.locationBin || ""}`
+        : kind === "po_expected"
+          ? entry.id || entry.lineId || `index:${Number(entry.lineIndex ?? -1)}`
+          : auditLineKey(entry)
+    ) === lineKey);
+    if (index < 0) return sendJson(res, 404, { error: kind === "po_expected" ? "Expected PO item not found in this audit. Refresh and try again." : "Scanned audit item not found. Expected PO lines remain open until received, backordered, or changed by purchasing." });
     const [line] = rows.splice(index, 1);
     const now = new Date().toISOString();
     const removedBy = String(authUser?.name || authUser?.username || body.user || "Warehouse user").trim() || "Warehouse user";
@@ -65793,22 +65799,23 @@ async function handleApi(req, res) {
       title: String(line.title || line.description || ""),
       barcode: String(line.barcode || line.upc || ""),
       locationBin: String(line.locationBin || ""),
-      countedQty: Number(kind === "unknown" ? line.count || 0 : line.countedQty || 0),
-      receivingPurchaseOrderLineId: String(line.receivingPurchaseOrderLineId || ""),
-      receivingPurchaseOrderLineIndex: Number(line.receivingPurchaseOrderLineIndex ?? -1),
+      countedQty: Number(kind === "unknown" ? line.count || 0 : kind === "po_expected" ? 0 : line.countedQty || 0),
+      expectedQty: Number(line.expectedQty || 0),
+      receivingPurchaseOrderLineId: String(kind === "po_expected" ? line.id || line.lineId || "" : line.receivingPurchaseOrderLineId || ""),
+      receivingPurchaseOrderLineIndex: Number(kind === "po_expected" ? line.lineIndex ?? -1 : line.receivingPurchaseOrderLineIndex ?? -1),
       removedAt: now,
       removedBy,
       reason
     };
     audit.removedItems = [...(Array.isArray(audit.removedItems) ? audit.removedItems : []), removedItem].slice(-250);
     audit.lifecycleEvents = [...(Array.isArray(audit.lifecycleEvents) ? audit.lifecycleEvents : []), {
-      type: "audit_item_removed",
+      type: kind === "po_expected" ? "audit_expected_line_excluded" : "audit_item_removed",
       at: now,
       user: removedBy,
       kind,
       sku: removedItem.sku,
       barcode: removedItem.barcode,
-      quantity: removedItem.countedQty,
+      quantity: kind === "po_expected" ? removedItem.expectedQty : removedItem.countedQty,
       reason
     }].slice(-250);
     audit.updatedAt = now;
@@ -65817,7 +65824,9 @@ async function handleApi(req, res) {
     return sendJson(res, 200, {
       audit,
       removedItem,
-      message: `${removedItem.sku || removedItem.barcode || "Audit item"} was removed from the active count.${removedItem.receivingPurchaseOrderLineId ? " Its PO requirement remains open." : ""}`
+      message: kind === "po_expected"
+        ? `${removedItem.sku || "The PO item"} was removed from this audit only. Its PO quantity remains open for a future receipt.`
+        : `${removedItem.sku || removedItem.barcode || "Audit item"} was removed from the active count.${removedItem.receivingPurchaseOrderLineId ? " Its PO requirement remains open." : ""}`
     });
   }
 
