@@ -51581,6 +51581,55 @@ function barcodeLookupForms(value) {
   return [...forms].filter(Boolean);
 }
 
+function catalogProductIdentityKeys(product = {}) {
+  return new Set([product.id, product.sku]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean));
+}
+
+function sharedCatalogBarcodeProducts(matches = {}, currentProduct = {}) {
+  const currentKeys = catalogProductIdentityKeys(currentProduct);
+  return (Array.isArray(matches.products) ? matches.products : []).filter((candidate) => ![candidate.id, candidate.sku]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean)
+    .some((value) => currentKeys.has(value)));
+}
+
+async function addMissingCatalogBarcode(product = {}, value = "", context = {}) {
+  const productKey = String(product.sku || product.id || "Catalog SKU").trim();
+  const existingBarcode = String(product.barcode || product.upc || product.gtin || "").trim();
+  if (existingBarcode) {
+    const error = new Error(`${productKey} already has UPC ${existingBarcode}. Open the catalog product to review it.`);
+    error.statusCode = 409;
+    throw error;
+  }
+  const upc = String(value || "").replace(/\D/g, "");
+  if (![8, 12, 13, 14].includes(upc.length)) {
+    const error = new Error("Enter a valid 8, 12, 13, or 14 digit UPC / GTIN.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const matches = await postgres.findBarcodeMatches(barcodeLookupForms(upc));
+  const sharedProducts = sharedCatalogBarcodeProducts(matches, product);
+  const sharedWithSkus = [...new Set(sharedProducts.map((candidate) => String(candidate.sku || candidate.id || "").trim()).filter(Boolean))];
+  const now = String(context.updatedAt || new Date().toISOString());
+  const actor = String(context.updatedBy || "DataPlus user").trim() || "DataPlus user";
+  product.barcode = upc;
+  product.updatedAt = now;
+  product.updatedBy = actor;
+  product.identifierUpdates = [...(Array.isArray(product.identifierUpdates) ? product.identifierUpdates : []), {
+    type: String(context.type || "upc_added"),
+    value: upc,
+    sourceType: String(context.sourceType || "catalog"),
+    sourceId: String(context.sourceId || ""),
+    sourceNumber: String(context.sourceNumber || ""),
+    sharedWithSkus,
+    updatedAt: now,
+    updatedBy: actor
+  }].slice(-50);
+  return { product, upc, sharedProducts, sharedWithSkus, now, actor };
+}
+
 async function resolveScannedCatalogBarcode(value) {
   const forms = barcodeLookupForms(value);
   if (!forms.length) return { barcode: "", product: null, sourceItem: null };
@@ -65662,31 +65711,22 @@ async function handleApi(req, res) {
     if (!productKey) return sendJson(res, 400, { error: "This audit item is not linked to a catalog SKU." });
     const product = await postgres.readProductByKey(productKey);
     if (!product) return sendJson(res, 404, { error: `Catalog SKU ${line.sku || productKey} was not found.` });
-    const existingBarcode = String(product.barcode || product.upc || product.gtin || "").trim();
-    if (existingBarcode) return sendJson(res, 409, { error: `${product.sku || productKey} already has UPC ${existingBarcode}. Open the catalog product to review it.` });
-    const upc = String(body.upc || body.barcode || "").replace(/\D/g, "");
-    if (![8, 12, 13, 14].includes(upc.length)) return sendJson(res, 400, { error: "Enter a valid 8, 12, 13, or 14 digit UPC / GTIN." });
-    const matches = await postgres.findBarcodeMatches(barcodeLookupForms(upc));
-    const currentProductKeys = new Set([product.id, product.sku].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean));
-    const conflictingProduct = (matches.products || []).find((candidate) => ![candidate.id, candidate.sku]
-      .map((value) => String(value || "").trim().toLowerCase())
-      .filter(Boolean)
-      .some((value) => currentProductKeys.has(value)));
-    if (conflictingProduct) return sendJson(res, 409, { error: `${upc} already belongs to catalog SKU ${conflictingProduct.sku || conflictingProduct.id}. The UPC was not changed.` });
-
     const now = new Date().toISOString();
     const actor = String(authUser?.name || authUser?.username || body.user || "Warehouse user").trim() || "Warehouse user";
-    product.barcode = upc;
-    product.updatedAt = now;
-    product.updatedBy = actor;
-    product.identifierUpdates = [...(Array.isArray(product.identifierUpdates) ? product.identifierUpdates : []), {
-      type: "upc_added_from_receiving",
-      value: upc,
-      auditId: String(audit.id || ""),
-      auditNumber: String(audit.auditNumber || ""),
-      updatedAt: now,
-      updatedBy: actor
-    }].slice(-50);
+    let barcodeAddition;
+    try {
+      barcodeAddition = await addMissingCatalogBarcode(product, body.upc || body.barcode, {
+        type: "upc_added_from_receiving",
+        sourceType: "warehouse_audit",
+        sourceId: audit.id,
+        sourceNumber: audit.auditNumber,
+        updatedAt: now,
+        updatedBy: actor
+      });
+    } catch (error) {
+      return sendJson(res, Number(error?.statusCode || 400), { error: error instanceof Error ? error.message : String(error) });
+    }
+    const { upc, sharedWithSkus } = barcodeAddition;
     for (const entry of audit.lines || []) {
       if (String(entry.productId || entry.sku || "").trim().toLowerCase() !== String(product.id || product.sku || "").trim().toLowerCase()
         && String(entry.sku || "").trim().toLowerCase() !== String(product.sku || "").trim().toLowerCase()) continue;
@@ -65703,11 +65743,35 @@ async function handleApi(req, res) {
       at: now,
       user: actor,
       sku: String(product.sku || productKey),
-      upc
+      upc,
+      sharedWithSkus
     }].slice(-250);
     audit.updatedAt = now;
     await postgres.upsertProductsFromState([product]);
     await postgres.saveWarehouseAudit(audit);
+    const linkedPurchaseOrderId = String(audit.linkedPurchaseOrderId || "").trim();
+    if (linkedPurchaseOrderId) {
+      const linkedPurchaseOrder = await postgres.readPurchaseOrderByKey(linkedPurchaseOrderId).catch(() => null);
+      if (linkedPurchaseOrder) {
+        let purchaseOrderChanged = false;
+        for (const purchaseOrderLine of linkedPurchaseOrder.items || []) {
+          if (String(purchaseOrderLine.sku || "").trim().toLowerCase() !== String(product.sku || "").trim().toLowerCase()) continue;
+          if (!String(purchaseOrderLine.upc || "").trim()) purchaseOrderLine.upc = upc;
+          if (!String(purchaseOrderLine.barcode || "").trim()) purchaseOrderLine.barcode = upc;
+          purchaseOrderChanged = true;
+        }
+        if (purchaseOrderChanged) {
+          linkedPurchaseOrder.updatedAt = now;
+          addPoTimeline(linkedPurchaseOrder, {
+            type: "catalog",
+            title: "UPC added during receiving",
+            message: `${upc} was added to ${product.sku || productKey}.${sharedWithSkus.length ? ` This physical UPC is also used by ${sharedWithSkus.join(", ")}.` : ""}`,
+            user: actor
+          });
+          await postgres.savePurchaseOrder(linkedPurchaseOrder);
+        }
+      }
+    }
     await Promise.all([
       redisCache.deleteByPrefix("dataplus:products:"),
       redisCache.deleteByPrefix("dataplus:product-detail:")
@@ -65717,9 +65781,17 @@ async function handleApi(req, res) {
       path: url.pathname,
       entityType: "product",
       entityId: product.id || product.sku,
-      metadata: { sku: product.sku, upc, auditId: audit.id, auditNumber: audit.auditNumber }
+      metadata: { sku: product.sku, upc, sharedWithSkus, auditId: audit.id, auditNumber: audit.auditNumber }
     });
-    return sendJson(res, 200, { audit, product: publicInventoryItem(product), upc, message: `${upc} was added to ${product.sku || productKey}.` });
+    return sendJson(res, 200, {
+      audit,
+      product: publicInventoryItem(product),
+      upc,
+      sharedWithSkus,
+      message: sharedWithSkus.length
+        ? `${upc} was added to ${product.sku || productKey} and remains shared with ${sharedWithSkus.join(", ")}. This PO receipt will use ${product.sku || productKey}.`
+        : `${upc} was added to ${product.sku || productKey}.`
+    });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "warehouse-audits" && parts[2] && parts[3] === "lines" && parts[4] && parts[5] === "match-po-line" && postgres.isPostgresEnabled()) {
@@ -70494,6 +70566,109 @@ async function handleApi(req, res) {
     await redisCache.deleteByPrefix("dataplus:products:");
     await redisCache.deleteByPrefix("dataplus:product-detail:");
     return sendJson(res, 200, { purchaseOrder: po, line, productCreated: created, postedInventoryQty, message: `${created ? `${line.sku} was created` : `${line.sku} was linked`} to the PO line${heldPurchaseQty ? ` and ${postedInventoryQty} inventory unit${postedInventoryQty === 1 ? " was" : "s were"} released from SKU-resolution hold` : ""}.` });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "lines" && parts[4] === "upc" && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const po = await postgres.readPurchaseOrderByKey(parts[2]);
+    if (!po) return notFound(res);
+    const routeId = String(body.routeId || "").trim();
+    const requestedIndex = Number(body.lineIndex);
+    const lineIndex = (po.items || []).findIndex((candidate, index) => routeId
+      ? String(candidate.routeId || "") === routeId
+      : Number.isInteger(requestedIndex) && requestedIndex === index);
+    const line = lineIndex >= 0 ? po.items[lineIndex] : null;
+    if (!line) return sendJson(res, 404, { error: "Purchase order line not found." });
+    const productKey = String(line.sku || "").trim();
+    if (!productKey || line.resolutionStatus === "unresolved") return sendJson(res, 400, { error: "Resolve this PO line to a catalog SKU before adding a UPC." });
+    const product = await postgres.readProductByKey(productKey).catch(() => null);
+    if (!product) return sendJson(res, 404, { error: `Catalog SKU ${productKey} was not found.` });
+    const now = new Date().toISOString();
+    const actor = String(authUser?.name || authUser?.username || body.user || "Buyer").trim() || "Buyer";
+    let barcodeAddition;
+    try {
+      barcodeAddition = await addMissingCatalogBarcode(product, body.upc || body.barcode, {
+        type: "upc_added_from_purchase_order",
+        sourceType: "purchase_order",
+        sourceId: po.id,
+        sourceNumber: po.poNumber,
+        updatedAt: now,
+        updatedBy: actor
+      });
+    } catch (error) {
+      return sendJson(res, Number(error?.statusCode || 400), { error: error instanceof Error ? error.message : String(error) });
+    }
+    const { upc, sharedWithSkus } = barcodeAddition;
+    line.upc = upc;
+    line.barcode = upc;
+    line.catalogBarcodeUpdatedAt = now;
+    line.catalogBarcodeUpdatedBy = actor;
+    po.updatedAt = now;
+    addPoTimeline(po, {
+      type: "catalog",
+      title: "UPC added to PO line",
+      message: `${upc} was added to ${productKey} on line ${lineIndex + 1}.${sharedWithSkus.length ? ` This physical UPC is also used by ${sharedWithSkus.join(", ")}.` : ""}`,
+      user: actor
+    });
+    await postgres.upsertProductsFromState([product]);
+    await postgres.savePurchaseOrder(po);
+
+    const activeReceivingAuditId = String(po.activeReceivingAudit?.auditId || "").trim();
+    if (activeReceivingAuditId) {
+      const activeAudit = await postgres.readWarehouseAudit(activeReceivingAuditId).catch(() => null);
+      if (activeAudit && String(activeAudit.linkedPurchaseOrderId || "") === String(po.id || "")) {
+        let auditChanged = false;
+        for (const auditLine of activeAudit.lines || []) {
+          if (String(auditLine.productId || auditLine.sku || "").trim().toLowerCase() !== String(product.id || product.sku || "").trim().toLowerCase()
+            && String(auditLine.sku || "").trim().toLowerCase() !== productKey.toLowerCase()) continue;
+          auditLine.catalogBarcode = upc;
+          if (!String(auditLine.selectedSupplierUpc || "").trim()) auditLine.selectedSupplierUpc = upc;
+          auditChanged = true;
+        }
+        for (const expectedLine of activeAudit.purchaseOrderExpectedLines || []) {
+          const sameLine = String(expectedLine.id || "") && String(expectedLine.id || "") === String(line.id || "")
+            || Number.isInteger(Number(expectedLine.lineIndex)) && Number(expectedLine.lineIndex) === lineIndex
+            || String(expectedLine.sku || "").trim().toLowerCase() === productKey.toLowerCase();
+          if (!sameLine) continue;
+          expectedLine.catalogBarcode = upc;
+          expectedLine.upc = upc;
+          auditChanged = true;
+        }
+        if (auditChanged) {
+          activeAudit.updatedAt = now;
+          activeAudit.lifecycleEvents = [...(Array.isArray(activeAudit.lifecycleEvents) ? activeAudit.lifecycleEvents : []), {
+            type: "catalog_upc_added_from_purchase_order",
+            at: now,
+            user: actor,
+            sku: productKey,
+            upc,
+            sharedWithSkus
+          }].slice(-250);
+          await postgres.saveWarehouseAudit(activeAudit);
+        }
+      }
+    }
+    await Promise.all([
+      redisCache.deleteByPrefix("dataplus:products:"),
+      redisCache.deleteByPrefix("dataplus:product-detail:")
+    ]);
+    void recordUserActivity(req, authUser, {
+      action: "added missing UPC from purchase order",
+      path: url.pathname,
+      entityType: "product",
+      entityId: product.id || product.sku,
+      metadata: { sku: product.sku, upc, sharedWithSkus, purchaseOrderId: po.id, purchaseOrderNumber: po.poNumber, lineIndex }
+    });
+    return sendJson(res, 200, {
+      purchaseOrder: po,
+      line,
+      product: publicInventoryItem(product),
+      upc,
+      sharedWithSkus,
+      message: sharedWithSkus.length
+        ? `${upc} was added to ${productKey} and remains shared with ${sharedWithSkus.join(", ")}. Receiving this PO will use ${productKey}.`
+        : `${upc} was added to ${productKey}.`
+    });
   }
 
   if (req.method === "POST" && parts[0] === "api" && parts[1] === "purchase-orders" && parts[2] && parts[3] === "lines" && parts[4] === "cost" && postgres.isPostgresEnabled()) {

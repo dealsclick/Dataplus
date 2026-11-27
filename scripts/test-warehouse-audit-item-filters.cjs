@@ -42,7 +42,10 @@ assert.match(ui, /\/lines\/\$\{encodeURIComponent\(auditLineKey\(upcLine\)\)\}\/
 assert.match(server, /parts\[5\] === "upc"/, "the audit UPC route exists");
 assert.match(server, /already has UPC[\s\S]*Open the catalog product to review it/, "the server refuses to replace an existing catalog UPC");
 assert.match(server, /findBarcodeMatches\(barcodeLookupForms\(upc\)\)/, "the server checks the UPC against the managed catalog");
+assert.doesNotMatch(server, /already belongs to catalog SKU[\s\S]*The UPC was not changed/, "a UPC already used by another supplier SKU is not blocked");
+assert.match(server, /sharedWithSkus/, "shared UPC relationships are recorded for review");
 assert.match(server, /type: "upc_added_from_receiving"/, "catalog identifier history records warehouse UPC additions");
 assert.match(server, /type: "catalog_upc_added"/, "the warehouse audit lifecycle records the UPC addition");
+assert.match(ui, /supplier-specific SKUs may share the same physical UPC/, "the audit explains shared supplier UPC behavior");
 
-console.log("Warehouse audit item filters and guarded missing-UPC updates are covered.");
+console.log("Warehouse audit item filters and supplier-aware missing-UPC updates are covered.");

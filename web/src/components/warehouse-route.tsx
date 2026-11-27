@@ -4397,7 +4397,7 @@ function WarehouseAuditPanel({
               <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-lg">
                 <DialogHeader>
                   <DialogTitle>Add UPC</DialogTitle>
-                  <DialogDescription>Add the missing catalog barcode for {String(upcLine?.sku || (upcLine?.receivingPoLine as Record<string, unknown> | undefined)?.sku || "this SKU")}. Existing UPCs cannot be replaced from receiving.</DialogDescription>
+                  <DialogDescription>Add the missing catalog barcode for {String(upcLine?.sku || (upcLine?.receivingPoLine as Record<string, unknown> | undefined)?.sku || "this SKU")}. Existing UPCs cannot be replaced, but supplier-specific SKUs may share the same physical UPC.</DialogDescription>
                 </DialogHeader>
                 <div className="rounded-md border bg-muted/30 p-3 text-sm">
                   <p className="font-mono font-medium">{String(upcLine?.sku || (upcLine?.receivingPoLine as Record<string, unknown> | undefined)?.sku || "Catalog SKU")}</p>
@@ -4406,7 +4406,7 @@ function WarehouseAuditPanel({
                 <Field label="UPC / GTIN">
                   <Input autoFocus inputMode="numeric" autoComplete="off" maxLength={14} value={newUpc} onChange={(event) => setNewUpc(event.target.value.replace(/\D/g, ""))} placeholder="Scan or enter 8, 12, 13, or 14 digits" />
                 </Field>
-                <p className="text-xs text-muted-foreground">DataPlus checks for another catalog product using this barcode before saving it.</p>
+                <p className="text-xs text-muted-foreground">If another supplier SKU already uses this UPC, DataPlus keeps both SKUs and this PO receipt stays attached to the SKU shown above.</p>
                 <DialogFooter>
                   <Button variant="outline" disabled={upcSaving} onClick={() => { setUpcLine(null); setNewUpc(""); }}>Cancel</Button>
                   <Button disabled={upcSaving || ![8, 12, 13, 14].includes(newUpc.length)} onClick={() => void saveAddedUpc()}>{upcSaving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}Save UPC</Button>
