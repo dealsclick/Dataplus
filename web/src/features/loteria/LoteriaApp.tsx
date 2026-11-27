@@ -394,6 +394,11 @@ function HostView({ initialCode, initialToken }: { initialCode: string; initialT
     } catch (cardError) { setMessage(cardError instanceof Error ? cardError.message : "No se pudieron actualizar las cartas.") }
   }
 
+  function closeCardPreview() {
+    setPreviewCard(null)
+    window.setTimeout(() => setDeckSettingsOpen(true), 0)
+  }
+
   if (!code) return <main className="loteria-shell loteria-center"><LanguageButton language={language} onChange={setLanguage} /><Card className="loteria-entry-card"><CardHeader><span className="loteria-logo">✦</span><CardTitle>{t.host}</CardTitle><CardDescription>Crea una sala privada y abre la pantalla de TV.</CardDescription></CardHeader><CardContent><Label htmlFor="initial-interval">{t.interval}</Label><Input id="initial-interval" type="number" min={3} max={30} value={intervalSeconds} onChange={(event) => setIntervalSeconds(Number(event.target.value))} /><Button size="lg" onClick={() => void createRoom()}>{t.create}</Button>{message && <p className="loteria-message is-error">{message}</p>}</CardContent></Card></main>
   if (!state) return <Loading message={t.connecting} />
   return <main className="loteria-shell loteria-host"><LanguageButton language={language} onChange={setLanguage} /><header><div><span className="loteria-kicker">{t.round} {state.round}</span><h1>{t.host}</h1></div><div className="loteria-host-code">{state.code}</div></header>
@@ -410,7 +415,7 @@ function HostView({ initialCode, initialToken }: { initialCode: string; initialT
       })}</div>
       </DialogContent>
     </Dialog>
-    <Dialog open={Boolean(previewCard)} onOpenChange={(open) => { if (!open) setPreviewCard(null) }}>
+    <Dialog open={Boolean(previewCard)} onOpenChange={(open) => { if (!open) closeCardPreview() }}>
       <DialogContent className="loteria-card-preview-dialog">
         {previewCard && <>
           <DialogHeader><DialogTitle>{language === "es" ? previewCard.nameEs : previewCard.nameEn}</DialogTitle><DialogDescription>{language === "es" ? "Vista ampliada de la carta" : "Full-size card preview"}</DialogDescription></DialogHeader>
