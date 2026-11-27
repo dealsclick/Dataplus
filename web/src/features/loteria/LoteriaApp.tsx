@@ -297,6 +297,12 @@ function JoinLanding() {
   return <main className="loteria-shell loteria-center"><LanguageButton language={language} onChange={setLanguage} /><Card className="loteria-entry-card"><CardHeader><span className="loteria-logo">✦</span><CardTitle>{t.title}</CardTitle><CardDescription>{t.instructions}</CardDescription></CardHeader><CardContent><Label htmlFor="room-code">{t.code}</Label><Input id="room-code" inputMode="numeric" maxLength={4} value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, ""))} placeholder="1234" /><Button size="lg" disabled={code.length !== 4} onClick={() => window.location.assign(`/loteria/${code}`)}>{t.enter}</Button></CardContent></Card></main>
 }
 
+function TvLanding() {
+  const [language, setLanguage] = useState<Language>("es")
+  const [code, setCode] = useState("")
+  return <main className="loteria-shell loteria-center"><LanguageButton language={language} onChange={setLanguage} /><Card className="loteria-entry-card"><CardHeader><span className="loteria-logo">TV</span><CardTitle>{language === "es" ? "Pantalla de TV" : "TV display"}</CardTitle><CardDescription>{language === "es" ? "Escribe el código de 4 dígitos de la sala." : "Enter the room's 4-digit code."}</CardDescription></CardHeader><CardContent><Label htmlFor="tv-room-code">{text[language].code}</Label><Input id="tv-room-code" autoFocus inputMode="numeric" maxLength={4} value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, ""))} onKeyDown={(event) => { if (event.key === "Enter" && code.length === 4) window.location.assign(`/tv/${code}`) }} placeholder="1234" /><Button size="lg" disabled={code.length !== 4} onClick={() => window.location.assign(`/tv/${code}`)}>{language === "es" ? "Abrir TV" : "Open TV"}</Button></CardContent></Card></main>
+}
+
 function PlayerView({ code }: { code: string }) {
   const [language, setLanguage] = useState<Language>("es")
   const [name, setName] = useState("")
@@ -305,6 +311,12 @@ function PlayerView({ code }: { code: string }) {
   const [busy, setBusy] = useState(false)
   const { state, setState, error } = useRoom(code, token)
   const t = text[language]
+
+  useEffect(() => {
+    if (!message || message.includes("válida")) return
+    const timer = window.setTimeout(() => setMessage(""), 3_000)
+    return () => window.clearTimeout(timer)
+  }, [message])
 
   async function join() {
     setBusy(true); setMessage("")
@@ -321,6 +333,7 @@ function PlayerView({ code }: { code: string }) {
     try {
       const next = await request<RoomState>(`/api/loteria/rooms/${code}/mark`, { method: "POST", body: JSON.stringify({ playerToken: token, cardId }) })
       setState(next)
+      setMessage("")
     } catch (markError) { setMessage(markError instanceof Error ? markError.message : "No se pudo marcar.") }
   }
 
@@ -404,7 +417,7 @@ function HostView({ initialCode, initialToken }: { initialCode: string; initialT
   if (!state) return <Loading message={t.connecting} />
   return <main className="loteria-shell loteria-host"><LanguageButton language={language} onChange={setLanguage} /><header><div><span className="loteria-kicker">{t.round} {state.round}</span><h1>{t.host}</h1></div><div className="loteria-host-code">{state.code}</div></header>
     <section className="loteria-host-grid"><Card><CardHeader><CardTitle>Estado: {state.status}</CardTitle><CardDescription>{state.playerCount} {t.players.toLowerCase()}</CardDescription></CardHeader><CardContent className="loteria-host-actions"><Button size="lg" disabled={state.status !== "lobby"} onClick={() => void action("start")}><Play /> {t.start}</Button><Button size="lg" variant="outline" disabled={!(["countdown", "playing"] as GameStatus[]).includes(state.status)} onClick={() => void action("pause")}><Pause /> {t.pause}</Button><Button size="lg" variant="outline" disabled={state.status !== "paused"} onClick={() => void action("resume")}><Play /> {t.resume}</Button><Button size="lg" variant="secondary" onClick={() => void action("new-round")}><RotateCcw /> {t.newRound}</Button></CardContent></Card>
-      <Card><CardHeader><CardTitle>{t.interval}</CardTitle><CardDescription>3–30 segundos</CardDescription></CardHeader><CardContent><Input type="range" min={3} max={30} value={intervalSeconds} onChange={(event) => setIntervalSeconds(Number(event.target.value))} /><strong className="loteria-interval-value">{intervalSeconds}s</strong><Button variant="outline" asChild><a href={`/loteria/tv/${state.code}`} target="_blank" rel="noreferrer">{t.tv}</a></Button></CardContent></Card>
+      <Card><CardHeader><CardTitle>{t.interval}</CardTitle><CardDescription>3–30 segundos</CardDescription></CardHeader><CardContent><Input type="range" min={3} max={30} value={intervalSeconds} onChange={(event) => setIntervalSeconds(Number(event.target.value))} /><strong className="loteria-interval-value">{intervalSeconds}s</strong><Button variant="outline" asChild><a href={`/tv/${state.code}`} target="_blank" rel="noreferrer">{t.tv}</a></Button></CardContent></Card>
       <Players state={state} language={language} />
       <Card className="loteria-deck-settings"><CardHeader><CardTitle>{language === "es" ? "Cartas de esta sala" : "Cards in this room"}</CardTitle><CardDescription>{state.enabledCardIds.length} de {state.cards.length} {language === "es" ? "activadas · mínimo 16 · solo se cambia antes de iniciar" : "enabled · minimum 16 · change before starting"}</CardDescription></CardHeader><CardContent><Button className="loteria-deck-settings-button" variant="outline" onClick={() => setDeckSettingsOpen(true)}><ImageIcon /> {language === "es" ? "Configurar cartas" : "Configure cards"}</Button></CardContent></Card></section>
     <Dialog open={deckSettingsOpen} onOpenChange={setDeckSettingsOpen}>
@@ -437,6 +450,7 @@ function Loading({ message }: { message: string }) {
 export default function LoteriaApp() {
   const path = window.location.pathname.split("/").filter(Boolean)
   const query = useMemo(() => new URLSearchParams(window.location.search), [])
+  if (path[0] === "tv") return path[1] ? <TvView code={String(path[1]).toUpperCase()} /> : <TvLanding />
   if (path[1] === "tv") return <TvView code={String(path[2] || "").toUpperCase()} />
   if (path[1] === "host") {
     const code = String(path[2] || "").toUpperCase()

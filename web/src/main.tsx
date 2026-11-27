@@ -8,7 +8,7 @@ import './premium-ui.css'
 import App from './App.tsx'
 import LoteriaApp from './features/loteria/LoteriaApp.tsx'
 
-const RootApp = window.location.pathname === '/loteria' || window.location.pathname.startsWith('/loteria/')
+const RootApp = window.location.pathname === '/loteria' || window.location.pathname.startsWith('/loteria/') || window.location.pathname === '/tv' || window.location.pathname.startsWith('/tv/')
   ? LoteriaApp
   : App
 

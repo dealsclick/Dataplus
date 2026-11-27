@@ -79,7 +79,7 @@ npm run web:build
 npm start
 ```
 
-Open the private host page at `http://localhost:4173/loteria/host`, create a room, and use the **Open TV display** button. Guests use the QR code or `http://localhost:4173/loteria`. Run the automated game lifecycle check with:
+Open the private host page at `http://localhost:4173/loteria/host`, create a room, and use the **Open TV display** button. On a TV, the short `http://localhost:4173/tv` route accepts the 4-digit room code; `/tv/:code` opens a room directly. Guests use the QR code or `http://localhost:4173/loteria`. Run the automated game lifecycle check with:
 
 ```powershell
 npm run test:loteria

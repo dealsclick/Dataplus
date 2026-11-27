@@ -10,6 +10,7 @@ const game = new LoteriaGame(deck, { random: () => 0.42, now: () => now });
 assert.equal(game.cards.find((card) => card.id === "cosecha")?.originalImage, "/loteria/cards/originals/la-cosecha.jpg", "deck retains optional original photo paths");
 const configuredGame = new LoteriaGame(deck, { random: () => 0.21, now: () => now });
 const configured = configuredGame.createRoom({ publicUrl: "https://game.example", intervalSeconds: 8 });
+assert.equal(configured.state.tvUrl, `https://game.example/tv/${configured.code}`, "room exposes the short TV URL");
 const selectedCardIds = configuredGame.cards.slice(0, 16).map((card) => card.id);
 assert.throws(() => configuredGame.hostAction(configured.code, configured.hostToken, "set-cards", { enabledCardIds: selectedCardIds.slice(0, 15) }), /at least 16|al menos 16/i, "host cannot enable fewer than 16 cards");
 const configuredState = configuredGame.hostAction(configured.code, configured.hostToken, "set-cards", { enabledCardIds: selectedCardIds });
