@@ -16,15 +16,20 @@ import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
+import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.EditText;
@@ -62,7 +67,7 @@ public class LauncherActivity extends Activity {
     private TextView backButton;
     private TextView offlineBanner;
     private TextView scannerStatus;
-    private TextView scannerPreview;
+    private EditText scannerCapture;
     private String screen = "loading";
     private String dashboardMode = SCREEN_RECEIVING;
     private JSONObject user;
@@ -78,7 +83,11 @@ public class LauncherActivity extends Activity {
     private boolean busy;
     private boolean modalOpen;
     private final StringBuilder scanBuffer = new StringBuilder();
+    private final Handler scannerSubmitHandler = new Handler(Looper.getMainLooper());
+    private Runnable pendingScannerSubmit;
+    private boolean updatingScannerCapture;
     private long lastScanKeyAt;
+    private long lastCompletedScanAt;
     private String selectedBin = "";
     private List<JSONObject> activeBins = new ArrayList<>();
     private SharedPreferences preferences;
@@ -114,20 +123,19 @@ public class LauncherActivity extends Activity {
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
-        if (!isHardwareScannerScreen() || modalOpen || event.getAction() != KeyEvent.ACTION_DOWN) {
+        if (!isHardwareScannerScreen() || modalOpen) {
             return super.dispatchKeyEvent(event);
         }
+        if (event.getAction() == KeyEvent.ACTION_MULTIPLE && event.getCharacters() != null) {
+            appendScannerCharacters(event.getCharacters());
+            return true;
+        }
+        if (event.getAction() != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(event);
         if (event.isCtrlPressed() || event.isAltPressed() || event.isMetaPressed()) return super.dispatchKeyEvent(event);
         int keyCode = event.getKeyCode();
         boolean terminator = keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER || keyCode == KeyEvent.KEYCODE_TAB;
         if (terminator) {
-            if (scanBuffer.length() >= 3) {
-                String barcode = scanBuffer.toString();
-                resetScanBuffer();
-                if (!busy) handleHardwareScan(barcode);
-                return true;
-            }
-            resetScanBuffer();
+            completeScannerCapture();
             return true;
         }
         int unicode = event.getUnicodeChar();
@@ -138,7 +146,8 @@ public class LauncherActivity extends Activity {
             if (Character.isLetterOrDigit(value) || value == '-') {
                 scanBuffer.append(value);
                 lastScanKeyAt = now;
-                if (scannerPreview != null) scannerPreview.setText(scanBuffer.toString());
+                setScannerCaptureText(scanBuffer.toString());
+                scheduleScannerSubmit();
                 return true;
             }
         }
@@ -571,17 +580,13 @@ public class LauncherActivity extends Activity {
         scannerTitle.addView(instruction);
         scannerCard.addView(scannerHeading);
 
-        scannerPreview = Ui.text(this, "Waiting for barcode", 16, Ui.MUTED, false);
-        scannerPreview.setGravity(Gravity.CENTER_VERTICAL);
-        scannerPreview.setTypeface(Typeface.MONOSPACE);
-        scannerPreview.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 14), 0);
-        scannerPreview.setBackground(Ui.bordered(0xFFF8FAFC, Ui.BORDER, 13, this));
+        scannerCapture = scannerCaptureField("Waiting for barcode");
         LinearLayout.LayoutParams previewParams = Ui.matchWrap();
         previewParams.height = Ui.dp(this, 54);
         previewParams.setMargins(0, Ui.dp(this, 16), 0, 0);
-        scannerCard.addView(scannerPreview, previewParams);
+        scannerCard.addView(scannerCapture, previewParams);
 
-        scannerStatus = Ui.text(this, "Ready · scan suffix Enter/CR", 12, Ui.SUCCESS, true);
+        scannerStatus = Ui.text(this, "Scanner input active · press either G47 trigger", 12, Ui.SUCCESS, true);
         Ui.margin(scannerStatus, 0, 8, 0, 0);
         scannerCard.addView(scannerStatus);
 
@@ -1078,16 +1083,12 @@ public class LauncherActivity extends Activity {
         TextView scannerHelp = Ui.text(this, "Press either G47 trigger. The app will open the available outbound audit and process the label.", 13, Ui.MUTED, false);
         Ui.margin(scannerHelp, 0, 4, 0, 0);
         scannerCard.addView(scannerHelp);
-        scannerPreview = Ui.text(this, "Waiting for tracking barcode", 15, Ui.MUTED, false);
-        scannerPreview.setTypeface(Typeface.MONOSPACE);
-        scannerPreview.setGravity(Gravity.CENTER_VERTICAL);
-        scannerPreview.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 14), 0);
-        scannerPreview.setBackground(Ui.bordered(0xFFF8FAFC, Ui.BORDER, 13, this));
+        scannerCapture = scannerCaptureField("Waiting for tracking barcode");
         LinearLayout.LayoutParams dashboardPreviewParams = Ui.matchWrap();
         dashboardPreviewParams.height = Ui.dp(this, 52);
         dashboardPreviewParams.setMargins(0, Ui.dp(this, 14), 0, 0);
-        scannerCard.addView(scannerPreview, dashboardPreviewParams);
-        scannerStatus = Ui.text(this, "Ready · scan suffix Enter/CR", 12, Ui.SUCCESS, true);
+        scannerCard.addView(scannerCapture, dashboardPreviewParams);
+        scannerStatus = Ui.text(this, "Scanner input active · press either G47 trigger", 12, Ui.SUCCESS, true);
         Ui.margin(scannerStatus, 0, 8, 0, 0);
         scannerCard.addView(scannerStatus);
         LinearLayout.LayoutParams dashboardScannerParams = Ui.matchWrap();
@@ -1379,17 +1380,13 @@ public class LauncherActivity extends Activity {
         scannerTitle.addView(instruction);
         scannerCard.addView(scannerHeading);
 
-        scannerPreview = Ui.text(this, "Waiting for barcode", 16, Ui.MUTED, false);
-        scannerPreview.setGravity(Gravity.CENTER_VERTICAL);
-        scannerPreview.setTypeface(Typeface.MONOSPACE);
-        scannerPreview.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 14), 0);
-        scannerPreview.setBackground(Ui.bordered(0xFFF8FAFC, Ui.BORDER, 13, this));
+        scannerCapture = scannerCaptureField(activeOutboundPackage == null ? "Waiting for tracking barcode" : "Waiting for item UPC");
         LinearLayout.LayoutParams previewParams = Ui.matchWrap();
         previewParams.height = Ui.dp(this, 54);
         previewParams.setMargins(0, Ui.dp(this, 16), 0, 0);
-        scannerCard.addView(scannerPreview, previewParams);
+        scannerCard.addView(scannerCapture, previewParams);
 
-        scannerStatus = Ui.text(this, "Ready · scan suffix Enter/CR", 12, Ui.SUCCESS, true);
+        scannerStatus = Ui.text(this, "Scanner input active · press either G47 trigger", 12, Ui.SUCCESS, true);
         Ui.margin(scannerStatus, 0, 8, 0, 0);
         scannerCard.addView(scannerStatus);
 
@@ -1599,6 +1596,13 @@ public class LauncherActivity extends Activity {
             feedback(false);
             return;
         }
+        JSONObject existing = findOutboundPackage(tracking);
+        if (existing != null) {
+            scannerMessage("Already scanned: " + tracking, false);
+            feedback(false);
+            showOutboundPackageResult(existing, true, "This package was already scanned in this handoff.");
+            return;
+        }
         busy = true;
         scannerMessage("Matching " + tracking + "…", true);
         JSONObject body = new JSONObject();
@@ -1618,8 +1622,9 @@ public class LauncherActivity extends Activity {
                 updateOutboundScan(scan);
                 boolean required = scan.optBoolean("liveItemRequired") && !"complete".equalsIgnoreCase(scan.optString("liveItemStatus"));
                 activeOutboundPackage = required ? scan : null;
-                feedback(true);
-                showOutboundPackageResult(scan, response.optBoolean("duplicate"), response.optString("message", "Package recorded."));
+                boolean duplicate = response.optBoolean("duplicate");
+                feedback(!duplicate);
+                showOutboundPackageResult(scan, duplicate, response.optString("message", duplicate ? "This package was already scanned in this handoff." : "Package recorded."));
             }
             @Override public void onError(ApiClient.ApiException error) {
                 busy = false;
@@ -1631,6 +1636,17 @@ public class LauncherActivity extends Activity {
                 }
             }
         });
+    }
+
+    private JSONObject findOutboundPackage(String tracking) {
+        String target = tracking.replaceAll("[^0-9A-Za-z]", "").toUpperCase(Locale.US);
+        for (int index = 0; index < outboundScans.length(); index++) {
+            JSONObject scan = outboundScans.optJSONObject(index);
+            if (scan == null) continue;
+            String saved = scan.optString("trackingNumber").replaceAll("[^0-9A-Za-z]", "").toUpperCase(Locale.US);
+            if (!target.isEmpty() && target.equals(saved)) return scan;
+        }
+        return null;
     }
 
     private void showOutboundPackageResult(JSONObject scan, boolean duplicate, String message) {
@@ -2141,7 +2157,7 @@ public class LauncherActivity extends Activity {
     }
 
     private void scannerMessage(String message, boolean pending) {
-        if (scannerPreview != null) scannerPreview.setText(message);
+        if (scannerCapture != null) scannerCapture.setHint(message);
         if (scannerStatus != null) {
             scannerStatus.setText(pending ? "Checking DataPlus…" : message);
             scannerStatus.setTextColor(pending ? Ui.PRIMARY : Ui.ERROR);
@@ -2149,19 +2165,126 @@ public class LauncherActivity extends Activity {
     }
 
     private void resetScanBuffer() {
+        if (pendingScannerSubmit != null) scannerSubmitHandler.removeCallbacks(pendingScannerSubmit);
+        pendingScannerSubmit = null;
         scanBuffer.setLength(0);
         lastScanKeyAt = 0;
-        if (scannerPreview != null && isHardwareScannerScreen()) scannerPreview.setText("Waiting for barcode");
+        setScannerCaptureText("");
+        if (scannerCapture != null && isHardwareScannerScreen()) scannerCapture.setHint(SCREEN_OUTBOUND.equals(screen) || (SCREEN_OUTBOUND_SCANNER.equals(screen) && activeOutboundPackage == null) ? "Waiting for tracking barcode" : "Waiting for barcode");
         if (scannerStatus != null && isHardwareScannerScreen()) {
-            scannerStatus.setText("Ready · scan suffix Enter/CR");
+            scannerStatus.setText("Scanner input active · press either G47 trigger");
             scannerStatus.setTextColor(Ui.SUCCESS);
         }
     }
 
+    private EditText scannerCaptureField(String hint) {
+        if (pendingScannerSubmit != null) scannerSubmitHandler.removeCallbacks(pendingScannerSubmit);
+        pendingScannerSubmit = null;
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setTextSize(16);
+        input.setTextColor(Ui.TEXT);
+        input.setHintTextColor(Ui.MUTED);
+        input.setHint(hint);
+        input.setTypeface(Typeface.MONOSPACE);
+        input.setGravity(Gravity.CENTER_VERTICAL);
+        input.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 14), 0);
+        input.setBackground(Ui.bordered(0xFFF8FAFC, Ui.BORDER, 13, this));
+        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        input.setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) input.setShowSoftInputOnFocus(false);
+        input.setOnFocusChangeListener((view, hasFocus) -> { if (hasFocus) hideKeyboard(view); });
+        input.setOnEditorActionListener((view, actionId, event) -> {
+            boolean enter = event != null && (event.getKeyCode() == KeyEvent.KEYCODE_ENTER || event.getKeyCode() == KeyEvent.KEYCODE_NUMPAD_ENTER);
+            if (actionId == EditorInfo.IME_ACTION_DONE || enter) {
+                completeScannerCapture();
+                return true;
+            }
+            return false;
+        });
+        input.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence value, int start, int before, int count) {
+                if (updatingScannerCapture || scannerCapture != input) return;
+                String raw = String.valueOf(value);
+                if (raw.contains("\n") || raw.contains("\r") || raw.contains("\t")) completeScannerCapture();
+                else if (raw.replaceAll("[^0-9A-Za-z-]", "").length() >= 3) scheduleScannerSubmit();
+            }
+            @Override public void afterTextChanged(Editable value) {}
+        });
+        return input;
+    }
+
+    private void setScannerCaptureText(String value) {
+        if (scannerCapture == null) return;
+        updatingScannerCapture = true;
+        scannerCapture.setText(value == null ? "" : value);
+        scannerCapture.setSelection(scannerCapture.length());
+        updatingScannerCapture = false;
+    }
+
+    private void appendScannerCharacters(String characters) {
+        boolean terminator = false;
+        for (int index = 0; index < characters.length(); index++) {
+            char value = characters.charAt(index);
+            if (value == '\r' || value == '\n' || value == '\t') {
+                terminator = true;
+            } else if (Character.isLetterOrDigit(value) || value == '-') {
+                scanBuffer.append(value);
+            }
+        }
+        lastScanKeyAt = System.currentTimeMillis();
+        setScannerCaptureText(scanBuffer.toString());
+        if (terminator) completeScannerCapture();
+        else scheduleScannerSubmit();
+    }
+
+    private void scheduleScannerSubmit() {
+        if (pendingScannerSubmit != null) scannerSubmitHandler.removeCallbacks(pendingScannerSubmit);
+        pendingScannerSubmit = () -> {
+            pendingScannerSubmit = null;
+            completeScannerCapture();
+        };
+        scannerSubmitHandler.postDelayed(pendingScannerSubmit, 350);
+    }
+
+    private void completeScannerCapture() {
+        if (pendingScannerSubmit != null) scannerSubmitHandler.removeCallbacks(pendingScannerSubmit);
+        pendingScannerSubmit = null;
+        String barcode = scanBuffer.length() >= 3
+            ? scanBuffer.toString()
+            : scannerCapture == null ? "" : scannerCapture.getText().toString();
+        barcode = barcode.replaceAll("[^0-9A-Za-z-]", "").trim();
+        resetScanBuffer();
+        if (barcode.length() < 3) {
+            if (System.currentTimeMillis() - lastCompletedScanAt < 1200) return;
+            scannerMessage("No barcode received. Keep this field focused and scan again.", false);
+            feedback(false);
+            focusScanner();
+            return;
+        }
+        if (busy) {
+            scannerMessage("Still checking the previous scan. Try this package again.", false);
+            feedback(false);
+            focusScanner();
+            return;
+        }
+        lastCompletedScanAt = System.currentTimeMillis();
+        scannerMessage("Barcode received: " + barcode, true);
+        handleHardwareScan(barcode);
+    }
+
     private void focusScanner() {
         if (!isHardwareScannerScreen() || modalOpen) return;
-        contentHost.setFocusableInTouchMode(true);
-        contentHost.requestFocus();
+        if (scannerCapture != null) {
+            scannerCapture.setFocusableInTouchMode(true);
+            scannerCapture.requestFocus();
+            scannerCapture.setSelection(scannerCapture.length());
+            hideKeyboard(scannerCapture);
+        } else {
+            contentHost.setFocusableInTouchMode(true);
+            contentHost.requestFocus();
+        }
     }
 
     private boolean isHardwareScannerScreen() {
