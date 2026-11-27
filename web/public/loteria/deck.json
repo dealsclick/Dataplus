@@ -4,6 +4,7 @@
     { "id": "cosecha", "nameEs": "La Cosecha", "nameEn": "The Harvest", "symbol": "🍋", "image": "/loteria/cards/la-cosecha.png", "originalImage": "/loteria/cards/originals/la-cosecha.jpg" },
     { "id": "santito", "nameEs": "El Santito", "nameEn": "The Little Saint", "symbol": "🕯️", "image": "/loteria/cards/el-santito.png", "originalImage": "/loteria/cards/originals/el-santito.jpg" },
     { "id": "duende", "nameEs": "El Duende", "nameEn": "The Elf", "symbol": "🧝", "image": "/loteria/cards/el-duende.png", "originalImage": "/loteria/cards/originals/el-duende.jpg" },
+    { "id": "peladito", "nameEs": "El Peladito", "nameEn": "The Little Bald One", "symbol": "👶", "image": "/loteria/cards/el-peladito.png", "originalImage": "/loteria/cards/originals/el-peladito.jpg" },
     { "id": "sol", "nameEs": "El Sol", "nameEn": "The Sun", "symbol": "☀️", "image": "/loteria/cards/placeholder.svg" },
     { "id": "luna", "nameEs": "La Luna", "nameEn": "The Moon", "symbol": "🌙", "image": "/loteria/cards/placeholder.svg" },
     { "id": "cactus", "nameEs": "El Nopal", "nameEn": "The Cactus", "symbol": "🌵", "image": "/loteria/cards/placeholder.svg" },
