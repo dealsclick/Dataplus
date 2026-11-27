@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Switch } from "@/components/ui/switch"
-import { ImageIcon, Pause, Play, RotateCcw, Volume2, VolumeX, Users } from "lucide-react"
+import { ImageIcon, Maximize2, Pause, Play, RotateCcw, Volume2, VolumeX, Users } from "lucide-react"
 import "./loteria.css"
 
 type Language = "es" | "en"
@@ -361,6 +361,8 @@ function HostView({ initialCode, initialToken }: { initialCode: string; initialT
   const [hostToken, setHostToken] = useState(initialToken)
   const [intervalSeconds, setIntervalSeconds] = useState(8)
   const [message, setMessage] = useState("")
+  const [deckSettingsOpen, setDeckSettingsOpen] = useState(false)
+  const [previewCard, setPreviewCard] = useState<LoteriaCard | null>(null)
   const { state, setState } = useRoom(code)
   const t = text[language]
 
@@ -398,10 +400,25 @@ function HostView({ initialCode, initialToken }: { initialCode: string; initialT
     <section className="loteria-host-grid"><Card><CardHeader><CardTitle>Estado: {state.status}</CardTitle><CardDescription>{state.playerCount} {t.players.toLowerCase()}</CardDescription></CardHeader><CardContent className="loteria-host-actions"><Button size="lg" disabled={state.status !== "lobby"} onClick={() => void action("start")}><Play /> {t.start}</Button><Button size="lg" variant="outline" disabled={!(["countdown", "playing"] as GameStatus[]).includes(state.status)} onClick={() => void action("pause")}><Pause /> {t.pause}</Button><Button size="lg" variant="outline" disabled={state.status !== "paused"} onClick={() => void action("resume")}><Play /> {t.resume}</Button><Button size="lg" variant="secondary" onClick={() => void action("new-round")}><RotateCcw /> {t.newRound}</Button></CardContent></Card>
       <Card><CardHeader><CardTitle>{t.interval}</CardTitle><CardDescription>3–30 segundos</CardDescription></CardHeader><CardContent><Input type="range" min={3} max={30} value={intervalSeconds} onChange={(event) => setIntervalSeconds(Number(event.target.value))} /><strong className="loteria-interval-value">{intervalSeconds}s</strong><Button variant="outline" asChild><a href={`/loteria/tv/${state.code}`} target="_blank" rel="noreferrer">{t.tv}</a></Button></CardContent></Card>
       <Players state={state} language={language} />
-      <Card className="loteria-deck-settings"><CardHeader><CardTitle>{language === "es" ? "Cartas de esta sala" : "Cards in this room"}</CardTitle><CardDescription>{state.enabledCardIds.length} de {state.cards.length} {language === "es" ? "activadas · mínimo 16 · solo se cambia antes de iniciar" : "enabled · minimum 16 · change before starting"}</CardDescription></CardHeader><CardContent><div className="loteria-deck-grid">{state.cards.map((card) => {
+      <Card className="loteria-deck-settings"><CardHeader><CardTitle>{language === "es" ? "Cartas de esta sala" : "Cards in this room"}</CardTitle><CardDescription>{state.enabledCardIds.length} de {state.cards.length} {language === "es" ? "activadas · mínimo 16 · solo se cambia antes de iniciar" : "enabled · minimum 16 · change before starting"}</CardDescription></CardHeader><CardContent><Button className="loteria-deck-settings-button" variant="outline" onClick={() => setDeckSettingsOpen(true)}><ImageIcon /> {language === "es" ? "Configurar cartas" : "Configure cards"}</Button></CardContent></Card></section>
+    <Dialog open={deckSettingsOpen} onOpenChange={setDeckSettingsOpen}>
+      <DialogContent className="loteria-deck-settings-dialog">
+        <DialogHeader><DialogTitle>{language === "es" ? "Cartas de esta sala" : "Cards in this room"}</DialogTitle><DialogDescription>{state.enabledCardIds.length} de {state.cards.length} {language === "es" ? "activadas · activa un mínimo de 16" : "enabled · enable at least 16"}</DialogDescription></DialogHeader>
+        <div className="loteria-deck-grid">{state.cards.map((card) => {
         const enabled = state.enabledCardIds.includes(card.id)
-        return <div key={card.id} className={`loteria-deck-option${enabled ? " is-enabled" : ""}`}><span className="loteria-deck-thumb" style={{ backgroundImage: `url(${card.image})` }}>{card.symbol}</span><span><strong>{language === "es" ? card.nameEs : card.nameEn}</strong><small>{enabled ? (language === "es" ? "Activada" : "Enabled") : (language === "es" ? "Desactivada" : "Disabled")}</small></span><Switch size="sm" checked={enabled} disabled={state.status !== "lobby"} onCheckedChange={(checked) => void setCardEnabled(card.id, checked)} aria-label={`${enabled ? "Desactivar" : "Activar"} ${card.nameEs}`} /></div>
-      })}</div></CardContent></Card></section>
+        return <div key={card.id} className={`loteria-deck-option${enabled ? " is-enabled" : ""}`}><button type="button" className="loteria-deck-preview" onClick={() => { setDeckSettingsOpen(false); setPreviewCard(card) }} aria-label={`${language === "es" ? "Ampliar" : "Preview"} ${card.nameEs}`}><span className="loteria-deck-thumb" style={{ backgroundImage: `url(${card.image})` }}>{card.symbol}</span><span><strong>{language === "es" ? card.nameEs : card.nameEn}</strong><small>{enabled ? (language === "es" ? "Activada" : "Enabled") : (language === "es" ? "Desactivada" : "Disabled")}</small></span><Maximize2 aria-hidden="true" /></button><Switch size="sm" checked={enabled} disabled={state.status !== "lobby"} onCheckedChange={(checked) => void setCardEnabled(card.id, checked)} aria-label={`${enabled ? "Desactivar" : "Activar"} ${card.nameEs}`} /></div>
+      })}</div>
+      </DialogContent>
+    </Dialog>
+    <Dialog open={Boolean(previewCard)} onOpenChange={(open) => { if (!open) setPreviewCard(null) }}>
+      <DialogContent className="loteria-card-preview-dialog">
+        {previewCard && <>
+          <DialogHeader><DialogTitle>{language === "es" ? previewCard.nameEs : previewCard.nameEn}</DialogTitle><DialogDescription>{language === "es" ? "Vista ampliada de la carta" : "Full-size card preview"}</DialogDescription></DialogHeader>
+          <img className="loteria-card-preview-art" src={previewCard.image} alt={`${language === "es" ? "Carta" : "Card"} ${previewCard.nameEs}`} />
+          {previewCard.originalImage && <details className="loteria-card-preview-original"><summary><ImageIcon /> {language === "es" ? "Ver foto original" : "View original photo"}</summary><img src={previewCard.originalImage} alt={`${language === "es" ? "Foto original de" : "Original photo for"} ${previewCard.nameEs}`} /></details>}
+        </>}
+      </DialogContent>
+    </Dialog>
     {message && <p className="loteria-message is-error">{message}</p>}
     {state.winner && <Winner state={state} />}
   </main>
