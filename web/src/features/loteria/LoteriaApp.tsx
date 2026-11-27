@@ -190,10 +190,10 @@ function CardFace({ card, marked = false, called = false, compact = false, winni
   winning?: boolean
   onClick?: () => void
 }) {
-  const [showOriginal, setShowOriginal] = useState(false)
+  const [showArtwork, setShowArtwork] = useState(false)
   const content = <>
     <span className="loteria-card-art" style={{ backgroundImage: `url(${card.image})` }} aria-hidden="true">
-      <span>{card.symbol}</span>
+      {!card.originalImage && <span>{card.symbol}</span>}
     </span>
     <strong>{card.nameEs}</strong>
     {marked && <span className="loteria-bean" aria-hidden="true">●</span>}
@@ -205,11 +205,12 @@ function CardFace({ card, marked = false, called = false, compact = false, winni
   return <div className={`loteria-card-shell${compact ? " is-compact" : ""}`}>
     {face}
     {card.originalImage && <>
-      <button type="button" className="loteria-original-photo" onClick={() => setShowOriginal(true)} aria-label={`Ver foto original de ${card.nameEs}`} title="Ver foto original"><ImageIcon /></button>
-      <Dialog open={showOriginal} onOpenChange={setShowOriginal}>
+      <button type="button" className="loteria-original-photo" onClick={() => setShowArtwork(true)} aria-label={`Ampliar ${card.nameEs}`} title="Ampliar carta"><ImageIcon /></button>
+      <Dialog open={showArtwork} onOpenChange={setShowArtwork}>
         <DialogContent className="loteria-original-dialog">
-          <DialogHeader><DialogTitle>Foto original · {card.nameEs}</DialogTitle><DialogDescription>La foto familiar que inspiró esta carta.</DialogDescription></DialogHeader>
-          <img src={card.originalImage} alt={`Foto original de ${card.nameEs}`} />
+          <DialogHeader><DialogTitle>{card.nameEs}</DialogTitle><DialogDescription>Vista ampliada de la carta.</DialogDescription></DialogHeader>
+          <img className="loteria-card-preview-art" src={card.image} alt={`Carta ${card.nameEs}`} />
+          <details className="loteria-card-preview-original"><summary><ImageIcon /> Ver foto original</summary><img src={card.originalImage} alt={`Foto original de ${card.nameEs}`} /></details>
         </DialogContent>
       </Dialog>
     </>}
@@ -411,7 +412,7 @@ function HostView({ initialCode, initialToken }: { initialCode: string; initialT
         <DialogHeader><DialogTitle>{language === "es" ? "Cartas de esta sala" : "Cards in this room"}</DialogTitle><DialogDescription>{state.enabledCardIds.length} de {state.cards.length} {language === "es" ? "activadas · activa un mínimo de 16" : "enabled · enable at least 16"}</DialogDescription></DialogHeader>
         <div className="loteria-deck-grid">{state.cards.map((card) => {
         const enabled = state.enabledCardIds.includes(card.id)
-        return <div key={card.id} className={`loteria-deck-option${enabled ? " is-enabled" : ""}`}><button type="button" className="loteria-deck-preview" onClick={() => { setDeckSettingsOpen(false); setPreviewCard(card) }} aria-label={`${language === "es" ? "Ampliar" : "Preview"} ${card.nameEs}`}><span className="loteria-deck-thumb" style={{ backgroundImage: `url(${card.image})` }}>{card.symbol}</span><span><strong>{language === "es" ? card.nameEs : card.nameEn}</strong><small>{enabled ? (language === "es" ? "Activada" : "Enabled") : (language === "es" ? "Desactivada" : "Disabled")}</small></span><Maximize2 aria-hidden="true" /></button><Switch size="sm" checked={enabled} disabled={state.status !== "lobby"} onCheckedChange={(checked) => void setCardEnabled(card.id, checked)} aria-label={`${enabled ? "Desactivar" : "Activar"} ${card.nameEs}`} /></div>
+        return <div key={card.id} className={`loteria-deck-option${enabled ? " is-enabled" : ""}`}><button type="button" className="loteria-deck-preview" onClick={() => { setDeckSettingsOpen(false); setPreviewCard(card) }} aria-label={`${language === "es" ? "Ampliar" : "Preview"} ${card.nameEs}`}><span className="loteria-deck-thumb" style={{ backgroundImage: `url(${card.image})` }}>{!card.originalImage && card.symbol}</span><span><strong>{language === "es" ? card.nameEs : card.nameEn}</strong><small>{enabled ? (language === "es" ? "Activada" : "Enabled") : (language === "es" ? "Desactivada" : "Disabled")}</small></span><Maximize2 aria-hidden="true" /></button><Switch size="sm" checked={enabled} disabled={state.status !== "lobby"} onCheckedChange={(checked) => void setCardEnabled(card.id, checked)} aria-label={`${enabled ? "Desactivar" : "Activar"} ${card.nameEs}`} /></div>
       })}</div>
       </DialogContent>
     </Dialog>
