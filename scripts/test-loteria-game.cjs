@@ -7,6 +7,7 @@ const { createLoteriaHttp } = require("../lib/loteria-http");
 const deck = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "web", "public", "loteria", "deck.json"), "utf8")).cards;
 let now = 1_000;
 const game = new LoteriaGame(deck, { random: () => 0.42, now: () => now });
+assert.equal(game.cards.find((card) => card.id === "cosecha")?.originalImage, "/loteria/cards/originals/la-cosecha.jpg", "deck retains optional original photo paths");
 const created = game.createRoom({ publicUrl: "https://game.example", intervalSeconds: 8 });
 const first = game.join(created.code, "Ana");
 const second = game.join(created.code, "Beto");

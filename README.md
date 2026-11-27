@@ -113,11 +113,12 @@ Edit `web/public/loteria/deck.json` and put card art in `web/public/loteria/card
   "nameEs": "El Sol",
   "nameEn": "The Sun",
   "image": "/loteria/cards/sol.webp",
+  "originalImage": "/loteria/cards/originals/sol.jpg",
   "symbol": "☀️"
 }
 ```
 
-`id` must be stable and unique, `nameEs` is required, `nameEn` is the English label, and `image` is the public path to the artwork. `symbol` is the visible sample/fallback illustration. A round cannot start with fewer than 16 valid distinct cards. Rebuild the React app after changing the manifest or artwork.
+`id` must be stable and unique, `nameEs` is required, `nameEn` is the English label, and `image` is the public path to the artwork. `originalImage` is optional; when present, the card shows a photo button that opens the family photo that inspired the artwork. `symbol` is the visible sample/fallback illustration. A round cannot start with fewer than 16 valid distinct cards. Rebuild the React app after changing the manifest or artwork.
 
 ### Game-night checklist
 

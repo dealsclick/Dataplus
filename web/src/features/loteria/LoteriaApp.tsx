@@ -5,7 +5,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
-import { Pause, Play, RotateCcw, Volume2, VolumeX, Users } from "lucide-react"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { ImageIcon, Pause, Play, RotateCcw, Volume2, VolumeX, Users } from "lucide-react"
 import "./loteria.css"
 
 type Language = "es" | "en"
@@ -16,6 +17,7 @@ type LoteriaCard = {
   nameEs: string
   nameEn: string
   image: string
+  originalImage?: string
   symbol: string
 }
 
@@ -186,6 +188,7 @@ function CardFace({ card, marked = false, called = false, compact = false, winni
   winning?: boolean
   onClick?: () => void
 }) {
+  const [showOriginal, setShowOriginal] = useState(false)
   const content = <>
     <span className="loteria-card-art" style={{ backgroundImage: `url(${card.image})` }} aria-hidden="true">
       <span>{card.symbol}</span>
@@ -194,9 +197,21 @@ function CardFace({ card, marked = false, called = false, compact = false, winni
     {marked && <span className="loteria-bean" aria-hidden="true">●</span>}
   </>
   const className = `loteria-card${marked ? " is-marked" : ""}${called ? " is-called" : ""}${compact ? " is-compact" : ""}${winning ? " is-winning" : ""}`
-  return onClick
+  const face = onClick
     ? <button type="button" className={className} onClick={onClick} aria-pressed={marked}>{content}</button>
     : <div className={className}>{content}</div>
+  return <div className={`loteria-card-shell${compact ? " is-compact" : ""}`}>
+    {face}
+    {card.originalImage && <>
+      <button type="button" className="loteria-original-photo" onClick={() => setShowOriginal(true)} aria-label={`Ver foto original de ${card.nameEs}`} title="Ver foto original"><ImageIcon /></button>
+      <Dialog open={showOriginal} onOpenChange={setShowOriginal}>
+        <DialogContent className="loteria-original-dialog">
+          <DialogHeader><DialogTitle>Foto original · {card.nameEs}</DialogTitle><DialogDescription>La foto familiar que inspiró esta carta.</DialogDescription></DialogHeader>
+          <img src={card.originalImage} alt={`Foto original de ${card.nameEs}`} />
+        </DialogContent>
+      </Dialog>
+    </>}
+  </div>
 }
 
 function Countdown({ state, language }: { state: RoomState; language: Language }) {

@@ -53,13 +53,16 @@
 .loteria-player-list [data-slot="badge"] { padding: .55rem .8rem; font-size: 1rem; }
 .loteria-call-stage { display: grid; grid-template-columns: minmax(25rem, 1fr) minmax(16rem, .34fr); gap: clamp(1.5rem, 4vw, 4rem); align-items: center; max-width: 90rem; margin: auto; }
 .loteria-current { display: grid; justify-items: center; gap: .8rem; }
-.loteria-current > .loteria-card { width: min(57vh, 33rem); }
+.loteria-current > .loteria-card-shell { width: min(57vh, 33rem); }
+.loteria-card-shell { position: relative; }
+.loteria-card-shell > .loteria-card { width: 100%; }
 .loteria-card { position: relative; display: grid; grid-template-rows: 1fr auto; gap: .35rem; overflow: hidden; padding: .45rem; aspect-ratio: 3 / 4; border: 3px solid #5d3a2e; border-radius: .8rem; background: #fff8dc; color: var(--lot-ink); text-align: center; box-shadow: 0 8px 22px rgba(63, 34, 18, .18); transition: transform .12s, filter .12s, border-color .12s; }
 button.loteria-card:active { transform: scale(.97); }
 .loteria-card-art { position: relative; display: grid; place-items: center; min-height: 0; border-radius: .5rem; background-position: center; background-size: cover; }
 .loteria-card-art > span { font-size: clamp(2rem, 10vw, 8rem); filter: drop-shadow(0 4px 2px rgba(50, 20, 10, .18)); }
 .loteria-card strong { padding: .25rem; font: clamp(.72rem, 2vw, 1.45rem) "Rye", Georgia, serif; }
-.loteria-card.is-compact { width: clamp(5.6rem, 9vw, 9rem); }
+.loteria-card-shell.is-compact { width: clamp(5.6rem, 9vw, 9rem); }
+.loteria-card.is-compact { width: 100%; }
 .loteria-card.is-compact .loteria-card-art > span { font-size: clamp(2rem, 5vw, 4rem); }
 .loteria-card.is-compact strong { font-size: clamp(.6rem, 1vw, .8rem); }
 .loteria-card.is-called:not(.is-marked) { border-color: var(--lot-teal); box-shadow: 0 0 0 3px rgba(8, 127, 114, .22); }
@@ -67,6 +70,11 @@ button.loteria-card:active { transform: scale(.97); }
 .loteria-card.is-marked::after { content: ""; position: absolute; inset: 0; background: rgba(201, 47, 69, .15); }
 .loteria-bean { position: absolute; z-index: 2; left: 50%; top: 48%; transform: translate(-50%, -50%) rotate(-12deg); display: grid; place-items: center; width: 36%; aspect-ratio: 1; border-radius: 50% 45% 50% 43%; color: #83162a; background: #d94a60; border: 4px solid #8f1c30; box-shadow: inset -6px -7px rgba(80, 8, 20, .18), 0 5px 8px rgba(48, 20, 10, .3); font-size: 0; }
 .loteria-card.is-winning { animation: winner-pop .8s ease-in-out infinite alternate; border-color: var(--lot-gold); }
+.loteria-original-photo { position: absolute; z-index: 5; top: .4rem; right: .4rem; display: grid; place-items: center; width: 2rem; height: 2rem; padding: 0; border: 2px solid rgba(255,255,255,.92); border-radius: 999px; background: rgba(57,37,29,.86); color: #fff; box-shadow: 0 3px 10px rgba(40,20,10,.3); }
+.loteria-original-photo:hover { background: var(--lot-teal); }
+.loteria-original-photo svg { width: 1rem; height: 1rem; }
+.loteria-original-dialog { width: min(calc(100vw - 2rem), 42rem) !important; max-height: 92vh; overflow: auto; background: #fffaf0 !important; color: var(--lot-ink) !important; }
+.loteria-original-dialog img { width: 100%; max-height: 72vh; object-fit: contain; border: 3px solid rgba(57,37,29,.14); border-radius: .75rem; background: #efe4ce; }
 @keyframes winner-pop { to { transform: translateY(-.5rem) rotate(2deg); box-shadow: 0 12px 26px rgba(244, 187, 69, .65); } }
 .loteria-countdown { display: flex; align-items: center; justify-content: center; gap: .7rem; padding: .5rem 1rem; border-radius: 999px; background: var(--lot-ink); color: #fff; font-weight: 800; }
 .loteria-countdown strong { font-size: 2rem; color: var(--lot-gold); }
@@ -86,7 +94,9 @@ button.loteria-card:active { transform: scale(.97); }
 .loteria-phone-call span { font-size: 2rem; }
 .loteria-switch-player { margin-top: .2rem; color: var(--lot-teal); font-size: .75rem; font-weight: 800; text-decoration: underline; }
 .loteria-board { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: clamp(.25rem, 1.5vw, .6rem); margin: 1rem 0; }
+.loteria-board .loteria-card-shell { width: 100%; }
 .loteria-board .loteria-card { width: 100%; padding: .2rem; border-width: 2px; }
+.loteria-board .loteria-original-photo { top: .2rem; right: .2rem; width: 1.55rem; height: 1.55rem; }
 .loteria-board .loteria-card-art > span { font-size: clamp(1.6rem, 10vw, 4rem); }
 .loteria-board .loteria-card strong { font-size: clamp(.51rem, 2.4vw, .82rem); line-height: 1.05; }
 .loteria-claim { position: fixed; z-index: 10; left: 1rem; right: 1rem; bottom: max(1rem, env(safe-area-inset-bottom)); width: min(calc(100% - 2rem), 42rem); height: 4.5rem !important; margin: auto; border: 4px solid #fff !important; border-radius: 1rem !important; box-shadow: 0 10px 30px rgba(64, 22, 16, .35); font: 1.65rem "Rye", serif !important; }
