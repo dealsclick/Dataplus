@@ -227,6 +227,9 @@ async function main() {
   assert.match(tiktokMarketplaceSource, /data->>'state' = 'pending'[\s\S]*limit 500/, 'Webhook reconciliation must read pending events directly in bounded database batches.');
   assert.match(tiktokMarketplaceSource, /queue\('webhook', \{ accountId, actor:/, 'Webhook receipt must queue one account-level catch-up job instead of one job per event.');
   assert.equal(tiktokMarketplaceSource.includes('launchOverrides:'), true, 'TikTok launch jobs must retain live-session merchant SKU and quantity overrides.');
+  assert.equal(tiktokMarketplaceSource.includes('liveAuctionExportContext'), true, 'TikTok must resolve the selected shop warehouse for LIVE auction CSV exports.');
+  assert.equal(serverSource.includes('parts[3] === "tiktok-auction" && parts[4] === "export"'), true, 'Live Sessions must expose a TikTok auction upload export route.');
+  assert.equal(liveSessionsSource.includes('Auction upload CSV'), true, 'TikTok Live Sessions must expose the manual auction upload fallback.');
   assert.equal(tiktokMarketplaceSource.includes("'/product/202309/images/upload'"), true, 'TikTok live-session photo overrides must upload to the TikTok product image API.');
   assert.equal(tiktokMarketplaceSource.includes('title: launchTitle'), true, 'TikTok live-session launches must use the reviewed session title.');
   assert.equal(tiktokMarketplaceSource.includes('seller_sku: merchantSku'), true, 'TikTok live-session launches must use the reviewed manufacturer SKU as seller SKU.');

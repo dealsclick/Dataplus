@@ -189,6 +189,7 @@ const shipmentConsolidation = require("./lib/shipment-consolidation");
 const { normalizeCarrierShippingAddress } = require("./lib/shipping-address");
 const { ebayLiveLineContext, ebayLiveOrderContext, ebayLiveOrderUsesCommittedStock, preserveEbayLiveOrderIdentity } = require("./lib/ebay-live-order");
 const { packageDimensionsChanged, applyManualPackageDimensions, applyShippingPreferences } = require("./lib/product-dimensions");
+const { DEFAULTS: TIKTOK_LIVE_AUCTION_DEFAULTS, buildTikTokLiveAuctionCsv } = require("./lib/tiktok-live-auction-csv");
 const { canonicalCarrierName, carrierTrackingUrl, inferCarrierFromTracking: detectCarrierFromTracking, isLikelyTrackingNumber, normalizeShipmentCarrier, normalizeTrackingNumber, validateCarrierService } = require("./lib/shipping-carriers");
 const { buildPrintPreview, attachmentFilePath, restorePurchasedLabelReferences, printJobsByBatchId } = require("./lib/fulfillment-print");
 const { buildLabelPacketIsolated } = require("./lib/isolated-fulfillment-print");
@@ -62845,6 +62846,64 @@ async function handleApi(req, res) {
         availableItems: previewItems.filter((item) => Number(item.allocatableQty || 0) > 0).length,
         exhaustedItems: previewItems.filter((item) => Number(item.sourceAvailableQty || 0) > 0 && Number(item.allocatableQty || 0) <= 0).length
       }
+    });
+  }
+
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "live-sessions" && parts[2] && parts[3] === "tiktok-auction" && parts[4] === "export" && postgres.isPostgresEnabled()) {
+    if (!userCan(authUser, "channels", "launch") && !userCan(authUser, "catalog.marketplace", "launch")) {
+      return sendJson(res, 403, { error: "Your account does not have marketplace launch access." });
+    }
+    const scope = liveSessionScope(req);
+    if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
+    const rows = await postgres.readEntityDocumentCollectionFast("liveSessions");
+    const target = liveSessionRecordForKey(rows, scope, parts[2]);
+    if (!target) return notFound(res);
+    if (normalizeLiveInventoryChannel(target.channel) !== "tiktok_live") {
+      return sendJson(res, 409, { error: "Select TikTok Live as this session's destination before creating its auction upload file." });
+    }
+    if (!["ready", "live"].includes(String(target.status || "").toLowerCase())) {
+      return sendJson(res, 409, { error: "Mark this TikTok Live session ready before exporting products for upload." });
+    }
+    const db = await readDbFast({ skipInventory: true });
+    const plan = await liveSessionLaunchContext(target, db);
+    if (!plan.selectedAccount?.connected) {
+      return sendJson(res, 409, { error: "Reconnect or select the TikTok seller account for this session before exporting products." });
+    }
+    let exportContext;
+    try {
+      exportContext = await getTikTokMarketplace().liveAuctionExportContext(plan.session.channelAccountId);
+    } catch (error) {
+      return sendJson(res, error.statusCode || 502, { error: error.message || "DataPlus could not load the connected TikTok shop warehouses." });
+    }
+    const exportResult = buildTikTokLiveAuctionCsv({
+      session: plan.session,
+      items: plan.session.items || [],
+      products: plan.products || [],
+      warehouses: exportContext.warehouses || [],
+      defaults: {
+        ...TIKTOK_LIVE_AUCTION_DEFAULTS,
+        warehouseId: exportContext.defaultWarehouseId || ""
+      }
+    });
+    if (!exportResult.productCount) {
+      const detail = exportResult.rejected.slice(0, 5).map((row) => `${row.sku}: ${row.issues.join(", ")}`).join("; ");
+      return sendJson(res, 409, {
+        error: `No session products are ready for TikTok's auction upload file.${detail ? ` ${detail}` : " Verify reserved quantities, package measurements, and the TikTok warehouse mapping."}`,
+        skipped: exportResult.rejected
+      });
+    }
+    const filenameBase = canonicalLiveSessionReference(plan.session.sessionNumber, plan.session.id) || "live-session";
+    const warning = exportResult.skippedCount
+      ? `${exportResult.skippedCount} product${exportResult.skippedCount === 1 ? " was" : "s were"} skipped because required catalog data is missing.`
+      : "";
+    return sendJson(res, 200, {
+      csv: exportResult.csv,
+      filename: `${filenameBase}-tiktok-live-auctions.csv`,
+      productCount: exportResult.productCount,
+      skippedCount: exportResult.skippedCount,
+      skipped: exportResult.rejected,
+      warning,
+      message: `${exportResult.productCount} TikTok LIVE auction product${exportResult.productCount === 1 ? "" : "s"} prepared from remaining reserved inventory.`
     });
   }
 
