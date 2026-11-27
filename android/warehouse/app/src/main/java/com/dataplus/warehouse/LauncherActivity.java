@@ -1,14 +1,20 @@
 package com.dataplus.warehouse;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.Matrix;
 import android.graphics.Typeface;
 import android.media.AudioManager;
+import android.media.ExifInterface;
 import android.media.ToneGenerator;
 import android.net.ConnectivityManager;
 import android.net.Network;
@@ -45,9 +51,14 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.text.SimpleDateFormat;
+import java.util.TimeZone;
 import java.util.UUID;
 
 public class LauncherActivity extends Activity {
@@ -57,6 +68,9 @@ public class LauncherActivity extends Activity {
     private static final String SCREEN_SCANNER = "scanner";
     private static final String SCREEN_OUTBOUND_SCANNER = "outbound_scanner";
     private static final String SCREEN_MORE = "more";
+    private static final int OUTBOUND_PHOTO_REQUEST = 7401;
+    private static final int OUTBOUND_CAMERA_PERMISSION_REQUEST = 7403;
+    private static final int OUTBOUND_PHOTO_MAX_BYTES = 1_500_000;
 
     private final ApiClient api = new ApiClient();
     private final ToneGenerator tones = new ToneGenerator(AudioManager.STREAM_NOTIFICATION, 75);
@@ -79,6 +93,9 @@ public class LauncherActivity extends Activity {
     private JSONArray outboundScans = new JSONArray();
     private JSONObject activeOutboundPackage;
     private String pendingOutboundBarcode = "";
+    private String pendingPhotoAuditId = "";
+    private String pendingPhotoScanId = "";
+    private String pendingPhotoTracking = "";
     private String outboundPackageFilter = "all";
     private boolean busy;
     private boolean modalOpen;
@@ -1157,8 +1174,16 @@ public class LauncherActivity extends Activity {
     }
 
     private void routeOutboundDashboardScan(String rawBarcode) {
+        routeOutboundDashboardScan(rawBarcode, false);
+    }
+
+    private void routeOutboundDashboardScan(String rawBarcode, boolean allowUnrecognizedTracking) {
         String barcode = normalizedScannerValue(rawBarcode);
         if (barcode.isEmpty() || busy) return;
+        if (!allowUnrecognizedTracking && !isLikelyOutboundTracking(barcode)) {
+            rejectNonTrackingBarcode(barcode);
+            return;
+        }
         if (!isOnline()) {
             scannerMessage("Offline — reconnect before scanning.", false);
             feedback(false);
@@ -1559,7 +1584,7 @@ public class LauncherActivity extends Activity {
             .setTitle(scan.optString("trackingNumber", "Package"))
             .setMessage(detail.toString())
             .setPositiveButton("Close", null)
-            .setNeutralButton(scan.optInt("evidenceCount") > 0 ? "Another photo" : "Optional photo", (value, which) -> openWeb(outboundPhotoPath(scan)));
+            .setNeutralButton(scan.optInt("evidenceCount") > 0 ? "Another photo" : "Optional photo", (value, which) -> takeOutboundPhoto(scan));
         if (canScanItems) {
             builder.setNegativeButton("Scan package items", (value, which) -> {
                 activeOutboundPackage = scan;
@@ -1587,8 +1612,16 @@ public class LauncherActivity extends Activity {
     }
 
     private void recordOutboundPackage(String rawTracking) {
+        recordOutboundPackage(rawTracking, false);
+    }
+
+    private void recordOutboundPackage(String rawTracking, boolean allowUnrecognizedTracking) {
         String tracking = normalizedScannerValue(rawTracking);
         if (tracking.isEmpty() || currentOutboundSession == null || busy) return;
+        if (!allowUnrecognizedTracking && !isLikelyOutboundTracking(tracking)) {
+            rejectNonTrackingBarcode(tracking);
+            return;
+        }
         if (!isOnline()) {
             scannerMessage("Offline — reconnect before scanning.", false);
             feedback(false);
@@ -1687,7 +1720,7 @@ public class LauncherActivity extends Activity {
         Button photo = Ui.button(this, scan.optInt("evidenceCount") > 0 ? "Take another optional photo" : "Take optional photo", false);
         photo.setOnClickListener(view -> {
             dialog.dismiss();
-            openWeb(outboundPhotoPath(scan));
+            takeOutboundPhoto(scan);
         });
         Ui.margin(photo, 0, 12, 0, 0);
         sheet.addView(photo, Ui.matchWrap());
@@ -1724,11 +1757,233 @@ public class LauncherActivity extends Activity {
         sizeBottomDialog(dialog);
     }
 
-    private String outboundPhotoPath(JSONObject scan) {
-        String auditId = currentOutboundSession == null ? "" : currentOutboundSession.optString("id");
-        return "/warehouse/outbound?auditId=" + Uri.encode(auditId)
-            + "&scanId=" + Uri.encode(scan.optString("id"))
-            + "&photo=1";
+    private void takeOutboundPhoto(JSONObject scan) {
+        if (scan == null || currentOutboundSession == null || busy) return;
+        if (!isOnline()) {
+            scannerMessage("Reconnect before taking a package photo.", false);
+            feedback(false);
+            return;
+        }
+        pendingPhotoAuditId = currentOutboundSession.optString("id");
+        pendingPhotoScanId = scan.optString("id");
+        pendingPhotoTracking = scan.optString("trackingNumber", "package");
+        if (pendingPhotoAuditId.isEmpty() || pendingPhotoScanId.isEmpty()) {
+            scannerMessage("This package is not available for a photo.", false);
+            feedback(false);
+            clearPendingPhoto();
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.CAMERA}, OUTBOUND_CAMERA_PERMISSION_REQUEST);
+            return;
+        }
+        launchNativePhotoCapture();
+    }
+
+    private void launchNativePhotoCapture() {
+        Intent intent = new Intent(this, PhotoCaptureActivity.class);
+        startActivityForResult(intent, OUTBOUND_PHOTO_REQUEST);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != OUTBOUND_PHOTO_REQUEST) return;
+        if (resultCode != RESULT_OK || data == null) {
+            String error = data == null ? "" : data.getStringExtra(PhotoCaptureActivity.EXTRA_ERROR);
+            if (error == null || error.trim().isEmpty()) scannerMessage("Photo canceled. The package remains recorded.", true);
+            else {
+                scannerMessage(error, false);
+                feedback(false);
+            }
+            clearPendingPhoto();
+            focusScanner();
+            return;
+        }
+        String path = data.getStringExtra(PhotoCaptureActivity.EXTRA_PHOTO_PATH);
+        File photo = path == null ? null : new File(path);
+        if (photo == null || !photo.isFile() || photo.length() <= 0) {
+            scannerMessage("The camera did not return a usable package photo.", false);
+            feedback(false);
+            clearPendingPhoto();
+            focusScanner();
+            return;
+        }
+        String auditId = pendingPhotoAuditId;
+        String scanId = pendingPhotoScanId;
+        String tracking = pendingPhotoTracking;
+        busy = true;
+        scannerMessage("Preparing package photo…", true);
+        new Thread(() -> {
+            try {
+                PhotoPayload payload = prepareOutboundPhoto(photo);
+                runOnUiThread(() -> createOutboundPhotoUpload(photo, payload, auditId, scanId, tracking));
+            } catch (Exception error) {
+                runOnUiThread(() -> finishPhotoUploadError(photo, error.getMessage(), null));
+            }
+        }, "DataPlusPhotoPrepare").start();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != OUTBOUND_CAMERA_PERMISSION_REQUEST) return;
+        if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) launchNativePhotoCapture();
+        else {
+            scannerMessage("Camera permission is required to take an optional package photo.", false);
+            feedback(false);
+            clearPendingPhoto();
+        }
+    }
+
+    private void createOutboundPhotoUpload(File photo, PhotoPayload payload, String auditId, String scanId, String tracking) {
+        JSONObject body = new JSONObject();
+        try {
+            body.put("clientEvidenceId", UUID.randomUUID().toString());
+            body.put("contentType", "image/jpeg");
+            body.put("byteSize", payload.bytes.length);
+            body.put("width", payload.width);
+            body.put("height", payload.height);
+            body.put("capturedAt", utcTimestamp());
+        } catch (Exception ignored) {}
+        String path = "/api/fulfillment/outbound-audits/" + Uri.encode(auditId)
+            + "/scans/" + Uri.encode(scanId) + "/evidence";
+        api.post(path, body, new ApiClient.Callback() {
+            @Override public void onSuccess(JSONObject response) {
+                String uploadUrl = response.optString("uploadUrl");
+                if (uploadUrl.isEmpty()) {
+                    finishPhotoUploadError(photo, "DataPlus did not return a package photo upload address.", null);
+                    return;
+                }
+                scannerMessage("Uploading package photo…", true);
+                api.putBytes(uploadUrl, payload.bytes, "image/jpeg", new ApiClient.Callback() {
+                    @Override public void onSuccess(JSONObject uploadResponse) {
+                        busy = false;
+                        if (photo.exists()) photo.delete();
+                        incrementOutboundEvidenceCount(scanId);
+                        clearPendingPhoto();
+                        showOutboundScanner();
+                        scannerMessage("Photo saved for " + tracking + ".", true);
+                        feedback(true);
+                        Toast.makeText(LauncherActivity.this, uploadResponse.optString("message", "Package photo saved."), Toast.LENGTH_LONG).show();
+                    }
+                    @Override public void onError(ApiClient.ApiException error) {
+                        finishPhotoUploadError(photo, error.getMessage(), error);
+                    }
+                });
+            }
+            @Override public void onError(ApiClient.ApiException error) {
+                finishPhotoUploadError(photo, error.getMessage(), error);
+            }
+        });
+    }
+
+    private void finishPhotoUploadError(File photo, String message, ApiClient.ApiException error) {
+        busy = false;
+        if (photo != null && photo.exists()) photo.delete();
+        clearPendingPhoto();
+        if (error != null && error.isUnauthorized()) {
+            showLogin();
+            return;
+        }
+        scannerMessage(message == null || message.trim().isEmpty() ? "Unable to save the package photo." : message, false);
+        feedback(false);
+        Toast.makeText(this, message == null ? "Unable to save the package photo." : message, Toast.LENGTH_LONG).show();
+        focusScanner();
+    }
+
+    private void incrementOutboundEvidenceCount(String scanId) {
+        for (int index = 0; index < outboundScans.length(); index++) {
+            JSONObject scan = outboundScans.optJSONObject(index);
+            if (scan == null || !scanId.equals(scan.optString("id"))) continue;
+            try {
+                scan.put("evidenceCount", scan.optInt("evidenceCount") + 1);
+                scan.put("evidenceStatus", "complete");
+            } catch (Exception ignored) {}
+            if (activeOutboundPackage != null && scanId.equals(activeOutboundPackage.optString("id"))) activeOutboundPackage = scan;
+            return;
+        }
+    }
+
+    private void clearPendingPhoto() {
+        pendingPhotoAuditId = "";
+        pendingPhotoScanId = "";
+        pendingPhotoTracking = "";
+    }
+
+    private static PhotoPayload prepareOutboundPhoto(File file) throws Exception {
+        Bitmap bitmap = BitmapFactory.decodeFile(file.getAbsolutePath());
+        if (bitmap == null) throw new IllegalStateException("The package photo could not be decoded.");
+        Bitmap working = orientPhoto(bitmap, file);
+        int longest = Math.max(working.getWidth(), working.getHeight());
+        if (longest > 1920) {
+            float scale = 1920f / longest;
+            Bitmap scaled = Bitmap.createScaledBitmap(working, Math.round(working.getWidth() * scale), Math.round(working.getHeight() * scale), true);
+            if (scaled != working) working.recycle();
+            working = scaled;
+        }
+        int quality = 86;
+        byte[] bytes = compressJpeg(working, quality);
+        while (bytes.length > OUTBOUND_PHOTO_MAX_BYTES && quality > 46) {
+            quality -= 10;
+            bytes = compressJpeg(working, quality);
+        }
+        while (bytes.length > OUTBOUND_PHOTO_MAX_BYTES && Math.max(working.getWidth(), working.getHeight()) > 900) {
+            Bitmap scaled = Bitmap.createScaledBitmap(working, Math.round(working.getWidth() * 0.8f), Math.round(working.getHeight() * 0.8f), true);
+            if (scaled != working) working.recycle();
+            working = scaled;
+            bytes = compressJpeg(working, 70);
+        }
+        if (bytes.length > OUTBOUND_PHOTO_MAX_BYTES) {
+            working.recycle();
+            throw new IllegalStateException("The package photo is too large. Move closer and take it again.");
+        }
+        PhotoPayload result = new PhotoPayload(bytes, working.getWidth(), working.getHeight());
+        working.recycle();
+        return result;
+    }
+
+    private static Bitmap orientPhoto(Bitmap bitmap, File file) {
+        try {
+            ExifInterface exif = new ExifInterface(file.getAbsolutePath());
+            int orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+            Matrix matrix = new Matrix();
+            if (orientation == ExifInterface.ORIENTATION_ROTATE_90) matrix.postRotate(90);
+            else if (orientation == ExifInterface.ORIENTATION_ROTATE_180) matrix.postRotate(180);
+            else if (orientation == ExifInterface.ORIENTATION_ROTATE_270) matrix.postRotate(270);
+            else if (orientation == ExifInterface.ORIENTATION_FLIP_HORIZONTAL) matrix.preScale(-1, 1);
+            else if (orientation == ExifInterface.ORIENTATION_FLIP_VERTICAL) matrix.preScale(1, -1);
+            else return bitmap;
+            Bitmap oriented = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
+            if (oriented != bitmap) bitmap.recycle();
+            return oriented;
+        } catch (Exception ignored) {
+            return bitmap;
+        }
+    }
+
+    private static byte[] compressJpeg(Bitmap bitmap, int quality) {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        bitmap.compress(Bitmap.CompressFormat.JPEG, quality, output);
+        return output.toByteArray();
+    }
+
+    private static String utcTimestamp() {
+        SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US);
+        format.setTimeZone(TimeZone.getTimeZone("UTC"));
+        return format.format(new Date());
+    }
+
+    private static final class PhotoPayload {
+        final byte[] bytes;
+        final int width;
+        final int height;
+
+        PhotoPayload(byte[] bytes, int width, int height) {
+            this.bytes = bytes;
+            this.width = width;
+            this.height = height;
+        }
     }
 
     private void recordOutboundItem(String rawBarcode) {
@@ -1810,7 +2065,10 @@ public class LauncherActivity extends Activity {
             .setPositiveButton("Continue", (selected, which) -> {
                 String barcode = value.getText().toString().trim();
                 modalOpen = false;
-                if (!barcode.isEmpty()) handleHardwareScan(barcode);
+                if (barcode.isEmpty()) return;
+                if (activeOutboundPackage != null) recordOutboundItem(barcode);
+                else if (SCREEN_OUTBOUND.equals(screen)) routeOutboundDashboardScan(barcode, true);
+                else recordOutboundPackage(barcode, true);
             })
             .setNegativeButton("Cancel", null)
             .create();
@@ -2293,6 +2551,28 @@ public class LauncherActivity extends Activity {
         // ]C1 for Code 128 or ]Q3 for QR. It is not part of the identifier.
         value = value.replaceFirst("^\\][A-Za-z0-9]{2}", "");
         return value.replaceAll("[^0-9A-Za-z-]", "").trim();
+    }
+
+    private boolean isLikelyOutboundTracking(String rawValue) {
+        String value = normalizedScannerValue(rawValue).replaceAll("[^0-9A-Za-z]", "").toUpperCase(Locale.US);
+        if (value.isEmpty() || value.length() > 80) return false;
+        if (value.matches("\\d{10,40}")) return true;
+        if (value.matches("1Z[0-9A-Z]{16}")) return true;
+        if (value.matches("[A-Z]{2}\\d{9}[A-Z]{2}")) return true;
+        if (value.matches("(?:T\\d{10}|C\\d{14}|D\\d{14}|1LS[0-9A-Z]{8,}|TB[AMCD][0-9A-Z]{8,})")) return true;
+        if (value.matches("(?:GM|JVGL|JJD|JD)[0-9A-Z]{8,}")) return true;
+        if (value.matches("(?:SPX|SPD)[0-9A-Z]{8,}")) return true;
+        if (value.matches("(?:GFUS[0-9A-Z]{10,}|GF[0-9A-Z]{10,}|GOFO[0-9A-Z]{6,})")) return true;
+        if (value.matches("(?:SWX[0-9A-Z]{12,}|SWIFTX[0-9A-Z]{6,})")) return true;
+        return value.matches("[A-Z]{2,6}[0-9A-Z]{10,}");
+    }
+
+    private void rejectNonTrackingBarcode(String barcode) {
+        String preview = barcode.length() > 14 ? barcode.substring(0, 14) + "…" : barcode;
+        scannerMessage("Ignored non-tracking barcode " + preview + ". Scan the carrier tracking barcode.", false);
+        Toast.makeText(this, "Not a tracking barcode. Aim at the long barcode under the tracking number.", Toast.LENGTH_LONG).show();
+        feedback(false);
+        focusScanner();
     }
 
     private void focusScanner() {

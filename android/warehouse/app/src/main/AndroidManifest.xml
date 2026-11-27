@@ -21,6 +21,11 @@
             android:exported="false" />
 
         <activity
+            android:name=".PhotoCaptureActivity"
+            android:exported="false"
+            android:screenOrientation="portrait" />
+
+        <activity
             android:name=".LauncherActivity"
             android:alwaysRetainTaskState="true"
             android:exported="true"

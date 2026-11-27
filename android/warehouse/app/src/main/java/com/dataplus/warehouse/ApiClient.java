@@ -56,6 +56,51 @@ final class ApiClient {
         request("POST", path, body == null ? new JSONObject() : body, callback);
     }
 
+    void putBytes(String path, byte[] body, String contentType, Callback callback) {
+        executor.execute(() -> {
+            HttpURLConnection connection = null;
+            try {
+                URL url = new URL(BASE_URL + path);
+                connection = (HttpURLConnection) url.openConnection();
+                connection.setRequestMethod("PUT");
+                connection.setConnectTimeout(15_000);
+                connection.setReadTimeout(45_000);
+                connection.setInstanceFollowRedirects(false);
+                connection.setRequestProperty("Accept", "application/json");
+                connection.setRequestProperty("User-Agent", "DataPlus-Warehouse-Android/2.2.3");
+                connection.setRequestProperty("Content-Type", contentType);
+                String cookies = cookieManager.getCookie(BASE_URL);
+                if (cookies != null && !cookies.trim().isEmpty()) connection.setRequestProperty("Cookie", cookies);
+                connection.setDoOutput(true);
+                connection.setFixedLengthStreamingMode(body.length);
+                try (OutputStream output = connection.getOutputStream()) {
+                    output.write(body);
+                }
+
+                int status = connection.getResponseCode();
+                storeResponseCookies(connection.getHeaderFields());
+                InputStream stream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
+                String text = readStream(stream);
+                JSONObject response = text.trim().isEmpty() ? new JSONObject() : new JSONObject(text);
+                if (status >= 400) {
+                    String message = response.optString("error", response.optString("message", "DataPlus upload failed."));
+                    throw new ApiException(status, message);
+                }
+                mainHandler.post(() -> callback.onSuccess(response));
+            } catch (ApiException error) {
+                mainHandler.post(() -> callback.onError(error));
+            } catch (JSONException error) {
+                ApiException wrapped = new ApiException(0, "DataPlus returned an unreadable upload response.");
+                mainHandler.post(() -> callback.onError(wrapped));
+            } catch (Exception error) {
+                ApiException wrapped = new ApiException(0, error.getMessage() == null ? "Unable to upload the package photo." : error.getMessage());
+                mainHandler.post(() -> callback.onError(wrapped));
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        });
+    }
+
     void request(String method, String path, JSONObject body, Callback callback) {
         executor.execute(() -> {
             HttpURLConnection connection = null;
