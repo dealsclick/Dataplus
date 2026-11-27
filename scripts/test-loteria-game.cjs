@@ -8,6 +8,16 @@ const deck = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "web", "publi
 let now = 1_000;
 const game = new LoteriaGame(deck, { random: () => 0.42, now: () => now });
 assert.equal(game.cards.find((card) => card.id === "cosecha")?.originalImage, "/loteria/cards/originals/la-cosecha.jpg", "deck retains optional original photo paths");
+const configuredGame = new LoteriaGame(deck, { random: () => 0.21, now: () => now });
+const configured = configuredGame.createRoom({ publicUrl: "https://game.example", intervalSeconds: 8 });
+const selectedCardIds = configuredGame.cards.slice(0, 16).map((card) => card.id);
+assert.throws(() => configuredGame.hostAction(configured.code, configured.hostToken, "set-cards", { enabledCardIds: selectedCardIds.slice(0, 15) }), /at least 16|al menos 16/i, "host cannot enable fewer than 16 cards");
+const configuredState = configuredGame.hostAction(configured.code, configured.hostToken, "set-cards", { enabledCardIds: selectedCardIds });
+assert.deepStrictEqual(configuredState.enabledCardIds, selectedCardIds, "host selection is authoritative");
+const configuredPlayer = configuredGame.join(configured.code, "Deck Tester");
+assert(configuredPlayer.state.player.board.every((card) => selectedCardIds.includes(card.id)), "boards only contain enabled cards");
+configuredGame.hostAction(configured.code, configured.hostToken, "start");
+assert.throws(() => configuredGame.hostAction(configured.code, configured.hostToken, "set-cards", { enabledCardIds: selectedCardIds }), /before|antes/i, "cards cannot change after the round starts");
 const created = game.createRoom({ publicUrl: "https://game.example", intervalSeconds: 8 });
 const first = game.join(created.code, "Ana");
 const second = game.join(created.code, "Beto");

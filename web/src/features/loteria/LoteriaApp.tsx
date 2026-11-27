@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Switch } from "@/components/ui/switch"
 import { ImageIcon, Pause, Play, RotateCcw, Volume2, VolumeX, Users } from "lucide-react"
 import "./loteria.css"
 
@@ -32,6 +33,7 @@ type RoomState = {
   playerCount: number
   players: Array<{ id: string; name: string; queued: boolean; connected: boolean }>
   cards: LoteriaCard[]
+  enabledCardIds: string[]
   currentCard: LoteriaCard | null
   recentCards: LoteriaCard[]
   calledCardIds: string[]
@@ -379,12 +381,27 @@ function HostView({ initialCode, initialToken }: { initialCode: string; initialT
     } catch (actionError) { setMessage(actionError instanceof Error ? actionError.message : "No se pudo completar la acción.") }
   }
 
+  async function setCardEnabled(cardId: string, enabled: boolean) {
+    if (!state) return
+    const enabledIds = new Set(state.enabledCardIds)
+    if (enabled) enabledIds.add(cardId); else enabledIds.delete(cardId)
+    setMessage("")
+    try {
+      const next = await request<RoomState>(`/api/loteria/rooms/${code}/host`, { method: "POST", headers: { "X-Loteria-Host-Token": hostToken }, body: JSON.stringify({ action: "set-cards", enabledCardIds: [...enabledIds] }) })
+      setState(next)
+    } catch (cardError) { setMessage(cardError instanceof Error ? cardError.message : "No se pudieron actualizar las cartas.") }
+  }
+
   if (!code) return <main className="loteria-shell loteria-center"><LanguageButton language={language} onChange={setLanguage} /><Card className="loteria-entry-card"><CardHeader><span className="loteria-logo">✦</span><CardTitle>{t.host}</CardTitle><CardDescription>Crea una sala privada y abre la pantalla de TV.</CardDescription></CardHeader><CardContent><Label htmlFor="initial-interval">{t.interval}</Label><Input id="initial-interval" type="number" min={3} max={30} value={intervalSeconds} onChange={(event) => setIntervalSeconds(Number(event.target.value))} /><Button size="lg" onClick={() => void createRoom()}>{t.create}</Button>{message && <p className="loteria-message is-error">{message}</p>}</CardContent></Card></main>
   if (!state) return <Loading message={t.connecting} />
   return <main className="loteria-shell loteria-host"><LanguageButton language={language} onChange={setLanguage} /><header><div><span className="loteria-kicker">{t.round} {state.round}</span><h1>{t.host}</h1></div><div className="loteria-host-code">{state.code}</div></header>
     <section className="loteria-host-grid"><Card><CardHeader><CardTitle>Estado: {state.status}</CardTitle><CardDescription>{state.playerCount} {t.players.toLowerCase()}</CardDescription></CardHeader><CardContent className="loteria-host-actions"><Button size="lg" disabled={state.status !== "lobby"} onClick={() => void action("start")}><Play /> {t.start}</Button><Button size="lg" variant="outline" disabled={!(["countdown", "playing"] as GameStatus[]).includes(state.status)} onClick={() => void action("pause")}><Pause /> {t.pause}</Button><Button size="lg" variant="outline" disabled={state.status !== "paused"} onClick={() => void action("resume")}><Play /> {t.resume}</Button><Button size="lg" variant="secondary" onClick={() => void action("new-round")}><RotateCcw /> {t.newRound}</Button></CardContent></Card>
       <Card><CardHeader><CardTitle>{t.interval}</CardTitle><CardDescription>3–30 segundos</CardDescription></CardHeader><CardContent><Input type="range" min={3} max={30} value={intervalSeconds} onChange={(event) => setIntervalSeconds(Number(event.target.value))} /><strong className="loteria-interval-value">{intervalSeconds}s</strong><Button variant="outline" asChild><a href={`/loteria/tv/${state.code}`} target="_blank" rel="noreferrer">{t.tv}</a></Button></CardContent></Card>
-      <Players state={state} language={language} /></section>
+      <Players state={state} language={language} />
+      <Card className="loteria-deck-settings"><CardHeader><CardTitle>{language === "es" ? "Cartas de esta sala" : "Cards in this room"}</CardTitle><CardDescription>{state.enabledCardIds.length} de {state.cards.length} {language === "es" ? "activadas · mínimo 16 · solo se cambia antes de iniciar" : "enabled · minimum 16 · change before starting"}</CardDescription></CardHeader><CardContent><div className="loteria-deck-grid">{state.cards.map((card) => {
+        const enabled = state.enabledCardIds.includes(card.id)
+        return <div key={card.id} className={`loteria-deck-option${enabled ? " is-enabled" : ""}`}><span className="loteria-deck-thumb" style={{ backgroundImage: `url(${card.image})` }}>{card.symbol}</span><span><strong>{language === "es" ? card.nameEs : card.nameEn}</strong><small>{enabled ? (language === "es" ? "Activada" : "Enabled") : (language === "es" ? "Desactivada" : "Disabled")}</small></span><Switch size="sm" checked={enabled} disabled={state.status !== "lobby"} onCheckedChange={(checked) => void setCardEnabled(card.id, checked)} aria-label={`${enabled ? "Desactivar" : "Activar"} ${card.nameEs}`} /></div>
+      })}</div></CardContent></Card></section>
     {message && <p className="loteria-message is-error">{message}</p>}
     {state.winner && <Winner state={state} />}
   </main>
