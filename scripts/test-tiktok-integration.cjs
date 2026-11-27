@@ -202,6 +202,8 @@ async function main() {
   assert.equal(liveSessionsSource.includes('Download loaded products'), true, 'TikTok Live Sessions must export the product tray with resolved DataPlus SKUs.');
   assert.equal(liveSessionsSource.includes('Session orders'), true, 'Attributed TikTok LIVE orders must remain visible outside the collapsible Studio panel.');
   assert.equal(liveSessionsSource.includes('Product tray status'), true, 'TikTok session products must expose their tray status and protected removal workflow.');
+  assert.equal(liveSessionsSource.includes('Not in uploaded CSV'), true, 'A session CSV must provide a safe tray-status fallback when TikTok does not expose the product tray.');
+  assert.equal(liveSessionsSource.includes('Tray access unavailable'), true, 'TikTok tray permission problems must be distinct from an unchecked tray.');
   const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const activeJobDatabaseSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
   const activeJobWorkerSource = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'dataplus-worker.js'), 'utf8');

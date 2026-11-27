@@ -50,6 +50,8 @@ const titleOnly = reconcileLiveSessionCsv({
 });
 assert.equal(titleOnly.rows[0].status, "matched");
 assert.equal(titleOnly.rows[0].matchBasis, "product_name");
+assert.equal(titleOnly.summary.sessionItemsMissingFromCsv, 1);
+assert.equal(titleOnly.missingSessionItems[0].sessionItemId, "item-1");
 
 const ambiguous = reconcileLiveSessionCsv({
   session: { items: [...session.items, { id: "item-3", sku: "ANOTHER", launchTitle: "SHOCKWAVE Impact Duty Red Helix Set" }] },
