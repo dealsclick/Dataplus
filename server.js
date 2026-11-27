@@ -73939,7 +73939,7 @@ async function handleApi(req, res) {
         liveItemRequired: resolved.liveItemRequired,
         liveItemExpectedCount: resolved.liveItemExpectedCount
       }, authUser);
-      const message = result.duplicate
+      const scanMessage = result.duplicate
         ? `${result.scan.trackingNumber} was already scanned into this handoff.`
         : resolved.matches.length === 1
           ? resolved.liveItemRequired
@@ -73954,6 +73954,9 @@ async function handleApi(req, res) {
                 ? `${resolved.trackingNumber} matched ${resolved.matches.length} orders. Item scanning is optional; scan the items or continue to the package photo.`
                 : `${resolved.trackingNumber} matched ${resolved.matches.length} orders and was retained with every match.`
             : `${resolved.trackingNumber} has no matching order and was retained in the handoff record.`;
+      const message = result.rolledOverFrom
+        ? `${result.rolledOverFrom.auditNumber} was from a previous day and closed automatically. ${result.session.auditNumber} is today's ${result.session.warehouseName} audit. ${scanMessage}`
+        : scanMessage;
       return sendJson(res, result.duplicate ? 200 : 201, { ...result, resolution: resolved, message });
     }
     if (req.method === "POST" && (action === "item-scan" || action === "quick-item")) {

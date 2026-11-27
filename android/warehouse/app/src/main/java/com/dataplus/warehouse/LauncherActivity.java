@@ -627,6 +627,14 @@ public class LauncherActivity extends Activity {
         fallbackParams.setMargins(0, Ui.dp(this, 12), 0, 0);
         scannerCard.addView(fallbackRow, fallbackParams);
 
+        List<JSONObject> missingUpcs = missingPurchaseOrderUpcLines();
+        if (!missingUpcs.isEmpty()) {
+            Button addUpc = Ui.button(this, "Add missing UPC (" + missingUpcs.size() + ")", false);
+            addUpc.setOnClickListener(view -> showMissingPurchaseOrderUpcPicker());
+            Ui.margin(addUpc, 0, 9, 0, 0);
+            scannerCard.addView(addUpc, Ui.matchWrap());
+        }
+
         LinearLayout.LayoutParams scannerParams = Ui.matchWrap();
         scannerParams.setMargins(0, Ui.dp(this, 12), 0, 0);
         page.addView(scannerCard, scannerParams);
@@ -670,10 +678,155 @@ public class LauncherActivity extends Activity {
             TextView metadata = Ui.text(this, detail, 12, Ui.MUTED, false);
             Ui.margin(metadata, 0, 7, 0, 0);
             card.addView(metadata);
+            if ("purchase_order_receipt".equalsIgnoreCase(currentAudit.optString("reason"))
+                && line.optString("catalogBarcode").trim().isEmpty()) {
+                Button addUpc = Ui.button(this, "Add missing UPC", false);
+                addUpc.setOnClickListener(view -> showAddPurchaseOrderUpcDialog(line));
+                Ui.margin(addUpc, 0, 9, 0, 0);
+                card.addView(addUpc, Ui.matchWrap());
+            }
             LinearLayout.LayoutParams params = Ui.matchWrap();
             params.setMargins(0, shown == 0 ? 0 : Ui.dp(this, 8), 0, 0);
             page.addView(card, params);
         }
+    }
+
+    private List<JSONObject> missingPurchaseOrderUpcLines() {
+        List<JSONObject> missing = new ArrayList<>();
+        if (currentAudit == null || !"purchase_order_receipt".equalsIgnoreCase(currentAudit.optString("reason"))) return missing;
+        JSONArray expected = currentAudit.optJSONArray("purchaseOrderExpectedLines");
+        if (expected == null) return missing;
+        for (int index = 0; index < expected.length(); index++) {
+            JSONObject line = expected.optJSONObject(index);
+            if (line == null || line.optString("id").trim().isEmpty() || line.optString("sku").trim().isEmpty()) continue;
+            if (line.optString("catalogBarcode").trim().isEmpty()) missing.add(line);
+        }
+        return missing;
+    }
+
+    private void showMissingPurchaseOrderUpcPicker() {
+        List<JSONObject> missing = missingPurchaseOrderUpcLines();
+        if (missing.isEmpty()) {
+            Toast.makeText(this, "Every PO item already has a catalog UPC.", Toast.LENGTH_SHORT).show();
+            focusScanner();
+            return;
+        }
+        if (missing.size() == 1) {
+            showAddPurchaseOrderUpcDialog(missing.get(0));
+            return;
+        }
+        String[] labels = new String[missing.size()];
+        for (int index = 0; index < missing.size(); index++) {
+            JSONObject line = missing.get(index);
+            String title = line.optString("title", line.optString("description"));
+            labels[index] = line.optString("sku") + (title.isEmpty() ? "" : " — " + title);
+        }
+        boolean[] selected = new boolean[]{false};
+        modalOpen = true;
+        AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle("Choose the PO item")
+            .setMessage("Select the item, then scan the UPC printed on the product.")
+            .setItems(labels, (value, which) -> {
+                selected[0] = true;
+                modalOpen = false;
+                value.dismiss();
+                scannerSubmitHandler.post(() -> showAddPurchaseOrderUpcDialog(missing.get(which)));
+            })
+            .setNegativeButton("Cancel", null)
+            .create();
+        dialog.setOnDismissListener(value -> {
+            if (!selected[0]) {
+                modalOpen = false;
+                focusScanner();
+            }
+        });
+        dialog.show();
+    }
+
+    private void showAddPurchaseOrderUpcDialog(JSONObject line) {
+        if (line == null || currentAudit == null) return;
+        modalOpen = true;
+        EditText upcInput = input("Scan or type UPC", false);
+        upcInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        upcInput.setSingleLine(true);
+        TextView error = Ui.text(this, "", 13, Ui.ERROR, true);
+        error.setVisibility(View.GONE);
+        LinearLayout wrapper = Ui.column(this, 0);
+        wrapper.setPadding(Ui.dp(this, 20), Ui.dp(this, 4), Ui.dp(this, 20), 0);
+        wrapper.addView(Ui.text(this, line.optString("sku", "PO item"), 16, Ui.TEXT, true), Ui.matchWrap());
+        String title = line.optString("title", line.optString("description"));
+        if (!title.isEmpty()) {
+            TextView titleView = Ui.text(this, title, 13, Ui.MUTED, false);
+            Ui.margin(titleView, 0, 4, 0, 10);
+            wrapper.addView(titleView, Ui.matchWrap());
+        }
+        wrapper.addView(upcInput, Ui.matchWrap());
+        Ui.margin(error, 0, 8, 0, 0);
+        wrapper.addView(error, Ui.matchWrap());
+        AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle("Add missing UPC")
+            .setMessage("Scan the 8, 12, 13, or 14 digit UPC. DataPlus will reject a UPC already assigned to another SKU.")
+            .setView(wrapper)
+            .setPositiveButton("Save UPC", null)
+            .setNegativeButton("Cancel", null)
+            .create();
+        dialog.setOnDismissListener(value -> {
+            modalOpen = false;
+            busy = false;
+            focusScanner();
+        });
+        dialog.setOnShowListener(value -> {
+            Button save = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            save.setOnClickListener(view -> {
+                String upc = upcInput.getText().toString().replaceAll("\\D", "");
+                if (!(upc.length() == 8 || upc.length() == 12 || upc.length() == 13 || upc.length() == 14)) {
+                    error.setText("Scan or enter a valid 8, 12, 13, or 14 digit UPC.");
+                    error.setVisibility(View.VISIBLE);
+                    return;
+                }
+                String lineKey = line.optString("id").trim();
+                if (lineKey.isEmpty()) {
+                    error.setText("This PO line is missing its DataPlus identifier. Refresh the receiving session.");
+                    error.setVisibility(View.VISIBLE);
+                    return;
+                }
+                busy = true;
+                save.setEnabled(false);
+                save.setText("Saving…");
+                JSONObject body = new JSONObject();
+                try {
+                    body.put("upc", upc);
+                    body.put("user", user == null ? "Warehouse" : user.optString("name", user.optString("username", "Warehouse")));
+                } catch (Exception ignored) {}
+                api.post("/api/warehouse-audits/" + Uri.encode(currentAudit.optString("id")) + "/lines/" + Uri.encode(lineKey) + "/upc", body, new ApiClient.Callback() {
+                    @Override public void onSuccess(JSONObject response) {
+                        busy = false;
+                        JSONObject audit = response.optJSONObject("audit");
+                        if (audit != null) currentAudit = audit;
+                        feedback(true);
+                        Toast.makeText(LauncherActivity.this, response.optString("message", "UPC saved."), Toast.LENGTH_SHORT).show();
+                        dialog.dismiss();
+                        showScanner();
+                    }
+                    @Override public void onError(ApiClient.ApiException apiError) {
+                        busy = false;
+                        if (apiError.isUnauthorized()) {
+                            dialog.dismiss();
+                            showLogin();
+                            return;
+                        }
+                        feedback(false);
+                        error.setText(apiError.getMessage());
+                        error.setVisibility(View.VISIBLE);
+                        save.setEnabled(true);
+                        save.setText("Save UPC");
+                    }
+                });
+            });
+            upcInput.requestFocus();
+            dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
+        });
+        dialog.show();
     }
 
     private void configureBins() {
@@ -1250,10 +1403,13 @@ public class LauncherActivity extends Activity {
         heading.addView(Ui.text(this, outboundAuditReference(audit), 18, Ui.TEXT, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         heading.addView(Ui.chip(this, open ? "Open" : "Closed", open ? Ui.WARNING : Ui.SUCCESS, open ? Ui.WARNING_SOFT : Ui.SUCCESS_SOFT));
         card.addView(heading);
+        TextView sessionDate = Ui.text(this, (open ? "Today · " : "Session date · ") + outboundSessionDate(audit), 12, open ? Ui.PRIMARY : Ui.MUTED, true);
+        Ui.margin(sessionDate, 0, 7, 0, 0);
+        card.addView(sessionDate);
         TextView warehouse = Ui.text(this, audit.optString("warehouseName", "Warehouse"), 14, Ui.TEXT, true);
         Ui.margin(warehouse, 0, 9, 0, 3);
         card.addView(warehouse);
-        card.addView(Ui.text(this, audit.optString("carrier").isEmpty() ? "Any carrier" : audit.optString("carrier"), 13, Ui.MUTED, false));
+        card.addView(Ui.text(this, "Daily mixed-carrier session", 13, Ui.MUTED, false));
         String counts = audit.optInt("packageCount") + " package" + (audit.optInt("packageCount") == 1 ? "" : "s")
             + " · " + audit.optInt("matchedCount") + " matched";
         if (audit.optInt("unmatchedCount") > 0) counts += " · " + audit.optInt("unmatchedCount") + " unmatched";
@@ -1376,12 +1532,15 @@ public class LauncherActivity extends Activity {
         TextView warehouse = Ui.text(this, currentOutboundSession.optString("warehouseName", "Warehouse"), 14, Ui.TEXT, true);
         Ui.margin(warehouse, 0, 9, 0, 3);
         auditCard.addView(warehouse);
-        auditCard.addView(Ui.text(this, currentOutboundSession.optString("carrier").isEmpty() ? "Any carrier" : currentOutboundSession.optString("carrier"), 13, Ui.MUTED, false));
+        auditCard.addView(Ui.text(this, "Daily mixed-carrier session", 13, Ui.MUTED, false));
         String summary = currentOutboundSession.optInt("packageCount") + " packages · " + currentOutboundSession.optInt("matchedCount") + " matched";
         if (currentOutboundSession.optInt("unmatchedCount") > 0) summary += " · " + currentOutboundSession.optInt("unmatchedCount") + " unmatched";
         TextView counts = Ui.text(this, summary, 13, currentOutboundSession.optInt("unmatchedCount") > 0 ? Ui.WARNING : Ui.MUTED, true);
         Ui.margin(counts, 0, 12, 0, 0);
         auditCard.addView(counts);
+        TextView carrierBreakdown = Ui.text(this, outboundCarrierBreakdownLabel(currentOutboundSession), 12, Ui.MUTED, false);
+        Ui.margin(carrierBreakdown, 0, 7, 0, 0);
+        auditCard.addView(carrierBreakdown);
         page.addView(auditCard, Ui.matchWrap());
 
         if (activeOutboundPackage != null) addActiveOutboundPackage(page);
@@ -1644,6 +1803,12 @@ public class LauncherActivity extends Activity {
                 busy = false;
                 JSONObject session = response.optJSONObject("session");
                 JSONObject scan = response.optJSONObject("scan");
+                String previousSessionId = currentOutboundSession == null ? "" : currentOutboundSession.optString("id");
+                boolean dailyRollover = session != null && !previousSessionId.isEmpty() && !previousSessionId.equals(session.optString("id"));
+                if (dailyRollover) {
+                    outboundScans = new JSONArray();
+                    activeOutboundPackage = null;
+                }
                 if (session != null) currentOutboundSession = session;
                 if (scan == null) {
                     scannerMessage("Package details were not returned.", false);
@@ -2219,6 +2384,32 @@ public class LauncherActivity extends Activity {
     private String outboundAuditReference(JSONObject audit) {
         String number = audit == null ? "" : audit.optString("auditNumber");
         return number.isEmpty() ? "Outbound audit" : number;
+    }
+
+    private String outboundSessionDate(JSONObject audit) {
+        String raw = audit == null ? "" : audit.optString("startedAt");
+        if (raw.isEmpty()) return "Unknown date";
+        try {
+            SimpleDateFormat parser = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSX", Locale.US);
+            Date value = parser.parse(raw);
+            SimpleDateFormat formatter = new SimpleDateFormat("EEE, MMM d, yyyy", Locale.US);
+            formatter.setTimeZone(TimeZone.getTimeZone("America/New_York"));
+            return value == null ? raw : formatter.format(value);
+        } catch (Exception ignored) {
+            return raw.length() >= 10 ? raw.substring(0, 10) : raw;
+        }
+    }
+
+    private String outboundCarrierBreakdownLabel(JSONObject audit) {
+        JSONArray rows = audit == null ? null : audit.optJSONArray("carrierBreakdown");
+        if (rows == null || rows.length() == 0) return "Carrier breakdown · no packages scanned yet";
+        StringBuilder label = new StringBuilder("Carrier breakdown");
+        for (int index = 0; index < rows.length(); index++) {
+            JSONObject row = rows.optJSONObject(index);
+            if (row == null || row.optInt("count") <= 0) continue;
+            label.append(" · ").append(row.optString("carrier", "Other")).append(" ").append(row.optInt("count"));
+        }
+        return label.toString();
     }
 
     private String outboundItemProgress(JSONObject scan) {

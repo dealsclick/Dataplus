@@ -111,7 +111,7 @@ public final class WebFallbackActivity extends Activity {
 
         webView = new WebView(this);
         WebSettings settings = webView.getSettings();
-        settings.setUserAgentString(settings.getUserAgentString() + " DataPlusWarehouse/2.2.3");
+        settings.setUserAgentString(settings.getUserAgentString() + " DataPlusWarehouse/2.2.4");
         settings.setJavaScriptEnabled(true);
         settings.setDomStorageEnabled(true);
         settings.setAllowFileAccess(false);
