@@ -42,6 +42,7 @@ type LiveSession = {
   remainingUnits?: number; shortageUnits?: number; scannedSkus?: number; scannedUnits?: number; unknownBarcodes?: number; items?: LiveSessionItem[]; notes?: string
   launch?: { status?: string; readyItems?: number; blockedItems?: number; queuedItems?: number; submittedItems?: number; liveItems?: number; failedItems?: number; blockers?: string[]; jobId?: string; jobNumber?: number; jobStatus?: string; jobPhase?: string; processedItems?: number; totalItems?: number; changedItems?: number; missingItems?: number; progressPercent?: number; merchantSkuDate?: string; message?: string; reviewedAt?: string; queuedAt?: string; updatedAt?: string }
   tiktokCreatorId?: string; tiktokCreatorName?: string; tiktokLiveSync?: { status?: string; creatorId?: string; creatorName?: string; requestedCount?: number; syncedCount?: number; failedCount?: number; warning?: string; syncedAt?: string }
+  tiktokStudio?: { liveId?: string; title?: string; status?: string; startTime?: string; endTime?: string; trackingStartedAt?: string; lastSeenAt?: string; matchMode?: string }
   createdAt?: string; createdBy?: string; updatedAt?: string; reconciledAt?: string; audit?: LiveSessionAudit | null
 }
 type QuickProduct = { id?: string; sku: string; title?: string; image?: string; qty?: number; cost?: number; barcode?: string; mfrPartNumber?: string; vendorSku?: string }
@@ -61,6 +62,11 @@ type StudioData = {
 }
 type StudioOrder = { id?: string; orderNumber?: string; marketplaceOrderId?: string; status?: string; createdAt?: string; shippedAt?: string; items?: Array<{ sku?: string; title?: string; quantity?: number }> }
 type StudioFinalization = { status?: string; finalizeAfter?: string; orderSyncJobId?: string; error?: string }
+type ActiveBroadcast = {
+  accountId?: string; accountName?: string; creatorId?: string; creatorName?: string; liveId?: string; title?: string; status?: string; startTime?: string
+  checkedAt?: string; openUrl?: string; matched?: boolean; matchMode?: string; sessionId?: string; sessionNumber?: string; candidateSessionNumbers?: string[]
+}
+type LiveDetection = { activeBroadcasts: ActiveBroadcast[]; checkedAt?: string; warnings: string[]; message?: string }
 
 const destinations = [
   { value: "unassigned", label: "Not assigned yet" },
@@ -212,6 +218,27 @@ function ItemIdentity({ item }: { item: LiveSessionItem }) {
     {(item.launchImage || item.launch?.imageDataUrl || item.image) ? <img src={item.launchImage || item.launch?.imageDataUrl || item.image} alt="" className="size-10 rounded border object-contain" /> : <span className="grid size-10 shrink-0 place-items-center rounded border bg-muted"><Boxes className="size-4 text-muted-foreground" /></span>}
     <div className="min-w-0"><a className="font-mono text-xs font-medium text-primary hover:underline" href={`/products/${encodeURIComponent(String(item.sku || ""))}`}>{item.sku || "Unknown SKU"}</a><p className="max-w-80 truncate font-medium" title={displayTitle}>{displayTitle}</p>{displayTitle !== item.title && <p className="max-w-80 truncate text-xs text-muted-foreground" title={item.title}>Catalog: {item.title}</p>}<p className="text-xs text-muted-foreground">UPC {item.upc || "-"} · MPN {item.manufacturerSku || "-"}</p></div>
   </div>
+}
+
+function ActiveBroadcastCard({ broadcast }: { broadcast: ActiveBroadcast }) {
+  const sessionUrl = broadcast.sessionNumber || broadcast.sessionId ? `/live-sessions/${encodeURIComponent(String(broadcast.sessionNumber || broadcast.sessionId))}` : ""
+  return <Card className="border-emerald-500/50 bg-emerald-500/5">
+    <CardContent className="flex flex-wrap items-center justify-between gap-4 p-4">
+      <div className="flex min-w-0 items-start gap-3">
+        <span className="grid size-10 shrink-0 place-items-center rounded-md bg-emerald-500/15 text-emerald-700 dark:text-emerald-300"><RadioTower className="size-5 animate-pulse" /></span>
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2"><Badge variant="success">LIVE now</Badge><p className="truncate font-semibold">{broadcast.title || "TikTok LIVE"}</p></div>
+          <p className="mt-1 text-sm text-muted-foreground">{broadcast.accountName || "TikTok Shop"} · @{broadcast.creatorName || "official account"}{broadcast.startTime ? ` · Started ${dateLabel(broadcast.startTime)}` : ""}</p>
+          {!broadcast.matched && <p className="mt-1 text-sm text-amber-700 dark:text-amber-300">TikTok is broadcasting, but DataPlus cannot safely choose between {broadcast.candidateSessionNumbers?.join(", ") || "the open sessions"}. Open the correct session to link it.</p>}
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {sessionUrl && <Button asChild size="sm"><a href={sessionUrl}>Open {broadcast.sessionNumber || "session"}</a></Button>}
+        {!broadcast.matched && broadcast.candidateSessionNumbers?.slice(0, 4).map((sessionNumber) => <Button key={sessionNumber} asChild size="sm" variant="outline"><a href={`/live-sessions/${encodeURIComponent(sessionNumber)}`}>Check {sessionNumber}</a></Button>)}
+        {broadcast.openUrl && <Button asChild size="sm" variant="outline"><a href={broadcast.openUrl} target="_blank" rel="noreferrer">Open TikTok<ExternalLink className="size-3.5" /></a></Button>}
+      </div>
+    </CardContent>
+  </Card>
 }
 
 function SessionDetail({ session, loading, error, references, onReload }: { session: LiveSession | null; loading: boolean; error: string; references: ReferenceData; onReload: () => Promise<void> }) {
@@ -539,6 +566,8 @@ export function LiveSessionsRoute({ warehouses = [], operatorName = "Warehouse u
   const [referencesLoaded, setReferencesLoaded] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
+  const [checkingLive, setCheckingLive] = useState(false)
+  const [liveDetection, setLiveDetection] = useState<LiveDetection>({ activeBroadcasts: [], warnings: [] })
   const [createOpen, setCreateOpen] = useState(Boolean(urlDefaults.sourceId))
   const [creating, setCreating] = useState(false)
   const [loadingSource, setLoadingSource] = useState(false)
@@ -580,7 +609,41 @@ export function LiveSessionsRoute({ warehouses = [], operatorName = "Warehouse u
     finally { setLoading(false) }
   }
 
+  const checkActiveBroadcasts = useCallback(async (refresh = false, quiet = false) => {
+    if (detailKey) return
+    if (!quiet) setCheckingLive(true)
+    try {
+      const result = await api<{ sessions?: LiveSession[]; activeBroadcasts?: ActiveBroadcast[]; checkedAt?: string; warnings?: string[]; message?: string }>(`/api/live-sessions/detect-active${refresh ? "?refresh=1" : ""}`, { method: "POST", body: "{}" })
+      setSessions(result.sessions || [])
+      setLiveDetection({ activeBroadcasts: result.activeBroadcasts || [], checkedAt: result.checkedAt, warnings: result.warnings || [], message: result.message })
+      if (!quiet) toast.success(result.message || "TikTok LIVE status checked.")
+    } catch (liveError) {
+      if (!quiet) toast.error(liveError instanceof Error ? liveError.message : "TikTok LIVE status could not be checked.")
+    } finally {
+      if (!quiet) setCheckingLive(false)
+    }
+  }, [detailKey])
+
   useEffect(() => { void load() }, [detailKey])
+  useEffect(() => {
+    if (detailKey || loading) return
+    let stopped = false
+    let inFlight = false
+    const poll = async () => {
+      if (stopped || inFlight || document.visibilityState !== "visible") return
+      inFlight = true
+      try { await checkActiveBroadcasts(false, true) } finally { inFlight = false }
+    }
+    void poll()
+    const timer = window.setInterval(() => void poll(), 30_000)
+    const visibility = () => { if (document.visibilityState === "visible") void poll() }
+    document.addEventListener("visibilitychange", visibility)
+    return () => {
+      stopped = true
+      window.clearInterval(timer)
+      document.removeEventListener("visibilitychange", visibility)
+    }
+  }, [checkActiveBroadcasts, detailKey, loading])
   useEffect(() => { if (detailKey || createOpen) void loadReferences() }, [detailKey, createOpen, referencesLoaded])
   useEffect(() => { if (!draft.warehouseId && physicalWarehouses[0]?.id) setDraft((current) => ({ ...current, warehouseId: String(physicalWarehouses[0]?.id || "") })) }, [physicalWarehouses, draft.warehouseId])
   useEffect(() => { setSourceSummary(null) }, [draft.sourceType])
@@ -658,16 +721,41 @@ export function LiveSessionsRoute({ warehouses = [], operatorName = "Warehouse u
   }
 
   if (detailKey) return <SessionDetail session={selectedSession} loading={loading} error={error} references={references} onReload={load} />
-  const active = sessions.filter((session) => !["completed", "canceled"].includes(String(session.status))).length
+  const openSessions = sessions.filter((session) => !["completed", "canceled"].includes(String(session.status))).length
+  const activeBroadcasts = liveDetection.activeBroadcasts || []
+  const liveSessionIds = new Set(activeBroadcasts.filter((broadcast) => broadcast.matched).map((broadcast) => String(broadcast.sessionId || "")))
   const reserved = sessions.reduce((sum, session) => sum + Number(session.reservedUnits || session.scannedUnits || 0), 0)
   const sold = sessions.reduce((sum, session) => sum + Number(session.soldUnits || 0), 0)
   const shortages = sessions.reduce((sum, session) => sum + Number(session.shortageUnits || 0), 0)
 
   return <div className="grid gap-5">
-    <PageHeader eyebrow="Warehouse / Live sessions" title="Live Sessions" description="Reserve inventory once, split a PO across multiple launches, and reconcile sold and shipped quantities without deducting physical stock twice." action={<Button onClick={() => setCreateOpen(true)}><PackagePlus className="size-4" /> Create session</Button>} />
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><MetricCard label="Active sessions" value={active} icon={RadioTower} /><MetricCard label="Reserved units" value={reserved} icon={Boxes} /><MetricCard label="Sold units" value={sold} icon={ShoppingBag} /><MetricCard label="Shortage units" value={shortages} icon={AlertTriangle} /></div>
+    <PageHeader eyebrow="Warehouse / Live sessions" title="Live Sessions" description="Reserve inventory once, split a PO across multiple launches, and reconcile sold and shipped quantities without deducting physical stock twice." action={<div className="flex flex-wrap gap-2"><Button variant="outline" disabled={checkingLive} onClick={() => void checkActiveBroadcasts(true)}>{checkingLive ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Check live</Button><Button onClick={() => setCreateOpen(true)}><PackagePlus className="size-4" /> Create session</Button></div>} />
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"><MetricCard label="Open sessions" value={openSessions} icon={RadioTower} /><MetricCard label="Live now" value={activeBroadcasts.length} icon={RadioTower} /><MetricCard label="Reserved units" value={reserved} icon={Boxes} /><MetricCard label="Sold units" value={sold} icon={ShoppingBag} /><MetricCard label="Shortage units" value={shortages} icon={AlertTriangle} /></div>
+    {activeBroadcasts.map((broadcast) => <ActiveBroadcastCard key={`${broadcast.accountId}-${broadcast.creatorId}-${broadcast.liveId}`} broadcast={broadcast} />)}
+    {liveDetection.warnings.length > 0 && <Alert className="border-amber-500/40 bg-amber-500/5"><AlertTriangle className="size-4" /><AlertTitle>TikTok LIVE detection needs attention</AlertTitle><AlertDescription>{liveDetection.warnings.join(" ")}</AlertDescription></Alert>}
     {error && <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Live sessions could not load</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
-    <Card><CardHeader className="border-b"><CardTitle className="text-base">Sessions</CardTitle><CardDescription>Every quantity stays traceable to the PO, audit, previous session, or warehouse stock that supplied it.</CardDescription></CardHeader><CardContent className="p-0">{loading ? <div className="flex min-h-52 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading live sessions...</div> : sessions.length ? <MobileTables><Table><TableHeader><TableRow><TableHead>Session</TableHead><TableHead>Source</TableHead><TableHead>Destination</TableHead><TableHead className="text-right">Reserved</TableHead><TableHead className="text-right">Sold</TableHead><TableHead className="text-right">Shipped</TableHead><TableHead className="text-right">Remaining</TableHead><TableHead>Status</TableHead><TableHead>Updated</TableHead></TableRow></TableHeader><TableBody>{sessions.map((session) => <TableRow key={session.id}><TableCell><a className="font-medium text-primary hover:underline" href={`/live-sessions/${encodeURIComponent(String(session.sessionNumber || session.id))}`}>{session.sessionNumber || "Session"}</a><p className="max-w-72 truncate text-xs text-muted-foreground">{session.title || "Live inventory"}</p></TableCell><TableCell><p>{session.sourceLabel || "Live inventory"}</p><p className="text-xs text-muted-foreground">{session.warehouseName || "-"}</p></TableCell><TableCell><p>{session.channelLabel || "Not assigned"}</p><p className="text-xs text-muted-foreground">{session.channelAccountName || "No shop selected"}</p></TableCell><TableCell className="text-right font-medium">{numberLabel(session.reservedUnits || session.scannedUnits)}</TableCell><TableCell className="text-right">{numberLabel(session.soldUnits)}</TableCell><TableCell className="text-right">{numberLabel(session.shippedUnits)}</TableCell><TableCell className="text-right">{numberLabel(session.remainingUnits)}</TableCell><TableCell><Badge variant="outline" className={statusClass(session.status)}>{statusLabel(session.status)}</Badge>{Number(session.shortageUnits || 0) > 0 && <Badge variant="warning" className="ml-1">Short {numberLabel(session.shortageUnits)}</Badge>}</TableCell><TableCell>{dateLabel(session.updatedAt || session.createdAt)}</TableCell></TableRow>)}</TableBody></Table></MobileTables> : <div className="flex min-h-52 flex-col items-center justify-center gap-3 px-5 py-10 text-center"><RadioTower className="size-8 text-muted-foreground" /><div><p className="font-medium">No live sessions yet</p><p className="mt-1 max-w-md text-sm text-muted-foreground">Create one from a live-purpose PO, inventory audit, previous unsold inventory, manual SKUs, or a new scan.</p></div><Button onClick={() => setCreateOpen(true)}><PackagePlus className="size-4" /> Create session</Button></div>}</CardContent></Card>
+    <Card>
+      <CardHeader className="border-b"><CardTitle className="text-base">Sessions</CardTitle><CardDescription>Every quantity stays traceable to the PO, audit, previous session, or warehouse stock that supplied it.</CardDescription></CardHeader>
+      <CardContent className="p-0">
+        {loading ? <div className="flex min-h-52 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" /> Loading live sessions...</div> : sessions.length ? <MobileTables><Table>
+          <TableHeader><TableRow><TableHead>Session</TableHead><TableHead>Source</TableHead><TableHead>Destination</TableHead><TableHead className="text-right">Reserved</TableHead><TableHead className="text-right">Sold</TableHead><TableHead className="text-right">Shipped</TableHead><TableHead className="text-right">Remaining</TableHead><TableHead>Status</TableHead><TableHead>Updated</TableHead></TableRow></TableHeader>
+          <TableBody>{sessions.map((session) => {
+            const liveNow = liveSessionIds.has(String(session.id))
+            return <TableRow key={session.id} className={liveNow ? "bg-emerald-500/5" : ""}>
+              <TableCell><a className="font-medium text-primary hover:underline" href={`/live-sessions/${encodeURIComponent(String(session.sessionNumber || session.id))}`}>{session.sessionNumber || "Session"}</a><p className="max-w-72 truncate text-xs text-muted-foreground">{session.title || "Live inventory"}</p></TableCell>
+              <TableCell><p>{session.sourceLabel || "Live inventory"}</p><p className="text-xs text-muted-foreground">{session.warehouseName || "-"}</p></TableCell>
+              <TableCell><p>{session.channelLabel || "Not assigned"}</p><p className="text-xs text-muted-foreground">{session.channelAccountName || "No shop selected"}</p>{liveNow && session.tiktokStudio?.liveId && <p className="mt-1 font-mono text-xs text-emerald-700 dark:text-emerald-300">Room {session.tiktokStudio.liveId}</p>}</TableCell>
+              <TableCell className="text-right font-medium">{numberLabel(session.reservedUnits || session.scannedUnits)}</TableCell>
+              <TableCell className="text-right">{numberLabel(session.soldUnits)}</TableCell>
+              <TableCell className="text-right">{numberLabel(session.shippedUnits)}</TableCell>
+              <TableCell className="text-right">{numberLabel(session.remainingUnits)}</TableCell>
+              <TableCell>{liveNow ? <Badge variant="success"><RadioTower className="mr-1 size-3 animate-pulse" /> Live now</Badge> : <Badge variant="outline" className={statusClass(session.status)}>{statusLabel(session.status)}</Badge>}{Number(session.shortageUnits || 0) > 0 && <Badge variant="warning" className="ml-1">Short {numberLabel(session.shortageUnits)}</Badge>}</TableCell>
+              <TableCell>{liveNow && session.tiktokStudio?.lastSeenAt ? <>Checked {dateLabel(session.tiktokStudio.lastSeenAt)}</> : dateLabel(session.updatedAt || session.createdAt)}</TableCell>
+            </TableRow>
+          })}</TableBody>
+        </Table></MobileTables> : <div className="flex min-h-52 flex-col items-center justify-center gap-3 px-5 py-10 text-center"><RadioTower className="size-8 text-muted-foreground" /><div><p className="font-medium">No live sessions yet</p><p className="mt-1 max-w-md text-sm text-muted-foreground">Create one from a live-purpose PO, inventory audit, previous unsold inventory, manual SKUs, or a new scan.</p></div><Button onClick={() => setCreateOpen(true)}><PackagePlus className="size-4" /> Create session</Button></div>}
+      </CardContent>
+    </Card>
     <CreateDialog open={createOpen} onOpenChange={setCreateOpen} draft={draft} setDraft={setDraft} sourceReferences={sourceReferences} selectSource={selectSource} physicalWarehouses={physicalWarehouses} selectedAccounts={selectedAccounts} loadingReferences={referencesLoading || !referencesLoaded} loadingSource={loadingSource} sourceSummary={sourceSummary} draftItems={draftItems} setDraftItems={setDraftItems} manualQuery={manualQuery} setManualQuery={setManualQuery} manualResults={manualResults} manualSearching={manualSearching} addManualProduct={addManualProduct} references={references} creating={creating} create={create} />
   </div>
 }

@@ -230,6 +230,9 @@ async function main() {
   assert.equal(tiktokMarketplaceSource.includes('liveAuctionExportContext'), true, 'TikTok must resolve the selected shop warehouse for LIVE auction CSV exports.');
   assert.equal(serverSource.includes('parts[3] === "tiktok-auction" && parts[4] === "export"'), true, 'Live Sessions must expose a TikTok auction upload export route.');
   assert.equal(liveSessionsSource.includes('Auction upload CSV'), true, 'TikTok Live Sessions must expose the manual auction upload fallback.');
+  assert.equal(serverSource.includes('url.pathname === "/api/live-sessions/detect-active"'), true, 'The Live Sessions workspace must detect active TikTok broadcasts without opening each session.');
+  assert.equal(liveSessionsSource.includes('Check live'), true, 'The Live Sessions workspace must expose an explicit TikTok broadcast refresh.');
+  assert.equal(liveSessionsSource.includes('Live now'), true, 'Active TikTok broadcasts must be visible in the Live Sessions workspace.');
   assert.equal(tiktokMarketplaceSource.includes("'/product/202309/images/upload'"), true, 'TikTok live-session photo overrides must upload to the TikTok product image API.');
   assert.equal(tiktokMarketplaceSource.includes('title: launchTitle'), true, 'TikTok live-session launches must use the reviewed session title.');
   assert.equal(tiktokMarketplaceSource.includes('seller_sku: merchantSku'), true, 'TikTok live-session launches must use the reviewed manufacturer SKU as seller SKU.');

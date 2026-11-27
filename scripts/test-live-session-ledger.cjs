@@ -8,11 +8,33 @@ const {
   itemMetrics,
   launchCounts,
   launchReadiness,
+  liveRoomSessionMatch,
   matchSessionItemToOrderLine,
   reconcileLiveSessions,
   sessionTotals,
   sourceAvailabilityItems,
 } = require("../lib/live-sessions");
+
+test("TikTok active rooms match an explicitly linked DataPlus session", () => {
+  const sessions = [
+    { id: "session-1", sessionNumber: "LS-101", status: "ready", channel: "tiktok_live", channelAccountId: "shop-1", tiktokCreatorId: "creator-1", tiktokStudio: { liveId: "room-101" } },
+    { id: "session-2", sessionNumber: "LS-102", status: "ready", channel: "tiktok_live", channelAccountId: "shop-1", tiktokCreatorId: "creator-1" },
+  ];
+  const match = liveRoomSessionMatch(sessions, { accountId: "shop-1", creatorId: "creator-1" }, { liveId: "room-101", status: "LIVE" });
+  assert.equal(match.session.id, "session-1");
+  assert.equal(match.matchMode, "tracked_room");
+});
+
+test("TikTok active-room detection refuses to guess between multiple sessions", () => {
+  const sessions = [
+    { id: "session-1", sessionNumber: "LS-101", status: "ready", channel: "tiktok_live", channelAccountId: "shop-1", tiktokCreatorId: "creator-1" },
+    { id: "session-2", sessionNumber: "LS-102", status: "ready", channel: "tiktok_live", channelAccountId: "shop-1", tiktokCreatorId: "creator-1" },
+  ];
+  const match = liveRoomSessionMatch(sessions, { accountId: "shop-1", creatorId: "creator-1" }, { liveId: "room-202", status: "LIVE" });
+  assert.equal(match.session, null);
+  assert.equal(match.matchMode, "ambiguous");
+  assert.deepEqual(match.candidateSessionNumbers, ["LS-101", "LS-102"]);
+});
 
 test("active sessions cannot reserve the same physical source units twice", () => {
   const first = sessionTotals({

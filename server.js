@@ -63076,6 +63076,127 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/live-sessions/detect-active" && postgres.isPostgresEnabled()) {
+    const scope = liveSessionScope(req);
+    if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
+    const allSessions = await postgres.readEntityDocumentCollectionFast("liveSessions");
+    const scopedSessions = liveSessionRowsForScope(allSessions, scope);
+    const candidateSessions = scopedSessions.filter((session) => (
+      normalizeLiveInventoryChannel(session.channel) === "tiktok_live"
+      && liveSessionLedger.sessionIsActive(session)
+    ));
+    const groups = new Map();
+    const warnings = [];
+    for (const session of candidateSessions) {
+      const accountId = String(session.channelAccountId || "").trim();
+      const creatorId = String(session.tiktokCreatorId || "").trim();
+      if (!accountId || !creatorId) {
+        warnings.push(`${session.sessionNumber || "A TikTok session"} needs both a TikTok shop and official LIVE account before DataPlus can detect its broadcast.`);
+        continue;
+      }
+      const key = `${accountId}:${creatorId}`;
+      const group = groups.get(key) || { accountId, creatorId, sessions: [] };
+      group.sessions.push(session);
+      groups.set(key, group);
+    }
+
+    const refresh = url.searchParams.get("refresh") === "1";
+    const checks = await Promise.all([...groups.values()].slice(0, 12).map(async (group) => {
+      try {
+        return { ...group, studio: await getTikTokMarketplace().studioStatus({ accountId: group.accountId, creatorId: group.creatorId, refresh }) };
+      } catch (error) {
+        return { ...group, error: error.message || "TikTok LIVE status could not be checked." };
+      }
+    }));
+    if (groups.size > 12) warnings.push(`${groups.size - 12} additional TikTok account pairing(s) were not checked in this refresh.`);
+
+    const checkedAt = new Date().toISOString();
+    const liveUpdates = new Map();
+    const activeBroadcasts = [];
+    for (const check of checks) {
+      if (check.error) {
+        warnings.push(`${check.sessions[0]?.channelAccountName || "TikTok"}: ${check.error}`);
+        continue;
+      }
+      const room = check.studio?.room || null;
+      if (!room || !liveSessionLedger.remoteLiveRoomIsActive(room)) continue;
+      const match = liveSessionLedger.liveRoomSessionMatch(check.sessions, { accountId: check.accountId, creatorId: check.creatorId }, room);
+      const matchedSession = match.session || null;
+      if (matchedSession) liveUpdates.set(String(matchedSession.id), { room, studio: check.studio, matchMode: match.matchMode });
+      activeBroadcasts.push({
+        accountId: check.accountId,
+        accountName: matchedSession?.channelAccountName || check.sessions[0]?.channelAccountName || "TikTok Shop",
+        creatorId: check.creatorId,
+        creatorName: check.studio?.creator?.username || matchedSession?.tiktokCreatorName || check.sessions[0]?.tiktokCreatorName || "Official LIVE account",
+        liveId: String(room.liveId || ""),
+        title: String(room.title || "TikTok LIVE"),
+        status: String(room.status || "LIVE").toUpperCase(),
+        startTime: room.startTime || "",
+        checkedAt: check.studio?.fetchedAt || checkedAt,
+        openUrl: check.studio?.openUrl || "",
+        matched: Boolean(matchedSession),
+        matchMode: match.matchMode,
+        sessionId: String(matchedSession?.id || ""),
+        sessionNumber: String(matchedSession?.sessionNumber || ""),
+        candidateSessionNumbers: match.candidateSessionNumbers || []
+      });
+    }
+
+    let finalScopedSessions = scopedSessions;
+    if (liveUpdates.size) {
+      const mutation = await postgres.mutateLiveSessionsAtomically((sessions) => {
+        const nextSessions = sessions.map((session) => {
+          const update = liveUpdates.get(String(session.id));
+          if (!update || liveSessionLedger.sessionIsTerminal(session)) return session;
+          const previousStudio = session.tiktokStudio || {};
+          const lastSeenAt = Date.parse(String(previousStudio.lastSeenAt || ""));
+          const heartbeatDue = !Number.isFinite(lastSeenAt) || Date.now() - lastSeenAt >= 120_000;
+          const changed = String(session.status || "") !== "live"
+            || String(previousStudio.liveId || "") !== String(update.room.liveId || "")
+            || String(previousStudio.status || "") !== String(update.room.status || "")
+            || heartbeatDue;
+          if (!changed) return session;
+          return liveSessionWithoutEmbeddedAudit(liveSessionLedger.sessionTotals({
+            ...session,
+            status: "live",
+            startedAt: session.startedAt || update.room.startTime || checkedAt,
+            tiktokStudio: {
+              ...previousStudio,
+              liveId: String(update.room.liveId || ""),
+              title: String(update.room.title || ""),
+              status: String(update.room.status || "LIVE").toUpperCase(),
+              startTime: update.room.startTime || "",
+              endTime: update.room.endTime || "",
+              creatorId: session.tiktokCreatorId || "",
+              creatorName: update.studio?.creator?.username || session.tiktokCreatorName || "",
+              trackingStartedAt: previousStudio.trackingStartedAt || update.studio?.fetchedAt || checkedAt,
+              lastSeenAt: update.studio?.fetchedAt || checkedAt,
+              detectedFrom: "live_sessions_workspace",
+              matchMode: update.matchMode
+            },
+            updatedAt: checkedAt
+          }));
+        });
+        return { sessions: nextSessions, result: { sessions: liveSessionRowsForScope(nextSessions, scope) } };
+      });
+      finalScopedSessions = mutation?.result?.sessions || scopedSessions;
+    }
+
+    const summaries = finalScopedSessions.map((session) => {
+      const { items, audit, ...summary } = liveSessionLedger.sessionTotals(session);
+      return summary;
+    }).sort((left, right) => new Date(String(right.updatedAt || right.createdAt || 0)).getTime() - new Date(String(left.updatedAt || left.createdAt || 0)).getTime());
+    return sendJson(res, 200, {
+      sessions: summaries,
+      activeBroadcasts,
+      checkedAt,
+      warnings: [...new Set(warnings)],
+      message: activeBroadcasts.length
+        ? `${activeBroadcasts.length} active TikTok LIVE broadcast${activeBroadcasts.length === 1 ? " was" : "s were"} detected.`
+        : "No active TikTok LIVE broadcast was detected for the configured sessions."
+    });
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "live-sessions" && postgres.isPostgresEnabled()) {
     const scope = liveSessionScope(req);
     if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
