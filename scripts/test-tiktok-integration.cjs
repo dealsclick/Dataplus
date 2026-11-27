@@ -202,6 +202,8 @@ async function main() {
   assert.equal(liveSessionsSource.includes('Download loaded products'), true, 'TikTok Live Sessions must export the product tray with resolved DataPlus SKUs.');
   assert.equal(liveSessionsSource.includes('Session orders'), true, 'Attributed TikTok LIVE orders must remain visible outside the collapsible Studio panel.');
   assert.equal(liveSessionsSource.includes('Product tray status'), true, 'TikTok session products must expose their tray status and protected removal workflow.');
+  assert.equal(liveSessionsSource.includes('Remove product from DataPlus session'), true, 'Unused TikTok session products must expose a manual removal action even when tray access is unavailable.');
+  assert.equal(liveSessionsSource.includes('This does not remove the product from TikTok'), true, 'Session removal must distinguish DataPlus inventory release from TikTok tray removal.');
   assert.equal(liveSessionsSource.includes('Not in uploaded CSV'), true, 'A session CSV must provide a safe tray-status fallback when TikTok does not expose the product tray.');
   assert.equal(liveSessionsSource.includes('Tray access unavailable'), true, 'TikTok tray permission problems must be distinct from an unchecked tray.');
   assert.equal(liveSessionsSource.includes('Change source PO'), true, 'A live session must allow its inventory source PO to be reviewed and changed.');

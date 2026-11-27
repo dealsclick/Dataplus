@@ -64092,11 +64092,29 @@ async function handleApi(req, res) {
         launch: requestedItemEdits.length ? { ...(target.launch || {}), status: "not_reviewed", blockers: [], message: "Product launch details changed. Run readiness review again.", reviewedAt: "", updatedAt: new Date().toISOString() } : target.launch,
         updatedAt: new Date().toISOString()
       });
-      return { sessions: workingSessions.map((session) => String(session.id) === String(target.id) ? next : session), result: { session: next, removedItems: removedItems.length } };
+      return {
+        sessions: workingSessions.map((session) => String(session.id) === String(target.id) ? next : session),
+        result: {
+          session: next,
+          removedItems: removedItems.length,
+          removedProducts: removedItems.map((item) => ({
+            id: String(item.id || ""),
+            sku: String(item.sku || item.catalogSku || item.supplierSku || ""),
+            title: String(item.title || ""),
+            reservedQty: Number(item.reservedQty || 0),
+            remainingQty: Number(item.remainingQty ?? item.reservedQty ?? 0),
+            sourceKey: String(item.sourceKey || "")
+          }))
+        }
+      };
     });
     void recordUserActivity(req, authUser, {
-      eventType: "live_session", action: "Edited live session", entityType: "live_session", entityId: mutation?.result?.session?.id || key,
-      metadata: { removedItems: Number(mutation?.result?.removedItems || 0), editedItems: Array.isArray(body.items) ? body.items.length : 0 }
+      eventType: "live_session", action: mutation?.result?.removedItems ? "Removed products from live session" : "Edited live session", entityType: "live_session", entityId: mutation?.result?.session?.id || key,
+      metadata: {
+        removedItems: Number(mutation?.result?.removedItems || 0),
+        removedProducts: mutation?.result?.removedProducts || [],
+        editedItems: Array.isArray(body.items) ? body.items.length : 0
+      }
     });
     return sendJson(res, 200, { session: mutation?.result?.session, message: mutation?.result?.removedItems ? `Live session updated; ${mutation.result.removedItems} product(s) removed and released.` : "Live session updated." });
   }
