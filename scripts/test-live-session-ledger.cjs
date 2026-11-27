@@ -11,6 +11,7 @@ const {
   liveRoomSessionMatch,
   matchSessionItemToOrderLine,
   reconcileLiveSessions,
+  relinkSessionToPurchaseOrder,
   sessionTotals,
   sourceAvailabilityItems,
 } = require("../lib/live-sessions");
@@ -124,6 +125,121 @@ test("the recorded import match mode preserves an original manufacturer SKU", ()
     sku: "BUS143823TRV",
   });
   assert.equal(match.mode, "manufacturer-part-number");
+});
+
+test("changing a session PO keeps the item identity when another supplier shares its MPN", () => {
+  const changed = relinkSessionToPurchaseOrder({
+    id: "session-104",
+    sessionNumber: "LS-104",
+    status: "live",
+    sourceType: "purchase_order",
+    sourceId: "po-test",
+    sourcePurchaseOrderId: "po-test",
+    sourcePurchaseOrderNumber: "PO-139008",
+    items: [{
+      id: "session-item-1",
+      sku: "BUS796732TRV",
+      supplierSku: "BUS796732TRV",
+      manufacturerSku: "48-32-4537",
+      sourceKey: "purchase_order:po-test:line-old",
+      sourceAvailableQty: 2,
+      requestedQty: 2,
+      reservedQty: 2,
+      launchTitle: "Live title",
+    }],
+  }, [{
+    id: "po-line-new",
+    sourceKey: "purchase_order:po-real:line-new",
+    sku: "BUS368388DIB",
+    supplierSku: "BUS368388DIB",
+    manufacturerSku: "48-32-4537",
+    sourceAvailableQty: 8,
+    requestedQty: 8,
+  }], [], {
+    id: "po-real",
+    number: "PO-140001",
+    label: "Purchase order PO-140001",
+    warehouseId: "warehouse-1",
+    warehouseName: "Staten Island 2",
+  }, { actor: "Luis", changedAt: "2026-11-27T18:00:00.000Z" });
+
+  assert.equal(changed.sourcePurchaseOrderId, "po-real");
+  assert.equal(changed.sourcePurchaseOrderNumber, "PO-140001");
+  assert.equal(changed.items.length, 1);
+  assert.equal(changed.items[0].id, "session-item-1");
+  assert.equal(changed.items[0].sku, "BUS368388DIB");
+  assert.equal(changed.items[0].sourceRelinkMatchMode, "manufacturer-part-number");
+  assert.equal(changed.items[0].reservedQty, 8);
+  assert.equal(changed.items[0].launchTitle, "Live title");
+  assert.equal(changed.sourceHistory.at(-1).fromNumber, "PO-139008");
+  assert.equal(changed.sourceHistory.at(-1).toNumber, "PO-140001");
+});
+
+test("changing a session PO matches UPC before a conflicting MPN and respects other reservations", () => {
+  const changed = relinkSessionToPurchaseOrder({
+    id: "session-moving",
+    status: "ready",
+    sourceType: "purchase_order",
+    sourceId: "po-old",
+    items: [{
+      id: "item-upc",
+      upc: "0045242167234",
+      manufacturerSku: "48-89-2801",
+      reservedQty: 1,
+    }, {
+      id: "item-mpn",
+      upc: "0000000000000",
+      manufacturerSku: "48-32-4537",
+      reservedQty: 1,
+    }],
+  }, [{
+    id: "new-line",
+    sourceKey: "purchase_order:po-new:new-line",
+    upc: "0045242167234",
+    manufacturerSku: "48-32-4537",
+    sourceAvailableQty: 5,
+    requestedQty: 5,
+  }], [{
+    id: "other-session",
+    status: "live",
+    items: [{
+      sourceKey: "purchase_order:po-new:new-line",
+      sourceAvailableQty: 5,
+      reservedQty: 2,
+    }],
+  }], { id: "po-new", number: "PO-140002" });
+
+  assert.equal(changed.items.length, 1);
+  assert.equal(changed.items[0].id, "item-upc");
+  assert.equal(changed.items[0].sourceRelinkMatchMode, "upc");
+  assert.equal(changed.items[0].reservedQty, 3);
+  assert.equal(changed.items[0].shortageQty, 2);
+});
+
+test("changing a session PO refuses to detach an unmatched sold item", () => {
+  assert.throws(() => relinkSessionToPurchaseOrder({
+    id: "session-sold",
+    status: "live",
+    sourceType: "purchase_order",
+    sourceId: "po-old",
+    items: [{
+      id: "sold-item",
+      sku: "BUS796732TRV",
+      manufacturerSku: "48-32-4537",
+      reservedQty: 2,
+      soldQty: 1,
+    }],
+  }, [{
+    id: "different-line",
+    sourceKey: "purchase_order:po-new:different-line",
+    sku: "BUS999999DIB",
+    manufacturerSku: "99-99-9999",
+    sourceAvailableQty: 2,
+  }], [], { id: "po-new", number: "PO-140003" }), (error) => {
+    assert.equal(error.statusCode, 409);
+    assert.match(error.message, /sales, shipments, or marketplace launch evidence/);
+    return true;
+  });
 });
 
 test("repeat reconciliation is deterministic and does not count a shipment twice", () => {

@@ -204,6 +204,10 @@ async function main() {
   assert.equal(liveSessionsSource.includes('Product tray status'), true, 'TikTok session products must expose their tray status and protected removal workflow.');
   assert.equal(liveSessionsSource.includes('Not in uploaded CSV'), true, 'A session CSV must provide a safe tray-status fallback when TikTok does not expose the product tray.');
   assert.equal(liveSessionsSource.includes('Tray access unavailable'), true, 'TikTok tray permission problems must be distinct from an unchecked tray.');
+  assert.equal(liveSessionsSource.includes('Change source PO'), true, 'A live session must allow its inventory source PO to be reviewed and changed.');
+  assert.equal(liveSessionsSource.includes('Link PO and reallocate'), true, 'PO reassignment must explicitly reallocate the session inventory.');
+  assert.equal(liveSessionsSource.includes('Resolved items'), true, 'TikTok session orders must show their resolved catalog identities.');
+  assert.equal(liveSessionsSource.includes('Not matched to source PO'), true, 'TikTok session orders must make missing PO allocation visible.');
   const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const activeJobDatabaseSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
   const activeJobWorkerSource = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'dataplus-worker.js'), 'utf8');
@@ -222,6 +226,8 @@ async function main() {
   assert.equal(serverSource.includes('parts[3] === "tiktok-live" && parts[4] === "sync"'), true, 'The server must expose a TikTok Live Session sync route.');
   assert.equal(serverSource.includes('parts[3] === "tiktok-csv" && parts[4] === "reconcile"'), true, 'The server must expose TikTok session CSV reconciliation.');
   assert.equal(serverSource.includes('parts[4] === "products.csv"'), true, 'The server must export TikTok LIVE tray products with local SKU matches.');
+  assert.equal(serverSource.includes('enrichLiveOrderCatalogIdentities'), true, 'TikTok LIVE reconciliation must hydrate UPC and MPN identity before assigning session inventory.');
+  assert.equal(serverSource.includes('parts[3] === "source"'), true, 'The server must expose a reviewed live-session source reassignment route.');
   assert.equal(tiktokChannelSource.includes('Shop code'), true, 'TikTok settings must display the selected shop code.');
   assert.equal(tiktokChannelSource.includes('Shared TikTok app credentials'), true, 'TikTok settings must distinguish app credentials from seller accounts.');
   assert.equal(tiktokChannelSource.includes('Saved securely'), true, 'TikTok settings must explain that saved app secrets are not displayed.');

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { AlertCircle, AlertTriangle, ArrowLeft, Boxes, CheckCircle2, ClipboardCheck, CopyPlus, Download, ExternalLink, FileUp, History, ImagePlus, Loader2, MoreHorizontal, PackagePlus, Play, RadioTower, RefreshCw, Rocket, ScanBarcode, Search, ShoppingBag, Trash2, Undo2, Warehouse, XCircle } from "lucide-react"
+import { AlertCircle, AlertTriangle, ArrowLeft, Boxes, CheckCircle2, ClipboardCheck, CopyPlus, Download, ExternalLink, FileUp, History, ImagePlus, Link2, Loader2, MoreHorizontal, PackagePlus, Play, RadioTower, RefreshCw, Rocket, ScanBarcode, Search, ShoppingBag, Trash2, Undo2, Warehouse, XCircle } from "lucide-react"
 import { toast } from "sonner"
 import { Field, MetricCard, PageHeader } from "./app-ui"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -69,7 +69,8 @@ type StudioData = {
   metrics?: { gmv?: number; currency?: string; skuOrders?: number; mainOrders?: number; itemsSold?: number; viewers?: number; views?: number; productClicks?: number; comments?: number; likes?: number; shares?: number } | null
   products?: StudioProduct[]; productPerformance?: StudioPerformance[]
 }
-type StudioOrder = { id?: string; orderNumber?: string; marketplaceOrderId?: string; status?: string; createdAt?: string; shippedAt?: string; items?: Array<{ sku?: string; title?: string; quantity?: number }> }
+type StudioOrder = { id?: string; orderNumber?: string; marketplaceOrderId?: string; status?: string; createdAt?: string; shippedAt?: string; items?: Array<{ sku?: string; importedSku?: string; catalogSku?: string; title?: string; quantity?: number; upc?: string; manufacturerSku?: string; supplierSku?: string; matchMode?: string; allocatedQty?: number; sourceSku?: string; sourcePurchaseOrderNumber?: string }> }
+type SourcePreview = { source?: SourceReference & { href?: string }; summary?: SourcePreviewSummary; items?: LiveSessionItem[] }
 type StudioFinalization = { status?: string; finalizeAfter?: string; orderSyncJobId?: string; error?: string }
 type ActiveBroadcast = {
   accountId?: string; accountName?: string; creatorId?: string; creatorName?: string; liveId?: string; title?: string; status?: string; startTime?: string
@@ -264,12 +265,19 @@ function SessionDetail({ session, loading, error, references, initialOrders, ini
   const [studioFinalization, setStudioFinalization] = useState<StudioFinalization | null>(null)
   const [csvUploading, setCsvUploading] = useState(false)
   const [removeItem, setRemoveItem] = useState<LiveSessionItem | null>(null)
+  const [sourceOpen, setSourceOpen] = useState(false)
+  const [sourceInput, setSourceInput] = useState("")
+  const [sourcePreview, setSourcePreview] = useState<SourcePreview | null>(null)
+  const [sourceError, setSourceError] = useState("")
   const csvInputRef = useRef<HTMLInputElement>(null)
   const studioLoadedForRef = useRef("")
   const [edit, setEdit] = useState<EditSession>({ title: "", channel: "unassigned", channelAccountId: "", tiktokCreatorId: "", scheduledStartAt: "", scheduledEndAt: "", scheduleTimeZone: browserTimeZone(), channelEventId: "", notes: "", items: [] })
 
   useEffect(() => {
-    if (session) setEdit({ title: session.title || "", channel: session.channel || "unassigned", channelAccountId: session.channelAccountId || "", tiktokCreatorId: session.tiktokCreatorId || "", scheduledStartAt: localDateTimeValue(session.scheduledStartAt), scheduledEndAt: localDateTimeValue(session.scheduledEndAt), scheduleTimeZone: session.scheduleTimeZone || browserTimeZone(), channelEventId: session.channelEventId || "", notes: session.notes || "", items: editableSessionItems(session.items || []) })
+    if (session) {
+      setEdit({ title: session.title || "", channel: session.channel || "unassigned", channelAccountId: session.channelAccountId || "", tiktokCreatorId: session.tiktokCreatorId || "", scheduledStartAt: localDateTimeValue(session.scheduledStartAt), scheduledEndAt: localDateTimeValue(session.scheduledEndAt), scheduleTimeZone: session.scheduleTimeZone || browserTimeZone(), channelEventId: session.channelEventId || "", notes: session.notes || "", items: editableSessionItems(session.items || []) })
+      setSourceInput(session.sourcePurchaseOrderNumber || (session.sourceType === "purchase_order" ? session.sourceNumber || "" : ""))
+    }
   }, [session])
 
   useEffect(() => {
@@ -364,6 +372,39 @@ function SessionDetail({ session, loading, error, references, initialOrders, ini
       await onReload()
     } catch (editError) { toast.error(editError instanceof Error ? editError.message : "Unable to update the live session.") }
     finally { setWorking("") }
+  }
+
+  const reviewSourcePurchaseOrder = async () => {
+    const sourceId = sourceInput.trim()
+    if (!sourceId || working) return
+    setWorking("source-preview")
+    setSourceError("")
+    setSourcePreview(null)
+    try {
+      const result = await api<SourcePreview>(`/api/live-sessions/source-preview?sourceType=purchase_order&sourceId=${encodeURIComponent(sourceId)}`)
+      setSourcePreview(result)
+    } catch (previewError) {
+      setSourceError(previewError instanceof Error ? previewError.message : "The purchase order could not be reviewed.")
+    } finally { setWorking("") }
+  }
+
+  const relinkSourcePurchaseOrder = async () => {
+    if (!session?.id || !sourcePreview?.source?.id || working) return
+    setWorking("source-relink")
+    try {
+      const result = await api<{ session?: LiveSession; orderFeed?: StudioOrder[]; orderFeedTotal?: number; message?: string }>(`/api/live-sessions/${encodeURIComponent(session.id)}/source`, {
+        method: "POST",
+        body: JSON.stringify({ sourceId: sourcePreview.source.id }),
+      })
+      toast.success(result.message || "The live session inventory source was updated.")
+      setStudioOrders(result.orderFeed || [])
+      setStudioOrderTotal(Number(result.orderFeedTotal || 0))
+      setSourceOpen(false)
+      setSourcePreview(null)
+      await onReload()
+    } catch (relinkError) {
+      toast.error(relinkError instanceof Error ? relinkError.message : "The purchase order could not be linked to this session.", { duration: 12000 })
+    } finally { setWorking("") }
   }
 
   const updateEditItem = (itemId: string, changes: Partial<EditSessionItem>) => {
@@ -553,6 +594,13 @@ function SessionDetail({ session, loading, error, references, initialOrders, ini
     <PageHeader eyebrow="Live sessions" title={`${session.sessionNumber || "Session"} · ${session.title || "Live inventory"}`} description={`${session.companyName || references.scope?.companyName || "Company"} · ${session.sourceLabel || "Live inventory"} · ${session.warehouseName || "Warehouse"}`} action={<div className="flex flex-wrap gap-2"><Button variant="outline" onClick={() => window.location.assign("/live-sessions")}><ArrowLeft className="size-4" /> Sessions</Button>{scanUrl && <Button onClick={() => window.location.assign(scanUrl)}><ScanBarcode className="size-4" /> Scan items</Button>}<DropdownMenu><DropdownMenuTrigger asChild><Button variant="outline"><MoreHorizontal className="size-4" /> Actions</Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onClick={() => setEditOpen(true)} disabled={!active}>Edit session</DropdownMenuItem>{canMarkReady && <DropdownMenuItem onClick={() => void runAction("ready")}><CheckCircle2 className="size-4" /> Mark ready</DropdownMenuItem>}{["draft", "ready"].includes(String(session.status)) && session.channel !== "tiktok_live" && <DropdownMenuItem onClick={() => void runAction("start")}><Play className="size-4" /> Start session</DropdownMenuItem>}{session.channel === "tiktok_live" && <DropdownMenuItem onClick={() => setStudioOpen(true)}><RadioTower className="size-4" /> Open DataPlus Studio</DropdownMenuItem>}<DropdownMenuItem onClick={() => void runAction("reconcile")} disabled={!session.channel}><RefreshCw className="size-4" /> Reconcile sales</DropdownMenuItem>{Number(session.remainingUnits || 0) > 0 && <DropdownMenuItem onClick={() => window.location.assign(`/live-sessions?sourceType=previous_session&sourceId=${encodeURIComponent(session.id)}`)}><CopyPlus className="size-4" /> Session from remaining</DropdownMenuItem>}{active && <><DropdownMenuSeparator /><DropdownMenuItem onClick={() => setConfirmAction("complete")}><ClipboardCheck className="size-4" /> Complete and release</DropdownMenuItem><DropdownMenuItem className="text-destructive" onClick={() => setConfirmAction("cancel")}><XCircle className="size-4" /> Cancel and release</DropdownMenuItem></>}</DropdownMenuContent></DropdownMenu></div>} />
     {Number(session.shortageUnits || 0) > 0 && <Alert className="border-amber-500/40 bg-amber-500/5"><AlertTriangle className="size-4" /><AlertTitle>{numberLabel(session.shortageUnits)} shortage unit(s)</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>Every unreserved unit from the original source was used first. Replenish that source or continue with only the units DataPlus reserved.</span><span className="flex flex-wrap gap-2">{sourceLink && <Button size="sm" variant="outline" asChild><a href={sourceLink}>Open original source</a></Button>}<Button size="sm" variant="outline" disabled={Boolean(working)} onClick={() => void runAction("accept_available")}>Use reserved quantities</Button></span></AlertDescription></Alert>}
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6"><MetricCard label="Reserved" value={numberLabel(session.reservedUnits)} icon={Boxes} /><MetricCard label="Received" value={numberLabel(session.receivedUnits)} icon={Warehouse} /><MetricCard label="Sold" value={numberLabel(session.soldUnits)} icon={ShoppingBag} /><MetricCard label="Shipped" value={numberLabel(session.shippedUnits)} icon={ScanBarcode} /><MetricCard label="Remaining" value={numberLabel(session.remainingUnits)} icon={RadioTower} /><MetricCard label="Status" value={statusLabel(session.status)} icon={CheckCircle2} /></div>
+    <Card>
+      <CardHeader className="flex-row items-center justify-between gap-4 border-b">
+        <div><CardTitle className="flex items-center gap-2 text-base"><Link2 className="size-4" /> Inventory source</CardTitle><CardDescription>{session.sourceLabel || "No source selected"}{session.warehouseName ? ` · ${session.warehouseName}` : ""}</CardDescription></div>
+        <Button size="sm" variant="outline" disabled={!active} onClick={() => { setSourcePreview(null); setSourceError(""); setSourceInput(session.sourcePurchaseOrderNumber || (session.sourceType === "purchase_order" ? session.sourceNumber || "" : "")); setSourceOpen(true) }}><Link2 className="size-4" /> Change source PO</Button>
+      </CardHeader>
+      <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm"><span>Reserved units stay with this live room while DataPlus moves their traceability and allocation to the replacement PO.</span>{sourceLink && <Button size="sm" variant="ghost" asChild><a href={sourceLink}>Open current source<ExternalLink className="size-3.5" /></a></Button>}</CardContent>
+    </Card>
     {session.channel === "tiktok_live" && <Card>
       <CardHeader className="border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="flex items-center gap-2 text-base"><RadioTower className="size-4" /> TikTok LIVE preparation</CardTitle><CardDescription>Select the shop's official TikTok account used to go LIVE. DataPlus adds published products and verifies that TikTok returns them in the LIVE or pre-LIVE product list.</CardDescription></div>{session.tiktokLiveSync?.status && <Badge variant={session.tiktokLiveSync.status === "synced" ? "success" : "warning"}>{session.tiktokLiveSync.status === "synced" ? "Synced" : "Needs review"}</Badge>}</div></CardHeader>
       <CardContent className="grid gap-4 p-5 sm:grid-cols-[minmax(16rem,28rem)_auto] sm:items-end">
@@ -603,7 +651,7 @@ function SessionDetail({ session, loading, error, references, initialOrders, ini
     </Card>}
     {session.channel === "tiktok_live" && <Card>
       <CardHeader className="border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="flex items-center gap-2 text-base"><ShoppingBag className="size-4" /> Session orders</CardTitle><CardDescription>TikTok LIVE orders attributed to this room and session, without customer personal data.{studioOrderTotal > studioOrders.length ? ` Showing the latest ${studioOrders.length} of ${studioOrderTotal}.` : ""}</CardDescription></div><div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" disabled={Boolean(working)} onClick={() => void runAction("reconcile")}>{working === "reconcile" ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Reconcile orders</Button>{studio?.tracked && !studioLive && !["completed", "canceled"].includes(String(session.status || "")) && <Button size="sm" variant="outline" disabled={Boolean(working)} onClick={() => void finalizeStudio()}>{working === "studio-finalize" ? <Loader2 className="size-4 animate-spin" /> : <ClipboardCheck className="size-4" />} Final sync and close</Button>}</div></div></CardHeader>
-      <CardContent className="p-0">{studioOrders.length ? <MobileTables><Table><TableHeader><TableRow><TableHead>DataPlus</TableHead><TableHead>TikTok order</TableHead><TableHead>Status</TableHead><TableHead>Items</TableHead><TableHead>Created</TableHead></TableRow></TableHeader><TableBody>{studioOrders.map((order) => <TableRow key={String(order.id || order.marketplaceOrderId)}><TableCell><a className="text-primary hover:underline" href={`/orders/${encodeURIComponent(String(order.id || order.orderNumber || ""))}`}>{order.orderNumber || order.id}</a></TableCell><TableCell className="font-mono text-xs">{order.marketplaceOrderId || "-"}</TableCell><TableCell><Badge variant="outline">{order.status || "Imported"}</Badge></TableCell><TableCell>{(order.items || []).map((item) => `${item.sku || item.title || "Item"} x${numberLabel(item.quantity)}`).join(", ") || "-"}</TableCell><TableCell>{dateLabel(order.createdAt)}</TableCell></TableRow>)}</TableBody></Table></MobileTables> : <div className="flex min-h-36 flex-col items-center justify-center gap-2 px-5 py-8 text-center"><ShoppingBag className="size-7 text-muted-foreground" /><p className="font-medium">No imported orders are attributed to this session yet</p><p className="text-sm text-muted-foreground">New TikTok LIVE orders are linked automatically by room ID during order, webhook, and LIVE synchronization.</p></div>}</CardContent>
+      <CardContent className="p-0">{studioOrders.length ? <MobileTables><Table><TableHeader><TableRow><TableHead>DataPlus</TableHead><TableHead>TikTok order</TableHead><TableHead>Status</TableHead><TableHead>Resolved items</TableHead><TableHead>PO allocation</TableHead><TableHead>Created</TableHead></TableRow></TableHeader><TableBody>{studioOrders.map((order) => <TableRow key={String(order.id || order.marketplaceOrderId)}><TableCell><a className="text-primary hover:underline" href={`/orders/${encodeURIComponent(String(order.id || order.orderNumber || ""))}`}>{order.orderNumber || order.id}</a></TableCell><TableCell className="font-mono text-xs">{order.marketplaceOrderId || "-"}</TableCell><TableCell><Badge variant="outline">{order.status || "Imported"}</Badge></TableCell><TableCell><div className="grid min-w-72 gap-2">{(order.items || []).map((item, index) => { const catalogSku = item.catalogSku || item.sku || ""; const importedSku = item.importedSku || item.sku || ""; return <div key={`${catalogSku}-${index}`} className="grid gap-0.5"><div className="flex flex-wrap items-center gap-2"><a className="font-mono text-xs font-medium text-primary hover:underline" href={`/products/${encodeURIComponent(catalogSku)}`}>{catalogSku || item.title || "Item"}</a><span className="text-xs">x{numberLabel(item.quantity)}</span>{item.matchMode && <Badge variant={item.matchMode === "upc" ? "success" : "outline"}>{item.matchMode === "manufacturer-part-number" ? "MPN match" : item.matchMode === "supplier-sku" ? "Supplier SKU match" : item.matchMode.replace(/-/g, " ")}</Badge>}</div>{importedSku && importedSku !== catalogSku && <p className="font-mono text-[11px] text-muted-foreground">Imported {importedSku}</p>}<p className="text-[11px] text-muted-foreground">UPC {item.upc || "-"} · MPN {item.manufacturerSku || "-"}</p></div> })}</div></TableCell><TableCell>{(order.items || []).some((item) => Number(item.allocatedQty || 0) > 0) ? <div className="grid gap-1">{(order.items || []).filter((item) => Number(item.allocatedQty || 0) > 0).map((item, index) => <span key={`${item.sourceSku}-${index}`}><Badge variant="success">{item.sourcePurchaseOrderNumber || session.sourcePurchaseOrderNumber || "Source PO"} · {item.sourceSku || item.catalogSku || item.sku} x{numberLabel(item.allocatedQty)}</Badge></span>)}</div> : <Badge variant="warning">Not matched to source PO</Badge>}</TableCell><TableCell>{dateLabel(order.createdAt)}</TableCell></TableRow>)}</TableBody></Table></MobileTables> : <div className="flex min-h-36 flex-col items-center justify-center gap-2 px-5 py-8 text-center"><ShoppingBag className="size-7 text-muted-foreground" /><p className="font-medium">No imported orders are attributed to this session yet</p><p className="text-sm text-muted-foreground">New TikTok LIVE orders are linked automatically by room ID during order, webhook, and LIVE synchronization.</p></div>}</CardContent>
     </Card>}
     {session.channel === "tiktok_live" && <Card>
       <CardHeader className="border-b"><div className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-base">Product tray status</CardTitle><CardDescription>Compare reserved products with TikTok's current LIVE tray or the exact CSV uploaded for this session. Only confirmed missing products without launch, sale, or shipment evidence can be removed.</CardDescription></div><Button size="sm" variant="outline" disabled={studioLoading} onClick={() => void loadStudio(true)}>{studioLoading ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Refresh tray</Button></div></CardHeader>
@@ -654,6 +702,24 @@ function SessionDetail({ session, loading, error, references, initialOrders, ini
           <Button variant="outline" onClick={() => setEditOpen(false)}>Cancel</Button>
           <Button onClick={() => void saveEdit()} disabled={working === "save" || edit.items.some((item) => !item.remove && !item.locked && !item.launchTitle.trim())}>{working === "save" && <Loader2 className="size-4 animate-spin" />} Save session</Button>
         </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    <Dialog open={sourceOpen} onOpenChange={(open) => { setSourceOpen(open); if (!open) { setSourcePreview(null); setSourceError("") } }}>
+      <DialogContent className="flex h-[100dvh] w-screen max-w-none flex-col gap-0 overflow-hidden p-0 sm:h-auto sm:max-h-[90vh] sm:max-w-3xl">
+        <DialogHeader className="shrink-0 border-b px-5 py-4 sm:px-6">
+          <DialogTitle>Change source purchase order</DialogTitle>
+          <DialogDescription>The TikTok room and imported orders stay on {session.sessionNumber || "this session"}. DataPlus replaces its inventory source and reconciles items by UPC first, MPN second, and supplier SKU third.</DialogDescription>
+        </DialogHeader>
+        <div className="grid flex-1 gap-5 overflow-y-auto px-5 py-5 sm:px-6">
+          <Alert><Link2 className="size-4" /><AlertTitle>Current source</AlertTitle><AlertDescription>{session.sourceLabel || "No purchase order linked"}{session.warehouseName ? ` · ${session.warehouseName}` : ""}</AlertDescription></Alert>
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+            <Field label="Replacement PO number or ID"><Input list="live-session-purchase-orders" value={sourceInput} onChange={(event) => { setSourceInput(event.target.value); setSourcePreview(null); setSourceError("") }} placeholder="PO-123456" onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void reviewSourcePurchaseOrder() } }} /><datalist id="live-session-purchase-orders">{(references.purchaseOrders || []).map((po) => <option key={po.id} value={po.number || po.id}>{po.label}</option>)}</datalist></Field>
+            <Button variant="outline" disabled={!sourceInput.trim() || Boolean(working)} onClick={() => void reviewSourcePurchaseOrder()}>{working === "source-preview" ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />} Review PO</Button>
+          </div>
+          {sourceError && <Alert variant="destructive"><AlertCircle className="size-4" /><AlertTitle>Purchase order unavailable</AlertTitle><AlertDescription>{sourceError}</AlertDescription></Alert>}
+          {sourcePreview?.source && <Card className="overflow-hidden"><CardHeader className="border-b"><CardTitle className="text-base">{sourcePreview.source.label}</CardTitle><CardDescription>{sourcePreview.source.warehouseName || "Warehouse not assigned"}</CardDescription></CardHeader><CardContent className="grid gap-4 p-4"><div className="grid gap-3 sm:grid-cols-4"><MetricCard label="PO units" value={numberLabel(sourcePreview.summary?.sourceUnits)} icon={Boxes} /><MetricCard label="Already reserved" value={numberLabel(sourcePreview.summary?.committedUnits)} icon={ClipboardCheck} /><MetricCard label="Available" value={numberLabel(sourcePreview.summary?.availableUnits)} icon={CheckCircle2} /><MetricCard label="Available SKUs" value={numberLabel(sourcePreview.summary?.availableItems)} icon={PackagePlus} /></div><Alert className="border-amber-500/40 bg-amber-500/5"><AlertTriangle className="size-4" /><AlertTitle>Allocation will be recalculated</AlertTitle><AlertDescription>Unlaunched test items that are not on this PO will be released. Any unmatched item with sales, shipments, or marketplace launch evidence blocks the change so history cannot be disconnected.</AlertDescription></Alert></CardContent></Card>}
+        </div>
+        <DialogFooter className="shrink-0 border-t bg-background px-5 py-4 sm:px-6"><Button variant="outline" onClick={() => setSourceOpen(false)}>Cancel</Button><Button disabled={!sourcePreview?.source?.id || Boolean(working) || String(sourcePreview?.source?.id || "") === String(session.sourcePurchaseOrderId || (session.sourceType === "purchase_order" ? session.sourceId : ""))} onClick={() => void relinkSourcePurchaseOrder()}>{working === "source-relink" ? <Loader2 className="size-4 animate-spin" /> : <Link2 className="size-4" />} Link PO and reallocate</Button></DialogFooter>
       </DialogContent>
     </Dialog>
     <AlertDialog open={Boolean(removeItem)} onOpenChange={(open) => !open && setRemoveItem(null)}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Remove {removeItem?.sku || "this product"} from the session?</AlertDialogTitle><AlertDialogDescription>This product is absent from TikTok's latest readable product tray or the session's uploaded CSV. DataPlus will release its unused reserved quantity and keep the source inventory history. Products with launch, sale, or shipment evidence cannot be removed.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Keep product</AlertDialogCancel><AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" disabled={Boolean(working)} onClick={() => void removeMissingTrayItem()}>{working.startsWith("remove-") && <Loader2 className="size-4 animate-spin" />} Remove and release</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>

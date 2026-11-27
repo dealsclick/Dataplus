@@ -13692,6 +13692,11 @@ function liveSessionOrderLinkSignature(order = {}) {
   return JSON.stringify({
     liveSessionIds: order.liveSessionIds || [],
     lines: (Array.isArray(order.items) ? order.items : []).map((line) => ({
+      sku: line.sku || "",
+      originalSku: line.originalSku || "",
+      upc: line.upc || line.upcCode || line.barcode || line.gtin || "",
+      manufacturerSku: line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || line.manufacturerSku || "",
+      catalogIdentityMatch: line.catalogIdentityMatch || null,
       liveSessionId: line.liveSessionId || "",
       liveSessionItemId: line.liveSessionItemId || "",
       allocations: line.liveSessionAllocations || []
@@ -13699,7 +13704,9 @@ function liveSessionOrderLinkSignature(order = {}) {
   });
 }
 
-function liveSessionOrderSummary(order = {}) {
+function liveSessionOrderSummary(order = {}, session = {}) {
+  const sessionKeys = new Set([session.id, session.sessionNumber].map((value) => String(value || "")).filter(Boolean));
+  const sourceItems = new Map((session.items || []).map((item) => [String(item.id || ""), item]));
   return {
     id: order.id,
     orderNumber: order.orderNumber || order.displayOrderNumber,
@@ -13707,14 +13714,28 @@ function liveSessionOrderSummary(order = {}) {
     status: order.status || "",
     createdAt: order.createdAt || order.orderDate || "",
     shippedAt: order.shippedAt || "",
-    items: (order.items || []).map((item) => ({
-      sku: item.sku || item.catalogSku || "",
-      title: item.title || "",
-      quantity: Number(item.quantity || item.qty || 0),
-      liveSessionId: item.liveSessionId || "",
-      liveSessionNumber: item.liveSessionNumber || "",
-      matchMode: item.liveSessionMatchMode || ""
-    }))
+    items: (order.items || []).map((item) => {
+      const allocation = (Array.isArray(item.liveSessionAllocations) ? item.liveSessionAllocations : []).find((entry) => (
+        sessionKeys.has(String(entry.liveSessionId || "")) || sessionKeys.has(String(entry.liveSessionNumber || ""))
+      ));
+      const sourceItem = sourceItems.get(String(allocation?.liveSessionItemId || item.liveSessionItemId || "")) || null;
+      return {
+        sku: item.sku || item.catalogSku || "",
+        importedSku: item.originalSku || item.marketplaceSku || item.channelSku || item.catalogIdentityMatch?.importedSku || item.sku || "",
+        catalogSku: item.catalogIdentityMatch?.catalogSku || item.catalogSku || item.sku || "",
+        title: item.title || "",
+        quantity: Number(item.quantity || item.qty || 0),
+        upc: item.upc || item.upcCode || item.barcode || item.gtin || sourceItem?.upc || sourceItem?.barcode || "",
+        manufacturerSku: item.mfrPartNumber || item.manufacturerPartNumber || item.mpn || item.manufacturerSku || sourceItem?.manufacturerSku || "",
+        supplierSku: item.supplierSku || item.vendorSku || item.sourceSku || sourceItem?.supplierSku || "",
+        liveSessionId: item.liveSessionId || "",
+        liveSessionNumber: item.liveSessionNumber || "",
+        matchMode: allocation?.matchMode || item.liveSessionMatchMode || item.catalogIdentityMatch?.mode || "",
+        allocatedQty: Number(allocation?.qty || 0),
+        sourceSku: sourceItem?.sku || "",
+        sourcePurchaseOrderNumber: allocation?.sourcePurchaseOrderNumber || session.sourcePurchaseOrderNumber || ""
+      };
+    })
   };
 }
 
@@ -13749,7 +13770,17 @@ async function liveSessionOrderFeed(session = {}, options = {}) {
     return contentIds.some((value) => eventIds.has(value));
   }).sort((left, right) => Date.parse(String(right.createdAt || right.orderDate || "")) - Date.parse(String(left.createdAt || left.orderDate || "")));
   const limit = Math.max(1, Math.min(500, Number(options.limit || 100)));
-  return { total: related.length, orders: related.slice(0, limit).map(liveSessionOrderSummary) };
+  return { total: related.length, orders: related.slice(0, limit).map((order) => liveSessionOrderSummary(order, session)) };
+}
+
+async function enrichLiveOrderCatalogIdentities(orders = [], channel = "") {
+  if (!Array.isArray(orders) || !orders.length) return orders;
+  const db = await readDbFast({ skipInventory: true });
+  await ensureProductsForImportedOrders(db, orders, {
+    channel: channel === "tiktok_live" ? "TikTok Shop" : channel === "ebay_live" ? "eBay" : channel || "Marketplace",
+    createMissingOrderSkus: false
+  });
+  return orders;
 }
 
 async function reconcileTikTokLiveSessionsFromOrders(options = {}) {
@@ -13769,6 +13800,7 @@ async function reconcileTikTokLiveSessionsFromOrders(options = {}) {
   const earliest = starts.length ? Math.min(...starts) : now - 7 * 86_400_000;
   const liveOrders = await postgres.listOrders({ channel: "tiktok_live", dateFrom: new Date(earliest - 86_400_000).toISOString().slice(0, 10), includeOpenWork: true, limit: 50000 });
   const priorLinkSignatures = new Map(liveOrders.map((order) => [stableLiveOrderKey(order), liveSessionOrderLinkSignature(order)]));
+  await enrichLiveOrderCatalogIdentities(liveOrders, "tiktok_live");
   const mutation = await postgres.mutateLiveSessionsAtomically((sessions) => {
     const scopedIds = new Set(scopedSessions.map((session) => String(session.id || "")));
     const currentScoped = sessions.filter((session) => scopedIds.has(String(session.id || "")));
@@ -40867,18 +40899,23 @@ async function ensureProductsForImportedOrders(db = {}, orders = [], options = {
       const selected = selectedByImportedSku.get(importedOrderLineLookupKey(importedSku, line));
       if (!selected) continue;
       const product = selected.product;
-      const lookupValues = importedOrderLineLookupValues(importedSku, selected.effectiveLine || line);
+      const effectiveLine = selected.effectiveLine || line;
+      const lookupValues = importedOrderLineLookupValues(importedSku, effectiveLine);
       const importedIdentity = selected.match.mode === "upc"
         ? (lookupValues.upcs[0] || importedSku || "catalog identifier")
         : selected.match.mode === "manufacturer-part-number"
           ? (lookupValues.manufacturerSkus[0] || importedSku || "catalog identifier")
           : (importedSku || lookupValues.upcs[0] || lookupValues.manufacturerSkus[0] || "catalog identifier");
+      if (!String(line.upc || line.upcCode || line.barcode || line.gtin || "").trim() && lookupValues.upcs[0]) line.upc = lookupValues.upcs[0];
+      if (!String(line.mfrPartNumber || line.manufacturerPartNumber || line.mpn || line.manufacturerSku || "").trim() && lookupValues.manufacturerSkus[0]) line.mfrPartNumber = lookupValues.manufacturerSkus[0];
       line.productId = product.id || line.productId || "";
       line.catalogIdentityMatch = {
         mode: selected.match.mode,
         importedSku: importedIdentity,
         catalogSku: product.sku,
         productId: product.id || "",
+        upc: lookupValues.upcs[0] || "",
+        manufacturerSku: lookupValues.manufacturerSkus[0] || "",
         matchedAt: new Date().toISOString()
       };
       line.catalogFamilyMatches = selected.family.map((member) => ({
@@ -63886,6 +63923,77 @@ async function handleApi(req, res) {
     return sendJson(res, 200, result);
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "live-sessions" && parts[2] && parts[3] === "source" && parts.length === 4 && postgres.isPostgresEnabled()) {
+    const body = await parseBody(req);
+    const scope = liveSessionScope(req);
+    if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
+    const key = decodeURIComponent(parts[2]);
+    const sourceId = String(body.sourceId || body.purchaseOrderId || body.poNumber || "").trim();
+    if (!sourceId) return sendJson(res, 400, { error: "Enter the replacement purchase order number or ID." });
+    const [po, db] = await Promise.all([
+      postgres.readPurchaseOrderByKey(sourceId),
+      readDbFast({ skipInventory: true })
+    ]);
+    if (!po) return sendJson(res, 404, { error: "Purchase order not found." });
+    if (String(po.fulfillmentMode || "").toLowerCase() === "dropship_per_order" || po.directToCustomer === true) {
+      return sendJson(res, 409, { error: "A direct-to-customer PO cannot supply a warehouse live session." });
+    }
+    const sourceItems = (po.items || []).map((line, index) => liveSessionItemFromPurchaseOrderLine(po, line, index, new Map()));
+    if (!sourceItems.length) return sendJson(res, 409, { error: "The replacement purchase order has no usable item lines." });
+    const warehouse = (db.warehouses || []).find((row) => String(row.id || "") === String(po.warehouseId || "")) || null;
+    if (po.warehouseId && !warehouse) return sendJson(res, 409, { error: "The replacement purchase order is not assigned to an available physical warehouse." });
+    const actor = String(authUser?.name || authUser?.username || authUser?.email || body.user || "DataPlus user");
+    const changedAt = new Date().toISOString();
+    const canonicalKey = canonicalLiveSessionReference(key).toLowerCase();
+    const mutation = await postgres.mutateLiveSessionsAtomically((sessions) => {
+      const scoped = liveSessionRowsForScope(sessions, scope);
+      const target = scoped.find((session) => String(session.id || "").toLowerCase() === key.toLowerCase()
+        || canonicalLiveSessionReference(session.sessionNumber, session.id).toLowerCase() === canonicalKey);
+      if (!target) throw Object.assign(new Error("Live session not found."), { statusCode: 404 });
+      if (liveSessionLedger.sessionIsTerminal(target)) throw Object.assign(new Error("Completed or canceled sessions cannot change their inventory source."), { statusCode: 409 });
+      if (String(target.sourcePurchaseOrderId || (target.sourceType === "purchase_order" ? target.sourceId : "")) === String(po.id || "")) {
+        throw Object.assign(new Error(`${po.poNumber || "This purchase order"} is already the inventory source for this session.`), { statusCode: 409 });
+      }
+      const next = liveSessionLedger.relinkSessionToPurchaseOrder(target, sourceItems, scoped, {
+        id: po.id,
+        number: po.poNumber || po.id,
+        label: `Purchase order ${po.poNumber || po.id}`,
+        warehouseId: po.warehouseId || warehouse?.id || target.warehouseId,
+        warehouseName: po.warehouseName || warehouse?.name || target.warehouseName
+      }, { actor, changedAt });
+      return {
+        sessions: sessions.map((session) => String(session.id || "") === String(target.id || "") ? next : session),
+        result: { session: next }
+      };
+    });
+    let updated = mutation?.result?.session;
+    let reconciliation = null;
+    if (normalizeLiveInventoryChannel(updated?.channel) === "tiktok_live") {
+      reconciliation = await reconcileTikTokLiveSessionsFromOrders({ accountId: updated.channelAccountId, operation: "source-relink" });
+      const refreshedRows = await postgres.readEntityDocumentCollectionFast("liveSessions");
+      updated = liveSessionRecordForKey(refreshedRows, scope, updated.id) || updated;
+    }
+    const related = await liveSessionOrderFeed(updated, { limit: 100, readLimit: 5000 });
+    void recordUserActivity(req, authUser, {
+      eventType: "live_session",
+      action: "Changed live session source purchase order",
+      entityType: "live_session",
+      entityId: updated?.id || key,
+      metadata: {
+        purchaseOrderId: po.id,
+        purchaseOrderNumber: po.poNumber || po.id,
+        reservedUnits: Number(updated?.reservedUnits || 0),
+        linkedOrders: Number(reconciliation?.linkedOrders || 0)
+      }
+    });
+    return sendJson(res, 200, {
+      session: updated,
+      orderFeed: related.orders,
+      orderFeedTotal: related.total,
+      message: `${updated?.sessionNumber || "Live session"} now uses ${po.poNumber || po.id}. Inventory was re-reserved from that PO and TikTok orders were reconciled by UPC, MPN, then supplier SKU.`
+    });
+  }
+
   if (req.method === "PATCH" && parts[0] === "api" && parts[1] === "live-sessions" && parts[2] && parts.length === 3 && postgres.isPostgresEnabled()) {
     const body = await parseBody(req);
     const scope = liveSessionScope(req);
@@ -64014,6 +64122,7 @@ async function handleApi(req, res) {
         const createdAt = new Date(existing.startedAt || existing.createdAt || Date.now());
         const dateFrom = new Date(createdAt.getTime() - 86400000).toISOString().slice(0, 10);
         liveOrders = await postgres.listOrders({ channel, dateFrom, includeOpenWork: true, limit: 50000 });
+        await enrichLiveOrderCatalogIdentities(liveOrders, channel);
       }
     }
     const now = new Date().toISOString();
