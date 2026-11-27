@@ -129,13 +129,16 @@ button.loteria-card:active { transform: scale(.97); }
 .loteria-deck-settings { grid-column: 1 / -1; }
 .loteria-deck-settings-button { width: 100%; min-height: 3rem; }
 .loteria-deck-settings-dialog { width: min(calc(100vw - 1rem), 54rem) !important; max-height: 90vh; overflow: auto; background: #fffaf0 !important; color: var(--lot-ink) !important; }
+.loteria-deck-settings-dialog [data-slot="dialog-title"] { color: var(--lot-ink) !important; }
+.loteria-deck-settings-dialog [data-slot="dialog-description"] { color: #67584d !important; }
 .loteria-deck-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr)); gap: .55rem; }
 .loteria-deck-option { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: .45rem; padding: .45rem; border: 2px solid rgba(57,37,29,.12); border-radius: .7rem; background: rgba(238,228,205,.65); opacity: .62; }
 .loteria-deck-option.is-enabled { border-color: rgba(8,127,114,.38); background: rgba(215,241,233,.72); opacity: 1; }
 .loteria-deck-option strong, .loteria-deck-option small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.loteria-deck-option strong { color: var(--lot-ink) !important; font-size: .9rem; font-weight: 900; }
 .loteria-deck-option small { color: #67584d; font-size: .72rem; }
 .loteria-deck-thumb { display: grid; place-items: center; width: 3rem; aspect-ratio: 3 / 4; border-radius: .35rem; background-color: #fff8dc; background-position: center; background-size: cover; font-size: 1.15rem; }
-.loteria-deck-preview { display: grid; grid-template-columns: 3rem minmax(0, 1fr) 1.15rem; align-items: center; gap: .65rem; min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: zoom-in; }
+.loteria-deck-preview { display: grid; grid-template-columns: 3rem minmax(0, 1fr) 1.15rem; align-items: center; gap: .65rem; min-width: 0; padding: 0; border: 0; background: transparent; color: var(--lot-ink) !important; text-align: left; cursor: zoom-in; }
 .loteria-deck-preview > svg { width: 1.05rem; height: 1.05rem; color: #67584d; }
 .loteria-deck-preview:focus-visible { outline: 3px solid rgba(8,127,114,.45); outline-offset: 3px; border-radius: .35rem; }
 .loteria-card-name-button { display: grid; place-items: center; width: 2.25rem; height: 2.25rem; padding: 0; border: 1px solid rgba(57,37,29,.25); border-radius: .5rem; background: #fffaf0; color: var(--lot-ink); }
