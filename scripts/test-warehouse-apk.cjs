@@ -45,6 +45,13 @@ assert.equal(available.version, '1.0.0')
 assert.equal(available.bytes, 1039222)
 assert.equal(available.sha256, 'abc123')
 
+const publishedApk = path.resolve('release-assets/warehouse/dataplus-warehouse.apk')
+const publishedMetadata = JSON.parse(fs.readFileSync(path.resolve('release-assets/warehouse/dataplus-warehouse.json'), 'utf8'))
+const publishedBytes = fs.readFileSync(publishedApk)
+assert.equal(publishedMetadata.bytes, publishedBytes.length)
+assert.equal(publishedMetadata.sha256, require('node:crypto').createHash('sha256').update(publishedBytes).digest('hex'))
+assert.match(String(publishedMetadata.version), /^\d+\.\d+\.\d+$/)
+
 assert.ok(source.includes('if (/^\\/api\\/mobile\\/warehouse-apk(?:\\/|$)/.test(pathname)) return "warehouse";'))
 assert.match(source, /url\.pathname === "\/api\/mobile\/warehouse-apk\/status"/)
 assert.match(source, /"Content-Type": "application\/vnd\.android\.package-archive"/)

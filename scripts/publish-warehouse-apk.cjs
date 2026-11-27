@@ -3,7 +3,7 @@ const path = require('node:path')
 const crypto = require('node:crypto')
 
 const input = path.resolve(String(process.argv[2] || 'android/warehouse/app-release-signed.apk'))
-const version = String(process.argv[3] || '1.0.0').trim()
+const version = String(process.argv[3] || '2.0.0').trim()
 if (!fs.existsSync(input) || !fs.statSync(input).isFile()) {
   console.error(`APK not found: ${input}`)
   process.exit(1)

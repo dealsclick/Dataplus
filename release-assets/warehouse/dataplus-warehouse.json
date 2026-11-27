@@ -1,7 +1,7 @@
 {
-  "version": "1.0.0",
-  "sha256": "51d45a4842ebc1b44caaa71d545e0af21dd7d1d34e2136fce797df776bbc6e1a",
-  "bytes": 1039222,
-  "publishedAt": "2026-11-25T19:52:11.619Z",
+  "version": "2.0.0",
+  "sha256": "a1616ba095deaf361028d1a80fa3f4b93c6a976f2be170bd0e405bf376203b21",
+  "bytes": 195400,
+  "publishedAt": "2026-11-27T17:29:31.236Z",
   "sourceFile": "app-release-signed.apk"
 }
