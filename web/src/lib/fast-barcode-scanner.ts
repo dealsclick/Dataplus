@@ -13,7 +13,76 @@ type NativeDetectorConstructor = {
   getSupportedFormats?: () => Promise<string[]>
 }
 
+type ScannerOptions = {
+  deviceId?: string
+  scanType?: BarcodeScanType
+  preferRegularRearCamera?: boolean
+}
+
 const nativeFormats = ["code_128", "code_39", "codabar", "itf", "ean_13", "ean_8", "upc_a", "upc_e", "data_matrix", "qr_code", "pdf417"]
+const nativeWarehouseUserAgent = /\bDataPlusWarehouse\//i
+const preferredRearCameraKey = "dataplus.warehouse.regular-rear-camera.v1"
+const scannerCameraLabel = /scanner|barcode|imager|infrared|monochrome|\bmono\b|depth|\bir\b/i
+const frontCameraLabel = /front|user|selfie|facetime/i
+const rearCameraLabel = /back|rear|environment|world|main|wide/i
+
+export function isNativeWarehouseWebView() {
+  return typeof navigator !== "undefined" && nativeWarehouseUserAgent.test(navigator.userAgent)
+}
+
+function stopStream(stream: MediaStream | null) {
+  for (const track of stream?.getTracks() || []) track.stop()
+}
+
+function cameraLabelScore(label: string) {
+  if (scannerCameraLabel.test(label)) return -2_000_000_000
+  if (frontCameraLabel.test(label)) return -1_000_000_000
+  return rearCameraLabel.test(label) ? 100_000_000 : 0
+}
+
+export async function selectRegularRearCameraDeviceId() {
+  if (!navigator.mediaDevices?.getUserMedia || !navigator.mediaDevices?.enumerateDevices) return ""
+  let cameras = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === "videoinput" && device.deviceId)
+  let cached = ""
+  try { cached = window.localStorage.getItem(preferredRearCameraKey) || "" } catch { /* Camera selection still works without storage. */ }
+  if (cached && cameras.some((camera) => camera.deviceId === cached)) return cached
+
+  let permissionStream: MediaStream | null = null
+  try {
+    permissionStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: "environment" } } })
+  } finally {
+    stopStream(permissionStream)
+  }
+  cameras = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === "videoinput" && device.deviceId)
+  if (!cameras.length) return ""
+
+  let best = { id: "", score: Number.NEGATIVE_INFINITY }
+  for (const camera of cameras) {
+    let score = cameraLabelScore(camera.label)
+    let probe: MediaStream | null = null
+    try {
+      probe = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          deviceId: { exact: camera.deviceId },
+          width: { ideal: 3840 },
+          height: { ideal: 2160 },
+        },
+      })
+      const settings = probe.getVideoTracks()[0]?.getSettings()
+      if (settings?.facingMode === "environment") score += 50_000_000
+      if (settings?.facingMode === "user") score -= 1_000_000_000
+      score += Number(settings?.width || 0) * Number(settings?.height || 0)
+    } catch {
+      score -= 10_000_000
+    } finally {
+      stopStream(probe)
+    }
+    if (score > best.score) best = { id: camera.deviceId, score }
+  }
+  if (best.id) try { window.localStorage.setItem(preferredRearCameraKey, best.id) } catch { /* Ignore locked-down storage. */ }
+  return best.id
+}
 
 function compactBarcodeValue(value: string) {
   return String(value || "").trim().replace(/^\][A-Z0-9]{2}/i, "").replace(/[^a-z0-9]/gi, "").toUpperCase()
@@ -47,11 +116,12 @@ async function applyCameraDefaults(track: MediaStreamTrack) {
   if (advanced.length) await track.applyConstraints({ advanced } as unknown as MediaTrackConstraints).catch(() => {})
 }
 
-export async function startFastBarcodeScanner(video: HTMLVideoElement, onDecode: (value: string) => void, options: { deviceId?: string; scanType?: BarcodeScanType } = {}): Promise<ScannerControls> {
+export async function startFastBarcodeScanner(video: HTMLVideoElement, onDecode: (value: string) => void, options: ScannerOptions = {}): Promise<ScannerControls> {
+  const preferredDeviceId = options.deviceId || (options.preferRegularRearCamera ? await selectRegularRearCameraDeviceId() : "")
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: false,
     video: {
-      ...(options.deviceId ? { deviceId: { exact: options.deviceId } } : { facingMode: { ideal: "environment" } }),
+      ...(preferredDeviceId ? { deviceId: { exact: preferredDeviceId } } : { facingMode: { ideal: "environment" } }),
       width: { ideal: 1280, max: 1920 },
       height: { ideal: 720, max: 1080 },
       frameRate: { ideal: 30, max: 30 },

@@ -73,6 +73,8 @@ public class LauncherActivity extends Activity {
     private JSONObject currentOutboundSession;
     private JSONArray outboundScans = new JSONArray();
     private JSONObject activeOutboundPackage;
+    private String pendingOutboundBarcode = "";
+    private String outboundPackageFilter = "all";
     private boolean busy;
     private boolean modalOpen;
     private final StringBuilder scanBuffer = new StringBuilder();
@@ -1018,6 +1020,7 @@ public class LauncherActivity extends Activity {
         currentOutboundSession = null;
         outboundScans = new JSONArray();
         activeOutboundPackage = null;
+        pendingOutboundBarcode = "";
         modalOpen = false;
         resetScanBuffer();
         bottomNav.setVisibility(View.VISIBLE);
@@ -1069,6 +1072,28 @@ public class LauncherActivity extends Activity {
         Ui.margin(subtitle, 0, 5, 0, 16);
         page.addView(subtitle);
 
+        LinearLayout scannerCard = Ui.card(this);
+        scannerCard.setBackground(Ui.bordered(Ui.SURFACE, 0xFFBFDBFE, 18, this));
+        scannerCard.addView(Ui.text(this, "Scan to open a handoff", 17, Ui.TEXT, true));
+        TextView scannerHelp = Ui.text(this, "Press either G47 trigger. The app will open the available outbound audit and process the label.", 13, Ui.MUTED, false);
+        Ui.margin(scannerHelp, 0, 4, 0, 0);
+        scannerCard.addView(scannerHelp);
+        scannerPreview = Ui.text(this, "Waiting for tracking barcode", 15, Ui.MUTED, false);
+        scannerPreview.setTypeface(Typeface.MONOSPACE);
+        scannerPreview.setGravity(Gravity.CENTER_VERTICAL);
+        scannerPreview.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 14), 0);
+        scannerPreview.setBackground(Ui.bordered(0xFFF8FAFC, Ui.BORDER, 13, this));
+        LinearLayout.LayoutParams dashboardPreviewParams = Ui.matchWrap();
+        dashboardPreviewParams.height = Ui.dp(this, 52);
+        dashboardPreviewParams.setMargins(0, Ui.dp(this, 14), 0, 0);
+        scannerCard.addView(scannerPreview, dashboardPreviewParams);
+        scannerStatus = Ui.text(this, "Ready · scan suffix Enter/CR", 12, Ui.SUCCESS, true);
+        Ui.margin(scannerStatus, 0, 8, 0, 0);
+        scannerCard.addView(scannerStatus);
+        LinearLayout.LayoutParams dashboardScannerParams = Ui.matchWrap();
+        dashboardScannerParams.setMargins(0, 0, 0, Ui.dp(this, 14));
+        page.addView(scannerCard, dashboardScannerParams);
+
         LinearLayout actions = Ui.row(this);
         Button start = Ui.button(this, "Use today's audit", true);
         start.setOnClickListener(view -> showStartOutboundDialog());
@@ -1108,6 +1133,82 @@ public class LauncherActivity extends Activity {
         }
         scroll.addView(page);
         setScreen(scroll);
+        page.requestFocus();
+        focusScanner();
+    }
+
+    private List<JSONObject> openOutboundAudits() {
+        List<JSONObject> open = new ArrayList<>();
+        for (int index = 0; index < outboundAudits.length(); index++) {
+            JSONObject audit = outboundAudits.optJSONObject(index);
+            if (audit != null && "open".equalsIgnoreCase(audit.optString("status"))) open.add(audit);
+        }
+        return open;
+    }
+
+    private List<JSONObject> physicalWarehouses() {
+        List<JSONObject> physical = new ArrayList<>();
+        for (int index = 0; index < warehouses.length(); index++) {
+            JSONObject warehouse = warehouses.optJSONObject(index);
+            if (warehouse != null && isPhysicalWarehouse(warehouse)) physical.add(warehouse);
+        }
+        return physical;
+    }
+
+    private void routeOutboundDashboardScan(String rawBarcode) {
+        String barcode = rawBarcode.replaceAll("[^0-9A-Za-z-]", "").trim();
+        if (barcode.isEmpty() || busy) return;
+        if (!isOnline()) {
+            scannerMessage("Offline — reconnect before scanning.", false);
+            feedback(false);
+            return;
+        }
+        pendingOutboundBarcode = barcode;
+        scannerMessage("Opening handoff for " + barcode + "…", true);
+        List<JSONObject> open = openOutboundAudits();
+        if (open.size() == 1) {
+            openOutboundAudit(open.get(0).optString("id"));
+            return;
+        }
+        if (open.size() > 1) {
+            chooseOutboundAuditForPendingScan(open);
+            return;
+        }
+        List<JSONObject> physical = physicalWarehouses();
+        if (physical.size() == 1) {
+            startOutboundAudit(physical.get(0));
+            return;
+        }
+        showStartOutboundDialog();
+    }
+
+    private void chooseOutboundAuditForPendingScan(List<JSONObject> open) {
+        String[] labels = new String[open.size()];
+        for (int index = 0; index < open.size(); index++) {
+            JSONObject audit = open.get(index);
+            labels[index] = outboundAuditReference(audit) + " · " + audit.optString("warehouseName", "Warehouse");
+        }
+        boolean[] selected = new boolean[]{false};
+        modalOpen = true;
+        AlertDialog dialog = new AlertDialog.Builder(this)
+            .setTitle("Choose the outbound handoff")
+            .setMessage("The label is ready. Choose which open handoff should receive it.")
+            .setItems(labels, (value, which) -> {
+                selected[0] = true;
+                modalOpen = false;
+                openOutboundAudit(open.get(which).optString("id"));
+            })
+            .setNegativeButton("Cancel", null)
+            .create();
+        dialog.setOnDismissListener(value -> {
+            modalOpen = false;
+            if (!selected[0]) {
+                pendingOutboundBarcode = "";
+                resetScanBuffer();
+                focusScanner();
+            }
+        });
+        dialog.show();
     }
 
     private LinearLayout outboundAuditCard(JSONObject audit) {
@@ -1137,11 +1238,7 @@ public class LauncherActivity extends Activity {
     }
 
     private void showStartOutboundDialog() {
-        List<JSONObject> physical = new ArrayList<>();
-        for (int index = 0; index < warehouses.length(); index++) {
-            JSONObject warehouse = warehouses.optJSONObject(index);
-            if (warehouse != null && isPhysicalWarehouse(warehouse)) physical.add(warehouse);
-        }
+        List<JSONObject> physical = physicalWarehouses();
         if (physical.isEmpty()) {
             Toast.makeText(this, "No active physical warehouse is available.", Toast.LENGTH_LONG).show();
             return;
@@ -1150,11 +1247,18 @@ public class LauncherActivity extends Activity {
         for (int index = 0; index < physical.size(); index++) names[index] = warehouseName(physical.get(index));
         modalOpen = true;
         AlertDialog dialog = new AlertDialog.Builder(this)
-            .setTitle("Use today's outbound audit")
+            .setTitle(pendingOutboundBarcode.isEmpty() ? "Use today's outbound audit" : "Choose warehouse for scanned package")
             .setItems(names, (value, which) -> startOutboundAudit(physical.get(which)))
             .setNegativeButton("Cancel", null)
             .create();
-        dialog.setOnDismissListener(value -> { modalOpen = false; });
+        dialog.setOnDismissListener(value -> {
+            modalOpen = false;
+            if (SCREEN_OUTBOUND.equals(screen) && !busy) {
+                pendingOutboundBarcode = "";
+                resetScanBuffer();
+                focusScanner();
+            }
+        });
         dialog.show();
     }
 
@@ -1202,6 +1306,11 @@ public class LauncherActivity extends Activity {
                     return;
                 }
                 showOutboundScanner();
+                if (!pendingOutboundBarcode.isEmpty()) {
+                    String barcode = pendingOutboundBarcode;
+                    pendingOutboundBarcode = "";
+                    recordOutboundPackage(barcode);
+                }
             }
             @Override public void onError(ApiClient.ApiException error) {
                 if (error.isUnauthorized()) showLogin();
@@ -1300,10 +1409,13 @@ public class LauncherActivity extends Activity {
         scannerParams.setMargins(0, Ui.dp(this, 12), 0, 0);
         page.addView(scannerCard, scannerParams);
 
-        TextView recentTitle = Ui.text(this, "Recent packages", 17, Ui.TEXT, true);
+        TextView recentTitle = Ui.text(this, "Scanned packages", 17, Ui.TEXT, true);
         Ui.margin(recentTitle, 2, 20, 0, 8);
         page.addView(recentTitle);
-        addRecentOutboundPackages(page);
+        LinearLayout packageList = Ui.column(this, 0);
+        addOutboundPackageFilters(page, packageList);
+        addRecentOutboundPackages(packageList);
+        page.addView(packageList, Ui.matchWrap());
 
         LinearLayout actionCard = Ui.card(this);
         Button reconcile = Ui.button(this, "Recheck unmatched packages", false);
@@ -1360,33 +1472,118 @@ public class LauncherActivity extends Activity {
             page.addView(empty, Ui.matchWrap());
             return;
         }
-        for (int index = 0; index < outboundScans.length() && index < 6; index++) {
+        int shown = 0;
+        for (int index = 0; index < outboundScans.length(); index++) {
             JSONObject scan = outboundScans.optJSONObject(index);
             if (scan == null) continue;
+            boolean unmatched = "unmatched".equalsIgnoreCase(scan.optString("matchStatus"));
+            if ("matched".equals(outboundPackageFilter) && unmatched) continue;
+            if ("unmatched".equals(outboundPackageFilter) && !unmatched) continue;
             LinearLayout card = Ui.card(this);
+            card.setClickable(true);
+            card.setFocusable(true);
+            card.setOnClickListener(view -> showOutboundPackageDetails(scan));
             LinearLayout first = Ui.row(this);
             TextView tracking = Ui.text(this, scan.optString("trackingNumber", "Package"), 14, Ui.TEXT, true);
             tracking.setTypeface(Typeface.MONOSPACE);
             first.addView(tracking, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-            boolean unmatched = "unmatched".equalsIgnoreCase(scan.optString("matchStatus"));
             first.addView(Ui.chip(this, unmatched ? "Unmatched" : "Matched", unmatched ? Ui.WARNING : Ui.SUCCESS, unmatched ? Ui.WARNING_SOFT : Ui.SUCCESS_SOFT));
             card.addView(first);
             TextView order = Ui.text(this, outboundOrderLabel(scan), 13, Ui.MUTED, false);
             Ui.margin(order, 0, 7, 0, 0);
             card.addView(order);
             if (scan.optInt("liveItemExpectedCount") > 0 || scan.optInt("liveItemScannedCount") > 0) {
-                TextView items = Ui.text(this, "Items " + outboundItemProgress(scan), 12, "complete".equalsIgnoreCase(scan.optString("liveItemStatus")) ? Ui.SUCCESS : Ui.WARNING, true);
+                TextView items = Ui.text(this, outboundItemVerificationLabel(scan), 12, "complete".equalsIgnoreCase(scan.optString("liveItemStatus")) ? Ui.SUCCESS : Ui.WARNING, true);
                 Ui.margin(items, 0, 6, 0, 0);
                 card.addView(items);
             }
+            TextView hint = Ui.text(this, "Tap to view package details", 11, Ui.PRIMARY, true);
+            Ui.margin(hint, 0, 8, 0, 0);
+            card.addView(hint);
             LinearLayout.LayoutParams params = Ui.matchWrap();
-            params.setMargins(0, index == 0 ? 0 : Ui.dp(this, 8), 0, 0);
+            params.setMargins(0, shown == 0 ? 0 : Ui.dp(this, 8), 0, 0);
             page.addView(card, params);
+            shown++;
+        }
+        if (shown == 0) {
+            LinearLayout empty = Ui.card(this);
+            TextView text = Ui.text(this, "No " + outboundPackageFilter + " packages in this handoff.", 13, Ui.MUTED, false);
+            text.setGravity(Gravity.CENTER);
+            empty.addView(text, Ui.matchWrap());
+            page.addView(empty, Ui.matchWrap());
         }
     }
 
+    private void addOutboundPackageFilters(LinearLayout page, LinearLayout packageList) {
+        LinearLayout filters = Ui.row(this);
+        Button all = Ui.button(this, "All " + currentOutboundSession.optInt("packageCount"), false);
+        Button matched = Ui.button(this, "Matched " + currentOutboundSession.optInt("matchedCount"), false);
+        Button unmatched = Ui.button(this, "Unmatched " + currentOutboundSession.optInt("unmatchedCount"), false);
+        Button[] buttons = new Button[]{all, matched, unmatched};
+        String[] values = new String[]{"all", "matched", "unmatched"};
+        for (int index = 0; index < buttons.length; index++) {
+            final int selected = index;
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, Ui.dp(this, 44), 1);
+            if (index > 0) params.setMargins(Ui.dp(this, 6), 0, 0, 0);
+            filters.addView(buttons[index], params);
+            buttons[index].setOnClickListener(view -> {
+                outboundPackageFilter = values[selected];
+                styleOutboundFilterButtons(buttons, values);
+                packageList.removeAllViews();
+                addRecentOutboundPackages(packageList);
+            });
+        }
+        styleOutboundFilterButtons(buttons, values);
+        LinearLayout.LayoutParams filterParams = Ui.matchWrap();
+        filterParams.setMargins(0, 0, 0, Ui.dp(this, 8));
+        page.addView(filters, filterParams);
+    }
+
+    private void styleOutboundFilterButtons(Button[] buttons, String[] values) {
+        for (int index = 0; index < buttons.length; index++) {
+            boolean selected = values[index].equals(outboundPackageFilter);
+            buttons[index].setTextColor(selected ? Color.WHITE : Ui.TEXT);
+            buttons[index].setBackground(Ui.rounded(selected ? Ui.PRIMARY : 0xFFF8FAFC, 12, this));
+        }
+    }
+
+    private void showOutboundPackageDetails(JSONObject scan) {
+        boolean unmatched = "unmatched".equalsIgnoreCase(scan.optString("matchStatus"));
+        boolean canScanItems = scan.optInt("liveItemExpectedCount") > 0 && !"complete".equalsIgnoreCase(scan.optString("liveItemStatus"));
+        StringBuilder detail = new StringBuilder();
+        detail.append(unmatched ? "No order match" : outboundOrderLabel(scan));
+        if (scan.optInt("liveItemExpectedCount") > 0 || scan.optInt("liveItemScannedCount") > 0) {
+            detail.append("\n\n").append(outboundItemVerificationLabel(scan));
+        }
+        if (!scan.optString("carrier").isEmpty()) detail.append("\nCarrier: ").append(scan.optString("carrier"));
+        if (!scan.optString("scannedByName").isEmpty()) detail.append("\nScanned by: ").append(scan.optString("scannedByName"));
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+            .setTitle(scan.optString("trackingNumber", "Package"))
+            .setMessage(detail.toString())
+            .setPositiveButton("Close", null)
+            .setNeutralButton(unmatched ? "Recheck matches" : "Full tools", (value, which) -> {
+                if (unmatched) reconcileOutboundAudit();
+                else openWeb("/warehouse/outbound");
+            });
+        if (canScanItems) {
+            builder.setNegativeButton("Scan package items", (value, which) -> {
+                activeOutboundPackage = scan;
+                showOutboundScanner();
+            });
+        }
+        modalOpen = true;
+        AlertDialog dialog = builder.create();
+        dialog.setOnDismissListener(value -> {
+            modalOpen = false;
+            focusScanner();
+        });
+        dialog.show();
+    }
+
     private void handleHardwareScan(String barcode) {
-        if (SCREEN_OUTBOUND_SCANNER.equals(screen)) {
+        if (SCREEN_OUTBOUND.equals(screen)) {
+            routeOutboundDashboardScan(barcode);
+        } else if (SCREEN_OUTBOUND_SCANNER.equals(screen)) {
             if (activeOutboundPackage == null) recordOutboundPackage(barcode);
             else recordOutboundItem(barcode);
         } else {
@@ -1743,6 +1940,13 @@ public class LauncherActivity extends Activity {
         return expected > 0 ? scanned + "/" + expected : scanned + " scanned";
     }
 
+    private String outboundItemVerificationLabel(JSONObject scan) {
+        int scanned = scan == null ? 0 : scan.optInt("liveItemScannedCount");
+        int expected = scan == null ? 0 : scan.optInt("liveItemExpectedCount");
+        String requirement = scan != null && scan.optBoolean("liveItemRequired") ? "Required" : "Optional";
+        return requirement + " item verification: " + scanned + " of " + expected + " scanned";
+    }
+
     private String outboundOrderLabel(JSONObject scan) {
         JSONArray matches = scan == null ? null : scan.optJSONArray("matches");
         if (matches == null || matches.length() == 0) return "Tracking retained without an order match";
@@ -1793,7 +1997,7 @@ public class LauncherActivity extends Activity {
         page.addView(subtitle);
 
         LinearLayout card = Ui.card(this);
-        card.addView(Ui.text(this, "DataPlus Warehouse 2.1.0", 17, Ui.TEXT, true));
+        card.addView(Ui.text(this, "DataPlus Warehouse 2.2.0", 17, Ui.TEXT, true));
         TextView device = Ui.text(this, "Optimized for G47 · Android " + Build.VERSION.RELEASE, 13, Ui.MUTED, false);
         Ui.margin(device, 0, 5, 0, 15);
         card.addView(device);
@@ -1961,7 +2165,7 @@ public class LauncherActivity extends Activity {
     }
 
     private boolean isHardwareScannerScreen() {
-        return SCREEN_SCANNER.equals(screen) || SCREEN_OUTBOUND_SCANNER.equals(screen);
+        return SCREEN_SCANNER.equals(screen) || SCREEN_OUTBOUND.equals(screen) || SCREEN_OUTBOUND_SCANNER.equals(screen);
     }
 
     private void feedback(boolean success) {

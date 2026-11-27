@@ -16,6 +16,7 @@ const sections = [
 
 export function isInstalledWarehouseApp() {
   if (typeof window === "undefined") return false
+  const nativeWarehouseWebView = /\bDataPlusWarehouse\//i.test(window.navigator.userAgent)
   const navigatorStandalone = (window.navigator as Navigator & { standalone?: boolean }).standalone === true
   const trustedAndroidLaunch = document.referrer.startsWith("android-app://com.dataplus.warehouse")
   let trustedAndroidSession = false
@@ -25,7 +26,8 @@ export function isInstalledWarehouseApp() {
   } catch {
     // Storage can be unavailable in locked-down webviews; launch and display mode still identify the app.
   }
-  return navigatorStandalone
+  return nativeWarehouseWebView
+    || navigatorStandalone
     || trustedAndroidLaunch
     || trustedAndroidSession
     || window.matchMedia("(display-mode: standalone)").matches

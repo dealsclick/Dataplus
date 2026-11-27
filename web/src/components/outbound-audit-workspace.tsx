@@ -14,7 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Textarea } from "@/components/ui/textarea"
 import { api, dateLabel, numberLabel } from "../lib/client-api"
-import { captureCompressedEvidence, startFastBarcodeScanner } from "../lib/fast-barcode-scanner"
+import { captureCompressedEvidence, isNativeWarehouseWebView, startFastBarcodeScanner } from "../lib/fast-barcode-scanner"
 import { listPendingOutboundEvidence, removePendingOutboundEvidence, savePendingOutboundEvidence, type PendingOutboundEvidence } from "../lib/outbound-evidence-queue"
 
 type Row = Record<string, any>
@@ -392,7 +392,7 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
           lastScanRef.current = { value, at: now }
           if (modeRef.current === "items") void submitItem(value)
           else void submit(value)
-        }, { scanType: "general" })
+        }, { scanType: "general", preferRegularRearCamera: isNativeWarehouseWebView() })
         controlsRef.current = controls
         setTorchAvailable(controls.torchAvailable)
         setScannerEngine(controls.engine)

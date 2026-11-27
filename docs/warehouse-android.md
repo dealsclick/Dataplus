@@ -6,7 +6,7 @@ DataPlus Warehouse 2 is a native Android scanner for receiving, warehouse audits
 
 - App name: DataPlus Warehouse
 - Package name: `com.dataplus.warehouse`
-- Version: `2.1.0` (`versionCode 3`)
+- Version: `2.2.0` (`versionCode 4`)
 - Minimum Android version: Android 7 / API 24
 - Target: Android API 36; the warehouse G47 runs Android 14
 - Server: `https://dataplusapp.duckdns.org`
@@ -52,7 +52,7 @@ The signed output is `android/warehouse/app-release-signed.apk`. The build align
 ## Publish the direct download
 
 ```powershell
-npm run android:publish -- android/warehouse/app-release-signed.apk 2.1.0
+npm run android:publish -- android/warehouse/app-release-signed.apk 2.2.0
 ```
 
 Publishing validates the APK container, copies it to `release-assets/warehouse/dataplus-warehouse.apk`, and records its SHA-256 checksum. Authenticated warehouse users download it from the existing **Install Warehouse APK** option in the name menu. `GET /api/mobile/warehouse-apk/status` reports availability and `GET /api/mobile/warehouse-apk` serves the installer with the Android APK MIME type.

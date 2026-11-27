@@ -49,6 +49,14 @@ assert.equal(tracking.length, 1);
 assert.equal(tracking[0].monitoringComplete, false, "shipped/in-transit shipments remain monitored until delivered");
 assert.ok(tracking[0].nextCheckAt instanceof Date);
 
+const providerlessTracking = shipmentTrackingRecords({
+  id: "order-providerless-tracking",
+  shipments: [{ id: "shipment-providerless", trackingNumber: "9234690425897800546786", status: "fulfilled" }]
+});
+assert.equal(providerlessTracking.length, 1, "a shipment with tracking remains searchable even when its provider field is blank");
+assert.equal(providerlessTracking[0].trackingNumber, "9234690425897800546786");
+assert.equal(providerlessTracking[0].provider, "tracking");
+
 const financials = shipmentFinancialRecords({
   ...compacted.order,
   orderNumber: "50001",

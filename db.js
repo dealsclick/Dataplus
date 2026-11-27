@@ -13255,7 +13255,7 @@ async function readOrdersByTrackingCandidates(values = [], options = {}) {
   if (!client || !candidates.length) return [];
   await initRelationalSchema();
   const limit = Math.max(1, Math.min(50, Number(options.limit || 20)));
-  const result = await client.query(`
+  let result = await client.query(`
     with matches as (
       select tracking.order_id, tracking.shipment_id,
         coalesce(tracking.tracking_number, '') as tracking_number,
@@ -13284,6 +13284,50 @@ async function readOrdersByTrackingCandidates(values = [], options = {}) {
     order by order_id
     limit $2
   `, [candidates, limit]);
+  if (!result.rows.length) {
+    result = await client.query(`
+      with raw_matches as (
+        select orders.order_id,
+          coalesce(nullif(shipment.value->>'id', ''), 'raw-shipment-' || shipment.ordinality::text) as shipment_id,
+          coalesce(
+            nullif(shipment.value->>'trackingNumber', ''),
+            nullif(shipment.value->>'tracking_number', ''),
+            nullif(shipment.value->'trackingInfo'->>'number', ''),
+            nullif(shipment.value->'trackingInfo'->>'trackingNumber', ''),
+            nullif(shipment.value->'trackingInfo'->0->>'number', ''),
+            nullif(shipment.value->'trackingInfo'->0->>'trackingNumber', ''),
+            nullif(shipment.value->'tracking'->>'number', ''),
+            nullif(shipment.value->'tracking'->>'trackingNumber', '')
+          ) as tracking_number,
+          coalesce(
+            nullif(shipment.value->>'provider', ''),
+            nullif(shipment.value->>'labelProvider', ''),
+            nullif(shipment.value->>'source', ''),
+            nullif(shipment.value->>'carrierName', ''),
+            nullif(shipment.value->>'carrier', '')
+          ) as provider
+        from order_records orders
+        cross join lateral jsonb_array_elements(
+          (case when jsonb_typeof(orders.raw->'shipments') = 'array' then orders.raw->'shipments' else '[]'::jsonb end)
+          || (case when jsonb_typeof(orders.raw->'fulfillments') = 'array' then orders.raw->'fulfillments' else '[]'::jsonb end)
+          || (case when jsonb_typeof(orders.raw->'shippingFulfillments') = 'array' then orders.raw->'shippingFulfillments' else '[]'::jsonb end)
+        ) with ordinality as shipment(value, ordinality)
+        where lower(coalesce(orders.status, '')) <> 'deleted'
+          and coalesce(orders.order_date, orders.created_at, orders.updated_at) >= now() - interval '365 days'
+      ), ranked as (
+        select distinct on (raw_matches.order_id)
+          raw_matches.order_id, raw_matches.shipment_id, raw_matches.tracking_number,
+          coalesce(raw_matches.provider, '') as provider
+        from raw_matches
+        where nullif(raw_matches.tracking_number, '') is not null
+          and regexp_replace(lower(raw_matches.tracking_number), '[^a-z0-9]', '', 'g') = any($1::text[])
+        order by raw_matches.order_id, raw_matches.shipment_id
+      )
+      select * from ranked
+      order by order_id
+      limit $2
+    `, [candidates, limit]);
+  }
   const orders = await readOrdersByIds(result.rows.map((row) => row.order_id));
   const matchByOrder = new Map(result.rows.map((row) => [String(row.order_id), row]));
   return orders.map((order) => ({

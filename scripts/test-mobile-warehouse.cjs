@@ -37,6 +37,7 @@ assert.match(warehouseRouteSource, /const lookupHardwareScan = async[\s\S]*setHa
 assert.match(warehouseRouteSource, /data-testid="hardware-scan-confirmation"[\s\S]*Confirm scanned item[\s\S]*Unit of measure[\s\S]*Quantity to receive[\s\S]*Receive quantity/, 'Hardware scans must show the native confirmation sheet with SKU, UOM, and quantity');
 assert.match(warehouseRouteSource, /Camera scanning is optional on this device[\s\S]*Use camera/, 'Camera scanning must be presented as an explicit fallback');
 assert.match(mobileSource, /function isInstalledWarehouseApp\(\)[\s\S]*android-app:\/\/com\.dataplus\.warehouse[\s\S]*display-mode: standalone/, 'Installed-app mode must be detected independently from ordinary mobile web');
+assert.match(mobileSource, /DataPlusWarehouse\\\/[\s\S]*nativeWarehouseWebView[\s\S]*navigatorStandalone/, 'The signed APK webview marker must enable app-only behavior without changing ordinary mobile web');
 assert.doesNotMatch(mobileSource, /display-mode: fullscreen/, 'Ordinary mobile web fullscreen mode must not enable Android-app UI');
 assert.match(warehouseRouteSource, /installedApp && auditStatus === "in_progress"[\s\S]*data-testid="hardware-scanner-panel"/, 'The hardware scanner UI must be limited to the installed app');
 assert.match(warehouseRouteSource, /!installedApp && <Button[\s\S]*<ScanBarcode[\s\S]*Scan/, 'Mobile web must retain its existing camera-first Scan action');

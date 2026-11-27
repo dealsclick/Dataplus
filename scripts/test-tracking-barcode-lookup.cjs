@@ -18,6 +18,11 @@ assert.equal(canonicalTrackingValue('4201234567899405511890123456789012'), '9405
 assert.equal(canonicalTrackingValue('(00) 123456789012345678'), '123456789012345678');
 assert.equal(canonicalTrackingValue('https://www.ups.com/track?tracknum=1Z999AA10123456784'), '1Z999AA10123456784');
 
+// USPS Ground Advantage label reported from the G47 warehouse scanner.
+const uspsGroundAdvantage = '9234690425897800547776';
+assert.equal(canonicalTrackingValue('9234 6904 2589 7800 5477 76'), uspsGroundAdvantage);
+assert(trackingLookupCandidates('9234 6904 2589 7800 5477 76').includes(uspsGroundAdvantage));
+
 // Walmart FedEx Ground return labels print a 12-digit TRK# while the bottom
 // barcode carries a 34-digit routing value. Both real label shapes must resolve
 // to the printed tracking number, including a structured scanner payload.
@@ -45,6 +50,8 @@ assert.deepEqual(findReturnReceipts(returns, fedexReturnOne).map(row => row.id),
 const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 assert.match(serverSource, /parts\[2\] !== "tracking-lookup"[\s\S]*readOrderByKey\(parts\[2\]\)/, 'tracking lookup must bypass the generic order-detail route');
 assert.match(serverSource, /url\.pathname === "\/api\/orders\/tracking-lookup"[\s\S]*readOrdersByTrackingCandidates\(candidates/, 'tracking lookup must resolve normalized candidates through the relational tracking index');
+const dbSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
+assert.match(dbSource, /readOrdersByTrackingCandidates[\s\S]*raw_matches[\s\S]*raw->'shipments'[\s\S]*raw->'fulfillments'[\s\S]*raw->'shippingFulfillments'/, 'tracking lookup must fall back to recent nested shipment data when a legacy tracking row was not indexed');
 assert.match(serverSource, /normalizedTracking: canonicalTrackingValue\(query\)/, 'tracking lookup must display the printed carrier number for composite barcodes');
 assert.match(serverSource, /Promise\.all\([\s\S]*readOrdersByTrackingCandidates\(candidates[\s\S]*findReturnsForReceiving\(canonicalTrackingValue\(query\)[\s\S]*exactOnly: true/, 'tracking lookup must query orders and returns once in parallel');
 assert.doesNotMatch(serverSource, /for \(const candidate of candidates\)[\s\S]*findReturnsForReceiving\(candidate/, 'tracking lookup must not repeat the return query for every barcode suffix');

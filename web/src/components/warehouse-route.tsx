@@ -34,7 +34,7 @@ import { api, dateLabel, moneyLabel, numberLabel } from "../lib/client-api"
 import { purchaseOrderUrl } from "../lib/purchase-order-url"
 import { canonicalWarehouseAuditReference, warehouseAuditMatchesKey, warehouseAuditUrl } from "../lib/warehouse-audit-url"
 import { loadAppBootstrap, loadAppReferences } from "../lib/app-state"
-import { compressEvidenceImage, startFastBarcodeScanner } from "../lib/fast-barcode-scanner"
+import { compressEvidenceImage, selectRegularRearCameraDeviceId, startFastBarcodeScanner } from "../lib/fast-barcode-scanner"
 import { Detail, Field, PageHeader } from "./app-ui"
 import { ProductDetailSheet } from "./product-workspaces"
 import type { CatalogItem, ImportJob, SystemSettings, Vendor } from "../App"
@@ -1619,10 +1619,11 @@ function WarehouseAuditPanel({
       const devices = (await navigator.mediaDevices.enumerateDevices())
         .filter((device) => device.kind === "videoinput")
         .map((device, index) => ({ id: device.deviceId, label: device.label || `Camera ${index + 1}` }));
+      const regularRearCameraId = installedApp ? await selectRegularRearCameraDeviceId().catch(() => "") : "";
       setCameraDevices(devices);
       setSelectedCameraId((current) => {
         if (current && devices.some((device) => device.id === current)) return current;
-        return devices.find((device) => /back|rear|environment|world/i.test(device.label))?.id || current;
+        return regularRearCameraId || devices.find((device) => /back|rear|environment|world/i.test(device.label))?.id || current;
       });
     } catch { /* Camera selection remains optional. */ }
   };
@@ -1867,7 +1868,7 @@ function WarehouseAuditPanel({
               scanRef.current = false;
             }).finally(() => setCameraLookupBusy(false));
           },
-          { deviceId: selectedCameraId || undefined },
+          { deviceId: selectedCameraId || undefined, preferRegularRearCamera: installedApp && !selectedCameraId },
         );
         scannerControlsRef.current = controls;
         setScannerEngine(controls.engine);
