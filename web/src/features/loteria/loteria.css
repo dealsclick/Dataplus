@@ -51,15 +51,17 @@
 .loteria-players [data-slot="card-title"] { display: flex; align-items: center; gap: .5rem; }
 .loteria-player-list { display: flex; flex-wrap: wrap; gap: .6rem; }
 .loteria-player-list [data-slot="badge"] { padding: .55rem .8rem; font-size: 1rem; }
-.loteria-call-stage { display: grid; grid-template-columns: minmax(25rem, 1fr) minmax(16rem, .34fr); gap: clamp(1.5rem, 4vw, 4rem); align-items: center; max-width: 90rem; margin: auto; }
+.loteria-call-stage { display: grid; grid-template-columns: minmax(25rem, 1fr) minmax(15rem, .28fr); gap: clamp(1.5rem, 3vw, 3rem); align-items: center; max-width: 108rem; margin: auto; }
 .loteria-current { display: grid; justify-items: center; gap: .8rem; }
-.loteria-current > .loteria-card-shell { width: min(57vh, 33rem); }
+.loteria-current > .loteria-card-shell { width: min(64vh, 42rem); }
+.loteria-current > .loteria-card-shell .loteria-card strong { font-size: clamp(2rem, 4vw, 4.25rem); line-height: 1; }
 .loteria-card-shell { position: relative; }
 .loteria-card-shell > .loteria-card { width: 100%; }
 .loteria-card { position: relative; display: grid; grid-template-rows: 1fr auto; gap: .35rem; overflow: hidden; padding: .45rem; aspect-ratio: 3 / 4; border: 3px solid #5d3a2e; border-radius: .8rem; background: #fff8dc; color: var(--lot-ink); text-align: center; box-shadow: 0 8px 22px rgba(63, 34, 18, .18); transition: transform .12s, filter .12s, border-color .12s; }
 button.loteria-card:active { transform: scale(.97); }
-.loteria-card-art { position: relative; display: grid; place-items: center; min-height: 0; border-radius: .5rem; background-position: center; background-size: cover; }
-.loteria-card-art > span { font-size: clamp(2rem, 10vw, 8rem); filter: drop-shadow(0 4px 2px rgba(50, 20, 10, .18)); }
+.loteria-card-art { position: relative; display: grid; place-items: center; min-height: 0; overflow: hidden; border-radius: .5rem; background: #efe4ce; }
+.loteria-card-art > img { width: 100%; height: 100%; min-height: 0; object-fit: cover; }
+.loteria-card-art > span { position: absolute; inset: 0; display: grid; place-items: center; font-size: clamp(2rem, 10vw, 8rem); filter: drop-shadow(0 4px 2px rgba(50, 20, 10, .18)); }
 .loteria-card strong { padding: .25rem; font: clamp(.72rem, 2vw, 1.45rem) "Rye", Georgia, serif; }
 .loteria-card-shell.is-compact { width: clamp(5.6rem, 9vw, 9rem); }
 .loteria-card.is-compact { width: 100%; }
