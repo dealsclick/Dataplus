@@ -92,7 +92,7 @@ export function trackingBarcodeConfidence(value: string, format = "") {
   const compact = compactBarcodeValue(value)
   const normalizedFormat = String(format || "").toLowerCase()
   if (!compact) return 0
-  if (/^(?:1Z[A-Z0-9]{16}|TB[AMCD]\d{8,}|(?:GM|JVGL|JJD|JD)[A-Z0-9]{8,}|(?:SPX|SPD)[A-Z0-9]{8,}|(?:GF\d{10,}|GOFO[A-Z0-9]{6,})|SWIFTX[A-Z0-9]{6,})$/.test(compact)) return 180
+  if (/^(?:1Z[A-Z0-9]{16}|TB[AMCD]\d{8,}|(?:GM|JVGL|JJD|JD)[A-Z0-9]{8,}|(?:SPX|SPD)[A-Z0-9]{8,}|(?:GF[A-Z0-9]{10,}|GOFO[A-Z0-9]{6,})|SWIFTX[A-Z0-9]{6,})$/.test(compact)) return 180
   if (/^420\d{5,9}\d{18,34}$/.test(compact)) return 170
   if (/^(?:86|96)\d{32}$/.test(compact)) return 165
   if (/^\d{12}$/.test(compact) || /^\d{15}$/.test(compact)) return 155

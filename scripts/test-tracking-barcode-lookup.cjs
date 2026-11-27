@@ -10,6 +10,28 @@ assert(trackingLookupCandidates('(00) 123456789012345678').includes('12345678901
 assert(trackingLookupCandidates('ABCD').includes('ABCD'));
 assert(trackingLookupCandidates('JJD000225478000123456').includes('JJD000225478000123456'));
 assert(trackingLookupCandidates(']C1SPXBDL011972610090001070').includes('SPXBDL011972610090001070'));
+const speedXWarehouseLabel = 'SPXRIC011972611240042687';
+const gofoWarehouseLabel = 'GFUS01085514514306';
+assert.equal(canonicalTrackingValue(`]C1${speedXWarehouseLabel}`), speedXWarehouseLabel);
+assert(trackingLookupCandidates(`]C1${speedXWarehouseLabel}`).includes(speedXWarehouseLabel));
+assert.equal(canonicalTrackingValue(`]C1${gofoWarehouseLabel}`), gofoWarehouseLabel);
+assert(trackingLookupCandidates(`]C1${gofoWarehouseLabel}`).includes(gofoWarehouseLabel));
+const supportedCarrierScannerValues = [
+  '1Z999AA10123456784',
+  'T1234567890',
+  '9400111899223856928499',
+  '123456789012',
+  'JD014600006281234567',
+  'C12345678901234',
+  'TBA123456789012',
+  speedXWarehouseLabel,
+  gofoWarehouseLabel,
+  'SWX523010000247149463',
+];
+for (const tracking of supportedCarrierScannerValues) {
+  assert.equal(canonicalTrackingValue(`]C1${tracking}`), tracking, `${tracking} must survive native Code 128 normalization`);
+  assert(trackingLookupCandidates(`]C1${tracking}`).includes(tracking), `${tracking} must remain an order-match candidate`);
+}
 assert(trackingLookupCandidates('https://www.ups.com/track?tracknum=1Z999AA10123456784').includes('1Z999AA10123456784'));
 assert(trackingLookupCandidates('https://carrier.test/track/94055118901234567890').includes('94055118901234567890'));
 assert.equal(canonicalTrackingValue(']C11Z999AA10123456784'), '1Z999AA10123456784');
@@ -29,11 +51,14 @@ assert(trackingLookupCandidates('9234 6904 2589 7800 5477 76').includes(uspsGrou
 const fedexReturnOne = '9632013760000000000000528864433447';
 const fedexReturnTwo = '8622013700000000000000797998753958';
 const fedexReturnLiveScan = '9632013760211031021200528867080771';
+const fedexWarehouseLabel = '9622085030000000000000385583760002';
 assert.equal(canonicalTrackingValue(fedexReturnOne), '528864433447');
 assert.equal(canonicalTrackingValue(fedexReturnTwo), '797998753958');
 assert(trackingLookupCandidates(fedexReturnOne).includes('528864433447'));
 assert(trackingLookupCandidates(fedexReturnTwo).includes('797998753958'));
 assert.equal(canonicalTrackingValue(fedexReturnLiveScan), '528867080771');
+assert.equal(canonicalTrackingValue(`]C1${fedexWarehouseLabel}`), '385583760002');
+assert(trackingLookupCandidates(`]C1${fedexWarehouseLabel}`).includes('385583760002'));
 assert.deepEqual(trackingLookupCandidates(fedexReturnLiveScan), [fedexReturnLiveScan, '528867080771']);
 assert(trackingLookupCandidates(`\u001eFDX\u001d${fedexReturnOne}\u001dRMA173225136766794525`).includes('528864433447'));
 

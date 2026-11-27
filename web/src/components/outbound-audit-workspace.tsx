@@ -170,9 +170,10 @@ function scanOrderReference(scan: AuditScan) {
   return [`DataPlus ${orderNumber}`, channelOrderNumber && channelOrderNumber !== orderNumber ? `${String(match.channel || "Channel")} ${channelOrderNumber}` : ""].filter(Boolean).join(" · ")
 }
 
-function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQuickCreate, onRemoveItem, onPhoto, pendingUploads }: {
+function AuditCamera({ open, initialScan, initialMode, onOpenChange, onScan, onItemScan, onQuickCreate, onRemoveItem, onPhoto, pendingUploads }: {
   open: boolean
   initialScan?: AuditScan | null
+  initialMode?: "photo" | null
   onOpenChange: (open: boolean) => void
   onScan: (tracking: string) => Promise<ScanResponse>
   onItemScan: (scan: AuditScan, barcode: string, clientScanId: string, options?: { forceItem?: boolean }) => Promise<LiveItemResponse>
@@ -210,7 +211,7 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
     if (!open) return
     if (initialScan) {
       setActiveScan(initialScan)
-      setMode(itemScanAvailable(initialScan) && initialScan.liveItemStatus !== "complete" ? "items" : initialScan.evidenceCount ? "scan" : "photo")
+      setMode(initialMode === "photo" ? "photo" : itemScanAvailable(initialScan) && initialScan.liveItemStatus !== "complete" ? "items" : initialScan.evidenceCount ? "scan" : "photo")
       setLastItem(initialScan.liveItems[initialScan.liveItems.length - 1] || null)
     } else {
       setMode("scan")
@@ -220,7 +221,7 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
     setUnknownItem(null)
     setTrackingCandidate(null)
     setQuickDraft({ title: "", cost: "" })
-  }, [initialScan, open])
+  }, [initialMode, initialScan, open])
   useEffect(() => () => { if (photo?.previewUrl) URL.revokeObjectURL(photo.previewUrl) }, [photo?.previewUrl])
 
   const clearPhoto = useCallback(() => {
@@ -505,6 +506,11 @@ function AuditCamera({ open, initialScan, onOpenChange, onScan, onItemScan, onQu
 
 export function OutboundAuditWorkspace({ warehouses = [] }: { warehouses?: Row[] }) {
   const availableWarehouses = useMemo(() => physicalWarehouses(warehouses), [warehouses])
+  const photoDeepLink = useMemo(() => {
+    if (typeof window === "undefined") return { auditId: "", scanId: "", photo: false }
+    const params = new URLSearchParams(window.location.search)
+    return { auditId: params.get("auditId") || "", scanId: params.get("scanId") || "", photo: params.get("photo") === "1" }
+  }, [])
   const [audits, setAudits] = useState<AuditSession[]>([])
   const [auditMatches, setAuditMatches] = useState<AuditSession[]>([])
   const [auditPickerOpen, setAuditPickerOpen] = useState(false)
@@ -517,6 +523,7 @@ export function OutboundAuditWorkspace({ warehouses = [] }: { warehouses?: Row[]
   const [startOpen, setStartOpen] = useState(false)
   const [scannerOpen, setScannerOpen] = useState(false)
   const [scannerInitialScan, setScannerInitialScan] = useState<AuditScan | null>(null)
+  const [scannerInitialMode, setScannerInitialMode] = useState<"photo" | null>(null)
   const [closeOpen, setCloseOpen] = useState(false)
   const [manualTracking, setManualTracking] = useState("")
   const [uploadStates, setUploadStates] = useState<Record<string, "uploading" | "failed">>({})
@@ -527,6 +534,7 @@ export function OutboundAuditWorkspace({ warehouses = [] }: { warehouses?: Row[]
   const [scannerFilter, setScannerFilter] = useState("all")
   const [photoPreview, setPhotoPreview] = useState<{ url: string; tracking: string } | null>(null)
   const uploadingEvidenceRef = useRef(new Set<string>())
+  const photoDeepLinkHandledRef = useRef(false)
   const [startDraft, setStartDraft] = useState({ warehouseId: "", carrier: "any", notes: "" })
   const [closeDraft, setCloseDraft] = useState({ handoffMethod: "pickup", driverName: "", pickupConfirmation: "", notes: "", completionOverrideReason: "" })
 
@@ -602,8 +610,20 @@ export function OutboundAuditWorkspace({ warehouses = [] }: { warehouses?: Row[]
     void uploadEvidence(item)
   }, [detail?.session.id, uploadEvidence])
 
-  useEffect(() => { void loadAudits() }, [loadAudits])
+  useEffect(() => { void loadAudits(photoDeepLink.auditId) }, [loadAudits, photoDeepLink.auditId])
   useEffect(() => { void loadDetail(selectedId) }, [loadDetail, selectedId])
+  useEffect(() => {
+    if (photoDeepLinkHandledRef.current || !photoDeepLink.photo || !photoDeepLink.auditId || !photoDeepLink.scanId || detail?.session.id !== photoDeepLink.auditId) return
+    photoDeepLinkHandledRef.current = true
+    const scan = detail.scans.find((row) => row.id === photoDeepLink.scanId)
+    if (!scan) {
+      toast.error("The scanned package is no longer available for a photo.")
+      return
+    }
+    setScannerInitialScan(scan)
+    setScannerInitialMode("photo")
+    setScannerOpen(true)
+  }, [detail, photoDeepLink])
   useEffect(() => { void retryPendingEvidence() }, [retryPendingEvidence])
   useEffect(() => {
     const query = auditQuery.trim()
@@ -790,6 +810,6 @@ export function OutboundAuditWorkspace({ warehouses = [] }: { warehouses?: Row[]
       </DialogContent>
     </Dialog>
     <Dialog open={Boolean(photoPreview)} onOpenChange={(next) => !next && setPhotoPreview(null)}><DialogContent className="max-h-[92vh] sm:max-w-5xl"><DialogHeader><DialogTitle>Shipment photo</DialogTitle><DialogDescription>{photoPreview?.tracking || "Outbound package evidence"}</DialogDescription></DialogHeader>{photoPreview ? <img src={photoPreview.url} alt={`Shipment ${photoPreview.tracking}`} className="max-h-[75vh] w-full rounded-md bg-muted object-contain" /> : null}</DialogContent></Dialog>
-    <AuditCamera open={scannerOpen} initialScan={scannerInitialScan} onOpenChange={(next) => { setScannerOpen(next); if (!next) setScannerInitialScan(null) }} onScan={recordScan} onItemScan={recordLiveItem} onQuickCreate={quickCreateLiveItem} onRemoveItem={removeOptionalItem} onPhoto={queueEvidencePhoto} pendingUploads={pendingUploadCount} />
+    <AuditCamera open={scannerOpen} initialScan={scannerInitialScan} initialMode={scannerInitialMode} onOpenChange={(next) => { setScannerOpen(next); if (!next) { setScannerInitialScan(null); setScannerInitialMode(null) } }} onScan={recordScan} onItemScan={recordLiveItem} onQuickCreate={quickCreateLiveItem} onRemoveItem={removeOptionalItem} onPhoto={queueEvidencePhoto} pendingUploads={pendingUploadCount} />
   </div>
 }

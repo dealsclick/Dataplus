@@ -143,7 +143,7 @@ public class LauncherActivity extends Activity {
             long now = System.currentTimeMillis();
             if (now - lastScanKeyAt > 220) scanBuffer.setLength(0);
             char value = (char) unicode;
-            if (Character.isLetterOrDigit(value) || value == '-') {
+            if (Character.isLetterOrDigit(value) || value == '-' || value == ']') {
                 scanBuffer.append(value);
                 lastScanKeyAt = now;
                 setScannerCaptureText(scanBuffer.toString());
@@ -773,7 +773,7 @@ public class LauncherActivity extends Activity {
     }
 
     private void lookupBarcode(String rawBarcode) {
-        String barcode = rawBarcode.replaceAll("[^0-9A-Za-z-]", "").trim();
+        String barcode = normalizedScannerValue(rawBarcode);
         if (barcode.isEmpty() || currentAudit == null || busy) return;
         if (!isOnline()) {
             scannerMessage("Offline — reconnect before scanning.", false);
@@ -1157,7 +1157,7 @@ public class LauncherActivity extends Activity {
     }
 
     private void routeOutboundDashboardScan(String rawBarcode) {
-        String barcode = rawBarcode.replaceAll("[^0-9A-Za-z-]", "").trim();
+        String barcode = normalizedScannerValue(rawBarcode);
         if (barcode.isEmpty() || busy) return;
         if (!isOnline()) {
             scannerMessage("Offline — reconnect before scanning.", false);
@@ -1554,14 +1554,12 @@ public class LauncherActivity extends Activity {
         }
         if (!scan.optString("carrier").isEmpty()) detail.append("\nCarrier: ").append(scan.optString("carrier"));
         if (!scan.optString("scannedByName").isEmpty()) detail.append("\nScanned by: ").append(scan.optString("scannedByName"));
+        detail.append("\nPhotos: ").append(scan.optInt("evidenceCount") > 0 ? scan.optInt("evidenceCount") + " saved" : "optional · none saved");
         AlertDialog.Builder builder = new AlertDialog.Builder(this)
             .setTitle(scan.optString("trackingNumber", "Package"))
             .setMessage(detail.toString())
             .setPositiveButton("Close", null)
-            .setNeutralButton(unmatched ? "Recheck matches" : "Full tools", (value, which) -> {
-                if (unmatched) reconcileOutboundAudit();
-                else openWeb("/warehouse/outbound");
-            });
+            .setNeutralButton(scan.optInt("evidenceCount") > 0 ? "Another photo" : "Optional photo", (value, which) -> openWeb(outboundPhotoPath(scan)));
         if (canScanItems) {
             builder.setNegativeButton("Scan package items", (value, which) -> {
                 activeOutboundPackage = scan;
@@ -1589,7 +1587,7 @@ public class LauncherActivity extends Activity {
     }
 
     private void recordOutboundPackage(String rawTracking) {
-        String tracking = rawTracking.replaceAll("[^0-9A-Za-z-]", "").trim();
+        String tracking = normalizedScannerValue(rawTracking);
         if (tracking.isEmpty() || currentOutboundSession == null || busy) return;
         if (!isOnline()) {
             scannerMessage("Offline — reconnect before scanning.", false);
@@ -1686,6 +1684,14 @@ public class LauncherActivity extends Activity {
         packageParams.setMargins(0, Ui.dp(this, 16), 0, 0);
         sheet.addView(packageCard, packageParams);
 
+        Button photo = Ui.button(this, scan.optInt("evidenceCount") > 0 ? "Take another optional photo" : "Take optional photo", false);
+        photo.setOnClickListener(view -> {
+            dialog.dismiss();
+            openWeb(outboundPhotoPath(scan));
+        });
+        Ui.margin(photo, 0, 12, 0, 0);
+        sheet.addView(photo, Ui.matchWrap());
+
         LinearLayout actions = Ui.row(this);
         boolean canScanItems = scan.optInt("liveItemExpectedCount") > 0 && !"complete".equalsIgnoreCase(scan.optString("liveItemStatus"));
         Button next = Ui.button(this, canScanItems && scan.optBoolean("liveItemRequired") ? "Full tools" : "Next package", false);
@@ -1718,8 +1724,15 @@ public class LauncherActivity extends Activity {
         sizeBottomDialog(dialog);
     }
 
+    private String outboundPhotoPath(JSONObject scan) {
+        String auditId = currentOutboundSession == null ? "" : currentOutboundSession.optString("id");
+        return "/warehouse/outbound?auditId=" + Uri.encode(auditId)
+            + "&scanId=" + Uri.encode(scan.optString("id"))
+            + "&photo=1";
+    }
+
     private void recordOutboundItem(String rawBarcode) {
-        String barcode = rawBarcode.replaceAll("[^0-9A-Za-z-]", "").trim();
+        String barcode = normalizedScannerValue(rawBarcode);
         if (barcode.isEmpty() || activeOutboundPackage == null || currentOutboundSession == null || busy) return;
         if (!isOnline()) {
             scannerMessage("Offline — reconnect before scanning.", false);
@@ -2208,7 +2221,7 @@ public class LauncherActivity extends Activity {
                 if (updatingScannerCapture || scannerCapture != input) return;
                 String raw = String.valueOf(value);
                 if (raw.contains("\n") || raw.contains("\r") || raw.contains("\t")) completeScannerCapture();
-                else if (raw.replaceAll("[^0-9A-Za-z-]", "").length() >= 3) scheduleScannerSubmit();
+                else if (normalizedScannerValue(raw).length() >= 3) scheduleScannerSubmit();
             }
             @Override public void afterTextChanged(Editable value) {}
         });
@@ -2229,7 +2242,7 @@ public class LauncherActivity extends Activity {
             char value = characters.charAt(index);
             if (value == '\r' || value == '\n' || value == '\t') {
                 terminator = true;
-            } else if (Character.isLetterOrDigit(value) || value == '-') {
+            } else if (Character.isLetterOrDigit(value) || value == '-' || value == ']') {
                 scanBuffer.append(value);
             }
         }
@@ -2245,7 +2258,7 @@ public class LauncherActivity extends Activity {
             pendingScannerSubmit = null;
             completeScannerCapture();
         };
-        scannerSubmitHandler.postDelayed(pendingScannerSubmit, 350);
+        scannerSubmitHandler.postDelayed(pendingScannerSubmit, 120);
     }
 
     private void completeScannerCapture() {
@@ -2254,7 +2267,7 @@ public class LauncherActivity extends Activity {
         String barcode = scanBuffer.length() >= 3
             ? scanBuffer.toString()
             : scannerCapture == null ? "" : scannerCapture.getText().toString();
-        barcode = barcode.replaceAll("[^0-9A-Za-z-]", "").trim();
+        barcode = normalizedScannerValue(barcode);
         resetScanBuffer();
         if (barcode.length() < 3) {
             if (System.currentTimeMillis() - lastCompletedScanAt < 1200) return;
@@ -2272,6 +2285,14 @@ public class LauncherActivity extends Activity {
         lastCompletedScanAt = System.currentTimeMillis();
         scannerMessage("Barcode received: " + barcode, true);
         handleHardwareScan(barcode);
+    }
+
+    private String normalizedScannerValue(String rawValue) {
+        String value = rawValue == null ? "" : rawValue.trim();
+        // Hardware imagers can prepend an AIM symbology identifier such as
+        // ]C1 for Code 128 or ]Q3 for QR. It is not part of the identifier.
+        value = value.replaceFirst("^\\][A-Za-z0-9]{2}", "");
+        return value.replaceAll("[^0-9A-Za-z-]", "").trim();
     }
 
     private void focusScanner() {

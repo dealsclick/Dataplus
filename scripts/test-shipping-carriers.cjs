@@ -18,11 +18,28 @@ assert.equal(inferCarrierFromTracking("9400111899223856928499"), "USPS");
 assert.equal(inferCarrierFromTracking("EC123456789US"), "USPS");
 assert.equal(inferCarrierFromTracking("123456789012"), "FedEx");
 assert.equal(inferCarrierFromTracking("12345678901234"), "FedEx");
+assert.equal(inferCarrierFromTracking("9622085030000000000000385583760002"), "FedEx");
 assert.equal(inferCarrierFromTracking("JD014600006281234567"), "DHL");
 assert.equal(inferCarrierFromTracking("TBA123456789012"), "Amazon Shipping");
+assert.equal(inferCarrierFromTracking("C12345678901234"), "OnTrac");
 assert.equal(inferCarrierFromTracking("GF6383377250020"), "GOFO");
 assert.equal(inferCarrierFromTracking("GFUS01083339081733"), "GOFO");
+assert.equal(inferCarrierFromTracking("SPXRIC011972611240042687"), "SpeedX");
+assert.equal(inferCarrierFromTracking("GFUS01085514514306"), "GOFO");
 assert.equal(inferCarrierFromTracking("SWX523010000247149463"), "SwiftX");
+for (const sample of [
+  "1Z999AA10123456784",
+  "T1234567890",
+  "9400111899223856928499",
+  "EC123456789US",
+  "9622085030000000000000385583760002",
+  "JD014600006281234567",
+  "C12345678901234",
+  "TBA123456789012",
+  "SPXRIC011972611240042687",
+  "GFUS01085514514306",
+  "SWX523010000247149463",
+]) assert.equal(isLikelyTrackingNumber(sample), true, `${sample} must be treated as package tracking`);
 assert.equal(inferCarrierFromTracking("1234567890"), "", "ambiguous numeric tracking is not guessed");
 assert.equal(inferCarrierFromTracking("1234567890", "DHL eCommerce"), "DHL", "saved carrier resolves an ambiguous number");
 assert.equal(inferCarrierFromTracking("LOCAL123", "Veeqo"), "", "a label provider is not treated as a carrier");
