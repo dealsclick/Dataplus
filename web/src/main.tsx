@@ -6,6 +6,11 @@ import './index.css'
 import './color-vision.css'
 import './premium-ui.css'
 import App from './App.tsx'
+import LoteriaApp from './features/loteria/LoteriaApp.tsx'
+
+const RootApp = window.location.pathname === '/loteria' || window.location.pathname.startsWith('/loteria/') || window.location.pathname === '/tv' || window.location.pathname.startsWith('/tv/')
+  ? LoteriaApp
+  : App
 
 createRoot(document.getElementById('root')!, {
   onUncaughtError: reactErrorHandler,
@@ -14,7 +19,7 @@ createRoot(document.getElementById('root')!, {
 }).render(
   <StrictMode>
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem storageKey="dataplus-theme">
-      <App />
+      <RootApp />
     </ThemeProvider>
   </StrictMode>,
 )

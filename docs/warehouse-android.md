@@ -1,52 +1,85 @@
 # DataPlus Warehouse for Android
 
-DataPlus Warehouse is a scan-first Android entry point for the React workspace at `/warehouse/mobile`. The G47 scanner is configured as a keyboard wedge with an Enter/CR suffix, so the Android package does not need a device-specific barcode SDK.
+DataPlus Warehouse 2 is a native Android scanner for receiving, warehouse audits, and outbound handoffs. It uses the existing DataPlus APIs and shares the authenticated session with a restricted in-app DataPlus web fallback for complex workflows. The normal G47 barcode path is native and does not open the camera.
 
-## Distribution
-
-The first release is distributed directly from DataPlus. The signed release APK is published as a versioned deployment asset so every production container serves the same verified installer:
-
-```powershell
-npm run android:publish -- android/warehouse/app-release-signed.apk 1.0.0
-```
-
-This validates the APK container, copies it to `release-assets/warehouse/dataplus-warehouse.apk`, and writes release metadata including its SHA-256 checksum. `GET /api/mobile/warehouse-apk/status` reports availability to authenticated warehouse users. `GET /api/mobile/warehouse-apk` downloads the package with the Android APK MIME type. The user's name menu enables **Install Warehouse APK** when the package is published and otherwise shows a disabled availability message.
-
-Production may instead set `WAREHOUSE_APK_FILE` to an absolute package path and `WAREHOUSE_APK_VERSION` to the displayed version. Never commit the signing key. Preserve and back it up securely: Android updates must use the same package name and signing certificate.
-
-## Web application contract
+## Native application contract
 
 - App name: DataPlus Warehouse
 - Package name: `com.dataplus.warehouse`
-- Minimum Android version: Android 7 / API 24 (the G47 is on Android 14)
-- Start URL: `https://dataplusapp.duckdns.org/warehouse/mobile`
-- Manifest: `https://dataplusapp.duckdns.org/warehouse.webmanifest`
+- Version: `2.1.0` (`versionCode 3`)
+- Minimum Android version: Android 7 / API 24
+- Target: Android API 36; the warehouse G47 runs Android 14
+- Server: `https://dataplusapp.duckdns.org`
+- Scanner: keyboard-wedge/HID/IME output with Enter/CR suffix
+- Network: required for lookups and writes; the app never claims an offline scan was saved
 - Orientation: portrait
-- Network: required for operational writes; never claim an offline scan was saved
-- Scanner: keyboard/keystroke/HID/IME output, no prefix, Enter/CR suffix
 
-The manifest is added to the document only in warehouse mobile mode. API responses and authenticated warehouse records are not cached for offline use.
+The installed package keeps the same application ID and signing certificate as version 1 so Android installs it as an update instead of a second app. Preserve and securely back up `android/warehouse/android.keystore`; future updates require that exact signing identity.
 
-## Trusted Web Activity build
+## Native workflow
 
-Use Google's Bubblewrap CLI. It can download the required JDK and Android command-line tools on first use. Android Studio is not required for this repository build.
+The native app owns sign-in, active receiving/audit selection, warehouse bin selection, hardware-key capture, product lookup, SKU/title/UOM/case-pack review, quantity confirmation, saving, recent counts, and sound/haptic feedback. A barcode lookup never changes inventory. The app calls the scan mutation only after the operator confirms the quantity.
+
+Outbound is also native: the operator can start or reopen today's warehouse handoff, scan tracking labels, review the matched DataPlus orders, complete required or optional package-item scans, recheck unmatched packages, and close the handoff. Package photos, quick item creation, and unusual exceptions remain available through **Photos & exceptions**, which opens the responsive full outbound workspace.
+
+Unknown barcodes are not received automatically. The operator may skip them or open the full DataPlus workflow to research or create the product. Starting a new receipt/audit, camera scanning, and administrative tools also use the explicit web fallback. That WebView permits navigation only inside the DataPlus HTTPS origin; other links open in an external app. Camera permission is requested only if the operator chooses the web camera scanner.
+
+The React mobile website remains an independent fallback. Native APK changes do not require changes under `web/src/`.
+
+## Build and sign
+
+The build uses JDK 17 and Android SDK API 36. The helper finds the existing Bubblewrap-managed JDK/SDK when `JAVA_HOME` and `ANDROID_HOME` are not already set.
 
 ```powershell
-npm install
 npm run android:build
-npm run android:publish -- android/warehouse/app-release-signed.apk 1.0.0
 ```
 
-The generated project is under `android/warehouse`. The release certificate fingerprint must match `web/public/.well-known/assetlinks.json` before the app can run without browser chrome. The ignored release keystore is `android/warehouse/android.keystore`; back it up securely because every future APK update must use the same key.
+Without signing variables, this creates:
 
-For direct distribution, register `com.dataplus.warehouse` and the release certificate in the [Android Developer Console](https://developer.android.com/developer-verification/guides/android-developer-console) before the global Android developer-verification rollout reaches the warehouse devices.
+`android/warehouse/app/build/outputs/apk/release/app-release-unsigned.apk`
 
-## G47 acceptance pass
+To produce the update-ready signed APK, set the signing variables in the current shell. Do not save passwords in the repository.
 
-1. Download the APK from the signed-in name menu and allow installation from the browser when Android prompts.
-2. Confirm the launcher opens DataPlus Warehouse without an address bar.
-3. Sign in and confirm the session persists after closing and reopening the app.
-4. Scan a PO, product identifier, bin label, and return label using both physical triggers.
-5. Confirm one physical scan creates one UI action, success/error feedback is visible, and the scanner field regains focus.
-6. Disable Wi-Fi and confirm the red offline banner prevents the operator from assuming scans were saved.
-7. Reconnect, finish a test receipt/audit, and verify the server-side record in the full React workspace.
+```powershell
+$env:WAREHOUSE_ANDROID_KEYSTORE_PASSWORD = "<keystore password>"
+$env:WAREHOUSE_ANDROID_KEY_PASSWORD = "<key password, only if different>"
+$env:WAREHOUSE_ANDROID_KEY_ALIAS = "datapluswarehouse"
+npm run android:build
+```
+
+The signed output is `android/warehouse/app-release-signed.apk`. The build aligns, signs, and verifies the APK. `WAREHOUSE_ANDROID_KEYSTORE` may point to a securely stored keystore outside the repository.
+
+## Publish the direct download
+
+```powershell
+npm run android:publish -- android/warehouse/app-release-signed.apk 2.1.0
+```
+
+Publishing validates the APK container, copies it to `release-assets/warehouse/dataplus-warehouse.apk`, and records its SHA-256 checksum. Authenticated warehouse users download it from the existing **Install Warehouse APK** option in the name menu. `GET /api/mobile/warehouse-apk/status` reports availability and `GET /api/mobile/warehouse-apk` serves the installer with the Android APK MIME type.
+
+Production can instead use `WAREHOUSE_APK_FILE` and `WAREHOUSE_APK_VERSION`. Register the package and signing certificate in the Android Developer Console before developer-verification rules require it for these warehouse devices.
+
+## Verification
+
+Run the source and distribution checks before publishing:
+
+```powershell
+npm run test:warehouse-native
+npm run test:warehouse-apk
+git diff --check
+```
+
+On the G47:
+
+1. Install version 2.1 over the existing DataPlus Warehouse app and confirm Android treats it as an update.
+2. Sign in, close the app, reopen it, and confirm the session persists.
+3. Open a test receipt and choose a bin.
+4. Scan with both physical triggers. Confirm one trigger press opens one native confirmation sheet.
+5. Verify SKU, title, UOM, case pack, bin, and quantity before tapping **Receive quantity**.
+6. Confirm cancel makes no server change and confirm makes exactly one server change.
+7. Disable Wi-Fi and confirm the red offline banner blocks the scan write.
+8. Use **Camera & tools** and verify camera permission is requested only there.
+9. Verify the saved count in the full React warehouse workspace.
+10. Open **Outbound**, start or reopen today's audit, and scan a package tracking label with the G47 trigger.
+11. Verify matched and unmatched packages are clearly identified, then complete any required package-item UPC scans.
+12. Close the handoff only after all required Live item scans are complete; confirm the same audit in the React outbound workspace.

@@ -16,6 +16,8 @@
 -->
 <resources>
 
+  <string name="app_name">DataPlus Warehouse</string>
+
 
   <!--
     The "fullscreen" and "fullscreen-sticky" TWA manifest values correspond to "immersive" and "sticky-immersive"
