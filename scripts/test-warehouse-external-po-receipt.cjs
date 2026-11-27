@@ -87,6 +87,10 @@ assert.match(warehouseUi, /setActionPreview\(preview\);\s*setDispositionType\("s
 assert.match(warehouseUi, /dispositionType === "fulfill_orders" && compatibleOrders\.length > 0/, 'additional matching orders are expanded only after allocation is explicitly selected');
 assert.match(warehouseUi, /max-h-40 overflow-y-auto overscroll-contain/, 'mobile receipt order previews use a bounded native scroller');
 assert.match(warehouseUi, /closeRemaining: closeShortPurchaseOrder/, 'linked PO receiving can explicitly close a supplier short shipment');
+assert.match(warehouseUi, /Post partial receipt & close audit/, 'the primary partial-receipt action closes only the current audit');
+assert.match(warehouseUi, /allows another audit when the balance arrives/, 'the finish dialog explains that one PO can support multiple receiving audits');
+assert.match(warehouseUi, /No action is required[\s\S]*marks the PO partially received/, 'partial receipt completion does not require a backorder classification');
+assert.match(server, /partialReceipt,\s*remainingQty[\s\S]*backorderLines/, 'completed audits retain the PO balance deferred to a future receipt');
 assert.match(warehouseUi, /Orders this receipt can move forward/, 'PO receiving shows pending, allocated, and label-purchased orders that can move forward');
 assert.match(warehouseUi, /Recent PO receiving/, 'mobile receiving shows recent and resumable PO sessions');
 assert.match(warehouseUi, /activeReceivingParticipants/, 'the shared scanner shows teammates who are actively receiving the PO');

@@ -5,6 +5,7 @@ const {
   updatePurchaseOrderLineCost,
   validatePurchaseOrderBackorders,
   applyPurchaseOrderReceiptBackorders,
+  openPurchaseOrderExpectationsFromState,
   reserveSupplierFreeItemLots,
   releaseSupplierFreeItemLotAssignments,
   consumeSupplierFreeItemLotAssignments
@@ -74,6 +75,14 @@ receivingPo.items[0].receivedQty = 9;
 const reduced = applyPurchaseOrderReceiptBackorders(receivingPo, [], receipt, { user: "Receiver" });
 assert.equal(receivingPo.items[0].backorderedQty, 1);
 assert.equal(reduced.totalUnits, 6);
+
+const futureAuditExpectations = openPurchaseOrderExpectationsFromState([receivingPo], ["SKU-A", "SKU-B"]);
+assert.deepEqual(futureAuditExpectations.map((line) => [line.sku, line.remainingQty]), [["SKU-A", 1], ["SKU-B", 5]], "Backordered quantities must remain available to a later receiving audit.");
+const partialWithoutBackorder = { id: "po-partial", poNumber: "PO-PARTIAL", status: "partially_received", items: [{ id: "line-c", sku: "SKU-C", qty: 10, receivedQty: 6, backorderedQty: 0 }] };
+assert.equal(openPurchaseOrderExpectationsFromState([partialWithoutBackorder], ["SKU-C"])[0].remainingQty, 4, "A partial PO remains eligible for another audit without requiring a supplier-backorder flag.");
+receivingPo.items[0].receivedQty = 10;
+receivingPo.items[1].receivedQty = 5;
+assert.equal(openPurchaseOrderExpectationsFromState([receivingPo], ["SKU-A", "SKU-B"]).length, 0, "The PO stops offering a line only after a later receipt finishes it.");
 
 const product = {
   sku: "FREE-1",

@@ -65935,6 +65935,10 @@ async function handleApi(req, res) {
       audit.appliedLines = (audit.lines || []).filter((line) => Number(line.countedQty || 0) > 0).length;
       const linkedAllocation = linkedReceipt.allocation && typeof linkedReceipt.allocation === "object" ? linkedReceipt.allocation : null;
       const allocatedQty = Number(linkedAllocation?.allocatedQty || 0);
+      const linkedBackorder = linkedReceipt.backorder && typeof linkedReceipt.backorder === "object" ? linkedReceipt.backorder : null;
+      const backorderedQty = Math.max(0, Number(linkedBackorder?.totalUnits || 0));
+      const remainingQty = (linkedPo.items || []).reduce((sum, line) => sum + purchaseOrderOpenQuantity(line), 0);
+      const partialReceipt = remainingQty > 0 && !["closed", "received"].includes(String(linkedPo.status || "").toLowerCase());
       audit.disposition = {
         type: linkedAllocation ? "fulfill_orders" : "purchase_order_receipt",
         label: linkedAllocation ? "Received against DataPlus PO and checked open orders" : "Received against DataPlus PO",
@@ -65943,6 +65947,10 @@ async function handleApi(req, res) {
         purchaseOrderNumber: linkedPo.poNumber,
         receiptId: linkedReceipt.id,
         receiptNumber: linkedReceipt.receiptNumber,
+        partialReceipt,
+        remainingQty,
+        backorderedQty,
+        backorderLines: Array.isArray(linkedBackorder?.lines) ? linkedBackorder.lines : [],
         allocatedQty,
         blockedQty: 0,
         poAdjustmentQty: Number(linkedAllocation?.poAdjustmentQty || 0),
@@ -65951,11 +65959,11 @@ async function handleApi(req, res) {
         appliedAt: now,
         appliedBy: audit.approvedBy
       };
-      audit.lifecycleEvents = [...(Array.isArray(audit.lifecycleEvents) ? audit.lifecycleEvents : []), { type: "purchase_order_receipt_posted", at: now, user: audit.approvedBy, purchaseOrderId: linkedPo.id, purchaseOrderNumber: linkedPo.poNumber, receiptId: linkedReceipt.id, receiptNumber: linkedReceipt.receiptNumber }].slice(-100);
+      audit.lifecycleEvents = [...(Array.isArray(audit.lifecycleEvents) ? audit.lifecycleEvents : []), { type: "purchase_order_receipt_posted", at: now, user: audit.approvedBy, purchaseOrderId: linkedPo.id, purchaseOrderNumber: linkedPo.poNumber, receiptId: linkedReceipt.id, receiptNumber: linkedReceipt.receiptNumber, partialReceipt, remainingQty, backorderedQty }].slice(-100);
       audit.updatedAt = now;
       await postgres.saveWarehouseAudit(audit);
       await syncPurchaseOrderReceivingProgress(audit, { clear: true });
-      return sendJson(res, 200, { audit, purchaseOrder: linkedPo, receipt: linkedReceipt, message: `${audit.auditNumber} completed and ${linkedReceipt.receiptNumber} was posted to ${linkedPo.poNumber}.${linkedAllocation ? allocatedQty > 0 ? ` ${allocatedQty} received unit${allocatedQty === 1 ? " was" : "s were"} allocated to ${Number(linkedAllocation.orderCount || 0)} open order${Number(linkedAllocation.orderCount || 0) === 1 ? "" : "s"}.` : " No eligible open order demand remained." : ""}` });
+      return sendJson(res, 200, { audit, purchaseOrder: linkedPo, receipt: linkedReceipt, message: `${audit.auditNumber} completed and ${linkedReceipt.receiptNumber} was posted to ${linkedPo.poNumber}.${partialReceipt ? ` ${remainingQty} unreceived unit${remainingQty === 1 ? " remains" : "s remain"} open for a future receiving audit.` : ""}${backorderedQty > 0 ? ` ${backorderedQty} unit${backorderedQty === 1 ? " is" : "s are"} marked as supplier backordered.` : ""}${linkedAllocation ? allocatedQty > 0 ? ` ${allocatedQty} received unit${allocatedQty === 1 ? " was" : "s were"} allocated to ${Number(linkedAllocation.orderCount || 0)} open order${Number(linkedAllocation.orderCount || 0) === 1 ? "" : "s"}.` : " No eligible open order demand remained." : ""}` });
     }
     const db = await readDbFast({ skipInventory: true });
     db.inventoryLedger = await postgres.readStateField("inventoryLedger").catch(() => []) || [];
