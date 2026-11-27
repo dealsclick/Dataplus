@@ -199,6 +199,42 @@ test("eBay event ID selects the correct session and persists the order allocatio
   assert.equal(order.items[0].liveSessionAllocations[0].receivedInventory, true);
 });
 
+test("TikTok room ID selects the correct session and persists the order allocation", () => {
+  const sessions = [{
+    id: "tiktok-other",
+    sessionNumber: "LS-103",
+    status: "live",
+    channel: "tiktok_live",
+    channelAccountId: "shop-1",
+    tiktokStudio: { liveId: "room-other" },
+    createdAt: "2026-11-20T12:00:00.000Z",
+    items: [{ id: "other-item", upc: "0045242167234", reservedQty: 2 }],
+  }, {
+    id: "tiktok-room",
+    sessionNumber: "LS-104",
+    status: "live",
+    channel: "tiktok_live",
+    channelAccountId: "shop-1",
+    tiktokStudio: { liveId: "17421894150" },
+    createdAt: "2026-11-20T12:00:00.000Z",
+    items: [{ id: "room-item", upc: "0045242167234", reservedQty: 2 }],
+  }];
+  const order = {
+    id: "tiktok-order-1",
+    orderNumber: "TT-1001",
+    isTikTokLive: true,
+    channelAccountId: "shop-1",
+    tiktokLive: { isLive: true, contentIds: ["17421894150"] },
+    items: [{ upc: "0045242167234", quantity: 1, tiktokLiveContentId: "17421894150" }],
+  };
+
+  const result = reconcileLiveSessions(sessions, [order]);
+  assert.equal(result[0].soldUnits, 0);
+  assert.equal(result[1].soldUnits, 1);
+  assert.equal(order.liveSessionId, "tiktok-room");
+  assert.equal(order.items[0].liveSessionItemId, "room-item");
+});
+
 test("scheduled sessions do not claim earlier orders without an exact event ID", () => {
   const order = {
     id: "order-before",

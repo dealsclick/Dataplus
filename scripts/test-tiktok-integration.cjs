@@ -198,6 +198,10 @@ async function main() {
   assert.equal(liveSessionsSource.includes('Sync products to TikTok LIVE'), true, 'TikTok Live Sessions must expose creator product sync.');
   assert.equal(liveSessionsSource.includes('Streamer showcase'), true, 'TikTok Live Session creation must select the official streamer showcase.');
   assert.equal(liveSessionsSource.includes('tiktokCreatorId'), true, 'TikTok Live Sessions must persist the selected official account.');
+  assert.equal(liveSessionsSource.includes('TikTok CSV reconciliation'), true, 'TikTok Live Sessions must crossmatch manually uploaded session CSV files.');
+  assert.equal(liveSessionsSource.includes('Download loaded products'), true, 'TikTok Live Sessions must export the product tray with resolved DataPlus SKUs.');
+  assert.equal(liveSessionsSource.includes('Session orders'), true, 'Attributed TikTok LIVE orders must remain visible outside the collapsible Studio panel.');
+  assert.equal(liveSessionsSource.includes('Product tray status'), true, 'TikTok session products must expose their tray status and protected removal workflow.');
   const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const activeJobDatabaseSource = fs.readFileSync(path.join(__dirname, '..', 'db.js'), 'utf8');
   const activeJobWorkerSource = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'dataplus-worker.js'), 'utf8');
@@ -214,6 +218,8 @@ async function main() {
   assert.match(serverSource, /createMissingOrderSkus: false/, 'Historical TikTok identity repair must not create draft catalog SKUs.');
   assert.match(serverSource, /orderIsReportingOnly\(order\)/, 'Historical reporting orders must not be queued for operational routing by identity repair.');
   assert.equal(serverSource.includes('parts[3] === "tiktok-live" && parts[4] === "sync"'), true, 'The server must expose a TikTok Live Session sync route.');
+  assert.equal(serverSource.includes('parts[3] === "tiktok-csv" && parts[4] === "reconcile"'), true, 'The server must expose TikTok session CSV reconciliation.');
+  assert.equal(serverSource.includes('parts[4] === "products.csv"'), true, 'The server must export TikTok LIVE tray products with local SKU matches.');
   assert.equal(tiktokChannelSource.includes('Shop code'), true, 'TikTok settings must display the selected shop code.');
   assert.equal(tiktokChannelSource.includes('Shared TikTok app credentials'), true, 'TikTok settings must distinguish app credentials from seller accounts.');
   assert.equal(tiktokChannelSource.includes('Saved securely'), true, 'TikTok settings must explain that saved app secrets are not displayed.');
@@ -228,6 +234,7 @@ async function main() {
   assert.match(tiktokMarketplaceSource, /queue\('webhook', \{ accountId, actor:/, 'Webhook receipt must queue one account-level catch-up job instead of one job per event.');
   assert.equal(tiktokMarketplaceSource.includes('launchOverrides:'), true, 'TikTok launch jobs must retain live-session merchant SKU and quantity overrides.');
   assert.equal(tiktokMarketplaceSource.includes('liveAuctionExportContext'), true, 'TikTok must resolve the selected shop warehouse for LIVE auction CSV exports.');
+  assert.equal(tiktokMarketplaceSource.includes('deps.reconcileLiveSessions'), true, 'TikTok order, webhook, and LIVE workers must reconcile imported orders to sessions.');
   assert.equal(serverSource.includes('parts[3] === "tiktok-auction" && parts[4] === "export"'), true, 'Live Sessions must expose a TikTok auction upload export route.');
   assert.equal(liveSessionsSource.includes('Auction upload CSV'), true, 'TikTok Live Sessions must expose the manual auction upload fallback.');
   assert.equal(serverSource.includes('url.pathname === "/api/live-sessions/detect-active"'), true, 'The Live Sessions workspace must detect active TikTok broadcasts without opening each session.');

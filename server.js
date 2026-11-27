@@ -22,6 +22,7 @@ const postgres = require("./db");
 const { createCompanyStore, LEGACY_TENANT, LEGACY_COMPANY } = require("./lib/company-workspaces");
 const { buildOrderIdentity } = require("./lib/order-identity");
 const liveSessionLedger = require("./lib/live-sessions");
+const liveSessionCsv = require("./lib/live-session-csv");
 const { SUPERUSER_FEATURES, isSuperuser: isSuperuserAccount, normalizedFeatureSettings, featureAccessForUser } = require("./lib/superuser-access");
 const { channelIsEnabled } = require("./lib/channel-enabled");
 const { applyWalmartSettings, walmartIsSettlementOnly } = require("./lib/walmart-settings");
@@ -13698,6 +13699,96 @@ function liveSessionOrderLinkSignature(order = {}) {
   });
 }
 
+function liveSessionOrderSummary(order = {}) {
+  return {
+    id: order.id,
+    orderNumber: order.orderNumber || order.displayOrderNumber,
+    marketplaceOrderId: order.marketplaceOrderId || order.externalOrderId || order.external?.orderId || "",
+    status: order.status || "",
+    createdAt: order.createdAt || order.orderDate || "",
+    shippedAt: order.shippedAt || "",
+    items: (order.items || []).map((item) => ({
+      sku: item.sku || item.catalogSku || "",
+      title: item.title || "",
+      quantity: Number(item.quantity || item.qty || 0),
+      liveSessionId: item.liveSessionId || "",
+      liveSessionNumber: item.liveSessionNumber || "",
+      matchMode: item.liveSessionMatchMode || ""
+    }))
+  };
+}
+
+async function liveSessionOrderFeed(session = {}, options = {}) {
+  const channel = normalizeLiveInventoryChannel(session.channel);
+  if (!channel) return { orders: [], total: 0 };
+  const sessionIds = new Set([session.id, session.sessionNumber].map((value) => String(value || "")).filter(Boolean));
+  const linkedOrderIds = new Set((session.items || []).flatMap((item) => item.linkedOrderIds || []).map(String));
+  const eventIds = new Set(liveSessionLedger.eventIdsForSession(session).map((value) => String(value).toLowerCase()));
+  const parsedFeedStart = new Date(session.startedAt || session.scheduledStartAt || session.createdAt || Date.now());
+  const feedStart = Number.isFinite(parsedFeedStart.getTime()) ? parsedFeedStart : new Date();
+  const dateFrom = new Date(feedStart.getTime() - 86_400_000).toISOString().slice(0, 10);
+  const recentOrders = await postgres.listOrders({ channel, dateFrom, includeOpenWork: true, limit: Math.max(100, Math.min(50000, Number(options.readLimit || 5000))) });
+  const related = recentOrders.filter((order) => {
+    if (linkedOrderIds.has(String(order.id)) || linkedOrderIds.has(String(order.orderNumber))) return true;
+    const orderSessionIds = [
+      order.liveSessionId,
+      order.liveSessionNumber,
+      ...(Array.isArray(order.liveSessionIds) ? order.liveSessionIds : []),
+      ...(Array.isArray(order.liveSessionNumbers) ? order.liveSessionNumbers : []),
+      ...(Array.isArray(order.external?.liveSessionIds) ? order.external.liveSessionIds : []),
+      ...(Array.isArray(order.external?.liveSessionNumbers) ? order.external.liveSessionNumbers : [])
+    ].map((value) => String(value || "")).filter(Boolean);
+    if (orderSessionIds.some((value) => sessionIds.has(value))) return true;
+    const contentIds = [
+      ...(order.tiktokLive?.contentIds || []),
+      ...(order.external?.tiktokLive?.contentIds || []),
+      ...(order.ebayLive?.eventIds || []),
+      ...(order.external?.ebayLive?.eventIds || []),
+      ...(order.items || []).flatMap((item) => [item.tiktokLiveContentId, item.channelEventId, item.ebayLiveEventId])
+    ].map((value) => String(value || "").toLowerCase()).filter(Boolean);
+    return contentIds.some((value) => eventIds.has(value));
+  }).sort((left, right) => Date.parse(String(right.createdAt || right.orderDate || "")) - Date.parse(String(left.createdAt || left.orderDate || "")));
+  const limit = Math.max(1, Math.min(500, Number(options.limit || 100)));
+  return { total: related.length, orders: related.slice(0, limit).map(liveSessionOrderSummary) };
+}
+
+async function reconcileTikTokLiveSessionsFromOrders(options = {}) {
+  const allSessions = await postgres.readEntityDocumentCollectionFast("liveSessions");
+  const accountId = String(options.accountId || "").trim().toLowerCase();
+  const now = Date.now();
+  const scopedSessions = liveSessionRowsForScope(allSessions, { legacy: true }).filter((session) => {
+    if (normalizeLiveInventoryChannel(session.channel) !== "tiktok_live") return false;
+    if (accountId && String(session.channelAccountId || "").trim().toLowerCase() !== accountId) return false;
+    const status = String(session.status || "draft").toLowerCase();
+    if (["ready", "live"].includes(status)) return true;
+    const endedAt = Date.parse(String(session.completedAt || session.canceledAt || session.endedAt || ""));
+    return status === "completed" && Number.isFinite(endedAt) && endedAt >= now - 7 * 86_400_000;
+  });
+  if (!scopedSessions.length) return { sessions: 0, orders: 0, linkedOrders: 0 };
+  const starts = scopedSessions.map((session) => Date.parse(String(session.startedAt || session.scheduledStartAt || session.createdAt || ""))).filter(Number.isFinite);
+  const earliest = starts.length ? Math.min(...starts) : now - 7 * 86_400_000;
+  const liveOrders = await postgres.listOrders({ channel: "tiktok_live", dateFrom: new Date(earliest - 86_400_000).toISOString().slice(0, 10), includeOpenWork: true, limit: 50000 });
+  const priorLinkSignatures = new Map(liveOrders.map((order) => [stableLiveOrderKey(order), liveSessionOrderLinkSignature(order)]));
+  const mutation = await postgres.mutateLiveSessionsAtomically((sessions) => {
+    const scopedIds = new Set(scopedSessions.map((session) => String(session.id || "")));
+    const currentScoped = sessions.filter((session) => scopedIds.has(String(session.id || "")));
+    const reconciled = liveSessionLedger.reconcileLiveSessions(currentScoped, liveOrders);
+    const byId = new Map(reconciled.map((session) => [String(session.id || ""), session]));
+    const changedOrders = liveOrders.filter((order) => priorLinkSignatures.get(stableLiveOrderKey(order)) !== liveSessionOrderLinkSignature(order));
+    return {
+      sessions: sessions.map((session) => byId.get(String(session.id || "")) || session),
+      orders: changedOrders,
+      result: { sessions: reconciled, orders: liveOrders }
+    };
+  });
+  const reconciledOrders = mutation?.result?.orders || liveOrders;
+  return {
+    sessions: scopedSessions.length,
+    orders: reconciledOrders.length,
+    linkedOrders: reconciledOrders.filter((order) => (order.liveSessionIds || []).length > 0).length
+  };
+}
+
 async function reconcileImportedEbayLiveOrdersAtomically(incomingOrders = []) {
   const imported = (Array.isArray(incomingOrders) ? incomingOrders : []).filter((order) => ebayLiveOrderContext(order).isLive);
   if (!imported.length) return { orders: [], sessions: [] };
@@ -25059,6 +25150,7 @@ function getTikTokMarketplace() {
       ...options,
       source: "TikTok Shop order import"
     }),
+    reconcileLiveSessions: options => reconcileTikTokLiveSessionsFromOrders(options),
     readProducts: skus => postgres.readProductsByKeys(skus),
     enrichProductCategoryMappings: enrichTikTokProductCategoryMappings,
     saveProductCategoryMapping: saveTikTokProductCategoryMapping,
@@ -62911,6 +63003,89 @@ async function handleApi(req, res) {
     });
   }
 
+  if (req.method === "POST" && parts[0] === "api" && parts[1] === "live-sessions" && parts[2] && parts[3] === "tiktok-csv" && parts[4] === "reconcile" && postgres.isPostgresEnabled()) {
+    const scope = liveSessionScope(req);
+    if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
+    const rows = await postgres.readEntityDocumentCollectionFast("liveSessions");
+    const target = liveSessionRecordForKey(rows, scope, parts[2]);
+    if (!target) return notFound(res);
+    if (normalizeLiveInventoryChannel(target.channel) !== "tiktok_live") return sendJson(res, 409, { error: "TikTok CSV reconciliation is available only for TikTok Live sessions." });
+    const body = await parseBody(req);
+    let reconciliation;
+    try {
+      reconciliation = liveSessionCsv.reconcileLiveSessionCsv({
+        session: target,
+        csv: String(body.csv || ""),
+        filename: body.filename,
+        actor: authUser?.name || authUser?.username || body.user || "DataPlus user"
+      });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 400, { error: error.message || "DataPlus could not read this TikTok CSV." });
+    }
+    const matchedByItem = new Map(reconciliation.rows
+      .filter((row) => row.status === "matched" && row.sessionItemId)
+      .map((row) => [String(row.sessionItemId), row]));
+    const now = new Date().toISOString();
+    const mutation = await postgres.mutateLiveSessionsAtomically((sessions) => {
+      const current = liveSessionRecordForKey(sessions, scope, parts[2]);
+      if (!current) throw Object.assign(new Error("Live session not found."), { statusCode: 404 });
+      const next = liveSessionLedger.sessionTotals({
+        ...current,
+        tiktokCsvReconciliation: reconciliation,
+        items: (current.items || []).map((item) => {
+          const itemId = String(item.id || item.sourceLineId || item.productId || item.sku || "");
+          const match = matchedByItem.get(itemId);
+          return {
+            ...item,
+            tiktokCsvMatch: match ? {
+              status: "matched",
+              filename: reconciliation.filename,
+              rowNumber: match.rowNumber,
+              matchBasis: match.matchBasis,
+              productId: match.productId,
+              sellerSku: match.sellerSku,
+              importedAt: reconciliation.importedAt
+            } : null
+          };
+        }),
+        updatedAt: now
+      });
+      return { sessions: sessions.map((session) => String(session.id) === String(current.id) ? liveSessionWithoutEmbeddedAudit(next) : session), result: { session: next } };
+    });
+    void recordUserActivity(req, authUser, {
+      eventType: "live_session", action: "Reconciled TikTok LIVE CSV", entityType: "live_session", entityId: target.id,
+      metadata: { filename: reconciliation.filename, ...reconciliation.summary }
+    });
+    return sendJson(res, 200, {
+      session: mutation?.result?.session,
+      reconciliation,
+      message: `${reconciliation.summary.matchedRows} of ${reconciliation.summary.csvRows} CSV row${reconciliation.summary.csvRows === 1 ? "" : "s"} matched this live session.`
+    });
+  }
+
+  if (req.method === "GET" && parts[0] === "api" && parts[1] === "live-sessions" && parts[2] && parts[3] === "studio" && parts[4] === "products.csv" && postgres.isPostgresEnabled()) {
+    const scope = liveSessionScope(req);
+    if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
+    const rows = await postgres.readEntityDocumentCollectionFast("liveSessions");
+    const target = liveSessionRecordForKey(rows, scope, parts[2]);
+    if (!target) return notFound(res);
+    if (normalizeLiveInventoryChannel(target.channel) !== "tiktok_live") return sendJson(res, 409, { error: "TikTok loaded-product export is available only for TikTok Live sessions." });
+    if (!String(target.channelAccountId || "").trim() || !String(target.tiktokCreatorId || "").trim()) return sendJson(res, 409, { error: "Select the TikTok shop and official LIVE account before downloading loaded products." });
+    let studio;
+    try {
+      studio = await getTikTokMarketplace().studioStatus({ accountId: target.channelAccountId, creatorId: target.tiktokCreatorId, liveId: target.tiktokStudio?.liveId, refresh: true });
+    } catch (error) {
+      return sendJson(res, error.statusCode || 502, { error: error.message || "DataPlus could not read TikTok's LIVE product tray." });
+    }
+    const products = liveSessionCsv.studioProductsWithSessionSkus(target, studio.products || []);
+    if (!products.length && studio.capabilities?.productTrayRead !== true) return sendJson(res, 409, { error: (studio.warnings || []).join(" ") || "TikTok has not granted DataPlus access to read this LIVE product tray." });
+    const quote = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+    const header = ["TikTok product ID", "DataPlus SKU", "Merchant SKU", "Title", "TikTok status", "Pinned", "Match status", "Match basis"];
+    const csvRows = products.map((product) => [product.productId, product.sku, product.merchantSku, product.title, product.status, product.pinned ? "Yes" : "No", product.matchStatus, product.matchBasis]);
+    const filenameBase = canonicalLiveSessionReference(target.sessionNumber, target.id) || "live-session";
+    return sendCsv(res, [header, ...csvRows].map((row) => row.map(quote).join(",")).join("\r\n"), `${filenameBase}-tiktok-loaded-products.csv`);
+  }
+
   if (req.method === "GET" && parts[0] === "api" && parts[1] === "live-sessions" && parts[2] && parts[3] === "studio" && parts[4] === "report.csv" && postgres.isPostgresEnabled()) {
     const scope = liveSessionScope(req);
     if (!scope.legacy) return sendJson(res, 409, { error: "Live inventory operations remain available only for LINQ while company isolation is completed." });
@@ -63042,34 +63217,17 @@ async function handleApi(req, res) {
       session = mutation?.result?.session || session;
       finalReconciled = shouldFinalize;
     }
-    const sessionOrderIds = new Set((session.items || []).flatMap((item) => item.linkedOrderIds || []).map(String));
-    const roomId = String(session.tiktokStudio?.liveId || "");
-    const feedStart = new Date(session.startedAt || session.scheduledStartAt || session.createdAt || Date.now());
-    const recentLiveOrders = await postgres.listOrders({ channel: "tiktok_live", dateFrom: new Date(feedStart.getTime() - 86_400_000).toISOString().slice(0, 10), includeOpenWork: true, limit: 5000 });
-    const relatedOrders = recentLiveOrders.filter((order) => {
-      if (sessionOrderIds.has(String(order.id)) || sessionOrderIds.has(String(order.orderNumber))) return true;
-      const contentIds = [...(order.tiktokLive?.contentIds || []), ...(order.external?.tiktokLive?.contentIds || []), ...(order.items || []).map((item) => item.tiktokLiveContentId)].map(String);
-      return Boolean(roomId && contentIds.includes(roomId));
-    });
-    const orderFeedTotal = relatedOrders.length;
-    const orderFeed = relatedOrders
-      .sort((left, right) => Date.parse(String(right.createdAt || right.orderDate || "")) - Date.parse(String(left.createdAt || left.orderDate || "")))
-      .slice(0, 100)
-      .map((order) => ({
-      id: order.id,
-      orderNumber: order.orderNumber || order.displayOrderNumber,
-      marketplaceOrderId: order.marketplaceOrderId || order.externalOrderId || order.external?.orderId || "",
-      status: order.status || "",
-      createdAt: order.createdAt || order.orderDate || "",
-      shippedAt: order.shippedAt || "",
-      items: (order.items || []).map((item) => ({ sku: item.sku || item.catalogSku || "", title: item.title || "", quantity: Number(item.quantity || item.qty || 0) }))
-      }));
+    const related = await liveSessionOrderFeed(session, { limit: 100 });
     const responseTrackedRoom = Boolean(studio.room?.liveId) && String(session.tiktokStudio?.liveId || "") === String(studio.room.liveId);
     return sendJson(res, 200, {
-      studio: { ...studio, tracked: responseTrackedRoom },
+      studio: {
+        ...studio,
+        tracked: responseTrackedRoom,
+        products: liveSessionCsv.studioProductsWithSessionSkus(session, studio.products || [])
+      },
       session,
-      orderFeed,
-      orderFeedTotal,
+      orderFeed: related.orders,
+      orderFeedTotal: related.total,
       finalReconciled,
       finalization: nextStudio?.finalizationStatus ? { status: nextStudio.finalizationStatus, finalizeAfter: nextStudio.finalizeAfter || "", orderSyncJobId: nextStudio.orderSyncJobId || "", error: nextStudio.orderSyncError || "" } : null,
       message: finalReconciled ? "TikTok ended the tracked LIVE room. DataPlus reconciled sales, completed the session, and released unused inventory." : shouldBeginFinalization ? "TikTok ended the LIVE room. A fresh order sync is running before DataPlus releases unused inventory." : studio.message
@@ -63209,7 +63367,9 @@ async function handleApi(req, res) {
         || canonicalLiveSessionReference(row.sessionNumber, row.id).toLowerCase() === canonicalKey);
       if (!session) return notFound(res);
       const audit = session.linkedAuditId ? await postgres.readWarehouseAudit(session.linkedAuditId) : null;
-      return sendJson(res, 200, { session: audit ? liveSessionWithAudit(session, audit) : liveSessionLedger.sessionTotals(session) });
+      const measured = audit ? liveSessionWithAudit(session, audit) : liveSessionLedger.sessionTotals(session);
+      const related = await liveSessionOrderFeed(measured, { limit: 100 });
+      return sendJson(res, 200, { session: measured, orderFeed: related.orders, orderFeedTotal: related.total });
     }
     const sourceId = String(url.searchParams.get("sourceId") || "").trim().toLowerCase();
     const filtered = sourceId ? scopedSessions.filter((session) => String(session.sourceId || session.sourcePurchaseOrderId || "").toLowerCase() === sourceId
