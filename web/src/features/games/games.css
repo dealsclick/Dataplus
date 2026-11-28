@@ -1,0 +1,25 @@
+.games-hub {
+  min-height: 100vh;
+  padding: clamp(1.25rem, 4vw, 4rem);
+  color: #132722;
+  background: radial-gradient(circle at 15% 5%, rgba(245, 184, 190, .45), transparent 26rem), radial-gradient(circle at 90% 8%, rgba(129, 198, 177, .36), transparent 25rem), #f7f5f0;
+}
+.games-hero { max-width: 56rem; margin: 0 auto 2rem; text-align: center; }
+.games-kicker { display: inline-flex; align-items: center; gap: .45rem; color: #a43d52; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }
+.games-kicker svg { width: 1.1rem; }
+.games-hero h1 { margin: .65rem 0; font-family: Georgia, serif; font-size: clamp(2.4rem, 7vw, 5.2rem); line-height: .96; letter-spacing: -.045em; }
+.games-hero p { max-width: 42rem; margin: auto; color: #53645f; font-size: clamp(1rem, 2.4vw, 1.25rem); }
+.games-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.25rem; width: min(100%, 68rem); margin: auto; }
+.game-card { overflow: hidden; border: 1px solid rgba(30, 63, 54, .14); color: #132722; background: rgba(255, 255, 255, .86); box-shadow: 0 22px 65px rgba(39, 69, 61, .12); }
+.game-card-wedding { border-top: .45rem solid #b84a61; }
+.game-card-loteria { border-top: .45rem solid #087f72; }
+.game-card [data-slot="card-title"] { color: #132722; font: 700 clamp(1.7rem, 4vw, 2.5rem)/1.05 Georgia, serif; }
+.game-card [data-slot="card-description"] { min-height: 5rem; color: #5c6b67; font-size: 1rem; line-height: 1.55; }
+.game-icon { display: grid; place-items: center; width: 3rem; height: 3rem; margin-bottom: .75rem; border-radius: 1rem; background: #f8e4e7; color: #a43d52; }
+.game-card-loteria .game-icon { background: #dff1ed; color: #087f72; }
+.game-card-actions { display: flex; flex-wrap: wrap; gap: .65rem; }
+.game-card-actions [data-variant="outline"] { color: #173d35; background: #fff; border-color: rgba(23, 61, 53, .22); }
+.game-card-actions [data-variant="outline"]:hover { color: #8e2f45; background: #f9edef; }
+.games-back { display: flex; margin: 2rem auto 0; }
+@media (max-width: 720px) { .games-grid { grid-template-columns: 1fr; } .game-card [data-slot="card-description"] { min-height: 0; } .game-card-actions > * { flex: 1 1 10rem; } }
+

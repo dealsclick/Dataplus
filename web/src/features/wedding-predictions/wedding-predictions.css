@@ -1,0 +1,101 @@
+.wedding-shell { --rose: #b8435b; --rose-dark: #8e2f45; --evergreen: #173d35; min-height: 100vh; padding: clamp(1rem, 3vw, 2.75rem); color: #18322c; background: radial-gradient(circle at 10% 0, rgba(236, 171, 183, .36), transparent 25rem), radial-gradient(circle at 95% 8%, rgba(115, 185, 164, .3), transparent 25rem), #f8f6f1; }
+.wedding-shell [data-slot="card"] { border-color: rgba(31, 75, 63, .14); color: #18322c; background: rgba(255,255,255,.92); box-shadow: 0 18px 55px rgba(40, 72, 63, .09); }
+.wedding-shell [data-slot="card-title"] { color: #18322c; }
+.wedding-shell [data-variant="outline"] { color: #173d35; background: #fff; border-color: rgba(23, 61, 53, .22); }
+.wedding-shell [data-variant="outline"]:hover { color: var(--rose-dark); background: #f9edef; }
+.wedding-center { display: grid; place-items: center; }
+.wedding-entry { width: min(100%, 31rem); }
+.wedding-entry [data-slot="card-title"] { font: 700 clamp(2rem, 7vw, 3.2rem)/1 Georgia, serif; }
+.wedding-entry [data-slot="card-content"], .host-create-fields { display: grid; gap: .65rem; }
+.wedding-mark { display: grid; place-items: center; width: 4rem; height: 4rem; margin-bottom: .8rem; border-radius: 50%; color: white; background: var(--rose); box-shadow: 0 8px 24px rgba(184, 67, 91, .26); }
+.room-code-input { height: 4.4rem; text-align: center; font-size: 2.4rem; font-weight: 900; letter-spacing: .35em; }
+.entry-actions { display: grid; gap: .45rem; }
+.wedding-header { display: flex; justify-content: space-between; align-items: end; gap: 1rem; width: min(100%, 76rem); margin: 0 auto 1.25rem; }
+.wedding-header h1 { margin: .2rem 0; font: 700 clamp(2.3rem, 6vw, 4.8rem)/.95 Georgia, serif; letter-spacing: -.045em; color: var(--evergreen); }
+.wedding-header p { color: #5c6e68; }
+.wedding-eyebrow { display: block; color: var(--rose); font-weight: 900; letter-spacing: .13em; text-transform: uppercase; }
+.wedding-back { display: inline-flex; align-items: center; gap: .35rem; margin-bottom: 1rem; color: #53655f; font-weight: 700; }
+.wedding-back svg { width: 1rem; }
+.wedding-room-stats { display: flex; flex-wrap: wrap; justify-content: end; gap: .5rem; }
+.wedding-room-stats [data-slot="badge"] { padding: .55rem .75rem; font-size: .9rem; }
+.wedding-wallet { display: flex; align-items: center; justify-content: space-between; gap: 1rem; width: min(100%, 76rem); margin: 0 auto 1rem; padding: 1rem 1.2rem; border-radius: 1rem; color: #fff; background: linear-gradient(120deg, var(--evergreen), #245f50); box-shadow: 0 15px 40px rgba(23, 61, 53, .2); }
+.wedding-wallet span { display: block; color: #c7ddd6; font-size: .85rem; }
+.wedding-wallet strong { display: flex; align-items: center; gap: .35rem; font-size: 1.7rem; }
+.wedding-wallet p { color: #d6e6e1; font-size: .9rem; }
+.wedding-tabs { width: min(100%, 76rem); margin: auto; }
+.wedding-tabs > [role="tablist"] { width: 100%; height: auto; justify-content: start; overflow-x: auto; }
+.wedding-tabs [role="tab"] { min-height: 2.8rem; padding-inline: 1rem; }
+.prediction-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-top: 1rem; }
+.prediction-card [data-slot="card-header"] { gap: .65rem; }
+.prediction-card [data-slot="card-title"] { font: 700 clamp(1.3rem, 2.5vw, 1.75rem)/1.16 Georgia, serif; }
+.prediction-card.is-resolved { opacity: .85; }
+.prediction-meta { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.outcome-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .65rem; }
+.outcome-button { position: relative; display: grid; min-width: 0; gap: .18rem; padding: .85rem; border: 1px solid rgba(38, 93, 78, .18); border-radius: .8rem; background: #f6faf8; text-align: left; transition: .15s ease; }
+.outcome-button:not(:disabled):hover { transform: translateY(-2px); border-color: var(--rose); box-shadow: 0 8px 20px rgba(61, 88, 80, .1); }
+.outcome-button:disabled { cursor: default; }
+.outcome-button span { min-height: 2.4rem; font-weight: 800; line-height: 1.2; }
+.outcome-button strong { color: var(--rose-dark); font-size: 1.5rem; }
+.outcome-button small { color: #66766f; }
+.outcome-button.is-winner { border-color: #1d8c69; background: #e6f6ef; }
+.outcome-button > svg { position: absolute; right: .5rem; top: .5rem; width: 1rem; color: #147154; }
+.market-progress { height: .4rem; margin-top: .8rem; }
+.market-volume { margin-top: .45rem; color: #6c7a75; font-size: .8rem; }
+.positions-list { display: grid; gap: .75rem; margin-top: 1rem; }
+.position-row [data-slot="card-content"] { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: 1rem; }
+.position-row h3 { margin: .4rem 0 .15rem; font-weight: 800; }
+.position-row p, .position-value span { color: #64736e; font-size: .85rem; }
+.position-value { flex: 0 0 auto; text-align: right; }
+.position-value strong { display: block; color: var(--evergreen); }
+.empty-picks [data-slot="card-content"] { display: grid; justify-items: center; gap: .5rem; padding: 3rem; text-align: center; }
+.empty-picks svg { width: 2rem; height: 2rem; color: var(--rose); }
+.leaderboard { margin-top: 1rem; }
+.leaderboard [data-slot="card-title"] { display: flex; align-items: center; gap: .5rem; font-family: Georgia, serif; font-size: 1.7rem; }
+.leader-row { display: grid; grid-template-columns: 2.2rem 1fr auto auto; align-items: center; gap: .75rem; padding: .8rem 0; border-bottom: 1px solid rgba(40, 75, 66, .11); }
+.leader-rank { display: grid; place-items: center; width: 2rem; height: 2rem; border-radius: 50%; background: #f0e6d0; font-weight: 900; }
+.leader-row > span:not(.leader-rank) { color: #6b7975; font-size: .85rem; }
+.bet-ticket { display: grid; gap: .75rem; }
+.bet-ticket > [data-slot="badge"] { width: fit-content; padding: .4rem .7rem; }
+.bet-math { display: grid; grid-template-columns: repeat(2, 1fr); gap: .75rem; padding: .8rem; border-radius: .7rem; background: #f1f6f4; }
+.bet-math span { display: grid; gap: .2rem; color: #66766f; font-size: .8rem; }
+.bet-math b { color: var(--evergreen); font-size: 1rem; }
+.quick-bets { display: flex; flex-wrap: wrap; gap: .4rem; }
+.wedding-error, .wedding-notice { padding: .65rem .8rem; border-radius: .6rem; color: #8e2f45; background: #fae7eb; font-weight: 700; }
+.wedding-notice { width: min(100%, 76rem); margin: 0 auto 1rem; }
+.host-top { display: grid; grid-template-columns: minmax(17rem, .65fr) minmax(20rem, 1fr); gap: 1rem; width: min(100%, 76rem); margin: auto; }
+.join-card [data-slot="card-content"] { display: grid; justify-items: center; gap: .5rem; text-align: center; }
+.join-card svg { max-width: 100%; height: auto; }
+.join-card strong { font: 700 3.4rem Georgia, serif; letter-spacing: .18em; color: var(--rose); }
+.join-card p { max-width: 100%; overflow-wrap: anywhere; color: #65746f; font-size: .78rem; }
+.host-summary [data-slot="card-content"] { display: grid; grid-template-columns: repeat(3, 1fr); gap: .75rem; }
+.host-summary [data-slot="card-title"] { display: flex; align-items: center; gap: .5rem; font-family: Georgia, serif; font-size: 1.7rem; }
+.host-summary [data-slot="card-content"] > div { padding: 1rem; border-radius: .8rem; background: #f2f7f5; }
+.host-summary [data-slot="card-content"] strong { display: block; font-size: 1.6rem; }
+.host-summary [data-slot="card-content"] span { color: #6b7975; font-size: .8rem; }
+.host-predictions { width: min(100%, 76rem); margin: 1rem auto 0; }
+.host-market-actions { flex-wrap: wrap; }
+.template-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .45rem; max-height: 15rem; overflow-y: auto; }
+.template-list button { padding: .65rem; border: 1px solid rgba(37, 80, 69, .16); border-radius: .65rem; text-align: left; background: #f6f9f8; font-weight: 700; }
+.template-list button:hover { border-color: var(--rose); }
+.template-list span { display: block; margin-bottom: .2rem; color: var(--rose); font-size: .7rem; font-weight: 900; text-transform: uppercase; }
+.market-fields { display: grid; gap: .5rem; }
+.answer-fields { display: grid; grid-template-columns: repeat(2, 1fr); gap: .65rem; }
+.answer-fields > div { display: grid; gap: .5rem; }
+.wedding-loading { display: grid; justify-items: center; gap: .8rem; color: var(--evergreen); font-weight: 800; }
+.wedding-loading > svg { width: 3rem; height: 3rem; color: var(--rose); animation: wedding-pulse 1s infinite alternate; }
+@keyframes wedding-pulse { to { transform: scale(1.15); } }
+@media (max-width: 760px) {
+  .wedding-shell { padding: .8rem; padding-bottom: max(1rem, env(safe-area-inset-bottom)); }
+  .wedding-header { align-items: start; flex-direction: column; }
+  .wedding-room-stats { justify-content: start; }
+  .wedding-wallet { position: sticky; z-index: 5; top: .5rem; padding: .8rem; }
+  .wedding-wallet p { display: none; }
+  .prediction-grid, .host-top { grid-template-columns: 1fr; }
+  .outcome-button { padding: .7rem; }
+  .host-summary [data-slot="card-content"] { grid-template-columns: 1fr; }
+  .template-list { grid-template-columns: 1fr; }
+  .leader-row { grid-template-columns: 2rem 1fr auto; }
+  .leader-row > span:not(.leader-rank) { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .wedding-loading > svg { animation: none; } .outcome-button { transition: none; } }
+
