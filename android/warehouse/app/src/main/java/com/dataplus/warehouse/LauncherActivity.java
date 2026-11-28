@@ -342,10 +342,33 @@ public class LauncherActivity extends Activity {
         Ui.margin(username, 0, 7, 0, 16);
         card.addView(username);
 
-        card.addView(Ui.text(this, "Password", 13, Ui.TEXT, true));
-        EditText password = input("Password", true);
-        Ui.margin(password, 0, 7, 0, 18);
-        card.addView(password);
+        final boolean[] useWarehousePin = { true };
+        TextView credentialLabel = Ui.text(this, "Warehouse PIN", 13, Ui.TEXT, true);
+        card.addView(credentialLabel);
+        EditText credential = input("4 to 8 digit PIN", true);
+        credential.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+        Ui.margin(credential, 0, 7, 0, 10);
+        card.addView(credential);
+
+        Button credentialMode = Ui.button(this, "Use normal password instead", false);
+        credentialMode.setOnClickListener(view -> {
+            useWarehousePin[0] = !useWarehousePin[0];
+            credential.setText("");
+            if (useWarehousePin[0]) {
+                credentialLabel.setText("Warehouse PIN");
+                credential.setHint("4 to 8 digit PIN");
+                credential.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+                credentialMode.setText("Use normal password instead");
+            } else {
+                credentialLabel.setText("Password");
+                credential.setHint("Password");
+                credential.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+                credentialMode.setText("Use warehouse PIN instead");
+            }
+            credential.requestFocus();
+        });
+        Ui.margin(credentialMode, 0, 0, 0, 18);
+        card.addView(credentialMode, Ui.matchWrap());
 
         TextView errorText = Ui.text(this, "", 13, Ui.ERROR, true);
         errorText.setVisibility(View.GONE);
@@ -356,18 +379,27 @@ public class LauncherActivity extends Activity {
         signIn.setOnClickListener(view -> {
             if (busy) return;
             String login = username.getText().toString().trim();
-            String secret = password.getText().toString();
+            String secret = credential.getText().toString();
             if (login.isEmpty() || secret.isEmpty()) {
-                errorText.setText("Enter your username and password.");
+                errorText.setText(useWarehousePin[0] ? "Enter your username and warehouse PIN." : "Enter your username and password.");
                 errorText.setVisibility(View.VISIBLE);
                 return;
             }
-            hideKeyboard(password);
+            if (useWarehousePin[0] && !secret.matches("\\d{4,8}")) {
+                errorText.setText("Warehouse PIN must contain 4 to 8 digits.");
+                errorText.setVisibility(View.VISIBLE);
+                return;
+            }
+            hideKeyboard(credential);
             busy = true;
             signIn.setEnabled(false);
             signIn.setText("Signing in…");
             JSONObject body = new JSONObject();
-            try { body.put("username", login).put("password", secret); } catch (Exception ignored) {}
+            try {
+                body.put("username", login).put("credentialType", useWarehousePin[0] ? "pin" : "password").put("warehouseLogin", true);
+                if (useWarehousePin[0]) body.put("pin", secret);
+                else body.put("password", secret);
+            } catch (Exception ignored) {}
             api.post("/api/auth/login", body, new ApiClient.Callback() {
                 @Override public void onSuccess(JSONObject response) {
                     busy = false;

@@ -202,8 +202,9 @@ export function OutboundPackingStations({ open, onOpenChange, session, scans, pe
   const [operatorSessions, setOperatorSessions] = useState<Record<string, OperatorSession>>({})
   const [operatorPolicy, setOperatorPolicy] = useState<OperatorPolicy>({ required: true, idleMinutes: 30, maxHours: 12 })
   const [operatorDialog, setOperatorDialog] = useState<{ station: PackingStation; mode: "assign" | "unlock" } | null>(null)
-  const [badgeValue, setBadgeValue] = useState("")
-  const [operatorPin, setOperatorPin] = useState("")
+  const [operatorUsername, setOperatorUsername] = useState("")
+  const [operatorCredentialType, setOperatorCredentialType] = useState<"pin" | "password">("pin")
+  const [operatorCredential, setOperatorCredential] = useState("")
   const [operatorSaving, setOperatorSaving] = useState(false)
   const videoElementsRef = useRef<Record<string, HTMLVideoElement | null>>({})
   const busyStationsRef = useRef(new Set<string>())
@@ -311,31 +312,32 @@ export function OutboundPackingStations({ open, onOpenChange, session, scans, pe
 
   function openOperatorDialog(station: PackingStation, mode: "assign" | "unlock") {
     setOperatorDialog({ station, mode })
-    setBadgeValue("")
-    setOperatorPin("")
+    setOperatorUsername("")
+    setOperatorCredentialType("pin")
+    setOperatorCredential("")
   }
 
   async function submitOperatorCredentials() {
-    if (!operatorDialog || !/^\d{4,8}$/.test(operatorPin)) return
+    if (!operatorDialog || (operatorDialog.mode === "assign" && !operatorUsername.trim()) || (operatorCredentialType === "pin" ? !/^\d{4,8}$/.test(operatorCredential) : !operatorCredential)) return
     setOperatorSaving(true)
     try {
       if (operatorDialog.mode === "assign") {
         await api(`/api/fulfillment/outbound-audits/${encodeURIComponent(session.id)}/packing-operators`, {
           method: "POST",
-          body: JSON.stringify({ stationId: operatorDialog.station.id, stationName: operatorDialog.station.name, badgeValue, pin: operatorPin }),
+          body: JSON.stringify({ stationId: operatorDialog.station.id, stationName: operatorDialog.station.name, username: operatorUsername.trim(), credentialType: operatorCredentialType, credential: operatorCredential }),
         })
       } else {
         await api(`/api/fulfillment/outbound-audits/${encodeURIComponent(session.id)}/packing-operators/${encodeURIComponent(operatorDialog.station.id)}/unlock`, {
           method: "POST",
-          body: JSON.stringify({ pin: operatorPin }),
+          body: JSON.stringify({ credentialType: operatorCredentialType, credential: operatorCredential }),
         })
       }
       await loadOperatorSessions()
       setOperatorDialog(null)
-      setBadgeValue("")
-      setOperatorPin("")
+      setOperatorUsername("")
+      setOperatorCredential("")
     } catch (error) {
-      setResults((current) => ({ ...current, [operatorDialog.station.id]: { kind: "error", title: "Operator not assigned", detail: error instanceof Error ? error.message : "Badge or PIN was not recognized.", trackingNumber: "", photoState: "none" } }))
+      setResults((current) => ({ ...current, [operatorDialog.station.id]: { kind: "error", title: "Operator not assigned", detail: error instanceof Error ? error.message : "Username or credential was not recognized.", trackingNumber: "", photoState: "none" } }))
     } finally {
       setOperatorSaving(false)
     }
@@ -362,7 +364,7 @@ export function OutboundPackingStations({ open, onOpenChange, session, scans, pe
   const processScan = useCallback(async (station: PackingStation, scannedValue: string) => {
     const operatorSession = operatorSessions[station.id]
     if (operatorPolicy.required && (!operatorSession || operatorSession.status === "locked")) {
-      setResults((current) => ({ ...current, [station.id]: { kind: "error", title: operatorSession ? "Station locked" : "Assign operator", detail: operatorSession ? `Enter ${operatorSession.operatorUserName}'s PIN before scanning.` : "Scan the employee badge and enter their PIN before accepting packages.", trackingNumber: scannedValue, photoState: "none" } }))
+      setResults((current) => ({ ...current, [station.id]: { kind: "error", title: operatorSession ? "Station locked" : "Assign operator", detail: operatorSession ? `Enter ${operatorSession.operatorUserName}'s PIN or password before scanning.` : "Sign in with the employee username and PIN or password before accepting packages.", trackingNumber: scannedValue, photoState: "none" } }))
       openOperatorDialog(station, operatorSession ? "unlock" : "assign")
       return
     }
@@ -520,7 +522,7 @@ export function OutboundPackingStations({ open, onOpenChange, session, scans, pe
                   <div className="flex flex-wrap items-center justify-end gap-2"><Badge variant="outline">{stationCounts[station.id] || 0} this run</Badge><Badge variant="secondary" className="font-mono">{station.scannerPrefix || "No prefix"}</Badge></div>
                 </div>
                 <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/20 px-3 py-2">
-                  <div className="flex min-w-0 items-center gap-2">{operatorSession ? <><UserRoundCheck className={`size-4 shrink-0 ${operatorSession.status === "locked" ? "text-amber-500" : "text-emerald-500"}`} /><div className="min-w-0"><p className="truncate text-sm font-medium">{operatorSession.operatorUserName}</p><p className="text-xs text-muted-foreground">{operatorSession.status === "locked" ? "Locked · PIN required" : `Active · locks after ${operatorPolicy.idleMinutes} min idle`}</p></div></> : <><LockKeyhole className="size-4 shrink-0 text-amber-500" /><div><p className="text-sm font-medium">No operator assigned</p><p className="text-xs text-muted-foreground">Badge and PIN required</p></div></>}</div>
+                  <div className="flex min-w-0 items-center gap-2">{operatorSession ? <><UserRoundCheck className={`size-4 shrink-0 ${operatorSession.status === "locked" ? "text-amber-500" : "text-emerald-500"}`} /><div className="min-w-0"><p className="truncate text-sm font-medium">{operatorSession.operatorUserName}</p><p className="text-xs text-muted-foreground">{operatorSession.status === "locked" ? "Locked · PIN or password required" : `Active · locks after ${operatorPolicy.idleMinutes} min idle`}</p></div></> : <><LockKeyhole className="size-4 shrink-0 text-amber-500" /><div><p className="text-sm font-medium">No operator assigned</p><p className="text-xs text-muted-foreground">Username and PIN or password required</p></div></>}</div>
                   <div className="flex flex-wrap gap-2">{operatorSession ? <>{operatorSession.status === "locked" ? <Button size="sm" onClick={() => openOperatorDialog(station, "unlock")}><LockKeyhole className="size-4" /> Unlock</Button> : <Button size="sm" variant="outline" onClick={() => void lockOperator(station)}><LockKeyhole className="size-4" /> Lock</Button>}<Button size="sm" variant="outline" onClick={() => openOperatorDialog(station, "assign")}><UserRoundCheck className="size-4" /> Change</Button><Button size="sm" variant="ghost" onClick={() => void endOperator(station)}><LogOut className="size-4" /> End shift</Button></> : <Button size="sm" onClick={() => openOperatorDialog(station, "assign")}><UserRoundCheck className="size-4" /> Assign operator</Button>}</div>
                 </div>
               </CardHeader>
@@ -557,11 +559,15 @@ export function OutboundPackingStations({ open, onOpenChange, session, scans, pe
       </div>
       <Dialog open={Boolean(operatorDialog)} onOpenChange={(next) => { if (!next) setOperatorDialog(null) }}>
         <DialogContent className="sm:max-w-md">
-          <DialogHeader><DialogTitle>{operatorDialog?.mode === "unlock" ? "Unlock packing station" : "Assign packing-station operator"}</DialogTitle><DialogDescription>{operatorDialog?.station.name || "Packing station"} · {operatorDialog?.mode === "unlock" ? `${operatorSessions[operatorDialog?.station.id || ""]?.operatorUserName || "Operator"} enters their PIN.` : "Scan the employee badge, then enter their PIN."}</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle>{operatorDialog?.mode === "unlock" ? "Unlock packing station" : "Assign packing-station operator"}</DialogTitle><DialogDescription>{operatorDialog?.station.name || "Packing station"} · {operatorDialog?.mode === "unlock" ? `${operatorSessions[operatorDialog?.station.id || ""]?.operatorUserName || "Operator"} signs back in.` : "Use the employee username with either their warehouse PIN or normal password."}</DialogDescription></DialogHeader>
           <form className="grid gap-4" onSubmit={(event) => { event.preventDefault(); void submitOperatorCredentials() }}>
-            {operatorDialog?.mode === "assign" ? <div className="grid gap-1.5"><Label>Employee badge</Label><Input className="font-mono" value={badgeValue} onChange={(event) => setBadgeValue(event.target.value)} placeholder="Scan DPUSER badge" autoFocus autoComplete="off" /><p className="text-xs text-muted-foreground">The scanner may include its station prefix; DataPlus reads the operator token from the badge.</p></div> : null}
-            <div className="grid gap-1.5"><Label>Operator PIN</Label><Input type="password" inputMode="numeric" pattern="[0-9]*" minLength={4} maxLength={8} value={operatorPin} onChange={(event) => setOperatorPin(event.target.value.replace(/\D/g, "").slice(0, 8))} placeholder="4 to 8 digits" autoFocus={operatorDialog?.mode === "unlock"} autoComplete="off" /></div>
-            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button type="button" variant="outline" onClick={() => setOperatorDialog(null)}>Cancel</Button><Button type="submit" disabled={operatorSaving || !/^\d{4,8}$/.test(operatorPin) || (operatorDialog?.mode === "assign" && !badgeValue.trim())}>{operatorSaving ? <Loader2 className="size-4 animate-spin" /> : <UserRoundCheck className="size-4" />} {operatorDialog?.mode === "unlock" ? "Unlock station" : "Assign operator"}</Button></div>
+            {operatorDialog?.mode === "assign" ? <div className="grid gap-1.5"><Label>Username</Label><Input value={operatorUsername} onChange={(event) => setOperatorUsername(event.target.value)} placeholder="Employee username" autoFocus autoComplete="username" /></div> : null}
+            <div className="grid grid-cols-2 gap-2 rounded-lg bg-muted p-1">
+              <Button type="button" size="sm" variant={operatorCredentialType === "pin" ? "default" : "ghost"} onClick={() => { setOperatorCredentialType("pin"); setOperatorCredential("") }}>Warehouse PIN</Button>
+              <Button type="button" size="sm" variant={operatorCredentialType === "password" ? "default" : "ghost"} onClick={() => { setOperatorCredentialType("password"); setOperatorCredential("") }}>Password</Button>
+            </div>
+            <div className="grid gap-1.5"><Label>{operatorCredentialType === "pin" ? "Warehouse PIN" : "Password"}</Label><Input type="password" inputMode={operatorCredentialType === "pin" ? "numeric" : undefined} pattern={operatorCredentialType === "pin" ? "[0-9]*" : undefined} minLength={operatorCredentialType === "pin" ? 4 : undefined} maxLength={operatorCredentialType === "pin" ? 8 : undefined} value={operatorCredential} onChange={(event) => setOperatorCredential(operatorCredentialType === "pin" ? event.target.value.replace(/\D/g, "").slice(0, 8) : event.target.value)} placeholder={operatorCredentialType === "pin" ? "4 to 8 digits" : "Account password"} autoFocus={operatorDialog?.mode === "unlock"} autoComplete="off" /></div>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button type="button" variant="outline" onClick={() => setOperatorDialog(null)}>Cancel</Button><Button type="submit" disabled={operatorSaving || (operatorDialog?.mode === "assign" && !operatorUsername.trim()) || (operatorCredentialType === "pin" ? !/^\d{4,8}$/.test(operatorCredential) : !operatorCredential)}>{operatorSaving ? <Loader2 className="size-4 animate-spin" /> : <UserRoundCheck className="size-4" />} {operatorDialog?.mode === "unlock" ? "Unlock station" : "Assign operator"}</Button></div>
           </form>
         </DialogContent>
       </Dialog>

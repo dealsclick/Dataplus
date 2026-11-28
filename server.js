@@ -344,6 +344,7 @@ let systemSettingsPersistPromise = Promise.resolve();
 let authSessionsCache = null;
 let authSessionsHydrationPromise = null;
 let authSessionsPersistPromise = Promise.resolve();
+const authLoginFailures = new Map();
 let productSourceEnrichmentCache = { mtimeMs: 0, data: null };
 const normalizedCategorySettingsCache = new WeakMap();
 const categoryMappingIndexCache = new WeakMap();
@@ -6570,6 +6571,62 @@ function verifyWarehousePin(user = {}, pin = "") {
   const actual = Buffer.from(hashUserPassword(String(pin), user.warehousePinSalt).hash, "hex");
   const expected = Buffer.from(String(user.warehousePinHash || ""), "hex");
   return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
+const AUTH_LOGIN_FAILURE_WINDOW_MS = 10 * 60 * 1000;
+const AUTH_LOGIN_MAX_FAILURES = 8;
+
+function systemUserByLogin(users = [], login = "") {
+  const normalizedLogin = sourceTextValue(login).toLowerCase();
+  if (!normalizedLogin) return null;
+  return (Array.isArray(users) ? users : []).find((candidate) => (
+    [candidate.username, candidate.email, candidate.name]
+      .map((value) => sourceTextValue(value).toLowerCase())
+      .includes(normalizedLogin)
+  )) || null;
+}
+
+function systemUserByUsername(users = [], username = "") {
+  const normalizedUsername = sourceTextValue(username).toLowerCase();
+  if (!normalizedUsername) return null;
+  return (Array.isArray(users) ? users : []).find((candidate) => (
+    sourceTextValue(candidate.username).toLowerCase() === normalizedUsername
+  )) || null;
+}
+
+function userCanOperateWarehouse(user = {}) {
+  return user?.status === "active" && (userCan(user, "warehouse", "view") || userCan(user, "fulfillment", "view"));
+}
+
+function authLoginFailureKey(req, login = "", credentialType = "password") {
+  return `${credentialType}:${requestIpAddress(req) || "unknown"}:${sourceTextValue(login).toLowerCase()}`;
+}
+
+function authLoginFailureState(key = "") {
+  const now = Date.now();
+  if (authLoginFailures.size > 1000) {
+    for (const [storedKey, stored] of authLoginFailures) {
+      if (!stored || now - stored.startedAt >= AUTH_LOGIN_FAILURE_WINDOW_MS) authLoginFailures.delete(storedKey);
+    }
+  }
+  const current = authLoginFailures.get(key);
+  if (!current || now - current.startedAt >= AUTH_LOGIN_FAILURE_WINDOW_MS) {
+    if (current) authLoginFailures.delete(key);
+    return { attempts: 0, startedAt: now, retryAfterSeconds: 0 };
+  }
+  return {
+    ...current,
+    retryAfterSeconds: Math.max(1, Math.ceil((AUTH_LOGIN_FAILURE_WINDOW_MS - (now - current.startedAt)) / 1000)),
+  };
+}
+
+function recordAuthLoginFailure(key = "") {
+  const current = authLoginFailureState(key);
+  authLoginFailures.set(key, { attempts: current.attempts + 1, startedAt: current.startedAt });
+}
+
+function clearAuthLoginFailures(key = "") {
+  if (key) authLoginFailures.delete(key);
 }
 
 function normalizeSystemUser(user = {}, index = 0) {
@@ -58968,18 +59025,34 @@ async function handleApi(req, res) {
   if (req.method === "POST" && url.pathname === "/api/auth/login") {
     const body = await parseBody(req);
     const login = sourceTextValue(body.username || body.email || body.login || "").toLowerCase();
-    const password = String(body.password || "");
+    const credentialType = body.credentialType === "pin" ? "pin" : "password";
+    const credential = credentialType === "pin" ? String(body.pin || body.credential || "") : String(body.password || body.credential || "");
+    const failureKey = authLoginFailureKey(req, login, credentialType);
+    const failureState = authLoginFailureState(failureKey);
+    if (failureState.attempts >= AUTH_LOGIN_MAX_FAILURES) {
+      res.setHeader("Retry-After", String(failureState.retryAfterSeconds));
+      return sendJson(res, 429, { error: "Too many sign-in attempts. Wait a few minutes and try again." });
+    }
     const settings = await readRuntimeSystemSettings(dbCache.data?.systemSettings || {});
-    const user = (settings.systemUsers || []).find((candidate) => [candidate.username, candidate.email, candidate.name].map((value) => sourceTextValue(value).toLowerCase()).includes(login));
-    if (!user || user.status !== "active" || !verifyUserPassword(user, password)) return sendJson(res, 401, { error: "Invalid username or password." });
+    const user = credentialType === "pin" ? systemUserByUsername(settings.systemUsers, login) : systemUserByLogin(settings.systemUsers, login);
+    const warehousePinAllowed = credentialType === "pin" && body.warehouseLogin === true && userCanOperateWarehouse(user || {});
+    const credentialsValid = user?.status === "active" && (credentialType === "pin"
+      ? warehousePinAllowed && verifyWarehousePin(user, credential)
+      : verifyUserPassword(user, credential));
+    if (!credentialsValid) {
+      recordAuthLoginFailure(failureKey);
+      return sendJson(res, 401, { error: credentialType === "pin" ? "Invalid username or warehouse PIN." : "Invalid username or password." });
+    }
+    clearAuthLoginFailures(failureKey);
     const token = crypto.randomBytes(32).toString("base64url");
     const sessions = readAuthSessions();
     const signedInAt = new Date().toISOString();
     sessions[authSessionStorageKey(token)] = {
       userId: user.id,
+      sessionType: credentialType === "pin" ? "warehouse_pin" : "password",
       createdAt: signedInAt,
       lastSeenAt: signedInAt,
-      expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+      expiresAt: new Date(Date.now() + (credentialType === "pin" ? 12 * 60 * 60 * 1000 : 14 * 24 * 60 * 60 * 1000)).toISOString(),
       ipAddress: requestIpAddress(req),
       userAgent: String(req.headers["user-agent"] || "").slice(0, 1000)
     };
@@ -58989,9 +59062,9 @@ async function handleApi(req, res) {
     const systemSettings = writeSystemSettingsStore(current);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
-    setAuthCookie(res, token);
+    setAuthCookie(res, token, credentialType === "pin" ? 12 * 60 * 60 : 14 * 24 * 60 * 60);
     const nextUser = systemSettings.systemUsers.find((candidate) => candidate.id === user.id) || user;
-    void recordUserActivity(req, nextUser, { eventType: "sign_in", action: "Signed in", sessionId: authSessionPublicId(token), scope: { tenantId: LEGACY_TENANT, companyId: LEGACY_COMPANY } });
+    void recordUserActivity(req, nextUser, { eventType: "sign_in", action: credentialType === "pin" ? "Signed in with warehouse PIN" : "Signed in", sessionId: authSessionPublicId(token), scope: { tenantId: LEGACY_TENANT, companyId: LEGACY_COMPANY } });
     return sendJson(res, 200, { authenticated: true, user: publicAuthUser(nextUser, await authFeatureAccess(nextUser)), permissionAreas: AUTH_PERMISSION_AREAS });
   }
 
@@ -59617,12 +59690,9 @@ async function handleApi(req, res) {
     const existing = (current.systemUsers || []).find((candidate) => String(candidate.id || "") === userId);
     if (!existing) return notFound(res);
     if (existing.status !== "active") return sendJson(res, 409, { error: "Activate this user before creating warehouse credentials." });
-    const badgeToken = crypto.randomBytes(18).toString("base64url");
-    const badgeValue = `DPUSER:${badgeToken}`;
     const hashedPin = hashUserPassword(pin);
     const updated = {
       ...existing,
-      warehouseBadgeHash: warehouseBadgeHash(badgeValue),
       warehousePinHash: hashedPin.hash,
       warehousePinSalt: hashedPin.salt,
       warehouseCredentialsUpdatedAt: new Date().toISOString(),
@@ -59630,23 +59700,23 @@ async function handleApi(req, res) {
     };
     current.systemUsers = current.systemUsers.map((candidate) => candidate.id === existing.id ? updated : candidate);
     appendAuthPermissionAudit(current, authUser, {
-      type: "warehouse_credentials_rotated",
+      type: "warehouse_pin_updated",
       targetType: "user",
       targetId: updated.id,
       targetName: updated.name || updated.username,
-      message: `Created a new packing-station badge and PIN for ${updated.name || updated.username}.`,
+      message: `Updated the warehouse PIN for ${updated.name || updated.username}.`,
     });
     const systemSettings = writeSystemSettingsStore(current);
     publicStateJsonCache = null;
     if (dbCache.data) dbCache.data.systemSettings = systemSettings;
     void recordUserActivity(req, authUser, {
       eventType: "security",
-      action: "Rotated warehouse badge and PIN",
+      action: "Updated warehouse PIN",
       entityType: "user",
       entityId: updated.id,
       metadata: { targetName: updated.name || updated.username },
     });
-    return sendJson(res, 200, { user: publicSystemUser(updated), users: systemSettings.systemUsers.map(publicSystemUser), badgeValue });
+    return sendJson(res, 200, { user: publicSystemUser(updated), users: systemSettings.systemUsers.map(publicSystemUser) });
   }
 
   const resetPasswordMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/password$/);
@@ -74091,11 +74161,24 @@ async function handleApi(req, res) {
       const audit = await outboundAuditStore.read(scope, auditId);
       if (!audit) return notFound(res);
       if (!audit.session?.isCurrentOperatingSession) return sendJson(res, 409, { error: "This is an older outbound session. Open today's audit before assigning a packing-station operator." });
-      const badgeDigest = warehouseBadgeHash(body.badgeValue || body.badge || "");
-      if (!badgeDigest) return sendJson(res, 400, { error: "Scan or enter the operator badge." });
       const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
-      const operator = (settings.systemUsers || []).find((candidate) => candidate.status === "active" && String(candidate.warehouseBadgeHash || "") === badgeDigest);
-      if (!operator || !verifyWarehousePin(operator, body.pin)) return sendJson(res, 401, { error: "Badge or PIN was not recognized." });
+      const credentialType = body.credentialType === "password" ? "password" : "pin";
+      const login = sourceTextValue(body.username || body.login || "").toLowerCase();
+      const credential = credentialType === "password" ? String(body.password || body.credential || "") : String(body.pin || body.credential || "");
+      if (!login) return sendJson(res, 400, { error: "Enter the operator username." });
+      const operator = systemUserByUsername(settings.systemUsers, login);
+      const failureKey = authLoginFailureKey(req, `packing:${auditId}:${body.stationId}:${login}`, credentialType);
+      const failureState = authLoginFailureState(failureKey);
+      if (failureState.attempts >= AUTH_LOGIN_MAX_FAILURES) {
+        res.setHeader("Retry-After", String(failureState.retryAfterSeconds));
+        return sendJson(res, 429, { error: "Too many operator sign-in attempts. Wait a few minutes and try again." });
+      }
+      const credentialValid = userCanOperateWarehouse(operator || {}) && (credentialType === "password" ? verifyUserPassword(operator, credential) : verifyWarehousePin(operator, credential));
+      if (!credentialValid) {
+        recordAuthLoginFailure(failureKey);
+        return sendJson(res, 401, { error: credentialType === "password" ? "Username or password was not recognized." : "Username or warehouse PIN was not recognized." });
+      }
+      clearAuthLoginFailures(failureKey);
       const result = await outboundPackingOperatorStore.assign(scope, auditId, body, operator, authUser);
       void recordUserActivity(req, operator, {
         eventType: "fulfillment",
@@ -74116,8 +74199,11 @@ async function handleApi(req, res) {
       const currentSession = await outboundPackingOperatorStore.active(scope, auditId, stationId);
       if (!currentSession.row) return sendJson(res, 404, { error: "No active operator is assigned to this station." });
       const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
-      const operator = (settings.systemUsers || []).find((candidate) => String(candidate.id) === String(currentSession.row.operator_user_id) && candidate.status === "active");
-      if (!operator || !verifyWarehousePin(operator, body.pin)) return sendJson(res, 401, { error: "Operator PIN was not recognized." });
+      const operator = (settings.systemUsers || []).find((candidate) => String(candidate.id) === String(currentSession.row.operator_user_id));
+      const credentialType = body.credentialType === "password" ? "password" : "pin";
+      const credential = credentialType === "password" ? String(body.password || body.credential || "") : String(body.pin || body.credential || "");
+      const credentialValid = userCanOperateWarehouse(operator || {}) && (credentialType === "password" ? verifyUserPassword(operator, credential) : verifyWarehousePin(operator, credential));
+      if (!credentialValid) return sendJson(res, 401, { error: credentialType === "password" ? "Operator password was not recognized." : "Operator PIN was not recognized." });
       const result = await outboundPackingOperatorStore.unlock(scope, auditId, stationId);
       void recordUserActivity(req, operator, { eventType: "security", action: "Unlocked packing station", entityType: "outbound_audit", entityId: auditId, metadata: { stationId } });
       return sendJson(res, 200, result);

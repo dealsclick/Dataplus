@@ -67,7 +67,7 @@ final class ApiClient {
                 connection.setReadTimeout(45_000);
                 connection.setInstanceFollowRedirects(false);
                 connection.setRequestProperty("Accept", "application/json");
-                connection.setRequestProperty("User-Agent", "DataPlus-Warehouse-Android/2.3.0");
+                connection.setRequestProperty("User-Agent", "DataPlus-Warehouse-Android/2.3.1");
                 connection.setRequestProperty("Content-Type", contentType);
                 String cookies = cookieManager.getCookie(BASE_URL);
                 if (cookies != null && !cookies.trim().isEmpty()) connection.setRequestProperty("Cookie", cookies);
@@ -112,7 +112,7 @@ final class ApiClient {
                 connection.setReadTimeout(35_000);
                 connection.setInstanceFollowRedirects(false);
                 connection.setRequestProperty("Accept", "application/json");
-                connection.setRequestProperty("User-Agent", "DataPlus-Warehouse-Android/2.3.0");
+                connection.setRequestProperty("User-Agent", "DataPlus-Warehouse-Android/2.3.1");
                 String cookies = cookieManager.getCookie(BASE_URL);
                 if (cookies != null && !cookies.trim().isEmpty()) connection.setRequestProperty("Cookie", cookies);
 

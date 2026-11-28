@@ -2223,7 +2223,9 @@ export function FloatingActions({
 
 function LoginPage({ onLogin }: { onLogin: (session: AuthSession) => void }) {
   const [username, setUsername] = useState("luis")
-  const [password, setPassword] = useState("")
+  const warehouseLogin = window.location.pathname.startsWith("/warehouse")
+  const [credentialType, setCredentialType] = useState<"password" | "pin">(warehouseLogin ? "pin" : "password")
+  const [credential, setCredential] = useState("")
   const [loading, setLoading] = useState(false)
 
   async function submit(event: FormEvent) {
@@ -2232,7 +2234,12 @@ function LoginPage({ onLogin }: { onLogin: (session: AuthSession) => void }) {
     try {
       const session = await api<AuthSession>("/api/auth/login", {
         method: "POST",
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({
+          username,
+          credentialType,
+          warehouseLogin,
+          ...(credentialType === "pin" ? { pin: credential } : { password: credential }),
+        }),
       })
       toast.success(`Signed in as ${session.user?.name || session.user?.username || "DataPlus user"}.`)
       onLogin(session)
@@ -2248,15 +2255,28 @@ function LoginPage({ onLogin }: { onLogin: (session: AuthSession) => void }) {
       <Card className="w-full max-w-sm">
         <CardHeader>
           <div className="mb-2 flex size-10 items-center justify-center rounded-md bg-primary text-primary-foreground"><LockKeyhole className="size-5" /></div>
-          <CardTitle>Sign in to DataPlus</CardTitle>
-          <CardDescription>Use your assigned login to access permitted workspaces.</CardDescription>
+          <CardTitle>{warehouseLogin ? "Sign in to DataPlus Warehouse" : "Sign in to DataPlus"}</CardTitle>
+          <CardDescription>{warehouseLogin ? "Use your username with your warehouse PIN or normal password." : "Use your assigned login to access permitted workspaces."}</CardDescription>
         </CardHeader>
         <form onSubmit={submit}>
           <CardContent className="grid gap-4">
             <Field label="Username"><Input autoFocus autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} /></Field>
-            <Field label="Password"><Input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} /></Field>
+            {warehouseLogin ? <div className="grid grid-cols-2 gap-2 rounded-lg bg-muted p-1">
+              <Button type="button" size="sm" variant={credentialType === "pin" ? "default" : "ghost"} onClick={() => { setCredentialType("pin"); setCredential("") }}>Warehouse PIN</Button>
+              <Button type="button" size="sm" variant={credentialType === "password" ? "default" : "ghost"} onClick={() => { setCredentialType("password"); setCredential("") }}>Password</Button>
+            </div> : null}
+            <Field label={credentialType === "pin" ? "Warehouse PIN" : "Password"}><Input
+              type="password"
+              inputMode={credentialType === "pin" ? "numeric" : undefined}
+              pattern={credentialType === "pin" ? "[0-9]*" : undefined}
+              minLength={credentialType === "pin" ? 4 : undefined}
+              maxLength={credentialType === "pin" ? 8 : undefined}
+              autoComplete={credentialType === "pin" ? "off" : "current-password"}
+              value={credential}
+              onChange={(event) => setCredential(credentialType === "pin" ? event.target.value.replace(/\D/g, "").slice(0, 8) : event.target.value)}
+            /></Field>
           </CardContent>
-          <CardFooter><Button className="w-full" disabled={loading || !username || !password}>{loading && <Loader2 className="size-4 animate-spin" />} Sign in</Button></CardFooter>
+          <CardFooter><Button className="w-full" disabled={loading || !username || (credentialType === "pin" ? !/^\d{4,8}$/.test(credential) : !credential)}>{loading && <Loader2 className="size-4 animate-spin" />} Sign in</Button></CardFooter>
         </form>
       </Card>
       <Toaster richColors />
