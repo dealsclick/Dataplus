@@ -14,6 +14,7 @@ FileDown,
 FileText,
 FileUp,
 FileWarning,
+Gamepad2,
 History,
 Home,
 Loader2,
@@ -3037,6 +3038,7 @@ function App({ companySettings = false, orderTools = false }: { companySettings?
           </SidebarContent>
           <SidebarFooter className="p-3">
             <SidebarMenu>
+              <SidebarMenuItem><SidebarMenuButton tooltip="Games" asChild><a href="/games"><Gamepad2 /><span>Games</span></a></SidebarMenuButton></SidebarMenuItem>
               {userCanView(authUser, "settings") && <SidebarMenuItem><SidebarMenuButton isActive={view === "settings"} tooltip="Settings" onClick={() => navigateTo("settings")}><Settings /><span>Settings</span></SidebarMenuButton></SidebarMenuItem>}
             </SidebarMenu>
           </SidebarFooter>

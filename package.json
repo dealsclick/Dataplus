@@ -10,6 +10,7 @@
     "worker:once": "node -e \"process.env.DATAPLUS_WORKER_ONCE='1'; require('./scripts/dataplus-worker')\"",
     "print-agent": "node scripts/dataplus-print-agent.js",
     "test:loteria": "node scripts/test-loteria-game.cjs",
+    "test:wedding-predictions": "node scripts/test-wedding-predictions.cjs",
     "web:build": "npm --prefix web run build",
     "web:dev": "npm --prefix web run dev",
     "android:build": "node scripts/build-warehouse-android.cjs",

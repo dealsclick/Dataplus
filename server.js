@@ -38,6 +38,7 @@ const competitorProducts = require("./lib/competitor-products");
 const { createCompanyHandler } = require("./lib/company-http");
 const { resolveMentionedUsers } = require("./lib/order-mentions");
 const { createLoteriaHttp } = require("./lib/loteria-http");
+const { createWeddingPredictionsHttp } = require("./lib/wedding-predictions-http");
 const companyStore = createCompanyStore(() => postgres.getPool(), {
   readLegacyChannels: async () => (await postgres.readStateField("connections") || []).filter(row => row.id && row.name).map(row => {
     const channel = normalizeChannel(row);
@@ -270,6 +271,7 @@ const CATALOG_INDEX_SUPPLIER_DIR = path.join(CATALOG_INDEX_DIR, "suppliers");
 const CATALOG_INDEX_SKU_DIR = path.join(CATALOG_INDEX_DIR, "sku-shards");
 const CATALOG_CHANGE_LOG_FILE = path.join(DATA_DIR, "catalog", "sku-changes.ndjson");
 const loteriaHttp = createLoteriaHttp({ root: ROOT, parseBody, sendJson });
+const weddingPredictionsHttp = createWeddingPredictionsHttp({ parseBody, sendJson });
 const CATALOG_CHANGE_SNAPSHOT_FILE = path.join(DATA_DIR, "catalog", "change-snapshot.tsv");
 const CATALOG_CLOSEOUT_FILE = path.join(DATA_DIR, "catalog", "closeout-skus.csv");
 const SHOPIFY_TAXONOMY_INDEX_FILE = path.join(DATA_DIR, "channel-taxonomies", "shopify", "taxonomy-index.json");
@@ -58633,6 +58635,7 @@ async function handleApi(req, res) {
   }
 
   if (await loteriaHttp.handle(req, res, url)) return;
+  if (await weddingPredictionsHttp.handle(req, res, url)) return;
 
   if (req.method === "GET" && url.pathname === "/api/webhooks/ebay") {
     const challengeCode = String(url.searchParams.get("challenge_code") || "").trim();
