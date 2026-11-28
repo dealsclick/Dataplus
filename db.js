@@ -1397,6 +1397,7 @@ async function initRelationalSchema() {
       live_item_status text not null default 'not_required',
       live_item_expected_count integer not null default 0,
       live_item_scans jsonb not null default '[]'::jsonb,
+      station_name text,
       scanned_by_id text,
       scanned_by_name text,
       scanned_at timestamptz not null default now(),
@@ -1423,6 +1424,7 @@ async function initRelationalSchema() {
     alter table outbound_audit_scans add column if not exists live_item_status text not null default 'not_required';
     alter table outbound_audit_scans add column if not exists live_item_expected_count integer not null default 0;
     alter table outbound_audit_scans add column if not exists live_item_scans jsonb not null default '[]'::jsonb;
+    alter table outbound_audit_scans add column if not exists station_name text;
     do $$
     begin
       if exists (

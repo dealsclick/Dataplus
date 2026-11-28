@@ -74024,6 +74024,7 @@ async function handleApi(req, res) {
         carrier: resolved.carrier,
         matches: resolved.matches,
         matchPending: deferOrderMatch,
+        stationName: body.stationName,
         liveItemRequired: resolved.liveItemRequired,
         liveItemExpectedCount: resolved.liveItemExpectedCount
       }, authUser);
@@ -74108,6 +74109,7 @@ async function handleApi(req, res) {
           live_items_expected: scan.liveItemExpectedCount,
           actual_skus: scan.liveItems.map((item) => item.sku).filter(Boolean).join(" | "),
           actual_titles: scan.liveItems.map((item) => item.title).filter(Boolean).join(" | "),
+          packing_station: scan.stationName,
           actual_cost: scan.liveItems.reduce((sum, item) => sum + Number(item.cost || 0), 0).toFixed(2),
           sold_price: scan.liveItems.reduce((sum, item) => sum + Number(item.soldPrice || 0), 0).toFixed(2),
           scanned_by: scan.scannedByName,
@@ -74125,7 +74127,8 @@ async function handleApi(req, res) {
         const actualItems = scan.liveItems.map((item) => `${escapeHtml(item.sku)} · ${escapeHtml(item.title)} · Cost $${Number(item.cost || 0).toFixed(2)} · Sold $${Number(item.soldPrice || 0).toFixed(2)}${item.verificationOnly ? item.verificationMatched === false ? " · SKU mismatch" : " · Verified" : " · Inventory assigned"}`).join("<br>");
         const orders = actualItems ? `${orderLinks}<hr><strong>Scanned package items</strong><br>${actualItems}` : orderLinks;
         const matchStatus = scan.liveItemExpectedCount > 0 ? `${scan.matchStatus.replace("multiple", "multiple orders")} · ${scan.liveItemRequired ? "Required" : "Optional"} items ${scan.liveItemScannedCount}/${scan.liveItemExpectedCount}` : scan.matchStatus.replace("multiple", "multiple orders");
-        return `<tr><td>${index + 1}</td><td>${escapeHtml(scan.trackingNumber)}</td><td>${escapeHtml(scan.carrier || "Unknown")}</td><td>${orders}</td><td>${escapeHtml(matchStatus)}</td><td>${escapeHtml(scan.evidenceCount ? `${scan.evidenceCount} saved` : scan.evidenceStatus)}</td><td>${escapeHtml(scan.scannedByName)}</td><td>${escapeHtml(new Date(scan.scannedAt).toLocaleString())}</td></tr>`;
+        const scanner = [scan.scannedByName, scan.stationName].filter(Boolean).map(escapeHtml).join("<br>");
+        return `<tr><td>${index + 1}</td><td>${escapeHtml(scan.trackingNumber)}</td><td>${escapeHtml(scan.carrier || "Unknown")}</td><td>${orders}</td><td>${escapeHtml(matchStatus)}</td><td>${escapeHtml(scan.evidenceCount ? `${scan.evidenceCount} saved` : scan.evidenceStatus)}</td><td>${scanner}</td><td>${escapeHtml(new Date(scan.scannedAt).toLocaleString())}</td></tr>`;
       }).join("");
       return sendHtml(res, 200, `<!doctype html><html><head><title>${escapeHtml(audit.session.auditNumber)} outbound audit</title><style>body{font-family:Arial,sans-serif;margin:30px;color:#111}h1{margin-bottom:4px}.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:18px 0}.meta div{border:1px solid #bbb;padding:8px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #bbb;padding:7px;text-align:left;vertical-align:top}th{background:#eee}.sign{margin-top:28px;display:grid;grid-template-columns:1fr 1fr;gap:36px}.line{border-top:1px solid #111;padding-top:6px;margin-top:28px}@media print{body{margin:10px}}</style></head><body><h1>${escapeHtml(audit.session.auditNumber)} · Outbound handoff audit</h1><p>Internal warehouse custody record. This is not carrier acceptance.</p><div class="meta"><div><strong>Warehouse</strong><br>${escapeHtml(audit.session.warehouseName)}</div><div><strong>Carrier</strong><br>${escapeHtml(audit.session.carrier || "Any carrier")}</div><div><strong>Status</strong><br>${escapeHtml(audit.session.status)}</div><div><strong>Packages</strong><br>${audit.session.packageCount}</div><div><strong>Photos saved / missing</strong><br>${audit.session.evidenceCompleteCount} / ${audit.session.evidenceMissingCount}</div><div><strong>Closed</strong><br>${escapeHtml(audit.session.closedAt ? new Date(audit.session.closedAt).toLocaleString() : "Open")}</div></div><table><thead><tr><th>#</th><th>Tracking</th><th>Carrier</th><th>Order</th><th>Match</th><th>Photo</th><th>Scanned by</th><th>Scanned at</th></tr></thead><tbody>${scanRows || '<tr><td colspan="8">No packages scanned.</td></tr>'}</tbody></table><div class="sign"><div class="line">Warehouse handoff</div><div class="line">Driver / receiving party</div></div></body></html>`);
     }

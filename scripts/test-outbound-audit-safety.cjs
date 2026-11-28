@@ -29,6 +29,11 @@ const upsScan = publicScan({
 assert.match(upsScan.trackingUrl, /^https:\/\/www\.ups\.com\/track/);
 assert.equal(upsScan.carrier, 'UPS');
 
+const stationScan = publicScan({
+  scan_id: 'scan-station', tracking_number: '1Z999AA10123456784', station_name: 'Packing 2'
+});
+assert.equal(stationScan.stationName, 'Packing 2');
+
 const groupedLiveScan = publicScan({
   scan_id: 'scan-live', tracking_number: '1Z999AA10123456784', carrier: 'UPS', match_status: 'multiple',
   order_matches: [{ orderId: 'order-1', shipmentGroupId: 'SG-1' }, { orderId: 'order-2', shipmentGroupId: 'SG-1' }],
@@ -82,6 +87,8 @@ assert.match(outboundScanCreate, /live_item_required boolean not null default fa
 assert.match(outboundScanCreate, /live_item_status text not null default 'not_required'/);
 assert.match(outboundScanCreate, /live_item_expected_count integer not null default 0/);
 assert.match(outboundScanCreate, /live_item_scans jsonb not null default '\[\]'::jsonb/);
+assert.match(outboundScanCreate, /station_name text/);
+assert.match(dbSource, /alter table outbound_audit_scans add column if not exists station_name text/);
 
 const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
 const routeStart = serverSource.indexOf('if (url.pathname === "/api/fulfillment/outbound-audits"');
