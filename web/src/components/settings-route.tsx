@@ -146,6 +146,7 @@ function SettingsPage({
     { tab: "shipping", label: "Carrier access by company", description: "Enable or disable shared carrier rates for each company", keywords: "share company buysupply linq carrier access permissions" },
     { tab: "fulfillment", label: "Inventory supply priority", description: "Physical stock and supplier routing priority", keywords: "supplier sourcing priority physical stock routing" },
     { tab: "fulfillment", label: "Fulfillment gates", description: "Warehouses, package requirements, and pick-list controls", keywords: "fulfillment gates package pick list warehouse" },
+    { tab: "operations", label: "Outbound operating calendar", description: "Session rollover time and closed warehouse weekdays", keywords: "warehouse outbound audit handoff operating calendar rollover weekend closed days" },
     { tab: "inventory", label: "Inventory allocation", description: "Reservations, safety stock, and warehouse strategy", keywords: "inventory allocation reservations safety stock" },
     { tab: "email", label: "Email provider", description: "Resend and SMTP credentials", keywords: "email resend smtp" },
     { tab: "templates", label: "Document templates", description: "Operational email and document templates", keywords: "templates documents quote email" },
@@ -1404,6 +1405,29 @@ function SettingsPage({
           </Card>
         </TabsContent>
         <TabsContent value="operations" className="grid gap-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Outbound operating calendar</CardTitle>
+              <CardDescription>Controls when mixed-carrier outbound handoffs roll into a new session. Days marked closed carry forward into the next open operating day.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-5">
+              <div className="grid gap-4 md:grid-cols-2">
+                <Field label="Session timezone"><Select disabled={!editing} value={String(value("outboundSessionTimezone") || value("organizationTimezone") || "America/New_York")} onValueChange={(next) => update("outboundSessionTimezone", next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="America/New_York">Eastern</SelectItem><SelectItem value="America/Chicago">Central</SelectItem><SelectItem value="America/Denver">Mountain</SelectItem><SelectItem value="America/Los_Angeles">Pacific</SelectItem><SelectItem value="UTC">UTC</SelectItem></SelectContent></Select></Field>
+                <Field label="Session rollover time"><Input disabled={!editing} type="time" value={String(value("outboundSessionRolloverTime") || "00:00")} onChange={(event) => update("outboundSessionRolloverTime", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">The next operating session begins at this time. Midnight keeps the entire open day together.</p></Field>
+              </div>
+              <div className="grid gap-2">
+                <p className="text-sm font-medium">Closed warehouse days</p>
+                <p className="text-xs text-muted-foreground">Scans on closed days join the next open day. With Saturday and Sunday selected, Saturday through Monday night is one Monday operating session.</p>
+                <div className="grid gap-2 sm:grid-cols-4 lg:grid-cols-7">
+                  {[{ day: 0, label: "Sunday" }, { day: 1, label: "Monday" }, { day: 2, label: "Tuesday" }, { day: 3, label: "Wednesday" }, { day: 4, label: "Thursday" }, { day: 5, label: "Friday" }, { day: 6, label: "Saturday" }].map(({ day, label }) => {
+                    const selected = (Array.isArray(value("outboundSessionClosedWeekdays")) ? value("outboundSessionClosedWeekdays") as unknown[] : [0, 6]).map(Number).includes(day)
+                    return <label key={day} className={cn("flex min-h-11 items-center gap-2 rounded-md border px-3 py-2 text-sm", selected && "border-amber-500/50 bg-amber-500/10")}><Checkbox disabled={!editing} checked={selected} onCheckedChange={(checked) => { const current = (Array.isArray(value("outboundSessionClosedWeekdays")) ? value("outboundSessionClosedWeekdays") as unknown[] : [0, 6]).map(Number); update("outboundSessionClosedWeekdays", checked ? [...new Set([...current, day])].sort() : current.filter((item) => item !== day)) }} /><span>{label}</span></label>
+                  })}
+                </div>
+              </div>
+              <Alert><Warehouse className="size-4" /><AlertTitle>Weekend carry-forward example</AlertTitle><AlertDescription>Manual Close handoff remains available at any time. Changing this calendar affects open sessions the next time outbound is loaded or scanned; package history is never deleted.</AlertDescription></Alert>
+            </CardContent>
+          </Card>
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Operations</CardTitle>

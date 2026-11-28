@@ -53,10 +53,14 @@ import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.text.SimpleDateFormat;
 import java.util.TimeZone;
 import java.util.UUID;
@@ -71,8 +75,11 @@ public class LauncherActivity extends Activity {
     private static final int OUTBOUND_PHOTO_REQUEST = 7401;
     private static final int OUTBOUND_CAMERA_PERMISSION_REQUEST = 7403;
     private static final int OUTBOUND_PHOTO_MAX_BYTES = 1_500_000;
+    private static final String PENDING_OUTBOUND_PHOTOS = "pending_outbound_photos";
 
     private final ApiClient api = new ApiClient();
+    private final ApiClient photoApi = new ApiClient();
+    private final Set<String> activePhotoUploads = new HashSet<>();
     private final ToneGenerator tones = new ToneGenerator(AudioManager.STREAM_NOTIFICATION, 75);
     private FrameLayout contentHost;
     private LinearLayout bottomNav;
@@ -135,6 +142,7 @@ public class LauncherActivity extends Activity {
     protected void onResume() {
         super.onResume();
         updateNetworkState();
+        retryPendingOutboundPhotos();
         if (isHardwareScannerScreen()) focusScanner();
     }
 
@@ -1266,7 +1274,7 @@ public class LauncherActivity extends Activity {
         page.addView(scannerCard, dashboardScannerParams);
 
         LinearLayout actions = Ui.row(this);
-        Button start = Ui.button(this, "Use today's audit", true);
+        Button start = Ui.button(this, "Use current audit", true);
         start.setOnClickListener(view -> showStartOutboundDialog());
         actions.addView(start, new LinearLayout.LayoutParams(0, Ui.dp(this, 50), 1));
         Button refresh = Ui.button(this, "Refresh", false);
@@ -1295,7 +1303,7 @@ public class LauncherActivity extends Activity {
             title.setGravity(Gravity.CENTER);
             Ui.margin(title, 0, 8, 0, 4);
             empty.addView(title);
-            TextView detail = Ui.text(this, "Start today's audit, then scan package tracking labels natively.", 13, Ui.MUTED, false);
+            TextView detail = Ui.text(this, "Start the current operating session, then scan package tracking labels natively.", 13, Ui.MUTED, false);
             detail.setGravity(Gravity.CENTER);
             empty.addView(detail);
             LinearLayout.LayoutParams params = Ui.matchWrap();
@@ -1403,15 +1411,16 @@ public class LauncherActivity extends Activity {
         heading.addView(Ui.text(this, outboundAuditReference(audit), 18, Ui.TEXT, true), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         heading.addView(Ui.chip(this, open ? "Open" : "Closed", open ? Ui.WARNING : Ui.SUCCESS, open ? Ui.WARNING_SOFT : Ui.SUCCESS_SOFT));
         card.addView(heading);
-        TextView sessionDate = Ui.text(this, (open ? "Today · " : "Session date · ") + outboundSessionDate(audit), 12, open ? Ui.PRIMARY : Ui.MUTED, true);
+        TextView sessionDate = Ui.text(this, (audit.optBoolean("isCurrentOperatingSession") ? "Current · " : "Operating date · ") + outboundSessionDate(audit), 12, open ? Ui.PRIMARY : Ui.MUTED, true);
         Ui.margin(sessionDate, 0, 7, 0, 0);
         card.addView(sessionDate);
         TextView warehouse = Ui.text(this, audit.optString("warehouseName", "Warehouse"), 14, Ui.TEXT, true);
         Ui.margin(warehouse, 0, 9, 0, 3);
         card.addView(warehouse);
-        card.addView(Ui.text(this, "Daily mixed-carrier session", 13, Ui.MUTED, false));
+        card.addView(Ui.text(this, "Operating mixed-carrier session", 13, Ui.MUTED, false));
         String counts = audit.optInt("packageCount") + " package" + (audit.optInt("packageCount") == 1 ? "" : "s")
             + " · " + audit.optInt("matchedCount") + " matched";
+        if (audit.optInt("pendingMatchCount") > 0) counts += " · " + audit.optInt("pendingMatchCount") + " matching";
         if (audit.optInt("unmatchedCount") > 0) counts += " · " + audit.optInt("unmatchedCount") + " unmatched";
         TextView progress = Ui.text(this, counts, 12, audit.optInt("unmatchedCount") > 0 ? Ui.WARNING : Ui.MUTED, false);
         Ui.margin(progress, 0, 12, 0, 0);
@@ -1429,7 +1438,7 @@ public class LauncherActivity extends Activity {
         for (int index = 0; index < physical.size(); index++) names[index] = warehouseName(physical.get(index));
         modalOpen = true;
         AlertDialog dialog = new AlertDialog.Builder(this)
-            .setTitle(pendingOutboundBarcode.isEmpty() ? "Use today's outbound audit" : "Choose warehouse for scanned package")
+            .setTitle(pendingOutboundBarcode.isEmpty() ? "Use current outbound audit" : "Choose warehouse for scanned package")
             .setItems(names, (value, which) -> startOutboundAudit(physical.get(which)))
             .setNegativeButton("Cancel", null)
             .create();
@@ -1447,7 +1456,7 @@ public class LauncherActivity extends Activity {
     private void startOutboundAudit(JSONObject warehouse) {
         if (busy || !isOnline()) return;
         busy = true;
-        showLoading("Opening today's outbound audit…");
+        showLoading("Opening current outbound audit…");
         JSONObject body = new JSONObject();
         try {
             body.put("warehouseId", warehouse.optString("id"));
@@ -1532,8 +1541,9 @@ public class LauncherActivity extends Activity {
         TextView warehouse = Ui.text(this, currentOutboundSession.optString("warehouseName", "Warehouse"), 14, Ui.TEXT, true);
         Ui.margin(warehouse, 0, 9, 0, 3);
         auditCard.addView(warehouse);
-        auditCard.addView(Ui.text(this, "Daily mixed-carrier session", 13, Ui.MUTED, false));
+        auditCard.addView(Ui.text(this, "Operating mixed-carrier session · " + outboundSessionDate(currentOutboundSession), 13, Ui.MUTED, false));
         String summary = currentOutboundSession.optInt("packageCount") + " packages · " + currentOutboundSession.optInt("matchedCount") + " matched";
+        if (currentOutboundSession.optInt("pendingMatchCount") > 0) summary += " · " + currentOutboundSession.optInt("pendingMatchCount") + " matching";
         if (currentOutboundSession.optInt("unmatchedCount") > 0) summary += " · " + currentOutboundSession.optInt("unmatchedCount") + " unmatched";
         TextView counts = Ui.text(this, summary, 13, currentOutboundSession.optInt("unmatchedCount") > 0 ? Ui.WARNING : Ui.MUTED, true);
         Ui.margin(counts, 0, 12, 0, 0);
@@ -1558,7 +1568,7 @@ public class LauncherActivity extends Activity {
         scannerHeading.addView(scannerTitle, titleParams);
         scannerTitle.addView(Ui.text(this, activeOutboundPackage == null ? "Tracking scanner ready" : "Item scanner ready", 17, Ui.TEXT, true));
         TextView instruction = Ui.text(this, activeOutboundPackage == null
-            ? "Scan the shipping label. DataPlus records the package and shows the order match."
+            ? "Scan the shipping label. DataPlus saves it immediately and matches the order in the background."
             : "Scan each physical item UPC for this package before moving to the next label.", 13, Ui.MUTED, false);
         Ui.margin(instruction, 0, 3, 0, 0);
         scannerTitle.addView(instruction);
@@ -1578,8 +1588,11 @@ public class LauncherActivity extends Activity {
         Button typeButton = Ui.button(this, activeOutboundPackage == null ? "Type tracking" : "Type item UPC", false);
         typeButton.setOnClickListener(view -> showOutboundManualBarcodeDialog());
         fallbackRow.addView(typeButton, new LinearLayout.LayoutParams(0, Ui.dp(this, 50), 1));
-        Button webButton = Ui.button(this, "Photos & exceptions", false);
-        webButton.setOnClickListener(view -> openWeb("/warehouse/outbound"));
+        Button webButton = Ui.button(this, pendingOutboundPhotoCount() > 0 ? "Photo uploads " + pendingOutboundPhotoCount() : "Photo uploads", false);
+        webButton.setOnClickListener(view -> {
+            retryPendingOutboundPhotos();
+            Toast.makeText(this, pendingOutboundPhotoCount() > 0 ? "Pending photos are uploading in the background." : "No package photos are waiting to upload.", Toast.LENGTH_SHORT).show();
+        });
         LinearLayout.LayoutParams webParams = new LinearLayout.LayoutParams(0, Ui.dp(this, 50), 1);
         webParams.setMargins(Ui.dp(this, 8), 0, 0, 0);
         fallbackRow.addView(webButton, webParams);
@@ -1658,7 +1671,8 @@ public class LauncherActivity extends Activity {
             JSONObject scan = outboundScans.optJSONObject(index);
             if (scan == null) continue;
             boolean unmatched = "unmatched".equalsIgnoreCase(scan.optString("matchStatus"));
-            if ("matched".equals(outboundPackageFilter) && unmatched) continue;
+            boolean matching = "pending".equalsIgnoreCase(scan.optString("matchStatus"));
+            if ("matched".equals(outboundPackageFilter) && (unmatched || matching)) continue;
             if ("unmatched".equals(outboundPackageFilter) && !unmatched) continue;
             LinearLayout card = Ui.card(this);
             card.setClickable(true);
@@ -1668,7 +1682,7 @@ public class LauncherActivity extends Activity {
             TextView tracking = Ui.text(this, scan.optString("trackingNumber", "Package"), 14, Ui.TEXT, true);
             tracking.setTypeface(Typeface.MONOSPACE);
             first.addView(tracking, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-            first.addView(Ui.chip(this, unmatched ? "Unmatched" : "Matched", unmatched ? Ui.WARNING : Ui.SUCCESS, unmatched ? Ui.WARNING_SOFT : Ui.SUCCESS_SOFT));
+            first.addView(Ui.chip(this, matching ? "Matching" : unmatched ? "Unmatched" : "Matched", matching ? Ui.PRIMARY : unmatched ? Ui.WARNING : Ui.SUCCESS, matching ? 0xFFEFF6FF : unmatched ? Ui.WARNING_SOFT : Ui.SUCCESS_SOFT));
             card.addView(first);
             TextView order = Ui.text(this, outboundOrderLabel(scan), 13, Ui.MUTED, false);
             Ui.margin(order, 0, 7, 0, 0);
@@ -1730,15 +1744,16 @@ public class LauncherActivity extends Activity {
 
     private void showOutboundPackageDetails(JSONObject scan) {
         boolean unmatched = "unmatched".equalsIgnoreCase(scan.optString("matchStatus"));
+        boolean matching = "pending".equalsIgnoreCase(scan.optString("matchStatus"));
         boolean canScanItems = scan.optInt("liveItemExpectedCount") > 0 && !"complete".equalsIgnoreCase(scan.optString("liveItemStatus"));
         StringBuilder detail = new StringBuilder();
-        detail.append(unmatched ? "No order match" : outboundOrderLabel(scan));
+        detail.append(matching ? "Order matching in background" : unmatched ? "No order match" : outboundOrderLabel(scan));
         if (scan.optInt("liveItemExpectedCount") > 0 || scan.optInt("liveItemScannedCount") > 0) {
             detail.append("\n\n").append(outboundItemVerificationLabel(scan));
         }
         if (!scan.optString("carrier").isEmpty()) detail.append("\nCarrier: ").append(scan.optString("carrier"));
         if (!scan.optString("scannedByName").isEmpty()) detail.append("\nScanned by: ").append(scan.optString("scannedByName"));
-        detail.append("\nPhotos: ").append(scan.optInt("evidenceCount") > 0 ? scan.optInt("evidenceCount") + " saved" : "optional · none saved");
+        detail.append("\nPhotos: ").append(scan.optInt("evidenceCount") > 0 ? scan.optInt("evidenceCount") + " saved" : "optional · missing");
         AlertDialog.Builder builder = new AlertDialog.Builder(this)
             .setTitle(scan.optString("trackingNumber", "Package"))
             .setMessage(detail.toString())
@@ -1794,9 +1809,13 @@ public class LauncherActivity extends Activity {
             return;
         }
         busy = true;
-        scannerMessage("Matching " + tracking + "…", true);
+        scannerMessage("Saving " + tracking + "…", true);
         JSONObject body = new JSONObject();
-        try { body.put("trackingNumber", tracking).put("clientScanId", UUID.randomUUID().toString()); } catch (Exception ignored) {}
+        try {
+            body.put("trackingNumber", tracking)
+                .put("clientScanId", UUID.randomUUID().toString())
+                .put("deferOrderMatch", true);
+        } catch (Exception ignored) {}
         String path = "/api/fulfillment/outbound-audits/" + Uri.encode(currentOutboundSession.optString("id")) + "/scan";
         api.post(path, body, new ApiClient.Callback() {
             @Override public void onSuccess(JSONObject response) {
@@ -1804,8 +1823,8 @@ public class LauncherActivity extends Activity {
                 JSONObject session = response.optJSONObject("session");
                 JSONObject scan = response.optJSONObject("scan");
                 String previousSessionId = currentOutboundSession == null ? "" : currentOutboundSession.optString("id");
-                boolean dailyRollover = session != null && !previousSessionId.isEmpty() && !previousSessionId.equals(session.optString("id"));
-                if (dailyRollover) {
+                boolean operatingRollover = session != null && !previousSessionId.isEmpty() && !previousSessionId.equals(session.optString("id"));
+                if (operatingRollover) {
                     outboundScans = new JSONArray();
                     activeOutboundPackage = null;
                 }
@@ -1863,12 +1882,13 @@ public class LauncherActivity extends Activity {
 
         LinearLayout packageCard = Ui.card(this);
         boolean unmatched = "unmatched".equalsIgnoreCase(scan.optString("matchStatus"));
-        packageCard.setBackground(Ui.bordered(unmatched ? Ui.WARNING_SOFT : Ui.SUCCESS_SOFT, unmatched ? 0xFFFCD34D : 0xFFA7F3D0, 16, this));
+        boolean matching = "pending".equalsIgnoreCase(scan.optString("matchStatus"));
+        packageCard.setBackground(Ui.bordered(matching ? 0xFFEFF6FF : unmatched ? Ui.WARNING_SOFT : Ui.SUCCESS_SOFT, matching ? 0xFF93C5FD : unmatched ? 0xFFFCD34D : 0xFFA7F3D0, 16, this));
         LinearLayout packageHeading = Ui.row(this);
         TextView tracking = Ui.text(this, scan.optString("trackingNumber", "Package"), 16, Ui.TEXT, true);
         tracking.setTypeface(Typeface.MONOSPACE);
         packageHeading.addView(tracking, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        packageHeading.addView(Ui.chip(this, unmatched ? "No order match" : "Order matched", unmatched ? Ui.WARNING : Ui.SUCCESS, Ui.SURFACE));
+        packageHeading.addView(Ui.chip(this, matching ? "Matching in background" : unmatched ? "No order match" : "Order matched", matching ? Ui.PRIMARY : unmatched ? Ui.WARNING : Ui.SUCCESS, Ui.SURFACE));
         packageCard.addView(packageHeading);
         TextView order = Ui.text(this, outboundOrderLabel(scan), 13, Ui.MUTED, false);
         Ui.margin(order, 0, 9, 0, 0);
@@ -1882,7 +1902,7 @@ public class LauncherActivity extends Activity {
         packageParams.setMargins(0, Ui.dp(this, 16), 0, 0);
         sheet.addView(packageCard, packageParams);
 
-        Button photo = Ui.button(this, scan.optInt("evidenceCount") > 0 ? "Take another optional photo" : "Take optional photo", false);
+        Button photo = Ui.button(this, scan.optInt("evidenceCount") > 0 ? "Take another optional photo" : "Take optional photo · missing", false);
         photo.setOnClickListener(view -> {
             dialog.dismiss();
             takeOutboundPhoto(scan);
@@ -1924,11 +1944,6 @@ public class LauncherActivity extends Activity {
 
     private void takeOutboundPhoto(JSONObject scan) {
         if (scan == null || currentOutboundSession == null || busy) return;
-        if (!isOnline()) {
-            scannerMessage("Reconnect before taking a package photo.", false);
-            feedback(false);
-            return;
-        }
         pendingPhotoAuditId = currentOutboundSession.optString("id");
         pendingPhotoScanId = scan.optString("id");
         pendingPhotoTracking = scan.optString("trackingNumber", "package");
@@ -1982,9 +1997,19 @@ public class LauncherActivity extends Activity {
         new Thread(() -> {
             try {
                 PhotoPayload payload = prepareOutboundPhoto(photo);
-                runOnUiThread(() -> createOutboundPhotoUpload(photo, payload, auditId, scanId, tracking));
+                JSONObject queued = persistOutboundPhoto(photo, payload, auditId, scanId, tracking);
+                runOnUiThread(() -> {
+                    busy = false;
+                    clearPendingPhoto();
+                    activeOutboundPackage = null;
+                    showOutboundScanner();
+                    scannerMessage("Photo queued for " + tracking + ". Keep scanning while it uploads.", true);
+                    Toast.makeText(LauncherActivity.this, "Photo queued. Upload continues in the background.", Toast.LENGTH_SHORT).show();
+                    uploadQueuedOutboundPhoto(queued);
+                    focusScanner();
+                });
             } catch (Exception error) {
-                runOnUiThread(() -> finishPhotoUploadError(photo, error.getMessage(), null));
+                runOnUiThread(() -> finishPhotoQueueError(photo, error.getMessage()));
             }
         }, "DataPlusPhotoPrepare").start();
     }
@@ -2001,60 +2026,141 @@ public class LauncherActivity extends Activity {
         }
     }
 
-    private void createOutboundPhotoUpload(File photo, PhotoPayload payload, String auditId, String scanId, String tracking) {
+    private synchronized JSONObject persistOutboundPhoto(File sourcePhoto, PhotoPayload payload, String auditId, String scanId, String tracking) throws Exception {
+        String evidenceId = UUID.randomUUID().toString();
+        File directory = new File(getFilesDir(), "outbound-photo-queue");
+        if (!directory.exists() && !directory.mkdirs()) throw new IllegalStateException("The app could not create its background photo queue.");
+        File queuedFile = new File(directory, evidenceId + ".jpg");
+        try (FileOutputStream output = new FileOutputStream(queuedFile)) {
+            output.write(payload.bytes);
+        }
+        if (sourcePhoto != null && sourcePhoto.exists()) sourcePhoto.delete();
+        JSONObject queued = new JSONObject();
+        queued.put("id", evidenceId);
+        queued.put("auditId", auditId);
+        queued.put("scanId", scanId);
+        queued.put("tracking", tracking);
+        queued.put("path", queuedFile.getAbsolutePath());
+        queued.put("byteSize", payload.bytes.length);
+        queued.put("width", payload.width);
+        queued.put("height", payload.height);
+        queued.put("capturedAt", utcTimestamp());
+        JSONArray pending = pendingOutboundPhotos();
+        pending.put(queued);
+        preferences.edit().putString(PENDING_OUTBOUND_PHOTOS, pending.toString()).apply();
+        return queued;
+    }
+
+    private synchronized JSONArray pendingOutboundPhotos() {
+        try { return new JSONArray(preferences.getString(PENDING_OUTBOUND_PHOTOS, "[]")); }
+        catch (Exception ignored) { return new JSONArray(); }
+    }
+
+    private int pendingOutboundPhotoCount() {
+        return pendingOutboundPhotos().length();
+    }
+
+    private synchronized void removePendingOutboundPhoto(String evidenceId) {
+        JSONArray current = pendingOutboundPhotos();
+        JSONArray next = new JSONArray();
+        for (int index = 0; index < current.length(); index++) {
+            JSONObject item = current.optJSONObject(index);
+            if (item != null && !evidenceId.equals(item.optString("id"))) next.put(item);
+        }
+        preferences.edit().putString(PENDING_OUTBOUND_PHOTOS, next.toString()).apply();
+    }
+
+    private void retryPendingOutboundPhotos() {
+        if (preferences == null || !isOnline()) return;
+        JSONArray pending = pendingOutboundPhotos();
+        for (int index = 0; index < pending.length(); index++) {
+            JSONObject item = pending.optJSONObject(index);
+            if (item != null) uploadQueuedOutboundPhoto(item);
+        }
+    }
+
+    private void uploadQueuedOutboundPhoto(JSONObject queued) {
+        if (queued == null || !isOnline()) return;
+        String evidenceId = queued.optString("id");
+        String auditId = queued.optString("auditId");
+        String scanId = queued.optString("scanId");
+        File photo = new File(queued.optString("path"));
+        if (evidenceId.isEmpty() || auditId.isEmpty() || scanId.isEmpty() || !photo.isFile()) {
+            removePendingOutboundPhoto(evidenceId);
+            return;
+        }
+        if (activePhotoUploads.contains(evidenceId)) return;
+        activePhotoUploads.add(evidenceId);
         JSONObject body = new JSONObject();
         try {
-            body.put("clientEvidenceId", UUID.randomUUID().toString());
+            body.put("clientEvidenceId", evidenceId);
             body.put("contentType", "image/jpeg");
-            body.put("byteSize", payload.bytes.length);
-            body.put("width", payload.width);
-            body.put("height", payload.height);
-            body.put("capturedAt", utcTimestamp());
+            body.put("byteSize", queued.optInt("byteSize", (int) photo.length()));
+            body.put("width", queued.optInt("width"));
+            body.put("height", queued.optInt("height"));
+            body.put("capturedAt", queued.optString("capturedAt", utcTimestamp()));
         } catch (Exception ignored) {}
         String path = "/api/fulfillment/outbound-audits/" + Uri.encode(auditId)
             + "/scans/" + Uri.encode(scanId) + "/evidence";
-        api.post(path, body, new ApiClient.Callback() {
+        photoApi.post(path, body, new ApiClient.Callback() {
             @Override public void onSuccess(JSONObject response) {
                 String uploadUrl = response.optString("uploadUrl");
                 if (uploadUrl.isEmpty()) {
-                    finishPhotoUploadError(photo, "DataPlus did not return a package photo upload address.", null);
+                    finishBackgroundPhotoUpload(evidenceId, false, "DataPlus did not return a package photo upload address.", scanId, queued.optString("tracking"), photo);
                     return;
                 }
-                scannerMessage("Uploading package photo…", true);
-                api.putBytes(uploadUrl, payload.bytes, "image/jpeg", new ApiClient.Callback() {
+                byte[] bytes;
+                try {
+                    bytes = readQueuedPhoto(photo);
+                } catch (Exception error) {
+                    finishBackgroundPhotoUpload(evidenceId, false, error.getMessage(), scanId, queued.optString("tracking"), photo);
+                    return;
+                }
+                photoApi.putBytes(uploadUrl, bytes, "image/jpeg", new ApiClient.Callback() {
                     @Override public void onSuccess(JSONObject uploadResponse) {
-                        busy = false;
-                        if (photo.exists()) photo.delete();
-                        incrementOutboundEvidenceCount(scanId);
-                        clearPendingPhoto();
-                        showOutboundScanner();
-                        scannerMessage("Photo saved for " + tracking + ".", true);
-                        feedback(true);
-                        Toast.makeText(LauncherActivity.this, uploadResponse.optString("message", "Package photo saved."), Toast.LENGTH_LONG).show();
+                        finishBackgroundPhotoUpload(evidenceId, true, uploadResponse.optString("message", "Package photo saved."), scanId, queued.optString("tracking"), photo);
                     }
                     @Override public void onError(ApiClient.ApiException error) {
-                        finishPhotoUploadError(photo, error.getMessage(), error);
+                        finishBackgroundPhotoUpload(evidenceId, false, error.getMessage(), scanId, queued.optString("tracking"), photo);
                     }
                 });
             }
             @Override public void onError(ApiClient.ApiException error) {
-                finishPhotoUploadError(photo, error.getMessage(), error);
+                finishBackgroundPhotoUpload(evidenceId, false, error.getMessage(), scanId, queued.optString("tracking"), photo);
             }
         });
     }
 
-    private void finishPhotoUploadError(File photo, String message, ApiClient.ApiException error) {
+    private void finishBackgroundPhotoUpload(String evidenceId, boolean success, String message, String scanId, String tracking, File photo) {
+        activePhotoUploads.remove(evidenceId);
+        if (!success) {
+            if (SCREEN_OUTBOUND_SCANNER.equals(screen)) scannerMessage("Photo pending upload. Package scans can continue.", true);
+            return;
+        }
+        removePendingOutboundPhoto(evidenceId);
+        if (photo != null && photo.exists()) photo.delete();
+        incrementOutboundEvidenceCount(scanId);
+        if (SCREEN_OUTBOUND_SCANNER.equals(screen)) scannerMessage("Photo saved for " + tracking + ".", true);
+    }
+
+    private void finishPhotoQueueError(File photo, String message) {
         busy = false;
         if (photo != null && photo.exists()) photo.delete();
         clearPendingPhoto();
-        if (error != null && error.isUnauthorized()) {
-            showLogin();
-            return;
-        }
         scannerMessage(message == null || message.trim().isEmpty() ? "Unable to save the package photo." : message, false);
         feedback(false);
         Toast.makeText(this, message == null ? "Unable to save the package photo." : message, Toast.LENGTH_LONG).show();
         focusScanner();
+    }
+
+    private static byte[] readQueuedPhoto(File file) throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream((int) Math.min(file.length(), OUTBOUND_PHOTO_MAX_BYTES));
+        byte[] buffer = new byte[16_384];
+        try (FileInputStream input = new FileInputStream(file)) {
+            int read;
+            while ((read = input.read(buffer)) >= 0) output.write(buffer, 0, read);
+        }
+        return output.toByteArray();
     }
 
     private void incrementOutboundEvidenceCount(String scanId) {
@@ -2387,6 +2493,8 @@ public class LauncherActivity extends Activity {
     }
 
     private String outboundSessionDate(JSONObject audit) {
+        String operatingDate = audit == null ? "" : audit.optString("operatingDate");
+        if (!operatingDate.isEmpty()) return operatingDate;
         String raw = audit == null ? "" : audit.optString("startedAt");
         if (raw.isEmpty()) return "Unknown date";
         try {
@@ -2426,6 +2534,7 @@ public class LauncherActivity extends Activity {
     }
 
     private String outboundOrderLabel(JSONObject scan) {
+        if (scan != null && "pending".equalsIgnoreCase(scan.optString("matchStatus"))) return "Order matching in background";
         JSONArray matches = scan == null ? null : scan.optJSONArray("matches");
         if (matches == null || matches.length() == 0) return "Tracking retained without an order match";
         List<String> numbers = new ArrayList<>();
@@ -2591,6 +2700,7 @@ public class LauncherActivity extends Activity {
             scannerStatus.setText("Offline — scanning is paused");
             scannerStatus.setTextColor(Ui.ERROR);
         }
+        if (online) retryPendingOutboundPhotos();
     }
 
     private void watchNetworkState() {

@@ -130,7 +130,10 @@ const { dailyScheduleKey } = require("./lib/carrier-tracking-schedule");
 const { createCarrierCredentials } = require("./lib/carrier-credentials");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
 const shippingDisputeStore = createShippingDisputeStore(() => postgres.getPool(), { ensureSchema: () => postgres.initRelationalSchema() });
-const outboundAuditStore = createOutboundAuditStore(() => postgres.getPool(), { ensureSchema: () => postgres.initRelationalSchema() });
+const outboundAuditStore = createOutboundAuditStore(() => postgres.getPool(), {
+  ensureSchema: () => postgres.initRelationalSchema(),
+  getSettings: () => readSystemSettingsStore(dbCache.data?.systemSettings || {}),
+});
 const outboundLiveItemLocks = new Map();
 
 async function withOutboundLiveItemLock(key, operation) {
@@ -1518,6 +1521,9 @@ const DEFAULT_SYSTEM_SETTINGS = {
   warehouseScannerSoundIntensity: "medium",
   warehouseScannerVibrationEnabled: true,
   warehouseScannerVibrationIntensity: "medium",
+  outboundSessionTimezone: "America/New_York",
+  outboundSessionRolloverTime: "00:00",
+  outboundSessionClosedWeekdays: [0, 6],
   scrapeGraphEnabled: false,
   scrapeGraphApiBaseUrl: "https://v2-api.scrapegraphai.com/api",
   scrapeGraphApiKey: "",
@@ -6309,6 +6315,18 @@ function normalizeSystemSettings(settings = {}) {
   normalized.warehouseScannerVibrationIntensity = ["low", "medium", "high"].includes(String(normalized.warehouseScannerVibrationIntensity || "").toLowerCase())
     ? String(normalized.warehouseScannerVibrationIntensity).toLowerCase()
     : "medium";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: String(normalized.outboundSessionTimezone || normalized.organizationTimezone || "America/New_York") }).format(new Date());
+  } catch {
+    normalized.outboundSessionTimezone = "America/New_York";
+  }
+  normalized.outboundSessionTimezone = String(normalized.outboundSessionTimezone || normalized.organizationTimezone || "America/New_York");
+  normalized.outboundSessionRolloverTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(normalized.outboundSessionRolloverTime || ""))
+    ? String(normalized.outboundSessionRolloverTime)
+    : "00:00";
+  normalized.outboundSessionClosedWeekdays = [...new Set((Array.isArray(normalized.outboundSessionClosedWeekdays) ? normalized.outboundSessionClosedWeekdays : [0, 6])
+    .map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))].sort((left, right) => left - right);
+  if (normalized.outboundSessionClosedWeekdays.length >= 7) normalized.outboundSessionClosedWeekdays = [0, 6];
   normalized.scrapeGraphEnabled = normalized.scrapeGraphEnabled === true || String(normalized.scrapeGraphEnabled).toLowerCase() === "true";
   normalized.scrapeGraphApiBaseUrl = "https://v2-api.scrapegraphai.com/api";
   normalized.scrapeGraphApiKey = String(normalized.scrapeGraphApiKey || process.env.SGAI_API_KEY || "").trim();
@@ -46348,6 +46366,67 @@ async function resolveOutboundAuditTracking(scannedValue = "") {
   };
 }
 
+function captureOutboundAuditTracking(scannedValue = "") {
+  const raw = String(scannedValue || "").trim();
+  const trackingNumber = canonicalTrackingValue(raw);
+  if (!trackingNumber || trackingNumber.length > 120) {
+    throw Object.assign(new Error("The scanned barcode does not contain a usable tracking reference."), { statusCode: 400 });
+  }
+  const carrier = inferCarrierFromTracking(trackingNumber);
+  const numericFallback = /^\d{15,34}$/.test(trackingNumber);
+  if (!isLikelyTrackingNumber(trackingNumber) && !carrier && !numericFallback) {
+    throw Object.assign(new Error(`${trackingNumber} does not look like a supported package tracking barcode. Aim at the carrier tracking barcode.`), { statusCode: 400 });
+  }
+  return {
+    scannedValue: raw,
+    normalizedCandidates: trackingLookupCandidates(raw),
+    trackingNumber,
+    trackingNormalized: trackingNumber,
+    carrier,
+    trackingUrl: carrierTrackingUrl(carrier, trackingNumber),
+    matches: [],
+    liveItemRequired: false,
+    liveItemExpectedCount: 0,
+    matchPending: true
+  };
+}
+
+const outboundAuditMatchQueue = [];
+const outboundAuditMatchKeys = new Set();
+let outboundAuditMatchWorkers = 0;
+const OUTBOUND_AUDIT_MATCH_CONCURRENCY = 3;
+
+function runOutboundAuditMatchQueue() {
+  while (outboundAuditMatchWorkers < OUTBOUND_AUDIT_MATCH_CONCURRENCY && outboundAuditMatchQueue.length) {
+    const task = outboundAuditMatchQueue.shift();
+    outboundAuditMatchWorkers += 1;
+    setImmediate(async () => {
+      try {
+        const resolved = await resolveOutboundAuditTracking(task.trackingValue);
+        await outboundAuditStore.replaceScanMatches(task.scope, task.auditId, task.scanId, resolved);
+      } catch (error) {
+        console.warn(`Outbound package ${task.scanId} remains pending for background matching:`, error?.message || error);
+      } finally {
+        outboundAuditMatchWorkers -= 1;
+        outboundAuditMatchKeys.delete(task.key);
+        runOutboundAuditMatchQueue();
+      }
+    });
+  }
+}
+
+function queueOutboundAuditMatch(scope, auditId, scan) {
+  const scanId = String(scan?.id || "").trim();
+  const trackingValue = String(scan?.trackingRaw || scan?.trackingNumber || "").trim();
+  if (!scanId || !trackingValue) return false;
+  const key = `${auditId}:${scanId}`;
+  if (outboundAuditMatchKeys.has(key)) return false;
+  outboundAuditMatchKeys.add(key);
+  outboundAuditMatchQueue.push({ key, scope: { ...scope }, auditId: String(auditId), scanId, trackingValue });
+  runOutboundAuditMatchQueue();
+  return true;
+}
+
 function outboundAuditTrackingValuesForOrders(orders = []) {
   const values = new Set();
   const add = (value) => {
@@ -46389,11 +46468,10 @@ async function reconcileOutboundAuditScansForOrders(orders = [], options = {}) {
   for (const entry of pending) {
     try {
       const resolved = await resolveOutboundAuditTracking(entry.scan.trackingRaw || entry.scan.trackingNumber);
-      if (!resolved.matches.length) continue;
       // Relinking is intentionally inventory-neutral. Inventory allocation and
       // outbound item scans keep their own idempotency keys and ledger entries.
       await outboundAuditStore.replaceScanMatches(scope, entry.auditId, entry.scan.id, resolved);
-      linked += 1;
+      if (resolved.matches.length) linked += 1;
     } catch (error) {
       errors.push({ auditId: entry.auditId, scanId: entry.scan.id, message: String(error?.message || error) });
     }
@@ -73810,12 +73888,12 @@ async function handleApi(req, res) {
     if (req.method === "POST") {
       const body = await parseBody(req);
       const audit = await outboundAuditStore.start(scope, body, authUser);
-      void recordUserActivity(req, authUser, { eventType: "fulfillment", action: audit.reused ? "Reused today's outbound handoff audit" : "Started outbound handoff audit", entityType: "outbound_audit", entityId: audit.id, metadata: { auditNumber: audit.auditNumber, warehouseId: audit.warehouseId, carrier: audit.carrier } });
+      void recordUserActivity(req, authUser, { eventType: "fulfillment", action: audit.reused ? "Reused current outbound handoff audit" : "Started outbound handoff audit", entityType: "outbound_audit", entityId: audit.id, metadata: { auditNumber: audit.auditNumber, warehouseId: audit.warehouseId, carrier: audit.carrier, operatingDate: audit.operatingDate } });
       return sendJson(res, audit.reused ? 200 : 201, {
         audit,
         message: audit.reused
-          ? `${audit.auditNumber} is already open for ${audit.warehouseName} today.`
-          : `${audit.auditNumber} is ready for today's package scans.`
+          ? `${audit.auditNumber} is already open for ${audit.warehouseName}'s ${audit.operatingDate || "current"} operating session.`
+          : `${audit.auditNumber} is ready for the ${audit.operatingDate || "current"} operating session.`
       });
     }
   }
@@ -73924,11 +74002,17 @@ async function handleApi(req, res) {
     const action = outboundAuditMatch[2] || "";
     if (req.method === "GET" && !action) {
       const audit = await outboundAuditStore.read(scope, auditId);
+      for (const scan of audit?.scans || []) {
+        if (scan.matchStatus === "pending") queueOutboundAuditMatch(scope, auditId, scan);
+      }
       return audit ? sendJson(res, 200, audit) : notFound(res);
     }
     if (req.method === "POST" && action === "scan") {
       const body = await parseBody(req);
-      const resolved = await resolveOutboundAuditTracking(body.trackingNumber || body.trackingRaw || body.value);
+      const deferOrderMatch = body.deferOrderMatch === true || /DataPlus-Warehouse-Android\//i.test(String(req.headers["user-agent"] || ""));
+      const resolved = deferOrderMatch
+        ? captureOutboundAuditTracking(body.trackingNumber || body.trackingRaw || body.value)
+        : await resolveOutboundAuditTracking(body.trackingNumber || body.trackingRaw || body.value);
       const result = await outboundAuditStore.recordScan(scope, auditId, {
         clientScanId: body.clientScanId,
         trackingRaw: resolved.scannedValue,
@@ -73936,26 +74020,30 @@ async function handleApi(req, res) {
         trackingNormalized: resolved.trackingNormalized,
         carrier: resolved.carrier,
         matches: resolved.matches,
+        matchPending: deferOrderMatch,
         liveItemRequired: resolved.liveItemRequired,
         liveItemExpectedCount: resolved.liveItemExpectedCount
       }, authUser);
+      if (result.scan.matchStatus === "pending") queueOutboundAuditMatch(scope, result.session.id, result.scan);
       const scanMessage = result.duplicate
         ? `${result.scan.trackingNumber} was already scanned into this handoff.`
-        : resolved.matches.length === 1
-          ? resolved.liveItemRequired
-            ? `${resolved.trackingNumber} matched Live order ${resolved.matches[0].orderNumber}. Scan ${resolved.liveItemExpectedCount} item${resolved.liveItemExpectedCount === 1 ? "" : "s"} before handoff.`
-            : resolved.liveItemExpectedCount > 0
-              ? `${resolved.trackingNumber} matched order ${resolved.matches[0].orderNumber}. Item scanning is optional; scan the items or continue to the package photo.`
-              : `${resolved.trackingNumber} matched order ${resolved.matches[0].orderNumber}.`
-          : resolved.matches.length > 1
+        : deferOrderMatch
+          ? `${resolved.trackingNumber} was recorded${resolved.carrier ? ` as ${resolved.carrier}` : ""}. Order matching will finish in the background; add an optional package photo now.`
+          : resolved.matches.length === 1
             ? resolved.liveItemRequired
-              ? `${resolved.trackingNumber} matched shipment group ${resolved.matches[0].shipmentGroupId || ""} with ${resolved.matches.length} orders. Scan ${resolved.liveItemExpectedCount} Live item${resolved.liveItemExpectedCount === 1 ? "" : "s"}.`
+              ? `${resolved.trackingNumber} matched Live order ${resolved.matches[0].orderNumber}. Scan ${resolved.liveItemExpectedCount} item${resolved.liveItemExpectedCount === 1 ? "" : "s"} before handoff.`
               : resolved.liveItemExpectedCount > 0
-                ? `${resolved.trackingNumber} matched ${resolved.matches.length} orders. Item scanning is optional; scan the items or continue to the package photo.`
-                : `${resolved.trackingNumber} matched ${resolved.matches.length} orders and was retained with every match.`
-            : `${resolved.trackingNumber} has no matching order and was retained in the handoff record.`;
+                ? `${resolved.trackingNumber} matched order ${resolved.matches[0].orderNumber}. Item scanning is optional; scan the items or continue to the package photo.`
+                : `${resolved.trackingNumber} matched order ${resolved.matches[0].orderNumber}.`
+            : resolved.matches.length > 1
+              ? resolved.liveItemRequired
+                ? `${resolved.trackingNumber} matched shipment group ${resolved.matches[0].shipmentGroupId || ""} with ${resolved.matches.length} orders. Scan ${resolved.liveItemExpectedCount} Live item${resolved.liveItemExpectedCount === 1 ? "" : "s"}.`
+                : resolved.liveItemExpectedCount > 0
+                  ? `${resolved.trackingNumber} matched ${resolved.matches.length} orders. Item scanning is optional; scan the items or continue to the package photo.`
+                  : `${resolved.trackingNumber} matched ${resolved.matches.length} orders and was retained with every match.`
+              : `${resolved.trackingNumber} has no matching order and was retained in the handoff record.`;
       const message = result.rolledOverFrom
-        ? `${result.rolledOverFrom.auditNumber} was from a previous day and closed automatically. ${result.session.auditNumber} is today's ${result.session.warehouseName} audit. ${scanMessage}`
+        ? `${result.rolledOverFrom.auditNumber} belongs to a previous operating session and closed automatically. ${result.session.auditNumber} is the current ${result.session.warehouseName} audit. ${scanMessage}`
         : scanMessage;
       return sendJson(res, result.duplicate ? 200 : 201, { ...result, resolution: resolved, message });
     }

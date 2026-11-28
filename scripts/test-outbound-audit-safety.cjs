@@ -5,12 +5,12 @@ const { publicScan, publicSession } = require('../lib/outbound-audit-store');
 
 const session = publicSession({
   audit_id: 'audit-1', audit_number: 17, warehouse_id: 'wh-1', warehouse_name: 'Staten Island',
-  status: 'open', package_count: 2, matched_count: 1, unmatched_count: 1, multiple_match_count: 0,
+  status: 'open', package_count: 2, matched_count: 1, unmatched_count: 0, pending_match_count: 1, multiple_match_count: 0,
   started_at: new Date('2026-10-27T12:00:00Z')
 });
 assert.equal(session.auditNumber, 'OA-000017');
 assert.equal(session.packageCount, 2);
-assert.equal(session.unmatchedCount, 1);
+assert.equal(session.pendingMatchCount, 1);
 
 const unmatched = publicScan({
   scan_id: 'scan-1', tracking_raw: 'EXTERNAL-TRACKING-123', tracking_number: 'EXTERNAL-TRACKING-123',
@@ -70,6 +70,8 @@ assert.match(dbSource, /unique \(audit_id, tracking_normalized\)/);
 assert.match(dbSource, /live_item_required boolean not null default false/);
 assert.match(dbSource, /live_item_expected_count integer not null default 0/);
 assert.match(dbSource, /live_item_scans jsonb not null default '\[\]'::jsonb/);
+assert.match(dbSource, /pending_match_count integer not null default 0/);
+assert.match(dbSource, /match_status in \('pending', 'matched', 'multiple', 'unmatched'\)/);
 assert.match(dbSource, /async function ensureOutboundAuditSchema\(client\)/);
 assert.match(dbSource, /if \(schemaVersion\.rows\[0\]\?\.current === true\) \{[\s\S]{0,900}await ensureOutboundAuditSchema\(client\)/);
 assert.match(dbSource, /cleaned_tracking_items/);
@@ -103,10 +105,14 @@ assert.match(serverSource, /verificationOnly: true/);
 assert.match(serverSource, /Unmatched package item/);
 assert.match(serverSource, /Unrecognized item barcode/);
 assert.match(serverSource, /recorded for this package\. Scan another item or continue to the package photo/);
-assert.match(serverSource, /Item scanning is optional; scan the items or continue to the package photo/);
-assert.match(serverSource, /Reused today's outbound handoff audit/);
-assert.match(serverSource, /was from a previous day and closed automatically/);
-assert.match(serverSource, /is today's \$\{result\.session\.warehouseName\} audit/);
+assert.match(serverSource, /Reused current outbound handoff audit/);
+assert.match(serverSource, /captureOutboundAuditTracking/);
+assert.match(serverSource, /queueOutboundAuditMatch/);
+assert.match(serverSource, /body\.deferOrderMatch === true/);
+assert.match(serverSource, /await resolveOutboundAuditTracking/);
+assert.match(serverSource, /if \(scan\.matchStatus === "pending"\) queueOutboundAuditMatch\(scope, auditId, scan\)/);
+assert.match(serverSource, /Order matching will finish in the background/);
+assert.match(serverSource, /belongs to a previous operating session and closed automatically/);
 assert.match(serverSource, /That is the package tracking barcode\. Scan the product UPC, or skip to the package photo/);
 assert.match(serverSource, /isLikelyTrackingNumber\(barcode\)/);
 assert.match(serverSource, /That looks like a new package tracking label\. Record it as the next package/);
@@ -149,11 +155,13 @@ assert.match(workspaceSource, /Unmatched package contents/);
 assert.match(workspaceSource, /Every package can continue to item scans and a photo/);
 assert.match(workspaceSource, /Skip to package photo/);
 assert.match(workspaceSource, /Item verification/);
-assert.match(workspaceSource, /Use today&apos;s audit/);
-assert.match(workspaceSource, /Previous-day sessions close automatically at midnight Eastern/);
-assert.match(workspaceSource, /Today and recent history/);
+assert.match(workspaceSource, /Use current audit/);
+assert.match(workspaceSource, /Sessions follow the System Settings operating calendar/);
+assert.match(workspaceSource, /Current and recent history/);
 assert.match(workspaceSource, /Carrier breakdown/);
-assert.match(workspaceSource, /Daily mixed-carrier session/);
+assert.match(workspaceSource, /Operating mixed-carrier session/);
+assert.match(workspaceSource, /Matching order/);
+assert.match(workspaceSource, /Photo missing/);
 assert.doesNotMatch(workspaceSource, /Expected carrier/);
 assert.match(workspaceSource, /current\.session\.id === result\.session\.id/);
 assert.match(workspaceSource, /result\.rolledOverFrom/);
@@ -174,17 +182,15 @@ assert.match(workspaceSource, /Undo last item/);
 assert.match(workspaceSource, /Remove \$\{item\.sku\} scan/);
 assert.match(workspaceSource, /removeOptionalItem/);
 assert.match(workspaceSource, /Search all audits, tracking numbers, or order numbers/);
-assert.match(workspaceSource, /Searches every outbound audit by audit ID, warehouse, user, tracking number, DataPlus order, or channel order/);
 assert.match(workspaceSource, /grid min-w-0 gap-4/);
 assert.doesNotMatch(workspaceSource, /xl:grid-cols-\[18rem_minmax\(0,1fr\)\]/);
 
 const outboundStoreSource = fs.readFileSync(path.join(__dirname, '..', 'lib', 'outbound-audit-store.js'), 'utf8');
-assert.match(outboundStoreSource, /timezone\('America\/New_York', started_at\)::date = timezone\('America\/New_York', now\(\)\)::date/);
 assert.match(outboundStoreSource, /async function closeExpiredSessions/);
-assert.match(outboundStoreSource, /Automatically closed at the daily outbound rollover/);
-assert.match(outboundStoreSource, /timezone\('America\/New_York', started_at\)::date < timezone\('America\/New_York', now\(\)\)::date/);
-assert.match(outboundStoreSource, /closed_by_name = coalesce\(nullif\(closed_by_name, ''\), 'DataPlus daily rollover'\)/);
-assert.match(outboundStoreSource, /requestedSession\.expired === true/);
+assert.match(outboundStoreSource, /Automatically closed at the configured outbound session rollover/);
+assert.match(outboundStoreSource, /outboundOperatingDate/);
+assert.match(outboundStoreSource, /DataPlus operating calendar/);
+assert.match(outboundStoreSource, /requestedOperatingDate !== currentOperatingDate/);
 assert.match(outboundStoreSource, /effectiveAuditId/);
 assert.match(outboundStoreSource, /rolledOverFrom/);
 assert.match(outboundStoreSource, /carrierBreakdownFromScans/);
@@ -194,8 +200,7 @@ assert.match(outboundStoreSource, /when scan\.live_item_expected_count > 0 and j
 assert.doesNotMatch(outboundStoreSource, /scan\.live_item_required = true or scan\.live_item_expected_count > 0/);
 assert.match(outboundStoreSource, /async function removeLiveItem/);
 assert.match(outboundStoreSource, /async function listUnmatched/);
-assert.match(outboundStoreSource, /scan\.match_status = 'unmatched'/);
-assert.doesNotMatch(outboundStoreSource, /scan\.match_status = 'unmatched'[\s\S]{0,240}session\.status = 'open'/);
+assert.match(outboundStoreSource, /scan\.match_status in \('pending', 'unmatched'\)/);
 assert.match(outboundStoreSource, /removedItem\.verificationOnly !== true/);
 assert.match(outboundStoreSource, /Inventory-assigned Live item scans require an audited stock reversal/);
 assert.match(outboundStoreSource, /jsonb_array_elements\(coalesce\(scan\.order_matches/);

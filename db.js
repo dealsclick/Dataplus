@@ -189,6 +189,7 @@ async function ensureOutboundAuditSchema(client) {
     alter table if exists outbound_audit_sessions alter column evidence_required set default false;
     update outbound_audit_sessions set evidence_required = false where evidence_required = true;
     alter table if exists outbound_audit_sessions add column if not exists evidence_complete_count integer not null default 0;
+    alter table if exists outbound_audit_sessions add column if not exists pending_match_count integer not null default 0;
     alter table if exists outbound_audit_sessions add column if not exists evidence_override_reason text;
     alter table if exists outbound_audit_sessions add column if not exists close_override_reason text;
     alter table if exists outbound_audit_scans add column if not exists evidence_status text not null default 'missing';
@@ -197,6 +198,20 @@ async function ensureOutboundAuditSchema(client) {
     alter table if exists outbound_audit_scans add column if not exists live_item_status text not null default 'not_required';
     alter table if exists outbound_audit_scans add column if not exists live_item_expected_count integer not null default 0;
     alter table if exists outbound_audit_scans add column if not exists live_item_scans jsonb not null default '[]'::jsonb;
+    do $$
+    begin
+      if exists (
+        select 1 from pg_constraint
+        where conname = 'outbound_audit_scans_match_status_check'
+          and pg_get_constraintdef(oid) not ilike '%pending%'
+      ) then
+        alter table outbound_audit_scans drop constraint outbound_audit_scans_match_status_check;
+      end if;
+      if not exists (select 1 from pg_constraint where conname = 'outbound_audit_scans_match_status_check') then
+        alter table outbound_audit_scans add constraint outbound_audit_scans_match_status_check
+          check (match_status in ('pending', 'matched', 'multiple', 'unmatched'));
+      end if;
+    end $$;
   `);
   await client.query(`
     with cleaned_tracking_items as (
@@ -1348,6 +1363,7 @@ async function initRelationalSchema() {
       package_count integer not null default 0,
       matched_count integer not null default 0,
       unmatched_count integer not null default 0,
+      pending_match_count integer not null default 0,
       multiple_match_count integer not null default 0,
       evidence_required boolean not null default false,
       evidence_complete_count integer not null default 0,
@@ -1373,7 +1389,7 @@ async function initRelationalSchema() {
       tracking_number text not null,
       tracking_normalized text not null,
       carrier text,
-      match_status text not null default 'unmatched' check (match_status in ('matched', 'multiple', 'unmatched')),
+      match_status text not null default 'unmatched' check (match_status in ('pending', 'matched', 'multiple', 'unmatched')),
       order_matches jsonb not null default '[]'::jsonb,
       evidence_status text not null default 'missing' check (evidence_status in ('missing', 'uploading', 'complete', 'failed')),
       evidence_count integer not null default 0,
@@ -1398,6 +1414,7 @@ async function initRelationalSchema() {
     alter table outbound_audit_sessions alter column evidence_required set default false;
     update outbound_audit_sessions set evidence_required = false where evidence_required = true;
     alter table outbound_audit_sessions add column if not exists evidence_complete_count integer not null default 0;
+    alter table outbound_audit_sessions add column if not exists pending_match_count integer not null default 0;
     alter table outbound_audit_sessions add column if not exists evidence_override_reason text;
     alter table outbound_audit_sessions add column if not exists close_override_reason text;
     alter table outbound_audit_scans add column if not exists evidence_status text not null default 'missing';
@@ -1406,6 +1423,20 @@ async function initRelationalSchema() {
     alter table outbound_audit_scans add column if not exists live_item_status text not null default 'not_required';
     alter table outbound_audit_scans add column if not exists live_item_expected_count integer not null default 0;
     alter table outbound_audit_scans add column if not exists live_item_scans jsonb not null default '[]'::jsonb;
+    do $$
+    begin
+      if exists (
+        select 1 from pg_constraint
+        where conname = 'outbound_audit_scans_match_status_check'
+          and pg_get_constraintdef(oid) not ilike '%pending%'
+      ) then
+        alter table outbound_audit_scans drop constraint outbound_audit_scans_match_status_check;
+      end if;
+      if not exists (select 1 from pg_constraint where conname = 'outbound_audit_scans_match_status_check') then
+        alter table outbound_audit_scans add constraint outbound_audit_scans_match_status_check
+          check (match_status in ('pending', 'matched', 'multiple', 'unmatched'));
+      end if;
+    end $$;
 
     create table if not exists outbound_audit_evidence (
       evidence_id text primary key,
