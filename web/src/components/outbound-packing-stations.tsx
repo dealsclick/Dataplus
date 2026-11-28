@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { AlertTriangle, CheckCircle2, Keyboard, Loader2, Monitor, Plus, RefreshCw, Settings2, Trash2, VideoOff, X } from "lucide-react"
+import { AlertTriangle, CheckCircle2, Keyboard, Loader2, LockKeyhole, LogOut, Monitor, Plus, RefreshCw, Settings2, Trash2, UserRoundCheck, VideoOff, X } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { captureCompressedEvidence } from "@/lib/fast-barcode-scanner"
+import { api } from "../lib/client-api"
 
 const STORAGE_KEY = "dataplus.outbound.packing-stations.v1"
 const MAX_STATIONS = 4
@@ -32,6 +33,9 @@ type PackingScan = {
   matchStatus: "pending" | "matched" | "multiple" | "unmatched"
   evidenceStatus: "missing" | "uploading" | "complete" | "failed"
   evidenceCount: number
+  scannedByName?: string
+  stationId?: string
+  stationName?: string
 }
 
 type PackingSession = {
@@ -58,6 +62,23 @@ type StationResult = {
 }
 
 type CameraState = "off" | "opening" | "ready" | "error"
+
+type OperatorSession = {
+  id: string
+  auditId: string
+  stationId: string
+  stationName: string
+  operatorUserId: string
+  operatorUserName: string
+  assignedAt: string
+  lastActivityAt: string
+  idleLocksAt: string
+  expiresAt: string
+  lockedAt: string
+  status: "active" | "locked"
+}
+
+type OperatorPolicy = { required: boolean; idleMinutes: number; maxHours: number }
 
 function defaultStations(): PackingStation[] {
   return [
@@ -166,7 +187,7 @@ export function OutboundPackingStations({ open, onOpenChange, session, scans, pe
   session: PackingSession
   scans: PackingScan[]
   pendingUploads: number
-  onScan: (trackingNumber: string, options: { deferOrderMatch: true; stationName: string }) => Promise<PackingScanResponse>
+  onScan: (trackingNumber: string, options: { deferOrderMatch: true; stationId: string; stationName: string }) => Promise<PackingScanResponse>
   onPhoto: (scan: PackingScan, photo: { blob: Blob; width: number; height: number }) => Promise<void>
   isTrackingBarcode: (value: string) => boolean
 }) {
@@ -178,6 +199,12 @@ export function OutboundPackingStations({ open, onOpenChange, session, scans, pe
   const [results, setResults] = useState<Record<string, StationResult>>({})
   const [stationCounts, setStationCounts] = useState<Record<string, number>>({})
   const [manualValues, setManualValues] = useState<Record<string, string>>({})
+  const [operatorSessions, setOperatorSessions] = useState<Record<string, OperatorSession>>({})
+  const [operatorPolicy, setOperatorPolicy] = useState<OperatorPolicy>({ required: true, idleMinutes: 30, maxHours: 12 })
+  const [operatorDialog, setOperatorDialog] = useState<{ station: PackingStation; mode: "assign" | "unlock" } | null>(null)
+  const [badgeValue, setBadgeValue] = useState("")
+  const [operatorPin, setOperatorPin] = useState("")
+  const [operatorSaving, setOperatorSaving] = useState(false)
   const videoElementsRef = useRef<Record<string, HTMLVideoElement | null>>({})
   const busyStationsRef = useRef(new Set<string>())
   const scanBufferRef = useRef({ value: "", startedAt: 0, lastAt: 0 })
@@ -241,6 +268,35 @@ export function OutboundPackingStations({ open, onOpenChange, session, scans, pe
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(stations))
   }, [open, stations])
 
+  const loadOperatorSessions = useCallback(async () => {
+    try {
+      const result = await api<{ sessions?: OperatorSession[]; policy?: OperatorPolicy }>(`/api/fulfillment/outbound-audits/${encodeURIComponent(session.id)}/packing-operators`)
+      setOperatorSessions(Object.fromEntries((result.sessions || []).map((row) => [row.stationId, row])))
+      if (result.policy) setOperatorPolicy(result.policy)
+    } catch (error) {
+      setResults((current) => ({ ...current, system: { kind: "error", title: "Operator assignments unavailable", detail: error instanceof Error ? error.message : "Unable to load station operators.", trackingNumber: "", photoState: "none" } }))
+    }
+  }, [session.id])
+
+  useEffect(() => {
+    if (!open) return
+    void loadOperatorSessions()
+    const timer = window.setInterval(() => void loadOperatorSessions(), 30_000)
+    return () => window.clearInterval(timer)
+  }, [loadOperatorSessions, open])
+
+  const operatorStats = useMemo(() => {
+    const rows = new Map<string, { name: string; packages: number; photos: number }>()
+    scans.forEach((scan) => {
+      const name = scan.scannedByName || "Unknown operator"
+      const row = rows.get(name) || { name, packages: 0, photos: 0 }
+      row.packages += 1
+      if (scan.evidenceCount > 0) row.photos += 1
+      rows.set(name, row)
+    })
+    return [...rows.values()].sort((left, right) => right.packages - left.packages || left.name.localeCompare(right.name))
+  }, [scans])
+
   const updateStation = useCallback((stationId: string, patch: Partial<PackingStation>) => {
     setStations((current) => current.map((station) => station.id === stationId ? { ...station, ...patch } : station))
   }, [])
@@ -253,7 +309,63 @@ export function OutboundPackingStations({ open, onOpenChange, session, scans, pe
     setCameraStates((current) => current[stationId] === state ? current : { ...current, [stationId]: state })
   }, [])
 
+  function openOperatorDialog(station: PackingStation, mode: "assign" | "unlock") {
+    setOperatorDialog({ station, mode })
+    setBadgeValue("")
+    setOperatorPin("")
+  }
+
+  async function submitOperatorCredentials() {
+    if (!operatorDialog || !/^\d{4,8}$/.test(operatorPin)) return
+    setOperatorSaving(true)
+    try {
+      if (operatorDialog.mode === "assign") {
+        await api(`/api/fulfillment/outbound-audits/${encodeURIComponent(session.id)}/packing-operators`, {
+          method: "POST",
+          body: JSON.stringify({ stationId: operatorDialog.station.id, stationName: operatorDialog.station.name, badgeValue, pin: operatorPin }),
+        })
+      } else {
+        await api(`/api/fulfillment/outbound-audits/${encodeURIComponent(session.id)}/packing-operators/${encodeURIComponent(operatorDialog.station.id)}/unlock`, {
+          method: "POST",
+          body: JSON.stringify({ pin: operatorPin }),
+        })
+      }
+      await loadOperatorSessions()
+      setOperatorDialog(null)
+      setBadgeValue("")
+      setOperatorPin("")
+    } catch (error) {
+      setResults((current) => ({ ...current, [operatorDialog.station.id]: { kind: "error", title: "Operator not assigned", detail: error instanceof Error ? error.message : "Badge or PIN was not recognized.", trackingNumber: "", photoState: "none" } }))
+    } finally {
+      setOperatorSaving(false)
+    }
+  }
+
+  async function lockOperator(station: PackingStation) {
+    try {
+      await api(`/api/fulfillment/outbound-audits/${encodeURIComponent(session.id)}/packing-operators/${encodeURIComponent(station.id)}/lock`, { method: "POST", body: JSON.stringify({}) })
+      await loadOperatorSessions()
+    } catch (error) {
+      setResults((current) => ({ ...current, [station.id]: { kind: "error", title: "Station was not locked", detail: error instanceof Error ? error.message : "Try again.", trackingNumber: "", photoState: "none" } }))
+    }
+  }
+
+  async function endOperator(station: PackingStation) {
+    try {
+      await api(`/api/fulfillment/outbound-audits/${encodeURIComponent(session.id)}/packing-operators/${encodeURIComponent(station.id)}`, { method: "DELETE" })
+      await loadOperatorSessions()
+    } catch (error) {
+      setResults((current) => ({ ...current, [station.id]: { kind: "error", title: "Shift was not ended", detail: error instanceof Error ? error.message : "Try again.", trackingNumber: "", photoState: "none" } }))
+    }
+  }
+
   const processScan = useCallback(async (station: PackingStation, scannedValue: string) => {
+    const operatorSession = operatorSessions[station.id]
+    if (operatorPolicy.required && (!operatorSession || operatorSession.status === "locked")) {
+      setResults((current) => ({ ...current, [station.id]: { kind: "error", title: operatorSession ? "Station locked" : "Assign operator", detail: operatorSession ? `Enter ${operatorSession.operatorUserName}'s PIN before scanning.` : "Scan the employee badge and enter their PIN before accepting packages.", trackingNumber: scannedValue, photoState: "none" } }))
+      openOperatorDialog(station, operatorSession ? "unlock" : "assign")
+      return
+    }
     if (busyStationsRef.current.has(station.id)) {
       setResults((current) => ({ ...current, [station.id]: { kind: "warning", title: "Station busy", detail: "Wait for the current package photo, then scan again.", trackingNumber: scannedValue, photoState: "none" } }))
       return
@@ -273,7 +385,7 @@ export function OutboundPackingStations({ open, onOpenChange, session, scans, pe
     busyStationsRef.current.add(station.id)
     setResults((current) => ({ ...current, [station.id]: { kind: "saving", title: "Saving package", detail: "Carrier is detected now; order matching continues in the background.", trackingNumber, photoState: "none" } }))
     try {
-      const response = await onScan(trackingNumber, { deferOrderMatch: true, stationName: station.name })
+      const response = await onScan(trackingNumber, { deferOrderMatch: true, stationId: station.id, stationName: station.name })
       if (response.duplicate) {
         setResults((current) => ({ ...current, [station.id]: { kind: "duplicate", title: "Already scanned", detail: response.scan.evidenceCount ? "This package and its photo are already in today's audit." : "This package is already in today's audit. Its photo is still missing.", trackingNumber: response.scan.trackingNumber, photoState: response.scan.evidenceCount ? "queued" : "missing" } }))
         return
@@ -303,10 +415,11 @@ export function OutboundPackingStations({ open, onOpenChange, session, scans, pe
       setResults((current) => ({ ...current, [station.id]: { kind: "success", title: `${response.scan.carrier || "Package"} recorded`, detail: photoDetail, trackingNumber: response.scan.trackingNumber, photoState } }))
     } catch (error) {
       setResults((current) => ({ ...current, [station.id]: { kind: "error", title: "Package needs attention", detail: error instanceof Error ? error.message : "The package could not be saved.", trackingNumber, photoState: "missing" } }))
+      void loadOperatorSessions()
     } finally {
       busyStationsRef.current.delete(station.id)
     }
-  }, [cameraStates, duplicateCameraIds, isTrackingBarcode, onPhoto, onScan, scans])
+  }, [cameraStates, duplicateCameraIds, isTrackingBarcode, loadOperatorSessions, onPhoto, onScan, operatorPolicy.required, operatorSessions, scans])
 
   const routeScan = useCallback((rawValue: string) => {
     const value = rawValue.trim()
@@ -383,6 +496,8 @@ export function OutboundPackingStations({ open, onOpenChange, session, scans, pe
       </DialogHeader>
 
       <div className="min-h-0 flex-1 overflow-y-auto bg-muted/20 p-3 sm:p-4">
+        {results.system ? <div className={`mb-4 rounded-md border p-3 ${resultStyle(results.system.kind)}`}><p className="font-medium">{results.system.title}</p><p className="text-sm">{results.system.detail}</p></div> : null}
+        {operatorStats.length ? <div className="mb-4 flex flex-wrap items-center gap-2 rounded-md border bg-card p-3"><span className="text-sm font-medium">Today's operator stats</span>{operatorStats.map((row) => <Badge key={row.name} variant="outline">{row.name}: {row.packages} packages · {row.photos} photos</Badge>)}</div> : null}
         {configuring ? <div className="mb-4 rounded-md border bg-card p-4">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div><h3 className="font-semibold">Computer station setup</h3><p className="text-sm text-muted-foreground">Camera choices and scanner prefixes are saved only on this computer. Configure each USB scanner to type its prefix before the tracking number and Enter afterward.</p></div>
@@ -397,11 +512,16 @@ export function OutboundPackingStations({ open, onOpenChange, session, scans, pe
             const result = results[station.id] || { kind: "idle", title: "Ready for package", detail: `Waiting for scanner ${station.scannerPrefix || "without a prefix"}`, trackingNumber: "", photoState: "none" }
             const duplicateCamera = Boolean(station.cameraId && duplicateCameraIds.has(station.cameraId))
             const cameraState = cameraStates[station.id] || "off"
+            const operatorSession = operatorSessions[station.id]
             return <Card key={station.id} className={!station.enabled ? "opacity-60" : ""}>
               <CardHeader className="border-b p-4">
                 <div className="flex items-center justify-between gap-3">
                   <CardTitle className="flex min-w-0 items-center gap-2 text-base"><span className={`size-2.5 shrink-0 rounded-full ${cameraState === "ready" ? "bg-emerald-500" : cameraState === "opening" ? "animate-pulse bg-blue-500" : "bg-muted-foreground/50"}`} /><span className="truncate">{station.name}</span></CardTitle>
-                  <div className="flex items-center gap-2"><Badge variant="outline">{stationCounts[station.id] || 0} this run</Badge><Badge variant="secondary" className="font-mono">{station.scannerPrefix || "No prefix"}</Badge></div>
+                  <div className="flex flex-wrap items-center justify-end gap-2"><Badge variant="outline">{stationCounts[station.id] || 0} this run</Badge><Badge variant="secondary" className="font-mono">{station.scannerPrefix || "No prefix"}</Badge></div>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/20 px-3 py-2">
+                  <div className="flex min-w-0 items-center gap-2">{operatorSession ? <><UserRoundCheck className={`size-4 shrink-0 ${operatorSession.status === "locked" ? "text-amber-500" : "text-emerald-500"}`} /><div className="min-w-0"><p className="truncate text-sm font-medium">{operatorSession.operatorUserName}</p><p className="text-xs text-muted-foreground">{operatorSession.status === "locked" ? "Locked · PIN required" : `Active · locks after ${operatorPolicy.idleMinutes} min idle`}</p></div></> : <><LockKeyhole className="size-4 shrink-0 text-amber-500" /><div><p className="text-sm font-medium">No operator assigned</p><p className="text-xs text-muted-foreground">Badge and PIN required</p></div></>}</div>
+                  <div className="flex flex-wrap gap-2">{operatorSession ? <>{operatorSession.status === "locked" ? <Button size="sm" onClick={() => openOperatorDialog(station, "unlock")}><LockKeyhole className="size-4" /> Unlock</Button> : <Button size="sm" variant="outline" onClick={() => void lockOperator(station)}><LockKeyhole className="size-4" /> Lock</Button>}<Button size="sm" variant="outline" onClick={() => openOperatorDialog(station, "assign")}><UserRoundCheck className="size-4" /> Change</Button><Button size="sm" variant="ghost" onClick={() => void endOperator(station)}><LogOut className="size-4" /> End shift</Button></> : <Button size="sm" onClick={() => openOperatorDialog(station, "assign")}><UserRoundCheck className="size-4" /> Assign operator</Button>}</div>
                 </div>
               </CardHeader>
               <CardContent className="grid gap-3 p-4">
@@ -435,6 +555,16 @@ export function OutboundPackingStations({ open, onOpenChange, session, scans, pe
         <p>Keep this window active. Each scanner must send its station prefix and finish with Enter/CR.</p>
         <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}><X className="size-4" /> Exit packing stations</Button>
       </div>
+      <Dialog open={Boolean(operatorDialog)} onOpenChange={(next) => { if (!next) setOperatorDialog(null) }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader><DialogTitle>{operatorDialog?.mode === "unlock" ? "Unlock packing station" : "Assign packing-station operator"}</DialogTitle><DialogDescription>{operatorDialog?.station.name || "Packing station"} · {operatorDialog?.mode === "unlock" ? `${operatorSessions[operatorDialog?.station.id || ""]?.operatorUserName || "Operator"} enters their PIN.` : "Scan the employee badge, then enter their PIN."}</DialogDescription></DialogHeader>
+          <form className="grid gap-4" onSubmit={(event) => { event.preventDefault(); void submitOperatorCredentials() }}>
+            {operatorDialog?.mode === "assign" ? <div className="grid gap-1.5"><Label>Employee badge</Label><Input className="font-mono" value={badgeValue} onChange={(event) => setBadgeValue(event.target.value)} placeholder="Scan DPUSER badge" autoFocus autoComplete="off" /><p className="text-xs text-muted-foreground">The scanner may include its station prefix; DataPlus reads the operator token from the badge.</p></div> : null}
+            <div className="grid gap-1.5"><Label>Operator PIN</Label><Input type="password" inputMode="numeric" pattern="[0-9]*" minLength={4} maxLength={8} value={operatorPin} onChange={(event) => setOperatorPin(event.target.value.replace(/\D/g, "").slice(0, 8))} placeholder="4 to 8 digits" autoFocus={operatorDialog?.mode === "unlock"} autoComplete="off" /></div>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button type="button" variant="outline" onClick={() => setOperatorDialog(null)}>Cancel</Button><Button type="submit" disabled={operatorSaving || !/^\d{4,8}$/.test(operatorPin) || (operatorDialog?.mode === "assign" && !badgeValue.trim())}>{operatorSaving ? <Loader2 className="size-4 animate-spin" /> : <UserRoundCheck className="size-4" />} {operatorDialog?.mode === "unlock" ? "Unlock station" : "Assign operator"}</Button></div>
+          </form>
+        </DialogContent>
+      </Dialog>
     </DialogContent>
   </Dialog>
 }

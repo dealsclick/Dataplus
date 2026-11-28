@@ -27,7 +27,7 @@ let relationalSchemaReady = false;
 let relationalSchemaPromise = null;
 let returnsWorkspaceSummaryCache = null;
 const RELATIONAL_SCHEMA_VERSION = "2026-10-29-shipping-report-facts-v1";
-const RUNTIME_SCHEMA_ENSURES_VERSION = "2026-11-15-supplier-coverage-resume-v3";
+const RUNTIME_SCHEMA_ENSURES_VERSION = "2026-11-28-packing-operator-sessions-v4";
 
 function getDatabaseUrl() {
   const databaseUrl = process.env.DATABASE_URL || "";
@@ -198,6 +198,33 @@ async function ensureOutboundAuditSchema(client) {
     alter table if exists outbound_audit_scans add column if not exists live_item_status text not null default 'not_required';
     alter table if exists outbound_audit_scans add column if not exists live_item_expected_count integer not null default 0;
     alter table if exists outbound_audit_scans add column if not exists live_item_scans jsonb not null default '[]'::jsonb;
+    alter table if exists outbound_audit_scans add column if not exists station_name text;
+    alter table if exists outbound_audit_scans add column if not exists station_id text;
+    alter table if exists outbound_audit_scans add column if not exists host_user_id text;
+    alter table if exists outbound_audit_scans add column if not exists host_user_name text;
+    create table if not exists outbound_packing_operator_sessions (
+      operator_session_id text primary key,
+      tenant_id text not null,
+      company_id text not null,
+      audit_id text not null references outbound_audit_sessions(audit_id) on delete restrict,
+      station_id text not null,
+      station_name text not null,
+      operator_user_id text not null,
+      operator_user_name text not null,
+      assigned_by_id text,
+      assigned_by_name text,
+      assigned_at timestamptz not null default now(),
+      last_activity_at timestamptz not null default now(),
+      locked_at timestamptz,
+      expires_at timestamptz not null,
+      ended_at timestamptz,
+      end_reason text
+    );
+    create unique index if not exists outbound_packing_operator_active_station_idx
+      on outbound_packing_operator_sessions (tenant_id, company_id, station_id)
+      where ended_at is null;
+    create index if not exists outbound_packing_operator_audit_idx
+      on outbound_packing_operator_sessions (audit_id, station_id, assigned_at desc);
     do $$
     begin
       if exists (
@@ -478,14 +505,7 @@ async function initRelationalSchema() {
             [RUNTIME_SCHEMA_ENSURES_VERSION]
           );
           if (runtimeEnsures.rows[0]?.current !== true) {
-            const previousRuntimeEnsures = await client.query(
-              "select exists (select 1 from schema_migrations where name = '2026-11-13-runtime-schema-ensures-v2') as current"
-            );
-            if (previousRuntimeEnsures.rows[0]?.current !== true) {
-              await ensureOutboundAuditSchema(client);
-              await ensureProductShadowSkuSchema(client);
-              await ensureReturnWorkspaceSchema(client);
-            }
+            await ensureOutboundAuditSchema(client);
             await ensureSupplierCoverageRebuildSchema(client);
             await client.query(
               "insert into schema_migrations (name) values ($1) on conflict (name) do nothing",
@@ -1398,8 +1418,11 @@ async function initRelationalSchema() {
       live_item_expected_count integer not null default 0,
       live_item_scans jsonb not null default '[]'::jsonb,
       station_name text,
+      station_id text,
       scanned_by_id text,
       scanned_by_name text,
+      host_user_id text,
+      host_user_name text,
       scanned_at timestamptz not null default now(),
       unique (audit_id, client_scan_id),
       unique (audit_id, tracking_normalized)
@@ -1425,6 +1448,9 @@ async function initRelationalSchema() {
     alter table outbound_audit_scans add column if not exists live_item_expected_count integer not null default 0;
     alter table outbound_audit_scans add column if not exists live_item_scans jsonb not null default '[]'::jsonb;
     alter table outbound_audit_scans add column if not exists station_name text;
+    alter table outbound_audit_scans add column if not exists station_id text;
+    alter table outbound_audit_scans add column if not exists host_user_id text;
+    alter table outbound_audit_scans add column if not exists host_user_name text;
     do $$
     begin
       if exists (
@@ -1439,6 +1465,30 @@ async function initRelationalSchema() {
           check (match_status in ('pending', 'matched', 'multiple', 'unmatched'));
       end if;
     end $$;
+
+    create table if not exists outbound_packing_operator_sessions (
+      operator_session_id text primary key,
+      tenant_id text not null,
+      company_id text not null,
+      audit_id text not null references outbound_audit_sessions(audit_id) on delete restrict,
+      station_id text not null,
+      station_name text not null,
+      operator_user_id text not null,
+      operator_user_name text not null,
+      assigned_by_id text,
+      assigned_by_name text,
+      assigned_at timestamptz not null default now(),
+      last_activity_at timestamptz not null default now(),
+      locked_at timestamptz,
+      expires_at timestamptz not null,
+      ended_at timestamptz,
+      end_reason text
+    );
+    create unique index if not exists outbound_packing_operator_active_station_idx
+      on outbound_packing_operator_sessions (tenant_id, company_id, station_id)
+      where ended_at is null;
+    create index if not exists outbound_packing_operator_audit_idx
+      on outbound_packing_operator_sessions (audit_id, station_id, assigned_at desc);
 
     create table if not exists outbound_audit_evidence (
       evidence_id text primary key,

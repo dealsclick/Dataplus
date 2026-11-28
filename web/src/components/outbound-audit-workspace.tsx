@@ -70,6 +70,7 @@ type AuditScan = {
   liveItemScannedCount: number
   liveItems: LiveItem[]
   scannedByName: string
+  stationId?: string
   stationName?: string
   scannedAt: string
 }
@@ -698,9 +699,9 @@ export function OutboundAuditWorkspace({ warehouses = [] }: { warehouses?: Row[]
     finally { setBusy(false) }
   }
 
-  const recordScan = useCallback(async (trackingNumber: string, options: { deferOrderMatch?: boolean; stationName?: string } = {}) => {
+  const recordScan = useCallback(async (trackingNumber: string, options: { deferOrderMatch?: boolean; stationId?: string; stationName?: string } = {}) => {
     if (!detail?.session.id) throw new Error("Start or select an open outbound audit first.")
-    const result = await api<ScanResponse>(`/api/fulfillment/outbound-audits/${encodeURIComponent(detail.session.id)}/scan`, { method: "POST", body: JSON.stringify({ trackingNumber, clientScanId: crypto.randomUUID(), deferOrderMatch: options.deferOrderMatch === true, stationName: options.stationName || "" }) })
+    const result = await api<ScanResponse>(`/api/fulfillment/outbound-audits/${encodeURIComponent(detail.session.id)}/scan`, { method: "POST", body: JSON.stringify({ trackingNumber, clientScanId: crypto.randomUUID(), deferOrderMatch: options.deferOrderMatch === true, stationId: options.stationId || "", stationName: options.stationName || "" }) })
     setDetail((current) => current ? current.session.id === result.session.id
       ? { session: result.session, scans: result.duplicate ? current.scans : [result.scan, ...current.scans] }
       : { session: result.session, scans: [result.scan] } : current)

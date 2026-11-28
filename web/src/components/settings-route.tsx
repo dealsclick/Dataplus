@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react"
-import { AlertCircle, CheckCircle2, Copy, Database, Eye, FileDown, FileUp, Loader2, LockKeyhole, Mail, PackagePlus, PackageSearch, Pencil, Play, Power, RefreshCw, RotateCcw, Save, Search, ShieldCheck, Trash2, Users, Warehouse } from "lucide-react"
+import { useEffect, useRef, useState } from "react"
+import JsBarcode from "jsbarcode"
+import { AlertCircle, CheckCircle2, Copy, Database, Eye, FileDown, FileUp, Loader2, LockKeyhole, Mail, PackagePlus, PackageSearch, Pencil, Play, Power, Printer, RefreshCw, RotateCcw, Save, ScanBarcode, Search, ShieldCheck, Trash2, Users, Warehouse } from "lucide-react"
 import { toast } from "sonner"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -114,6 +115,11 @@ function SettingsPage({
   const [templateDraft, setTemplateDraft] = useState<{ id?: string; name: string; description: string; permissions: AuthPermissionMatrix; builtIn?: boolean }>({ name: "", description: "", permissions: {} })
   const [userSaving, setUserSaving] = useState(false)
   const [temporaryPassword, setTemporaryPassword] = useState("")
+  const [warehouseCredentialUser, setWarehouseCredentialUser] = useState<AuthUser | null>(null)
+  const [warehousePin, setWarehousePin] = useState("")
+  const [warehouseBadgeValue, setWarehouseBadgeValue] = useState("")
+  const [warehouseCredentialSaving, setWarehouseCredentialSaving] = useState(false)
+  const warehouseBadgeSvgRef = useRef<SVGSVGElement | null>(null)
   const [ownPasswordDraft, setOwnPasswordDraft] = useState({ currentPassword: "", password: "", confirm: "" })
   const [ownPasswordSaving, setOwnPasswordSaving] = useState(false)
   const [settingsSearch, setSettingsSearch] = useState("")
@@ -242,6 +248,10 @@ function SettingsPage({
     if (selectedUserId || !users.length) return
     setSelectedUserId(users[0].id)
   }, [users, selectedUserId])
+  useEffect(() => {
+    if (!warehouseBadgeValue || !warehouseBadgeSvgRef.current) return
+    JsBarcode(warehouseBadgeSvgRef.current, warehouseBadgeValue, { format: "CODE128", width: 2, height: 72, displayValue: true, fontSize: 14, margin: 12, background: "#ffffff", lineColor: "#000000" })
+  }, [warehouseBadgeValue])
   useEffect(() => {
     if (!userAreas.length) return
     if (selectedPermissionAreaId && userAreas.some((area) => area.id === selectedPermissionAreaId)) return
@@ -469,6 +479,45 @@ function SettingsPage({
     } finally {
       setUserSaving(false)
     }
+  }
+
+  function openWarehouseCredentials(user: AuthUser) {
+    setWarehouseCredentialUser(user)
+    setWarehousePin("")
+    setWarehouseBadgeValue("")
+  }
+
+  async function createWarehouseCredentials() {
+    if (!warehouseCredentialUser) return
+    if (!/^\d{4,8}$/.test(warehousePin)) return toast.error("Enter a 4 to 8 digit warehouse PIN.")
+    setWarehouseCredentialSaving(true)
+    try {
+      const result = await api<{ user?: AuthUser; users?: AuthUser[]; badgeValue?: string }>(`/api/users/${encodeURIComponent(warehouseCredentialUser.id)}/warehouse-credentials`, {
+        method: "POST",
+        body: JSON.stringify({ pin: warehousePin }),
+      })
+      if (result.users) {
+        setUsers(result.users)
+        setSavedUsers(result.users)
+      }
+      setWarehouseBadgeValue(result.badgeValue || "")
+      setWarehousePin("")
+      toast.success("Packing-station badge and PIN created.")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to create warehouse credentials.")
+    } finally {
+      setWarehouseCredentialSaving(false)
+    }
+  }
+
+  function printWarehouseBadge() {
+    if (!warehouseCredentialUser || !warehouseBadgeSvgRef.current || !warehouseBadgeValue) return
+    const printWindow = window.open("", "_blank", "width=700,height=520")
+    if (!printWindow) return toast.error("Allow pop-ups to print the badge.")
+    printWindow.opener = null
+    const name = warehouseCredentialUser.name || warehouseCredentialUser.username || "Warehouse operator"
+    printWindow.document.write(`<!doctype html><html><head><title>Warehouse badge</title><style>body{font-family:Arial,sans-serif;margin:0;display:grid;place-items:center;min-height:100vh}.badge{border:2px solid #111;border-radius:16px;padding:28px;text-align:center;width:560px}.name{font-size:28px;font-weight:700;margin-bottom:8px}.label{font-size:14px;color:#555;margin-bottom:18px}svg{max-width:100%;height:auto}@media print{.badge{break-inside:avoid}}</style></head><body><div class="badge"><div class="name">${String(name).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[character] || character)}</div><div class="label">DataPlus packing-station operator</div>${warehouseBadgeSvgRef.current.outerHTML}</div><script>window.onload=()=>{window.print();window.close()}</script></body></html>`)
+    printWindow.document.close()
   }
 
   async function changeOwnPassword() {
@@ -1430,6 +1479,17 @@ function SettingsPage({
           </Card>
           <Card>
             <CardHeader>
+              <CardTitle className="text-base">Packing-station operator security</CardTitle>
+              <CardDescription>Assigns each shared scanner and webcam station to the employee actually packing. Badge and PIN sessions are server-validated and package records keep the operator and station.</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-4 md:grid-cols-3">
+              <ToggleField label="Require operator badge and PIN" description="Blocks desktop packing-station scans until an active employee is assigned." checked={boolValue("outboundPackingRequireOperator")} disabled={!editing} onCheckedChange={(next) => update("outboundPackingRequireOperator", next)} />
+              <Field label="Lock after inactivity (minutes)"><Input disabled={!editing || !boolValue("outboundPackingRequireOperator")} type="number" min="5" max="240" value={String(value("outboundPackingIdleMinutes") || 30)} onChange={(event) => update("outboundPackingIdleMinutes", Number(event.target.value || 30))} /><p className="mt-1 text-xs text-muted-foreground">The same operator enters only their PIN to resume. Default: 30 minutes.</p></Field>
+              <Field label="Maximum shift session (hours)"><Input disabled={!editing || !boolValue("outboundPackingRequireOperator")} type="number" min="1" max="24" value={String(value("outboundPackingMaxSessionHours") || 12)} onChange={(event) => update("outboundPackingMaxSessionHours", Number(event.target.value || 12))} /><p className="mt-1 text-xs text-muted-foreground">After this limit, badge and PIN are required again. Sessions also end when the outbound audit changes.</p></Field>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
               <CardTitle className="text-base">Operations</CardTitle>
               <CardDescription>Controls background work and job history behavior.</CardDescription>
             </CardHeader>
@@ -1996,7 +2056,7 @@ function SettingsPage({
                     <CardTitle className="flex flex-wrap items-center gap-2 text-base">{selectedUser ? `Profile: ${selectedUser.name || selectedUser.username}` : "User profile"}{selectedUserDirty && <Badge variant="warning">Unsaved changes</Badge>}{previewOpen && <Badge variant="secondary">Preview open</Badge>}</CardTitle>
                     <CardDescription>{selectedUser?.isMasterAdmin ? "Luis is the protected master admin and always keeps full access." : "Save profile changes and permission edits for the selected login."}</CardDescription>
                   </div>
-                  {selectedUser && <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => setPreviewOpen((open) => !open)}><Eye className="size-4" /> Preview</Button>{selectedUser.id !== authUser.id && <Button size="sm" variant="outline" disabled={!canResetUserPasswords || userSaving || selectedUser.status === "archived"} onClick={() => void resetUserPassword(selectedUser.id)}><LockKeyhole className="size-4" /> Generate temporary password</Button>}<Button size="sm" variant="outline" disabled={!canDeactivateUsers || userSaving || selectedUser.isMasterAdmin || selectedUser.status === "archived"} onClick={() => void archiveSelectedUser()}><Trash2 className="size-4" /> Archive</Button><Button size="sm" disabled={!(canEditUserAccounts || canEditUserPermissions) || userSaving || !selectedUserDirty} onClick={() => void saveUser(selectedUser.id, selectedUser)}>{userSaving && <Loader2 className="size-4 animate-spin" />} Save user</Button></div>}
+                  {selectedUser && <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => setPreviewOpen((open) => !open)}><Eye className="size-4" /> Preview</Button><Button size="sm" variant="outline" disabled={!canResetUserPasswords || userSaving || selectedUser.status !== "active"} onClick={() => openWarehouseCredentials(selectedUser)}><ScanBarcode className="size-4" /> {selectedUser.warehouseBadgeConfigured ? "Rotate warehouse badge" : "Create warehouse badge"}</Button>{selectedUser.id !== authUser.id && <Button size="sm" variant="outline" disabled={!canResetUserPasswords || userSaving || selectedUser.status === "archived"} onClick={() => void resetUserPassword(selectedUser.id)}><LockKeyhole className="size-4" /> Generate temporary password</Button>}<Button size="sm" variant="outline" disabled={!canDeactivateUsers || userSaving || selectedUser.isMasterAdmin || selectedUser.status === "archived"} onClick={() => void archiveSelectedUser()}><Trash2 className="size-4" /> Archive</Button><Button size="sm" disabled={!(canEditUserAccounts || canEditUserPermissions) || userSaving || !selectedUserDirty} onClick={() => void saveUser(selectedUser.id, selectedUser)}>{userSaving && <Loader2 className="size-4 animate-spin" />} Save user</Button></div>}
                 </div>
               </CardHeader>
               <CardContent className="grid gap-5 p-4">
@@ -2040,6 +2100,10 @@ function SettingsPage({
                       <Field label="Status"><Select disabled={!(canEditUserAccounts && canDeactivateUsers) || selectedUser.isMasterAdmin} value={selectedUser.status || "active"} onValueChange={updateSelectedUserStatus}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="active">Active</SelectItem><SelectItem value="inactive">Inactive</SelectItem><SelectItem value="archived">Archived</SelectItem></SelectContent></Select></Field>
                       <Field label="Profile notes"><Textarea disabled={!canEditUserAccounts} className="min-h-24 xl:col-span-2" value={selectedUser.notes || ""} onChange={(event) => updateSelectedUserField("notes", event.target.value)} /></Field>
                     </CardContent>
+                  </Card>
+                  <Card className="border-dashed">
+                    <CardHeader className="pb-3"><CardTitle className="flex items-center gap-2 text-sm"><ScanBarcode className="size-4 text-primary" /> Warehouse operator badge</CardTitle><CardDescription>Used only to assign this employee to a desktop packing station. It does not replace their normal DataPlus login.</CardDescription></CardHeader>
+                    <CardContent className="flex flex-wrap items-center justify-between gap-3"><div className="flex flex-wrap items-center gap-2"><Badge variant={selectedUser.warehouseBadgeConfigured && selectedUser.warehousePinConfigured ? "success" : "secondary"}>{selectedUser.warehouseBadgeConfigured && selectedUser.warehousePinConfigured ? "Badge and PIN ready" : "Not configured"}</Badge>{selectedUser.warehouseCredentialsUpdatedAt ? <span className="text-xs text-muted-foreground">Updated {dateLabel(selectedUser.warehouseCredentialsUpdatedAt)}</span> : null}</div><Button type="button" size="sm" variant="outline" disabled={!canResetUserPasswords || selectedUser.status !== "active"} onClick={() => openWarehouseCredentials(selectedUser)}><ScanBarcode className="size-4" /> {selectedUser.warehouseBadgeConfigured ? "Replace credentials" : "Set up credentials"}</Button></CardContent>
                   </Card>
                   <UserCompanyAccess key={selectedUser.id} userId={selectedUser.id} canEdit={canEditUserPermissions && selectedUser.status === "active"}/>
                   <Card className="border-dashed">
@@ -2289,6 +2353,21 @@ function SettingsPage({
                 <Button variant="outline" onClick={() => setTemplateDialogOpen(false)}>Cancel</Button>
                 <Button disabled={!canEditUserPermissions || userSaving || !templateDraft.name.trim()} onClick={() => void savePermissionTemplate()}>{userSaving && <Loader2 className="size-4 animate-spin" />} Save template</Button>
               </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={Boolean(warehouseCredentialUser)} onOpenChange={(open) => { if (!open) { setWarehouseCredentialUser(null); setWarehousePin(""); setWarehouseBadgeValue("") } }}>
+            <DialogContent className="sm:max-w-xl">
+              <DialogHeader><DialogTitle>{warehouseBadgeValue ? "Print warehouse operator badge" : "Warehouse badge and PIN"}</DialogTitle><DialogDescription>{warehouseCredentialUser?.name || warehouseCredentialUser?.username || "This user"} will use these credentials only to claim and unlock a desktop packing station.</DialogDescription></DialogHeader>
+              {warehouseBadgeValue ? <div className="grid gap-4">
+                <Alert className="border-emerald-500/40 bg-emerald-500/5"><CheckCircle2 className="size-4" /><AlertTitle>Badge created</AlertTitle><AlertDescription>Print it now. The raw badge value is shown only in this dialog; creating another badge immediately replaces this one.</AlertDescription></Alert>
+                <div className="overflow-x-auto rounded-md border bg-white p-3"><svg ref={warehouseBadgeSvgRef} className="mx-auto" /></div>
+                <p className="break-all rounded-md bg-muted p-3 font-mono text-xs">{warehouseBadgeValue}</p>
+              </div> : <div className="grid gap-4">
+                {warehouseCredentialUser?.warehouseBadgeConfigured ? <Alert><RotateCcw className="size-4" /><AlertTitle>This replaces the current badge</AlertTitle><AlertDescription>The old barcode and PIN stop working as soon as you create the new credentials.</AlertDescription></Alert> : null}
+                <Field label="Operator PIN"><Input type="password" inputMode="numeric" pattern="[0-9]*" minLength={4} maxLength={8} autoComplete="new-password" value={warehousePin} onChange={(event) => setWarehousePin(event.target.value.replace(/\D/g, "").slice(0, 8))} placeholder="4 to 8 digits" autoFocus /><p className="mt-1 text-xs text-muted-foreground">Give this PIN only to the employee. DataPlus stores a one-way hash, never the readable PIN.</p></Field>
+              </div>}
+              <DialogFooter>{warehouseBadgeValue ? <><Button variant="outline" onClick={() => { setWarehouseCredentialUser(null); setWarehouseBadgeValue("") }}>Done</Button><Button onClick={printWarehouseBadge}><Printer className="size-4" /> Print badge</Button></> : <><Button variant="outline" onClick={() => setWarehouseCredentialUser(null)}>Cancel</Button><Button disabled={warehouseCredentialSaving || !/^\d{4,8}$/.test(warehousePin)} onClick={() => void createWarehouseCredentials()}>{warehouseCredentialSaving ? <Loader2 className="size-4 animate-spin" /> : <ScanBarcode className="size-4" />} Create and rotate badge</Button></>}</DialogFooter>
             </DialogContent>
           </Dialog>
 

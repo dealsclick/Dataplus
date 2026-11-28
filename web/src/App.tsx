@@ -891,6 +891,9 @@ export type AuthUser = {
   lastLoginAt?: string
   archivedAt?: string
   passwordConfigured?: boolean
+  warehouseBadgeConfigured?: boolean
+  warehousePinConfigured?: boolean
+  warehouseCredentialsUpdatedAt?: string
 }
 
 type AuthSession = {

@@ -123,6 +123,7 @@ const { createChannelFeeStore } = require("./lib/channel-fee-store");
 const { importTemuSettlementReport } = require("./lib/temu-settlement-report");
 const { createShippingDisputeStore } = require("./lib/shipping-disputes");
 const { createOutboundAuditStore, publicEvidence } = require("./lib/outbound-audit-store");
+const { createOutboundPackingOperatorStore } = require("./lib/outbound-packing-operator-store");
 const ebayOperations = require("./lib/ebay-operations");
 const upsRating = require("./lib/ups-rating");
 const uspsApi = require("./lib/usps-api");
@@ -132,6 +133,10 @@ const { createCarrierCredentials } = require("./lib/carrier-credentials");
 const channelFeeStore = createChannelFeeStore(() => postgres.getPool(), { onOrdersChanged: invalidateOrderFinancialCaches });
 const shippingDisputeStore = createShippingDisputeStore(() => postgres.getPool(), { ensureSchema: () => postgres.initRelationalSchema() });
 const outboundAuditStore = createOutboundAuditStore(() => postgres.getPool(), {
+  ensureSchema: () => postgres.initRelationalSchema(),
+  getSettings: () => readSystemSettingsStore(dbCache.data?.systemSettings || {}),
+});
+const outboundPackingOperatorStore = createOutboundPackingOperatorStore(() => postgres.getPool(), {
   ensureSchema: () => postgres.initRelationalSchema(),
   getSettings: () => readSystemSettingsStore(dbCache.data?.systemSettings || {}),
 });
@@ -1526,6 +1531,9 @@ const DEFAULT_SYSTEM_SETTINGS = {
   outboundSessionTimezone: "America/New_York",
   outboundSessionRolloverTime: "00:00",
   outboundSessionClosedWeekdays: [0, 6],
+  outboundPackingRequireOperator: true,
+  outboundPackingIdleMinutes: 30,
+  outboundPackingMaxSessionHours: 12,
   scrapeGraphEnabled: false,
   scrapeGraphApiBaseUrl: "https://v2-api.scrapegraphai.com/api",
   scrapeGraphApiKey: "",
@@ -6329,6 +6337,9 @@ function normalizeSystemSettings(settings = {}) {
   normalized.outboundSessionClosedWeekdays = [...new Set((Array.isArray(normalized.outboundSessionClosedWeekdays) ? normalized.outboundSessionClosedWeekdays : [0, 6])
     .map(Number).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))].sort((left, right) => left - right);
   if (normalized.outboundSessionClosedWeekdays.length >= 7) normalized.outboundSessionClosedWeekdays = [0, 6];
+  normalized.outboundPackingRequireOperator = normalized.outboundPackingRequireOperator !== false && String(normalized.outboundPackingRequireOperator).toLowerCase() !== "false";
+  normalized.outboundPackingIdleMinutes = Math.max(5, Math.min(240, Number(normalized.outboundPackingIdleMinutes || 30) || 30));
+  normalized.outboundPackingMaxSessionHours = Math.max(1, Math.min(24, Number(normalized.outboundPackingMaxSessionHours || 12) || 12));
   normalized.scrapeGraphEnabled = normalized.scrapeGraphEnabled === true || String(normalized.scrapeGraphEnabled).toLowerCase() === "true";
   normalized.scrapeGraphApiBaseUrl = "https://v2-api.scrapegraphai.com/api";
   normalized.scrapeGraphApiKey = String(normalized.scrapeGraphApiKey || process.env.SGAI_API_KEY || "").trim();
@@ -6544,6 +6555,23 @@ function verifyUserPassword(user = {}, password = "") {
   return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
 }
 
+function warehouseBadgeToken(value = "") {
+  const match = String(value || "").trim().match(/DPUSER:([A-Z0-9_-]{16,})/i);
+  return match ? match[1] : "";
+}
+
+function warehouseBadgeHash(value = "") {
+  const token = warehouseBadgeToken(value) || String(value || "").trim();
+  return token ? crypto.createHash("sha256").update(token).digest("hex") : "";
+}
+
+function verifyWarehousePin(user = {}, pin = "") {
+  if (!user.warehousePinHash || !user.warehousePinSalt || !/^\d{4,8}$/.test(String(pin || ""))) return false;
+  const actual = Buffer.from(hashUserPassword(String(pin), user.warehousePinSalt).hash, "hex");
+  const expected = Buffer.from(String(user.warehousePinHash || ""), "hex");
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
 function normalizeSystemUser(user = {}, index = 0) {
   const isMasterAdmin = user.isMasterAdmin === true || String(user.role || "").toLowerCase() === "master admin" || String(user.id || "") === "owner";
   const firstName = sourceTextValue(user.firstName || "");
@@ -6578,6 +6606,10 @@ function normalizeSystemUser(user = {}, index = 0) {
     passwordChangeDueAt: Number.isFinite(Date.parse(user.passwordChangeDueAt)) ? new Date(user.passwordChangeDueAt).toISOString() : "",
     passwordHash: String(user.passwordHash || ""),
     passwordSalt: String(user.passwordSalt || ""),
+    warehouseBadgeHash: String(user.warehouseBadgeHash || ""),
+    warehousePinHash: String(user.warehousePinHash || ""),
+    warehousePinSalt: String(user.warehousePinSalt || ""),
+    warehouseCredentialsUpdatedAt: sourceTextValue(user.warehouseCredentialsUpdatedAt || ""),
     permissions: normalizeAuthPermissions(user.permissions, isMasterAdmin),
     permissionTemplateId: isMasterAdmin ? "master-admin" : sourceTextValue(user.permissionTemplateId || "custom"),
     permissionTemplateVersion: isMasterAdmin ? 0 : Math.max(0, Number(user.permissionTemplateVersion || 0) || 0),
@@ -6642,7 +6674,10 @@ function publicSystemUser(user = {}) {
     createdAt: user.createdAt || "",
     updatedAt: user.updatedAt || "",
     lastLoginAt: user.lastLoginAt || "",
-    passwordConfigured: Boolean(user.passwordHash)
+    passwordConfigured: Boolean(user.passwordHash),
+    warehouseBadgeConfigured: Boolean(user.warehouseBadgeHash),
+    warehousePinConfigured: Boolean(user.warehousePinHash),
+    warehouseCredentialsUpdatedAt: user.warehouseCredentialsUpdatedAt || ""
   };
 }
 
@@ -6901,6 +6936,7 @@ function authRequirementForRequest(req, url, parts = []) {
   }
   if (area === "users") {
     if (pathname.startsWith("/api/users/templates")) return { area: "users.permissions", action: method === "GET" ? "view" : "permissions" };
+    if (pathname.endsWith("/warehouse-credentials")) return { area: "users.accounts", action: "passwords" };
     if (pathname.endsWith("/password")) return { area: "users.accounts", action: "passwords" };
     if (method === "POST") return { area: "users.accounts", action: "create" };
     return { area: "users", action: "view" };
@@ -59570,6 +59606,49 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { user: publicSystemUser(updated), users: systemSettings.systemUsers.map(publicSystemUser) });
   }
 
+  const warehouseCredentialsMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/warehouse-credentials$/);
+  if (warehouseCredentialsMatch && req.method === "POST") {
+    if (!userCan(authUser, "users.accounts", "passwords")) return sendJson(res, 403, { error: "User credential management access is required." });
+    const userId = decodeURIComponent(warehouseCredentialsMatch[1] || "");
+    const body = await parseBody(req);
+    const pin = String(body.pin || "").trim();
+    if (!/^\d{4,8}$/.test(pin)) return sendJson(res, 400, { error: "Warehouse PIN must contain 4 to 8 digits." });
+    const current = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+    const existing = (current.systemUsers || []).find((candidate) => String(candidate.id || "") === userId);
+    if (!existing) return notFound(res);
+    if (existing.status !== "active") return sendJson(res, 409, { error: "Activate this user before creating warehouse credentials." });
+    const badgeToken = crypto.randomBytes(18).toString("base64url");
+    const badgeValue = `DPUSER:${badgeToken}`;
+    const hashedPin = hashUserPassword(pin);
+    const updated = {
+      ...existing,
+      warehouseBadgeHash: warehouseBadgeHash(badgeValue),
+      warehousePinHash: hashedPin.hash,
+      warehousePinSalt: hashedPin.salt,
+      warehouseCredentialsUpdatedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    current.systemUsers = current.systemUsers.map((candidate) => candidate.id === existing.id ? updated : candidate);
+    appendAuthPermissionAudit(current, authUser, {
+      type: "warehouse_credentials_rotated",
+      targetType: "user",
+      targetId: updated.id,
+      targetName: updated.name || updated.username,
+      message: `Created a new packing-station badge and PIN for ${updated.name || updated.username}.`,
+    });
+    const systemSettings = writeSystemSettingsStore(current);
+    publicStateJsonCache = null;
+    if (dbCache.data) dbCache.data.systemSettings = systemSettings;
+    void recordUserActivity(req, authUser, {
+      eventType: "security",
+      action: "Rotated warehouse badge and PIN",
+      entityType: "user",
+      entityId: updated.id,
+      metadata: { targetName: updated.name || updated.username },
+    });
+    return sendJson(res, 200, { user: publicSystemUser(updated), users: systemSettings.systemUsers.map(publicSystemUser), badgeValue });
+  }
+
   const resetPasswordMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/password$/);
   if (resetPasswordMatch && req.method === "POST") {
     const userId = decodeURIComponent(resetPasswordMatch[1] || "");
@@ -73995,6 +74074,62 @@ async function handleApi(req, res) {
     return sendJson(res, 200, { ...result, message: `${result.item?.sku || "Item"} was removed from this package scan.` });
   }
 
+  const outboundPackingOperatorMatch = url.pathname.match(/^\/api\/fulfillment\/outbound-audits\/([^/]+)\/packing-operators(?:\/([^/]+)(?:\/(lock|unlock))?)?$/);
+  if (outboundPackingOperatorMatch && postgres.isPostgresEnabled()) {
+    const scope = notificationScope(req);
+    if (scope.tenantId !== LEGACY_TENANT || scope.companyId !== LEGACY_COMPANY) {
+      return sendJson(res, 409, { error: "Packing-station operator sessions are available only for LINQ while fulfillment isolation is completed." });
+    }
+    const auditId = decodeURIComponent(outboundPackingOperatorMatch[1]);
+    const stationId = outboundPackingOperatorMatch[2] ? decodeURIComponent(outboundPackingOperatorMatch[2]) : "";
+    const action = outboundPackingOperatorMatch[3] || "";
+    if (req.method === "GET" && !stationId) {
+      return sendJson(res, 200, await outboundPackingOperatorStore.list(scope, auditId));
+    }
+    if (req.method === "POST" && !stationId) {
+      const body = await parseBody(req);
+      const audit = await outboundAuditStore.read(scope, auditId);
+      if (!audit) return notFound(res);
+      if (!audit.session?.isCurrentOperatingSession) return sendJson(res, 409, { error: "This is an older outbound session. Open today's audit before assigning a packing-station operator." });
+      const badgeDigest = warehouseBadgeHash(body.badgeValue || body.badge || "");
+      if (!badgeDigest) return sendJson(res, 400, { error: "Scan or enter the operator badge." });
+      const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+      const operator = (settings.systemUsers || []).find((candidate) => candidate.status === "active" && String(candidate.warehouseBadgeHash || "") === badgeDigest);
+      if (!operator || !verifyWarehousePin(operator, body.pin)) return sendJson(res, 401, { error: "Badge or PIN was not recognized." });
+      const result = await outboundPackingOperatorStore.assign(scope, auditId, body, operator, authUser);
+      void recordUserActivity(req, operator, {
+        eventType: "fulfillment",
+        action: "Started packing-station shift",
+        entityType: "outbound_audit",
+        entityId: auditId,
+        metadata: { stationId: body.stationId, stationName: body.stationName, assignedById: authUser.id },
+      });
+      return sendJson(res, 201, result);
+    }
+    if (req.method === "POST" && stationId && action === "lock") {
+      const result = await outboundPackingOperatorStore.lock(scope, auditId, stationId);
+      void recordUserActivity(req, authUser, { eventType: "security", action: "Locked packing station", entityType: "outbound_audit", entityId: auditId, metadata: { stationId } });
+      return sendJson(res, 200, result);
+    }
+    if (req.method === "POST" && stationId && action === "unlock") {
+      const body = await parseBody(req);
+      const currentSession = await outboundPackingOperatorStore.active(scope, auditId, stationId);
+      if (!currentSession.row) return sendJson(res, 404, { error: "No active operator is assigned to this station." });
+      const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+      const operator = (settings.systemUsers || []).find((candidate) => String(candidate.id) === String(currentSession.row.operator_user_id) && candidate.status === "active");
+      if (!operator || !verifyWarehousePin(operator, body.pin)) return sendJson(res, 401, { error: "Operator PIN was not recognized." });
+      const result = await outboundPackingOperatorStore.unlock(scope, auditId, stationId);
+      void recordUserActivity(req, operator, { eventType: "security", action: "Unlocked packing station", entityType: "outbound_audit", entityId: auditId, metadata: { stationId } });
+      return sendJson(res, 200, result);
+    }
+    if (req.method === "DELETE" && stationId && !action) {
+      await outboundPackingOperatorStore.end(scope, auditId, stationId, "manual");
+      void recordUserActivity(req, authUser, { eventType: "fulfillment", action: "Ended packing-station shift", entityType: "outbound_audit", entityId: auditId, metadata: { stationId } });
+      return sendJson(res, 200, { ended: true });
+    }
+    return sendJson(res, 405, { error: "Packing-station operator action not supported." });
+  }
+
   const outboundAuditMatch = url.pathname.match(/^\/api\/fulfillment\/outbound-audits\/([^/]+)(?:\/(scan|item-scan|quick-item|close|reconcile|print|export\.csv))?$/);
   if (outboundAuditMatch && postgres.isPostgresEnabled()) {
     const scope = notificationScope(req);
@@ -74012,6 +74147,22 @@ async function handleApi(req, res) {
     }
     if (req.method === "POST" && action === "scan") {
       const body = await parseBody(req);
+      let scanActor = authUser;
+      if (body.stationId) {
+        const audit = await outboundAuditStore.read(scope, auditId);
+        if (!audit) return notFound(res);
+        if (!audit.session?.isCurrentOperatingSession) return sendJson(res, 409, { error: "This packing station is still on an older outbound session. Open today's audit and assign the operator again." });
+        const assignment = await outboundPackingOperatorStore.requireActive(scope, auditId, body.stationId);
+        if (assignment.operator) {
+          const settings = readSystemSettingsStore(dbCache.data?.systemSettings || {});
+          const activeOperator = (settings.systemUsers || []).find((candidate) => String(candidate.id) === String(assignment.operator.id) && candidate.status === "active");
+          if (!activeOperator) {
+            await outboundPackingOperatorStore.end(scope, auditId, body.stationId, "operator_inactive");
+            return sendJson(res, 423, { error: "This operator account is no longer active. Assign another employee before scanning." });
+          }
+          scanActor = { id: activeOperator.id, name: activeOperator.name || activeOperator.username || assignment.operator.name };
+        }
+      }
       const deferOrderMatch = body.deferOrderMatch === true || /DataPlus-Warehouse-Android\//i.test(String(req.headers["user-agent"] || ""));
       const resolved = deferOrderMatch
         ? captureOutboundAuditTracking(body.trackingNumber || body.trackingRaw || body.value)
@@ -74025,9 +74176,13 @@ async function handleApi(req, res) {
         matches: resolved.matches,
         matchPending: deferOrderMatch,
         stationName: body.stationName,
+        stationId: body.stationId,
+        hostUserId: body.stationId ? authUser.id : "",
+        hostUserName: body.stationId ? (authUser.name || authUser.username || "DataPlus user") : "",
         liveItemRequired: resolved.liveItemRequired,
         liveItemExpectedCount: resolved.liveItemExpectedCount
-      }, authUser);
+      }, scanActor);
+      if (body.stationId) await outboundPackingOperatorStore.touch(scope, result.session.id, body.stationId);
       if (result.scan.matchStatus === "pending") queueOutboundAuditMatch(scope, result.session.id, result.scan);
       const scanMessage = result.duplicate
         ? `${result.scan.trackingNumber} was already scanned into this handoff.`
